@@ -1893,3 +1893,65 @@ func TestLoadPreviousRefusesASnapshotSymlinkEscapingItsDirectory(t *testing.T) {
 		t.Errorf("the outside file's CONTENT reached the error path: %q", err)
 	}
 }
+
+// TestPassPublishesToTheInProcessServer pins the daemon's primary handover: a
+// completed pass hands its snapshot straight to the feed server running in the
+// same process, so the feed is servable the moment the cycle finishes - no
+// reload clock tick, no request-triggered read, and no dependency on the file
+// being readable back. The published render must also be the same one a load
+// produces: the persisted snapshot is GUID-only, so the download links have to be
+// re-derived rather than carried from the pre-strip render.
+func TestPassPublishesToTheInProcessServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	w := NewFeedWriter(&FeedWriterConfig{
+		Path:           path,
+		Server:         ix,
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+	}, nil, nil)
+
+	if err := w.Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	// No tick, no refresh: the server serves what the cycle handed it.
+	items := ix.feedFor(upstreamNyaa)
+	if len(items) != 1 {
+		t.Fatalf("served feed after the pass = %d items, want 1 published in-process", len(items))
+	}
+	if items[0].DownloadURL == "" {
+		t.Error("published item has no download URL; the load-path derivation must run on the published render too")
+	}
+
+	// The generation just written is recorded, so the reload clock recognizes the
+	// published snapshot as current instead of re-reading the file this process
+	// already holds.
+	log, rec := capture.New()
+	ix.cache.log = log
+	tick(ix)
+	if got := rec.Count("indexer feed snapshot loaded"); got != 0 {
+		t.Errorf("reload clock re-read the file this process published (%d load lines); want the recorded identity to skip it:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestPassWithoutAnInProcessServerOnlyWritesTheFile pins the out-of-process half
+// of the same contract: the `poll` subcommand builds no server, so its pass has
+// nothing to publish into and the file stays the whole channel - which is what
+// the resident daemon's reload clock exists for.
+func TestPassWithoutAnInProcessServerOnlyWritesTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Fatalf("served feed = %d items with no in-process handover, want 0 until the reload clock runs", len(got))
+	}
+	tick(ix)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("served feed after one tick = %d items, want the persisted snapshot loaded (1)", len(got))
+	}
+}

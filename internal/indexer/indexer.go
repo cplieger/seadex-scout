@@ -30,8 +30,12 @@
 // operator's passkey, so it is a secret; the endpoint is apikey-gated and meant
 // to bind LAN-only. The curation set and the two synthesized feeds are produced
 // together by the compare cycle (one SeaDex fetch feeds both the findings and
-// the feed), persisted atomically (see FeedWriter), and reloaded by the server
-// when the snapshot file changes - the server never fetches SeaDex itself.
+// the feed) and reach the server two ways: a cycle in this process hands its
+// snapshot over in memory the moment it completes, and a cycle in another
+// process (the `poll` subcommand) goes through the atomically persisted file,
+// which the server re-stats on its own clock (see FeedWriter and
+// snapshotCache). Serving a request never reads the file - the server never
+// fetches SeaDex either.
 //
 // The feed is served per-tracker only, addressable by path or by subdomain:
 // /nyaa (or a nyaa.* host) serves the Nyaa-sourced curated releases, /ab (or an
@@ -135,9 +139,9 @@ func (c UpstreamConfig) enabled(scope string) bool {
 // SnapshotPath, where the compare cycle persists the materialized feed
 // (config.DefaultIndexerFeedPath in production). SnapshotPath names the same
 // file FeedWriterConfig.Path writes, the one contract binding the package's
-// write half to its read half; it is warmed by Run so a restart serves the last
-// feed immediately, and reloaded on change while running. An empty SnapshotPath
-// serves an empty feed (used in tests).
+// write half to its read half; it is loaded by Run so a restart serves the last
+// feed immediately, and re-stat'ed on the cache's own clock while running. An
+// empty SnapshotPath serves an empty feed (used in tests).
 type Config struct {
 	APIKey       string
 	SnapshotPath string
@@ -196,17 +200,19 @@ func wireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) []
 
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
 // and periodic RSS checks from the two synthesized per-tracker feeds. Both come
-// from the persisted snapshot the compare cycle builds (see FeedWriter), owned
-// by cache: Run warms it on start (cache.warm; New is pure assembly and loads
-// nothing) and cache.refresh reloads it when the file changes (a cycle - in this
-// process or the `poll` subcommand - rewrote it), under the cache's own locks.
-// The server never fetches SeaDex or Fribb itself.
+// from the snapshot the compare cycle builds (see FeedWriter), owned by cache,
+// which takes it either straight from a cycle running in this process
+// (FeedWriter.publishSnapshot) or from the persisted file on its own reload clock
+// - Run starts that clock (cache.start; New is pure assembly and loads nothing),
+// which loads the last snapshot and thereafter re-stats it for restart recovery
+// and for the out-of-process `poll` subcommand. Nothing on the request path
+// loads. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
-	// cache owns the persisted-snapshot lifecycle - the initial warm load
-	// included - and its two locking regimes (see snapshotCache). The server
-	// reaches it through its six methods only, so nothing here holds snapshot
-	// state and nothing on the request path names a lock primitive or a
-	// reload-only flag.
+	// cache owns the served snapshot's lifecycle - the initial load and the
+	// in-process handover included - and its locking (see snapshotCache). The
+	// serving path reaches it through three methods only, so nothing here holds
+	// snapshot state and no request names a lock primitive or a reload-only
+	// flag.
 	cache *snapshotCache
 	// log is set once in New and read per request without a lock, like
 	// enablement and keyUnusable below; none of them is ever written after
@@ -256,12 +262,11 @@ type Indexer struct {
 
 // New builds the Torznab feed server from cfg, log, and the HTTP client its
 // Prowlarr search proxy dials with. It is pure assembly and starts no work: the
-// persisted feed snapshot named by cfg.SnapshotPath is warmed by Run
-// (cache.warm), so all background work begins under the explicit lifecycle
-// method. A nil log falls back to slog.Default(); a nil client serves the
-// snapshot without proxying searches. cfg is the one argument with no nil
-// tolerance - it is dereferenced here, so a nil cfg panics rather than yielding
-// a defaulted server.
+// snapshot named by cfg.SnapshotPath is loaded by Run (cache.start), so all
+// background work begins under the explicit lifecycle method. A nil log falls
+// back to slog.Default(); a nil client serves the snapshot without proxying
+// searches. cfg is the one argument with no nil tolerance - it is dereferenced
+// here, so a nil cfg panics rather than yielding a defaulted server.
 //
 // The upstreams are wired HERE, from cfg's own UpstreamConfig (see
 // wireUpstreams), so the server's enablement gates and its reachability can

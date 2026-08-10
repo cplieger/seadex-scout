@@ -426,7 +426,7 @@ func TestFeedWriter(t *testing.T) {
 				IndexerNyaaTorznabURL: tt.nyaaURL,
 				IndexerABTorznabURL:   tt.abURL,
 			}
-			fw, cleanup := feedWriter(cfg, slog.Default())
+			fw, cleanup := feedWriter(cfg, slog.Default(), nil)
 			t.Cleanup(cleanup)
 			if gotNil := fw == nil; gotNil != tt.wantNil {
 				t.Errorf("feedWriter(nyaa=%q, ab=%q) nil = %v, want %v", tt.nyaaURL, tt.abURL, gotNil, tt.wantNil)
@@ -593,7 +593,7 @@ func TestWriteStarterConfigError(t *testing.T) {
 // propagates as a build error instead of being swallowed.
 func TestBuildScout(t *testing.T) {
 	t.Run("disabled arrs build hermetically", func(t *testing.T) {
-		b, err := buildScout(context.Background(), &config.Config{})
+		b, err := buildScout(context.Background(), &config.Config{}, nil)
 		if err != nil {
 			t.Fatalf("buildScout(zero config) = %v, want nil", err)
 		}
@@ -614,7 +614,7 @@ func TestBuildScout(t *testing.T) {
 	})
 	t.Run("invalid sonarr URL propagates", func(t *testing.T) {
 		cfg := &config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"}
-		if _, err := buildScout(context.Background(), cfg); err == nil {
+		if _, err := buildScout(context.Background(), cfg, nil); err == nil {
 			t.Fatal("buildScout(invalid sonarr URL) = nil, want error")
 		}
 		if _, err := buildReporter(context.Background(), cfg); err == nil {
@@ -787,8 +787,10 @@ func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
 }
 
 // TestBuildIndexer pins the Torznab feed server wiring hermetically: a
-// configured feed builds a non-nil server (warm-loading the absent feed
-// snapshot is the documented fresh-install no-op) and cleanup is callable.
+// configured feed builds a non-nil server (New is pure assembly, so nothing is
+// loaded yet) and cleanup is callable; an unconfigured one builds nothing, which
+// is the socket-less posture and what makes the compare cycle's in-process
+// handover nil.
 func TestBuildIndexer(t *testing.T) {
 	cfg := &config.Config{
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
@@ -799,6 +801,12 @@ func TestBuildIndexer(t *testing.T) {
 		t.Fatal("indexer = nil, want a wired Torznab feed server")
 	}
 	bi.cleanup()
+
+	unconfigured := buildIndexer(&config.Config{})
+	if unconfigured.indexer != nil {
+		t.Error("indexer != nil for an unconfigured feed, want none built (the daemon binds no HTTP port)")
+	}
+	unconfigured.cleanup()
 }
 
 // TestStartIndexerUnconfiguredIsNoOp pins the socket-less contract: with no
@@ -811,7 +819,7 @@ func TestStartIndexerUnconfiguredIsNoOp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	stop := startIndexer(ctx, &config.Config{})
+	stop := startIndexer(ctx, buildIndexer(&config.Config{}))
 	stop()
 
 	if msgs := rec.Messages(); len(msgs) != 0 {
@@ -876,7 +884,7 @@ func TestStartIndexerLogsRunErrorAndStops(t *testing.T) {
 	ctx := t.Context()
 
 	cfg := &config.Config{IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api"}
-	stop := startIndexer(ctx, cfg)
+	stop := startIndexer(ctx, buildIndexer(cfg))
 	stop() // must wait for the goroutine's terminal log, then return
 
 	if !rec.Contains("indexer feed stopped") {

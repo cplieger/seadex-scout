@@ -381,7 +381,7 @@ func runPoll(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	b, err := buildScout(ctx, cfg)
+	b, err := buildScout(ctx, cfg, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Shutdown cancelled startup (pre-cycle phase of the uniform
@@ -455,19 +455,26 @@ func run(cfg *config.Config) error {
 	marker.Set(false)
 	defer marker.Cleanup()
 
-	b, err := buildScout(ctx, cfg)
+	// The Torznab feed runs alongside the compare loop in the same process, so
+	// one daemon serves both features with no on/off knob. It is built BEFORE the
+	// scout because the compare cycle publishes each completed snapshot straight
+	// into it (buildScout threads it to the feed writer), which is what keeps the
+	// snapshot file off the serving path here. It starts only when a Prowlarr
+	// Torznab URL is configured (else the daemon binds no HTTP port), owns no
+	// health marker (the compare loop does), and its failure is logged without
+	// affecting the compare loop.
+	bi := buildIndexer(cfg)
+
+	b, err := buildScout(ctx, cfg, bi.indexer)
 	if err != nil {
+		bi.cleanup()
 		return err
 	}
 	defer b.cleanup()
 
-	// The Torznab feed runs alongside the compare loop in the same process, so
-	// one daemon serves both features with no on/off knob. It starts only when a
-	// Prowlarr Torznab URL is configured (else the daemon binds no HTTP port),
-	// owns no health marker (the compare loop does), and its failure is logged
-	// without affecting the compare loop. stopIndexer waits for its graceful
-	// shutdown before releasing its clients.
-	stopIndexer := startIndexer(ctx, cfg)
+	// stopIndexer waits for the feed's graceful shutdown before releasing its
+	// clients.
+	stopIndexer := startIndexer(ctx, bi)
 	defer stopIndexer()
 
 	// Resident-idle (poll_interval: off): no internal timer; healthy on boot and
@@ -503,17 +510,17 @@ func run(cfg *config.Config) error {
 	return nil
 }
 
-// startIndexer launches the Torznab feed in a goroutine when it is configured,
+// startIndexer launches the Torznab feed in a goroutine when one was built,
 // returning the func that stops it and waits for its graceful drain (the feed
 // owns that supervision - the panic shield, the resource release and the drain
 // budget - in internal/indexer.Supervise, beside the timeouts the budget is
-// derived from). When no Prowlarr Torznab URL is set it starts nothing - the
-// daemon binds no HTTP port - and returns a no-op.
-func startIndexer(ctx context.Context, cfg *config.Config) func() {
-	if !cfg.IndexerConfigured() {
+// derived from). With no Prowlarr Torznab URL configured buildIndexer built
+// nothing, so this starts nothing - the daemon binds no HTTP port - and returns
+// a no-op.
+func startIndexer(ctx context.Context, bi builtIndexer) func() {
+	if bi.indexer == nil {
 		return func() {}
 	}
-	bi := buildIndexer(cfg)
 	return bi.indexer.Supervise(ctx, bi.cleanup)
 }
 

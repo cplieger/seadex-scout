@@ -506,7 +506,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}))
 	defer torznabSrv.Close()
 
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
 	}}, nil, torznabSrv.Client())
@@ -690,46 +690,28 @@ func TestConsumerWarningsStayIndependent(t *testing.T) {
 	}
 }
 
-// TestWedgedWarmLoadFaultsInsteadOfParkingRequests pins the startup bound on the
-// warm snapshot load: while the load is still running it owns the cache's reload
-// gate, so a request that entered refresh would block for as long as the
-// filesystem does (net/http's WriteTimeout cannot cancel a handler) and would
-// hold a query/feed slot while doing it. cache.warm must stop WAITING at
-// warmLoadTimeout, and every request arriving before the load returns must be
-// answered with the snapshot-unavailable Torznab fault immediately - then serve
-// normally once the loader completes. The wedged load is simulated by holding the
-// reload gate, which is exactly what the real loader does across its syscalls.
-func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
+// TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty pins the startup window of
+// the cache's reload clock: until its first load resolves, nothing is installed
+// and the empty in-memory snapshot is indistinguishable from a fresh install, so
+// every request must answer the snapshot-unavailable Torznab fault rather than a
+// successful empty feed the arr would record as a clean no-match. It must answer
+// IMMEDIATELY - the request path performs no load and waits on nothing, which is
+// what a wedged /config mount used to be able to break - and serve normally once
+// the load resolves.
+//
+// The unresolved state is set directly rather than simulated with a wedged
+// filesystem: the loader owns the load, so there is nothing on the request path
+// left to block on, and this state machine is exactly what the fault reads.
+func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	prev := warmLoadTimeout
-	warmLoadTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { warmLoadTimeout = prev })
-
-	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, log, nil)
-	// The warm loader is wedged inside refresh: it holds the reload gate and has
-	// not published a snapshot.
-	if !ix.cache.tryLockReload() {
-		t.Fatal("reload gate already held; want it free before simulating the wedged warm load")
-	}
-
-	warmed := make(chan struct{})
-	go func() { defer close(warmed); ix.cache.warm(context.Background()) }()
-	select {
-	case <-warmed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("cache.warm still waiting on a wedged load; want the wait bounded by warmLoadTimeout")
-	}
-	// The WARN is the only signal that startup stopped waiting and began serving
-	// without the persisted snapshot; unasserted, it can be deleted or dropped to
-	// Debug with the whole suite still green.
-	if got := rec.CountLevel(slog.LevelWarn, "feed snapshot warm load still running"); got != 1 {
-		t.Errorf("warm-load timeout WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
-	}
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	// A loader is running and has not resolved its first load: exactly the state
+	// start leaves behind when the wait expires before the load returns.
+	ix.cache.watchStarted.Store(true)
 
 	served := make(chan *torznabFault, 1)
 	go func() {
@@ -739,40 +721,114 @@ func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 	select {
 	case fault := <-served:
 		if fault == nil || fault.summary != "feed snapshot unavailable" {
-			t.Fatalf("fault while the warm load is running = %+v, want the snapshot-unavailable fault", fault)
+			t.Fatalf("fault while the first load is unresolved = %+v, want the snapshot-unavailable fault", fault)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("request parked behind the wedged warm load; want an immediate snapshot-unavailable fault")
+		t.Fatal("request waited on the unresolved first load; want an immediate snapshot-unavailable fault")
 	}
 
-	// The loader completes: requests resume the normal refresh path.
-	ix.cache.unlockReload()
-	<-ix.cache.warmDone
+	// The loader resolves: requests serve the loaded snapshot.
+	ix.cache.refresh(context.Background())
+	close(ix.cache.firstLoad)
 	items, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if fault != nil {
-		t.Fatalf("post-warm fault = %+v, want none", fault)
+		t.Fatalf("post-load fault = %+v, want none", fault)
 	}
 	if len(items) != 1 {
-		t.Errorf("post-warm feed = %d items, want 1", len(items))
+		t.Errorf("post-load feed = %d items, want 1", len(items))
 	}
 }
 
-// TestFeedWriterReload verifies the server picks up a newer snapshot the writer
-// persists after the server started (the cross-process poll -> resident daemon
-// path): an initially-absent snapshot serves an empty feed, and once the writer
-// writes one the server reloads it on the next request.
+// TestFirstLoadWaitIsBounded pins the startup bound on the initial snapshot load:
+// a slow or wedged /config mount cannot be interrupted mid-syscall, so
+// awaitFirstLoad must stop WAITING at warmLoadTimeout rather than hold the whole
+// daemon's startup down behind it. The WARN is the only signal that startup
+// stopped waiting and began serving without the persisted snapshot; unasserted,
+// it can be deleted or dropped to Debug with the whole suite still green.
+func TestFirstLoadWaitIsBounded(t *testing.T) {
+	prev := warmLoadTimeout
+	warmLoadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { warmLoadTimeout = prev })
+
+	log, rec := capture.New()
+	// firstLoad is never closed: the load is still running, which is the state
+	// the bound exists for.
+	c := newSnapshotCache(filepath.Join(t.TempDir(), "feed.json"), "", log)
+
+	done := make(chan struct{})
+	go func() { defer close(done); c.awaitFirstLoad(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitFirstLoad still waiting on an unresolved load; want the wait bounded by warmLoadTimeout")
+	}
+	if got := rec.CountLevel(slog.LevelWarn, "feed snapshot warm load still running"); got != 1 {
+		t.Errorf("warm-load timeout WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestStartServesPublishedSnapshotWithoutRequestLoad pins the reload clock's own
+// cadence: start loads the persisted snapshot once, and a snapshot written
+// afterwards by ANOTHER process (the `poll` subcommand) is picked up by the
+// cache's own tick - never by a request, which does one lock-free read of
+// whatever is current.
+func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
+	prev := snapshotWatchInterval
+	snapshotWatchInterval = 10 * time.Millisecond
+	t.Cleanup(func() { snapshotWatchInterval = prev })
+
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	writer := newTestWriter(path, "", false)
+	if err := writer.Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	ix.cache.start(ctx)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("feed after start = %d items, want the persisted snapshot loaded (1)", len(got))
+	}
+
+	// A second process rewrote the snapshot: no request triggers the load, so the
+	// tick is what must pick it up.
+	if err := writer.Rebuild(context.Background(), nyaaTestEntries(3), nil); err != nil {
+		t.Fatalf("second Rebuild: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := ix.feedFor(upstreamNyaa); len(got) == 3 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("feed = %d items after the out-of-process rewrite, want 3 within a few ticks",
+				len(ix.feedFor(upstreamNyaa)))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestFeedWriterReload verifies the server picks up a newer snapshot a writer in
+// ANOTHER process persists after the server started (the cross-process poll ->
+// resident daemon path, the one case that still goes through the file): an
+// initially-absent snapshot serves an empty feed, and once the file is written
+// the cache's own reload clock installs it. The request path deliberately does
+// not - a request is a lock-free read of whatever is published - so the tick is
+// what makes the new feed servable.
 func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
 
 	// No snapshot yet: the empty-q feed serves nothing.
 	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("pre-write feed = %d items, want 0", len(got))
 	}
 
-	// A cycle (here, the writer) persists a snapshot; the next request reloads
-	// it. The pre-write empty-feed assertion above doubles as the fresh-install
-	// journal shape, so the ledger is seeded empty for the rebuild to journal.
+	// A cycle in another process (here, a writer with no in-process server)
+	// persists a snapshot; the cache's next tick installs it. The pre-write
+	// empty-feed assertion above doubles as the fresh-install journal shape, so
+	// the ledger is seeded empty for the rebuild to journal.
 	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 7,
@@ -785,6 +841,10 @@ func TestFeedWriterReload(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+		t.Fatalf("feed before the reload tick = %d items, want 0: a request must not load the snapshot itself", len(got))
+	}
+	tick(ix)
 	got, st, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("post-write feed = %d items (feed=%v), want 1 reloaded item", len(got), st.feed)
@@ -1093,7 +1153,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	}
 
 	t.Run("unconfigured AB serves the empty-feed shape", func(t *testing.T) {
-		off := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, nil, nil)
+		off := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, nil, nil)
 		body := serve(off)
 		if strings.Contains(body, "SECRETPASSKEY") {
 			t.Errorf("unconfigured AB response leaks the passkey: %q", body)
@@ -1107,7 +1167,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	})
 
 	t.Run("configured AB serves the same snapshot", func(t *testing.T) {
-		on := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, nil, nil)
+		on := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, nil, nil)
 		body := serve(on)
 		if !strings.Contains(body, "<item>") || !strings.Contains(body, "Frieren - S01 (BD Remux 1080p) [PMR]") {
 			t.Errorf("configured AB did not serve the snapshot item: %q", body)
@@ -1508,7 +1568,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
 
 	items, stats, fault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {
@@ -1631,5 +1691,38 @@ func TestRejectionLinesNameTheClientIP(t *testing.T) {
 	want := []string{"192.0.2.10", "192.0.2.11"}
 	if !slices.Equal(gotIPs, want) {
 		t.Errorf("client_ip values on the rejection lines = %q, want %q (messages: %v)", gotIPs, want, rec.Messages())
+	}
+}
+
+// TestDisabledTrackerFeedIsNotGatedBySnapshotState pins the off switch against
+// the snapshot state machine: an empty per-tracker Torznab URL is that tracker's
+// documented off switch, and its RSS answer is the plain empty feed - so it must
+// hold even while nothing has ever loaded (here a malformed first snapshot, the
+// startup-fault state). Answering the snapshot-unavailable Torznab error there
+// would fail an operator's Prowlarr save-test for a tracker they deliberately
+// turned off, on a fault that has nothing to do with it. An ENABLED tracker still
+// gets the fault, which is the assertion that keeps this from reading as "the
+// gate was simply removed".
+func TestDisabledTrackerFeedIsNotGatedBySnapshotState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+	// Nyaa on, AnimeBytes off.
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
+
+	rss := url.Values{}
+	items, stats, fault := ix.query(context.Background(), rss, upstreamAB)
+	if fault != nil {
+		t.Errorf("disabled tracker RSS fault = %+v, want none (the off switch is config, not snapshot state)", fault)
+	}
+	if len(items) != 0 {
+		t.Errorf("disabled tracker RSS items = %d, want 0", len(items))
+	}
+	if !stats.answered || !stats.feed {
+		t.Errorf("disabled tracker RSS stats = %+v, want an answered feed request", stats)
+	}
+	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault == nil {
+		t.Error("configured tracker RSS fault = nil while nothing has loaded, want the snapshot-unavailable fault")
 	}
 }

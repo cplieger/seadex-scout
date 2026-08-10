@@ -255,6 +255,7 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	if err := os.Rename(path, aside); err != nil {
 		t.Fatal(err)
 	}
+	tick(ix)
 	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault != nil {
 		t.Fatalf("missing first snapshot: fault = %+v, want fresh-install semantics (no error)", fault)
 	}
@@ -264,6 +265,7 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	if err := os.Rename(aside, path); err != nil {
 		t.Fatal(err)
 	}
+	tick(ix)
 	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault == nil {
 		t.Errorf("reappeared malformed snapshot: fault = nil, want a snapshot-unavailable fault (a Torznab error), not false-empty success")
 	}
@@ -837,80 +839,6 @@ func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
 	}
 }
 
-// TestReloadCoalescingLoserBlocksWithoutMarkingFailure deterministically pins
-// the pre-first-load coalescing arm: while a
-// winning reload holds the reload gate over a missing first snapshot, a loser that
-// reaches the pre-first-load arm must commit to BLOCKING (the
-// reloadBlockGate seam marks that commitment) without latching snapFailed -
-// the historic bug this arm exists to prevent - and, once the winner
-// releases the lock, must run the stat path itself and confirm the healthy
-// fresh-install state.
-func TestReloadCoalescingLoserBlocksWithoutMarkingFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
-
-	// The winning reload is in flight over the missing first snapshot.
-	if !ix.cache.tryLockReload() {
-		t.Fatal("reload gate already held; want it free before simulating the winning reload")
-	}
-	atGate := make(chan struct{})
-	prev := reloadBlockGate
-	reloadBlockGate = func() { close(atGate) }
-	t.Cleanup(func() { reloadBlockGate = prev })
-
-	done := make(chan struct{})
-	go func() { defer close(done); ix.cache.refresh(context.Background()) }()
-
-	<-atGate // the loser took the pre-first-load arm and committed to blocking
-	ix.cache.mu.RLock()
-	failed := ix.cache.snapFailed
-	ix.cache.mu.RUnlock()
-	if failed {
-		t.Error("snapFailed = true while the winner still holds the reload gate; a blocked loser must not latch a failure it never observed")
-	}
-	ix.cache.unlockReload()
-	<-done
-
-	if ix.cache.unavailable() {
-		t.Fatal("snapshotUnavailable() = true after the loser re-ran the stat path on a fresh install; absence of a first snapshot is the documented healthy state")
-	}
-}
-
-// TestReloadCoalescingLoserWaitAbandonsOnCancelledContext pins the
-// cancellability of the pre-first-load wait: a loser whose request context is
-// already done (client disconnect, arr timeout) must return BEFORE the winner
-// releases the gate, instead of parking its handler goroutine and connection
-// behind the winner's unbounded stat/read/decode (no server write timeout
-// bounds a mutex wait). It must also leave the snapshot state untouched, exactly
-// like the blocking loser: the verdict is the winner's to establish.
-func TestReloadCoalescingLoserWaitAbandonsOnCancelledContext(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
-
-	// The winning reload is in flight over the missing first snapshot.
-	if !ix.cache.tryLockReload() {
-		t.Fatal("reload gate already held; want it free before simulating the winning reload")
-	}
-	t.Cleanup(ix.cache.unlockReload)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	done := make(chan struct{})
-	go func() { defer close(done); ix.cache.refresh(ctx) }()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancelled loser still waiting while the winner holds the reload gate; want an abandoned wait")
-	}
-	ix.cache.mu.RLock()
-	failed := ix.cache.snapFailed
-	ix.cache.mu.RUnlock()
-	if failed {
-		t.Error("snapFailed = true after an abandoned wait; the verdict is the winner's to establish")
-	}
-}
-
 // TestReloadKeepsFeedOnMalformedSnapshot verifies reload's resilience contract: once a
 // good feed is loaded, a later malformed snapshot write (a partial/corrupt cycle write) is
 // logged and ignored, never blanking the live feed. A cross-process poll writes the file
@@ -921,7 +849,7 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
 	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -929,6 +857,7 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 		t.Fatalf("corrupt write: %v", err)
 	}
 	bumpMtime(t, path)
+	tick(ix)
 	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("after malformed rewrite feed = %d items, want 1 (a bad write must not blank a live feed)", len(got))
 	}
@@ -1136,11 +1065,14 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	}
 }
 
-// TestReloadConcurrentCallers exercises reload's coalescing under concurrency
-// (run with -race): many requests observing a rewritten snapshot at once must
-// never race on the published snapshot fields, and the new feed must be
-// installed once the dust settles.
-func TestReloadConcurrentCallers(t *testing.T) {
+// TestConcurrentReadersAgainstAnInstallingLoader exercises the cache's live
+// concurrency contract (run with -race): ONE producer installing a snapshot -
+// here the loader, the same shape as the in-process publish - against many
+// concurrent readers doing exactly what a request does. Coalescing is gone
+// because refresh has a single caller by construction, so what must hold is that
+// a reader never races an install, never observes a half-installed snapshot, and
+// sees the new feed once the install lands.
+func TestConcurrentReadersAgainstAnInstallingLoader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -1154,19 +1086,29 @@ func TestReloadConcurrentCallers(t *testing.T) {
 		t.Fatalf("Rebuild newer: %v", err)
 	}
 	bumpMtime(t, path)
+
+	installed := make(chan struct{})
+	go func() {
+		defer close(installed)
+		tick(ix)
+	}()
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			ix.cache.refresh(context.Background())
-			_ = ix.feedFor(upstreamNyaa)
+			for range 20 {
+				items := ix.feedFor(upstreamNyaa)
+				if len(items) != 1 && len(items) != 2 {
+					t.Errorf("feed = %d items mid-install, want a complete snapshot (1 before, 2 after)", len(items))
+				}
+				_ = ix.cache.curation()
+				_ = ix.cache.unavailable()
+			}
 		})
 	}
 	wg.Wait()
-	// TryLock losers return without installing; one more serial reload
-	// guarantees the newer snapshot is in.
-	ix.cache.refresh(context.Background())
+	<-installed
 	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
-		t.Errorf("after concurrent reloads feed = %d items, want 2", len(got))
+		t.Errorf("after the install feed = %d items, want 2", len(got))
 	}
 }
 
@@ -1253,70 +1195,6 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	ix.cache.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("feed after unchanged-mtime rewrite = %#v, want the loaded first snapshot (equality skips)", got)
-	}
-}
-
-// TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract
-// AFTER a first successful load: while one request holds the refresh
-// (the reload gate, as a winning reload does for its whole stat/read/unmarshal), a
-// sibling reload returns immediately without duplicating the read - it does
-// not block and does not install the on-disk snapshot itself - and feedFor
-// keeps serving the current snapshot unblocked. Once the refresh is released,
-// the next reload installs the new snapshot. (Before the first load, losers
-// block on the winner's verdict instead - see
-// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall.)
-func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json")
-	firstJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
-		t.Fatalf("write first snapshot: %v", err)
-	}
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
-		t.Fatalf("initial feed = %#v, want the first snapshot loaded", got)
-	}
-
-	// A newer on-disk snapshot the in-progress refresh has not installed yet.
-	// The in-place rewrite lands on the same inode within the filesystem's
-	// mtime granularity, so bump the mtime past the loaded snapshot's or
-	// loadedSnapshotUnchanged would skip the reload (production writes are
-	// atomic renames, which install a new inode instead).
-	newJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:3","Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
-		t.Fatalf("write new snapshot: %v", err)
-	}
-	bumpMtime(t, path)
-
-	// Simulate a refresh in progress: hold the reload gate exactly as the
-	// winning request does across its stat/read/unmarshal.
-	if !ix.cache.tryLockReload() {
-		t.Fatal("reload gate already held; want it free before simulating a refresh")
-	}
-
-	// A sibling reload must return immediately rather than queue behind the
-	// in-progress refresh or perform a duplicate read.
-	done := make(chan struct{})
-	go func() {
-		ix.cache.refresh(context.Background())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		ix.cache.unlockReload()
-		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return once a snapshot is loaded")
-	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
-		ix.cache.unlockReload()
-		t.Fatalf("sibling reload = %#v; want the current snapshot kept and the install left to the refresh holder", got)
-	}
-
-	// Once the winning request releases the refresh, the next reload installs
-	// the new snapshot as usual.
-	ix.cache.unlockReload()
-	ix.cache.refresh(context.Background())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "new" {
-		t.Fatalf("reload after the refresh released = %#v, want the new snapshot installed", got)
 	}
 }
 

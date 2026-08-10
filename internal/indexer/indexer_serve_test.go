@@ -255,7 +255,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 		t.Fatalf("write malformed snapshot: %v", err)
 	}
 	log, logRec := capture.New()
-	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
+	ix := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
 		log, srv.Client())
 
 	rec := httptest.NewRecorder()
@@ -290,6 +290,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 	// writes are atomic renames, which install a new inode instead).
 	writeSnapshotFile(t, path, &snapshot{Owners: owns(), Published: map[string]bool{}})
 	bumpMtime(t, path)
+	tick(ix)
 	rec = httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "<rss") || strings.Contains(body, "<error") {
@@ -476,9 +477,10 @@ func TestReloadRefusesSymlinkedSnapshotPath(t *testing.T) {
 
 // TestReloadRefusesFifoSnapshotPathWithoutBlocking pins openSnapshot's
 // O_NONBLOCK arm: a FIFO left at the snapshot path must be rejected by the
-// regular-file gate rather than blocking the open. A blocking open would hold
-// reloadGate forever, so the test asserting this returns at all is the
-// regression guard.
+// regular-file gate rather than blocking the open. A blocking open cannot be
+// interrupted, so it would wedge the cache's loader permanently - the served feed
+// would freeze on whatever was loaded and never reload again - which makes the
+// test asserting this returns at all the regression guard.
 func TestReloadRefusesFifoSnapshotPathWithoutBlocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
@@ -743,7 +745,7 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 		NyaaFeed: feed,
 	})
 	log, rec := capture.New()
-	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil)
+	ix := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil)
 
 	rr := httptest.NewRecorder()
 	ix.serve(rr, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k&limit=1000", nil))

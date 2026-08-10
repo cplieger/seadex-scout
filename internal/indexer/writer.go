@@ -687,6 +687,15 @@ func (s *snapshot) supportedVersion() bool { return s.Version == currentFeedVers
 // also power the title harvest (see harvest.go).
 type FeedWriterConfig struct {
 	Path string
+	// Server is the Torznab feed server running in THIS process, when there is
+	// one (the daemon runs the compare loop and the feed together). Each
+	// completed pass then hands its snapshot straight to that server's cache, so
+	// the process that produced a feed serves it without reading the file back -
+	// and without a request having to trigger that read. Nil is the
+	// out-of-process case (the `poll` subcommand, and report mode), where the
+	// resident daemon's server picks the snapshot up from the file on its own
+	// clock instead.
+	Server *Indexer
 	// TagFilter is the operator's filters.exclude_tags policy, asked about the
 	// feed surface. Its zero value - the default - excludes nothing, so a
 	// torrent SeaDex tags Broken is curated, journaled and served like any
@@ -695,18 +704,24 @@ type FeedWriterConfig struct {
 	UpstreamConfig
 }
 
-// FeedWriter builds the feed snapshot from a SeaDex fetch and persists it
-// atomically for the server to read. It holds no SeaDex/Fribb clients of its
-// own - the compare cycle owns the shared fetch and hands the results to
-// Rebuild - and no Prowlarr clients either: the title harvest is its own
-// component (harvester, see harvest.go), held here as a single collaborator
-// because Rebuild is where it runs.
+// FeedWriter builds the feed snapshot from a SeaDex fetch, persists it
+// atomically, and hands it to the in-process feed server when one runs here. It
+// holds no SeaDex/Fribb clients of its own - the compare cycle owns the shared
+// fetch and hands the results to Rebuild - and no Prowlarr clients either: the
+// title harvest is its own component (harvester, see harvest.go), held here as a
+// single collaborator because Rebuild is where it runs.
 type FeedWriter struct {
 	log     *slog.Logger
 	now     func() time.Time
 	harvest *harvester
-	tags    tagfilter.Filter
-	path    string
+	// cache is the in-process feed server's snapshot cache, or nil when no
+	// server runs in this process (the `poll` subcommand). A completed pass
+	// publishes into it (see publishSnapshot), which is what keeps the file off
+	// the serving path in the daemon: the file write remains, but only as
+	// restart recovery and as the channel to a server in ANOTHER process.
+	cache *snapshotCache
+	tags  tagfilter.Filter
+	path  string
 	// enablement is the operator's per-tracker input, held whole rather than
 	// flattened into derived booleans, mirroring Indexer.enablement:
 	// enabled(scope) is the package's one home for the scope-to-config
@@ -721,10 +736,13 @@ type FeedWriter struct {
 // NewFeedWriter returns a FeedWriter for cfg. client is the HTTP client the
 // title harvest queries Prowlarr with (nil disables harvesting - items then
 // keep their synthesized titles) and log may be nil (falls back to
-// slog.Default). The upstreams are wired here from cfg's own UpstreamConfig
-// (see wireUpstreams), so the writer's enablement and its reachability come
-// from one operator input; the client stays a parameter because this package
-// must never construct one.
+// slog.Default). cfg.Server, when set, is the feed server running in this
+// process, and each completed pass publishes its snapshot into that server's
+// cache; the writer takes the cache rather than the server so nothing on the
+// write path can reach the server's request handling. The upstreams are wired
+// here from cfg's own UpstreamConfig (see wireUpstreams), so the writer's
+// enablement and its reachability come from one operator input; the client stays
+// a parameter because this package must never construct one.
 //
 // The half-configured AnimeBytes intent (a passkey set for a tracker with no
 // ab_torznab_url - the README's off switch) is NOT reported here. It is one
@@ -750,6 +768,9 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 			ABTorznabURL:   cfg.ABTorznabURL,
 			ABPasskey:      cfg.ABPasskey,
 		},
+	}
+	if cfg.Server != nil {
+		w.cache = cfg.Server.cache
 	}
 	// The harvest reads the writer's clock through a closure over w rather than
 	// a copy of the func value: w.now is a live field the test suite replaces
@@ -794,14 +815,19 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 	return w.run(ctx, entries, info, scopeCatalogue)
 }
 
-// persist atomically writes the snapshot, mirroring the reader's size bound
-// before committing: a snapshot the reload would reject must not replace the
-// last-good file, or the next restart starts with an empty feed. It first
-// strips BOTH feeds' download URLs (stripDownloadURLs) so no passkey is ever
-// serialized and the snapshot stays GUID-only for fetch targets: the reader
-// re-derives every served link from the item's tracker page URL on load. The
-// wholesale Nyaa strip also scrubs an AB-scoped item misplaced in the Nyaa
-// feed, so a scope mismatch cannot leak a passkey either.
+// persist atomically writes the snapshot and hands it to the in-process feed
+// server, mirroring the reader's size bound before committing: a snapshot the
+// reload would reject must not replace the last-good file, or the next restart
+// starts with an empty feed. It first strips BOTH feeds' download URLs
+// (stripDownloadURLs) so no passkey is ever serialized and the snapshot stays
+// GUID-only for fetch targets: the reader re-derives every served link from the
+// item's tracker page URL on load, and publishSnapshot re-derives them the same
+// way in memory. The wholesale Nyaa strip also scrubs an AB-scoped item
+// misplaced in the Nyaa feed, so a scope mismatch cannot leak a passkey either.
+//
+// The write comes FIRST and the handover second, deliberately: a snapshot that
+// could not be persisted must not be served either, or a restart would silently
+// lose a feed the arrs had already been shown.
 func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	stripDownloadURLs(snap.ABFeed)
 	stripDownloadURLs(snap.NyaaFeed)
@@ -822,7 +848,39 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 		}
 		return fmt.Errorf("indexer: write feed snapshot %s: %w", w.path, err)
 	}
+	w.publishSnapshot(snap)
 	return nil
+}
+
+// publishSnapshot hands the completed pass's snapshot to the feed server running
+// in this process, so serving it never waits on - or depends on - a file read.
+// In the daemon this is how every cycle's feed reaches the arrs: the cycle
+// already holds the snapshot, so publishing it is immediate, where a
+// reload-driven server would serve the previous feed until something re-read the
+// file. With no in-process server (the `poll` subcommand runs in its own
+// process) it is a no-op and the resident daemon's own reload clock picks the
+// file up.
+//
+// The identity of the generation just written rides along so that clock
+// recognizes the published snapshot as current instead of re-reading bytes this
+// process already holds. It is best-effort: a stat failure costs exactly one
+// redundant background read, which is not worth failing a pass over. The stat is
+// taken under the cross-process cycle lock every writer runs inside, so it
+// describes the generation this pass wrote rather than a racing one.
+func (w *FeedWriter) publishSnapshot(snap *snapshot) {
+	if w.cache == nil {
+		return
+	}
+	info, err := os.Stat(w.path)
+	if err != nil {
+		// Field-name-only at Debug: nothing is broken (the write succeeded and
+		// the snapshot is still published), and the only consequence is one
+		// redundant read on the server's next tick.
+		w.log.Debug("indexer feed snapshot stat after write failed; the server will re-read the file once",
+			"path", w.path, "error", err)
+		info = nil
+	}
+	w.cache.publish(snap, info)
 }
 
 // stripDownloadURLs blanks every feed item's download URL before persistence:

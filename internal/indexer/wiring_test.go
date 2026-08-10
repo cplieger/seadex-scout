@@ -20,3 +20,9 @@ func warmedIndexer(cfg *Config, log *slog.Logger, client *http.Client) *Indexer 
 	ix.cache.refresh(context.Background())
 	return ix
 }
+
+// tick runs one iteration of the cache's own reload clock, which is what watch
+// does per snapshotWatchInterval. Requests never load (see snapshotCache), so a
+// test that changes the snapshot FILE and then asserts on the served feed says
+// so with this rather than relying on a request to pick the change up.
+func tick(ix *Indexer) { ix.cache.refresh(context.Background()) }

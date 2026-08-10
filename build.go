@@ -129,13 +129,19 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 // buildScout wires config into the compare-cycle components and returns the
 // runnable scout plus a cleanup func that releases the HTTP and arr clients -
 // including the feed writer's Prowlarr client when a Torznab feed is configured.
-func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
+//
+// server is the Torznab feed server running in this process, or nil when none
+// does (the `poll` subcommand). It is threaded through to the feed writer so a
+// completed cycle hands its snapshot straight to that server instead of leaving
+// it to be re-read from the file (see indexer.FeedWriterConfig.Server), which is
+// why the daemon builds the server BEFORE the scout.
+func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer) (built, error) {
 	c, err := buildCore(ctx, cfg, false)
 	if err != nil {
 		return built{}, err
 	}
 	anilistClient := c.anilist
-	feed, feedCleanup := feedWriter(cfg, c.log)
+	feed, feedCleanup := feedWriter(cfg, c.log, server)
 
 	sc := scout.New(&scout.Deps{
 		Logger:  c.log,
@@ -216,12 +222,14 @@ func indexerLogger(log *slog.Logger) *slog.Logger {
 // Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP
 // client - else a nil writer (the cycle then does no feed work) and a no-op.
 // It persists the materialized feed snapshot (curation set + the synthesized
-// RSS journal) the indexer HTTP server reads, so one cycle feeds both the
-// findings and the feed from a single SeaDex fetch. The cycle owns the shared
-// SeaDex + Fribb fetch and hands the results to Rebuild; the writer's own
-// client only serves the title harvest, which queries the same per-indexer
-// Prowlarr Torznab endpoints the server proxies searches through.
-func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, cleanup func()) {
+// RSS journal) and hands it to server, the feed server running in this process
+// (nil in the `poll` subcommand, whose snapshot reaches the resident daemon
+// through the file), so one cycle feeds both the findings and the feed from a
+// single SeaDex fetch. The cycle owns the shared SeaDex + Fribb fetch and hands
+// the results to Rebuild; the writer's own client only serves the title harvest,
+// which queries the same per-indexer Prowlarr Torznab endpoints the server
+// proxies searches through.
+func feedWriter(cfg *config.Config, log *slog.Logger, server *indexer.Indexer) (fw scout.FeedWriter, cleanup func()) {
 	if !cfg.IndexerConfigured() {
 		return nil, func() {}
 	}
@@ -229,6 +237,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	log = indexerLogger(log)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
+		Server:         server,
 		TagFilter:      cfg.TagFilter,
 		UpstreamConfig: upstreamConfig(cfg),
 	}, log, prowlarrHTTP)
@@ -236,19 +245,25 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 }
 
 // builtIndexer holds the assembled Torznab feed server and the resources to
-// release.
+// release. A zero value (nil indexer, no-op cleanup) is the not-configured case.
 type builtIndexer struct {
 	indexer *indexer.Indexer
 	cleanup func()
 }
 
 // buildIndexer wires the Torznab feed server the daemon runs alongside the
-// compare loop. It needs only an HTTP client for Prowlarr's per-indexer Torznab
-// endpoints (a search proxies them); the curation set and RSS feeds it serves
-// come from the snapshot the compare cycle persists (see feedWriter), which it
-// reads from config.DefaultIndexerFeedPath. Its logger carries component=indexer
-// so its lines separate cleanly from the compare findings in a shared slog stream.
+// compare loop, or the zero builtIndexer when no Prowlarr Torznab URL is
+// configured (the daemon then binds no HTTP port). It needs only an HTTP client
+// for Prowlarr's per-indexer Torznab endpoints (a search proxies them); the
+// curation set and RSS feeds it serves come from the compare cycle, in-process
+// once the cycle is wired to it (see feedWriter) and from
+// config.DefaultIndexerFeedPath on restart or when a `poll` cycle wrote it. Its
+// logger carries component=indexer so its lines separate cleanly from the compare
+// findings in a shared slog stream.
 func buildIndexer(cfg *config.Config) builtIndexer {
+	if !cfg.IndexerConfigured() {
+		return builtIndexer{cleanup: func() {}}
+	}
 	log := indexerLogger(slog.Default())
 	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
 

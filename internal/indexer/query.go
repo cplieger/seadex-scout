@@ -262,25 +262,30 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	if !servesQuery(q) {
 		return nil, queryStats{}, nil
 	}
-	// Run's warm load owns the cache's reload gate until its filesystem
-	// syscalls return, and a wedged /config mount has no bound of its own:
-	// entering refresh here would park this request on that gate while it holds
-	// a query/feed slot, since net/http's WriteTimeout cannot cancel a handler.
-	// Answer the snapshot-unavailable fault immediately instead, so the arr sees
-	// a fault it can back off from rather than a hung request (see
-	// snapshotCache.warmPending).
-	if ix.cache.warmPending() {
-		return nil, queryStats{answered: true}, snapshotUnavailableFault()
+	// A disabled tracker has NO feed to read, whatever the snapshot's state, so
+	// its documented off-switch response cannot be gated by snapshot state:
+	// feedFor already serves an unconfigured scope nothing, and
+	// rejectMissingABPasskey promises that same empty feed earlier in the same
+	// request. Answering the snapshot-unavailable fault here instead would make a
+	// deliberately-off tracker's Prowlarr save-test fail on a local fault that
+	// has nothing to do with it.
+	if isFeedRequest(q) && !ix.enablement.enabled(scope) {
+		return nil, queryStats{answered: true, feed: true}, nil
 	}
-	// Pick up a newer feed snapshot a cycle may have written (this process's
-	// daemon loop, or the `poll` subcommand in another process) before serving.
-	ix.cache.refresh(ctx)
-	// A snapshot that failed to load before any successful install is a local
-	// fault, not an empty catalogue: serving the synthesized feed would blank
-	// it, and a search would filter every Prowlarr result against nil
-	// curation maps - both false-empty. Answer with a fault (serve renders a
-	// Torznab <error>, exactly like an unavailable Prowlarr dependency)
-	// without contacting a tracker.
+	// Nothing here LOADS. The served snapshot is installed off the request path -
+	// published in-process by this process's compare cycle, or loaded by the
+	// cache's own reload clock (see snapshotCache) - so a request is one atomic
+	// read of whatever is current: no syscall, no gate, no wait. That is the
+	// whole reason a wedged /config mount can no longer strand a handler, which
+	// net/http's WriteTimeout cannot cancel.
+	//
+	// The one snapshot state a request still reads is whether ANYTHING has ever
+	// been installed. Nothing installed is not an empty catalogue: serving the
+	// synthesized feed would blank it, and a search would filter every Prowlarr
+	// result against nil curation maps - both false-empty, so the arr records a
+	// clean no-match during a local fault. Answer with a fault (serve renders a
+	// Torznab <error>, exactly like an unavailable Prowlarr dependency) without
+	// contacting a tracker.
 	if ix.cache.unavailable() {
 		return nil, queryStats{answered: true}, snapshotUnavailableFault()
 	}
@@ -411,6 +416,13 @@ func (ix *Indexer) feedFor(scope string) []item {
 	// The enablement gate is the SERVER's, not the cache's: whether a tracker's
 	// feed may be served at all is config policy, while the cache only answers
 	// what is loaded. An unknown scope is not enabled, so it returns nil here.
+	//
+	// query reads the same predicate earlier, to answer a different question -
+	// whether this request needs a snapshot at all - and the two readings share
+	// their one home (UpstreamConfig.enabled), so they cannot disagree. This one
+	// stays because it is the fail-closed gate at the serving boundary: the /ab
+	// feed's links carry the operator's passkey, and that must not depend on a
+	// caller having checked first.
 	if !ix.enablement.enabled(scope) {
 		return nil
 	}

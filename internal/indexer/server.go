@@ -44,19 +44,10 @@ const (
 // own constants keeps the deadline valid when the retry policy or the
 // per-attempt timeout changes.
 //
-// One handler segment is deliberately NOT in that sum, because no constant
-// bounds it: query calls cache.refresh, and before the FIRST successful
-// snapshot load a coalescing loser WAITS on the reload gate for the winner's
-// whole open/stat/read/decode (reload.go's lockReloadOrDone). Nothing
-// server-side bounds that wait - a write deadline cannot cancel a handler - so
-// it ends only when the winner finishes or the client disconnects and cancels
-// the request context, which is why that wait is cancellable in the first
-// place. Run's cache.warm (bounded by warmLoadTimeout) plus the warmPending
-// fault keep it off the request path during startup; the residual window is a
-// fresh install whose first snapshot has not been written yet on a slow
-// /config mount, where a queued request can outlive this deadline and have its
-// rendered feed cut mid-write, with the only signal a Debug line blaming the
-// client.
+// It is a complete bound, and that is the point of the snapshot never being
+// loaded on the request path: a handler's snapshot access is one lock-free read
+// of the published pointer (see snapshotCache), so no filesystem wait can
+// outlive this deadline and have a rendered feed cut mid-write.
 //
 // A var so a test can shorten it; it is evaluated once at init.
 var writeTimeout = upstreamMaxAttempts*upstreamAttemptTimeout +
@@ -94,14 +85,16 @@ func unusableFeedKey(key string) bool { return secretref.Unusable(key) }
 // RSS check answers the Torznab <error> that names the passkey.
 func unusableABPasskey(passkey string) bool { return secretref.Unusable(passkey) }
 
-// Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
-// cancelled. It first warms the feed from the last persisted snapshot
-// (cache.warm) - the one piece of startup work, owned by this lifecycle method
-// rather than by New. The endpoint then listens immediately (so an arr's caps
-// Test succeeds right away); it serves whatever feed the last compare cycle
-// persisted (empty until the first cycle on a fresh install) and reloads the
-// snapshot when a cycle rewrites it. It owns no health marker - the daemon that
-// runs it does - so a feed failure never flips container health.
+// Run serves the Torznab endpoint from the current feed snapshot until ctx is
+// cancelled. It first starts the snapshot cache's own reload clock
+// (cache.start) - the one piece of startup work, owned by this lifecycle method
+// rather than by New - which loads the last persisted snapshot and thereafter
+// re-stats it on its own clock. The endpoint then listens immediately (so an
+// arr's caps Test succeeds right away); it serves whatever feed the last compare
+// cycle produced (empty until the first cycle on a fresh install), taking this
+// process's cycles in-process (see FeedWriter.publishSnapshot) and a `poll`
+// cycle's from the file. It owns no health marker - the daemon that runs it does
+// - so a feed failure never flips container health.
 func (ix *Indexer) Run(ctx context.Context) error {
 	// Fail closed at the network boundary: config.Validate (validateIndexer)
 	// already rejects a configured feed with an empty or still-unresolved
@@ -128,8 +121,9 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			"the /ab RSS feed answers a Torznab error until it is set")
 	}
 	// The one piece of startup work, deliberately here and not in New: all
-	// background work begins under the explicit lifecycle method.
-	ix.cache.warm(ctx)
+	// background work begins under the explicit lifecycle method. The cache's
+	// loader goroutine lives for ctx, so it stops with the server.
+	ix.cache.start(ctx)
 	// Bind up front so a port-in-use error surfaces synchronously here and is
 	// returned to the daemon's startIndexer, which logs it. The feed owns no
 	// health marker (the compare loop does), so a bind failure never flips
