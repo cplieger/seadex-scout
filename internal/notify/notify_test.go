@@ -571,10 +571,10 @@ func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd" // C1 CSI, RLO override, C0 ESC
 	const clean = "a b c d"
-	// A link-destination attribute additionally goes through capURLAttr's
-	// Markdown escaping, so the spaces the sanitizer substituted arrive
-	// percent-encoded (a space also terminates a CommonMark destination).
-	const cleanURL = "a%20b%20c%20d"
+	// release_url takes the plain capAttr render: alerts.yaml never renders it as
+	// a Markdown link destination, so the spaces the sanitizer substituted stay
+	// spaces rather than arriving percent-encoded the way an interpolated
+	// link-destination attribute's do (see TestFindingLineSanitizesEveryUntrustedAttr).
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("dirty", dirty)
 	finding.CurrentGroup = dirty
@@ -588,7 +588,7 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 		"title":             clean,
 		"current_group":     clean,
 		"recommended_group": clean,
-		"release_url":       cleanURL,
+		"release_url":       clean,
 		"info_hash":         clean,
 	}
 	sawLine := false
@@ -627,8 +627,11 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd"
 	const clean = "a b c d"
-	// Link-destination attributes carry capURLAttr's Markdown escaping on top of
-	// the sanitizer, so their substituted spaces arrive percent-encoded.
+	// The link-destination attributes the annotation renders (nyaa_url, ab_url,
+	// public_url, arr_url) carry capURLAttr's Markdown escaping on top of the
+	// sanitizer, so their substituted spaces arrive percent-encoded. release_url
+	// and release_urls are not rendered as destinations anywhere and take the
+	// plain capAttr / joiner render.
 	const cleanURL = "a%20b%20c%20d"
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("dirty-all", dirty)
@@ -653,7 +656,7 @@ func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 		"recommended_groups":    clean,
 		"tracker":               clean,
 		"classification_reason": clean,
-		"release_url":           cleanURL,
+		"release_url":           clean,
 		"release_urls":          clean + "=" + clean + " Nyaa=https://nyaa.si/view/a b c",
 		"nyaa_url":              "https://nyaa.si/view/a%20b%20c",
 		"ab_url":                cleanURL,

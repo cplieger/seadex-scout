@@ -11,17 +11,19 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
-// The shipped alerts.yaml keys its better-release rule on an exact msg literal
-// and groups by an exact label set; these read both out of the rules file so no
-// attribute name is retyped in this test.
+// The shipped alerts.yaml keys its better-release rule on an exact msg literal,
+// groups by an exact label set, and interpolates a fixed set of labels into its
+// annotations; these read all three out of the rules file so no attribute name or
+// inventory is retyped in this test.
 var (
 	alertSumByRe = regexp.MustCompile(`sum by \(([^)]*)\)`)
 	alertMsgRe   = regexp.MustCompile("msg=`([^`]+)`")
+	alertLabelRe = regexp.MustCompile(`\$labels\.([a-z_]+)`)
 )
 
-// betterReleaseContract extracts the shipped better-release rule's matched
-// message literal and its `sum by` label set from the raw alerts.yaml bytes.
-func betterReleaseContract(t *testing.T, raw []byte) (string, []string) {
+// betterReleaseRule returns the shipped better-release rule's body, sliced out
+// of the raw alerts.yaml bytes so every assertion below reads the real consumer.
+func betterReleaseRule(t *testing.T, raw []byte) string {
 	t.Helper()
 	const anchor = "alert: SeadexScoutBetterReleaseFound"
 	body := string(raw)
@@ -33,6 +35,14 @@ func betterReleaseContract(t *testing.T, raw []byte) (string, []string) {
 	if next := strings.Index(body[len(anchor):], "- alert:"); next >= 0 {
 		body = body[:len(anchor)+next]
 	}
+	return body
+}
+
+// betterReleaseContract extracts the shipped better-release rule's matched
+// message literal and its `sum by` label set from the raw alerts.yaml bytes.
+func betterReleaseContract(t *testing.T, raw []byte) (string, []string) {
+	t.Helper()
+	body := betterReleaseRule(t, raw)
 	msg := alertMsgRe.FindStringSubmatch(body)
 	if msg == nil {
 		t.Fatalf("the SeadexScoutBetterReleaseFound rule matches no msg=`...` literal:\n%s", body)
@@ -48,6 +58,59 @@ func betterReleaseContract(t *testing.T, raw []byte) (string, []string) {
 		}
 	}
 	return msg[1], want
+}
+
+// interpolatedAlertLabels returns the distinct labels the better-release rule's
+// annotations actually INTERPOLATE, read out of alerts.yaml. That inventory is
+// the rules file's knowledge, never this test's: a value the annotation does not
+// render occupies none of the embed's budget, and a value it starts rendering
+// must be accounted for the moment it does.
+func interpolatedAlertLabels(t *testing.T, raw []byte) []string {
+	t.Helper()
+	body := betterReleaseRule(t, raw)
+	annotations := strings.Index(body, "annotations:")
+	if annotations < 0 {
+		t.Fatalf("the SeadexScoutBetterReleaseFound rule carries no annotations block:\n%s", body)
+	}
+	seen := map[string]bool{}
+	var labels []string
+	for _, m := range alertLabelRe.FindAllStringSubmatch(body[annotations:], -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			labels = append(labels, m[1])
+		}
+	}
+	if len(labels) == 0 {
+		t.Fatalf("the SeadexScoutBetterReleaseFound annotations interpolate no $labels.* value:\n%s", body)
+	}
+	return labels
+}
+
+// alertAttrBudgets is the other half of the arithmetic: the byte budget
+// findingKVs renders each interpolable attribute under. The BUDGETS are the
+// code's knowledge; the INVENTORY is alerts.yaml's (interpolatedAlertLabels), so
+// neither side can be hand-copied wrong. A fixed-pattern app value carries 0:
+// an id, an arr name, a season number and the seadex_tags vocabulary hold no
+// untrusted upstream text and their worst case is a handful of bytes.
+//
+// A label the annotation renders but this map does not classify FAILS the test
+// rather than being counted as free - which is the guard that matters, because
+// the two attributes deliberately left out (release_url, release_urls) carry the
+// multi-KB log-line budget: if a future annotation starts rendering one, its cap
+// has to be revisited before the arithmetic can hold.
+var alertAttrBudgets = map[string]int{
+	"alert_title":             maxAlertTextBytes,
+	"alert_recommended_group": maxAlertTextBytes,
+	"public_tracker":          maxAlertTextBytes,
+	"ab_tracker":              maxAlertTextBytes,
+	"arr_url":                 maxAlertURLBytes,
+	"nyaa_url":                maxAlertURLBytes,
+	"public_url":              maxAlertURLBytes,
+	"ab_url":                  maxAlertURLBytes,
+	"al_id":                   0,
+	"arr":                     0,
+	"season":                  0,
+	"seadex_tags":             0,
 }
 
 // TestAlertContractMatchesShippedRules pins the ONE observable contract this
@@ -97,23 +160,40 @@ func TestAlertContractMatchesShippedRules(t *testing.T) {
 // maxAlertURLBytes, which is the part a reader cannot check by eye and the part
 // a future cap change would silently break.
 //
-// The failure it guards is specific: alerts.yaml interpolates nine untrusted
+// The failure it guards is specific: alerts.yaml interpolates several untrusted
 // values into ONE Discord annotation and renders the clickable tracker links
 // LAST, so if the values can collectively exceed the embed's 4096-rune
 // description limit, the half the operator acts on is what gets cut. Capping
 // every interpolated value is therefore not enough on its own - their SUM has to
 // fit, which is why the URL bound is 256 rather than reusing the 512 the text
 // attributes carry or the multi-KB Loki log-line budget the URLs used to.
+//
+// The inventory is READ from the shipped rules file rather than re-spelled here
+// (the sibling TestAlertContractMatchesShippedRules reads its contract the same
+// way). A hand-copied one had counted release_url among the interpolated URL
+// attributes, which alerts.yaml neither groups by nor renders - so an attribute
+// nothing in the annotation reads was paying the annotation's budget, and the
+// arithmetic "proved" a sum that did not describe the shipped template.
 func TestAlertAnnotationBudgetFitsTheEmbedLimit(t *testing.T) {
 	t.Parallel()
 	// Discord's embed description limit, the ceiling Alertmanager's notifier
 	// truncates the rendered annotation at.
 	const discordEmbedDescriptionRunes = 4096
-	// findingKVs interpolates four text attributes (alert_title,
-	// alert_recommended_group, public_tracker, ab_tracker) and five URL
-	// attributes (arr_url, release_url, nyaa_url, public_url, ab_url).
-	const alertTextAttrs, alertURLAttrs = 4, 5
-	worst := alertTextAttrs*maxAlertTextBytes + alertURLAttrs*maxAlertURLBytes
+	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts.yaml"))
+	if err != nil {
+		t.Fatalf("read alerts.yaml: %v", err)
+	}
+	worst := 0
+	for _, label := range interpolatedAlertLabels(t, raw) {
+		budget, classified := alertAttrBudgets[label]
+		if !classified {
+			t.Errorf("alerts.yaml interpolates %q into the annotation but this test does not know its budget; "+
+				"classify it in alertAttrBudgets (an attribute rendered on the multi-KB log-line budget must be "+
+				"re-capped before it can be interpolated at all)", label)
+			continue
+		}
+		worst += budget
+	}
 	if worst > discordEmbedDescriptionRunes {
 		t.Errorf("every interpolated attribute at its cap sums to %d bytes, over the %d-rune "+
 			"embed description limit: the clickable links render LAST, so they are what a "+

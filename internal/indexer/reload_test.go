@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1198,12 +1199,13 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 }
 
-// TestInstallSnapshotSkipsAlreadyInstalledFile pins installSnapshot's
-// under-lock re-check: re-installing the same unchanged file (equal mtime AND
-// os.SameFile identity) returns false and leaves the published snapshot
-// untouched. The reload gate already serializes reloads today, but the comment
-// declares this defense-in-depth invariant must hold even if the TryLock
-// coalescing changes, so it is pinned by direct call.
+// TestInstallSnapshotSkipsAlreadyInstalledFile pins the installer's identity
+// re-check: re-installing the same unchanged file (equal mtime AND os.SameFile
+// identity) returns false and leaves the published snapshot untouched. It is
+// pinned by direct call on installPublished, the unordered producer entry point,
+// so the identity leg is exercised on its own rather than through the loader's
+// ordering leg (installLoaded, pinned by
+// TestAnOlderLoadCannotOverwriteANewerPublish).
 func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
@@ -1218,15 +1220,15 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
-	if !ix.cache.installSnapshot(info1, &snapshot{NyaaFeed: []journalItem{
+	if !ix.cache.installPublished(info1, &snapshot{NyaaFeed: []journalItem{
 		{item: item{Title: "first"}},
 	}}) {
-		t.Fatal("first installSnapshot = false, want true")
+		t.Fatal("first install = false, want true")
 	}
-	if ix.cache.installSnapshot(info2, &snapshot{NyaaFeed: []journalItem{
+	if ix.cache.installPublished(info2, &snapshot{NyaaFeed: []journalItem{
 		{item: item{Title: "second"}},
 	}}) {
-		t.Fatal("second installSnapshot with same unchanged file = true, want false")
+		t.Fatal("second install with same unchanged file = true, want false")
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("served feed = %+v, want the originally installed snapshot", got)
@@ -1480,5 +1482,167 @@ func TestReloadDropsOutOfVocabularyCategories(t *testing.T) {
 	}
 	if cats := byTitle["clean"].Categories; !slices.Equal(cats, []int{catMovies}) {
 		t.Errorf("in-vocabulary persisted categories = %v, want %v left alone", cats, []int{catMovies})
+	}
+}
+
+// nyaaFixtureSnapshot builds a one-item Nyaa snapshot a test can publish
+// in-process, with the GUID-to-Key identity the load-boundary rebuild requires.
+func nyaaFixtureSnapshot(title, id string) *snapshot {
+	return &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: title, GUID: "https://nyaa.si/view/" + id}, Key: "nyaa:" + id, FirstSeen: time.Now().UTC()},
+		},
+	}
+}
+
+// TestPublishedSnapshotServesWhileTheFirstLoadIsStillRunning pins the readiness
+// rule: a request is answered from what is INSTALLED, never from whether a load
+// is in flight. The load is uninterruptible (warmLoadTimeout bounds the WAIT, not
+// the load), so on a wedged /config mount the first load never resolves for the
+// life of the process - and reading that state first meant every search and RSS
+// request answered a Torznab fault even after the compare cycle had published a
+// complete snapshot in-process. Serving must not depend on the snapshot's load:
+// neither performing it nor being failed by it.
+func TestPublishedSnapshotServesWhileTheFirstLoadIsStillRunning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	ix := loadingIndexer(&Config{
+		SnapshotPath:   path,
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"},
+	}, nil, nil)
+
+	// Nothing installed and the clock's first load unresolved: the empty
+	// in-memory snapshot is indistinguishable from a fresh install here, so the
+	// fault is correct.
+	if !ix.cache.unavailable() {
+		t.Fatal("unavailable() = false with nothing installed and the first load unresolved, want true")
+	}
+
+	// The compare cycle completes and hands its snapshot over in-process. The
+	// load is still in flight - it always will be, on a wedged mount.
+	ix.cache.publish(nyaaFixtureSnapshot("published", "7"), nil)
+
+	if ix.cache.unavailable() {
+		t.Error("unavailable() = true after an in-process publish installed a snapshot, want false: readiness is what is installed, not whether a load is pending")
+	}
+	items, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	if fault != nil {
+		t.Fatalf("fault = %+v after a publish, want none (the published snapshot is servable)", fault)
+	}
+	if len(items) != 1 || items[0].Title != "published" {
+		t.Errorf("served feed = %+v, want the published item", items)
+	}
+}
+
+// TestStalledLaterLoadWarnsOnce pins the loader's liveness observable on every
+// load, not just the first. Only the initial refresh is watched by
+// awaitFirstLoad; a later ticker arm runs synchronously on the sole loader
+// goroutine, so an open/stat/read that wedges AFTER startup means the ticker
+// never arms again and every later feed.json generation is ignored for the life
+// of the process - in resident-idle / external-poll mode, that is every generation
+// there is. noteStatFault cannot report it because the blocked syscall never
+// returns, so the watchdog's single bounded WARN is the only signal the operator
+// can get.
+func TestStalledLaterLoadWarnsOnce(t *testing.T) {
+	const stallWARN = "indexer feed snapshot reload still running"
+	prevTimeout := warmLoadTimeout
+	warmLoadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { warmLoadTimeout = prevTimeout })
+
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{},
+		NyaaFeed:  []journalItem{{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"}},
+	})
+	log, rec := capture.New()
+	c := newSnapshotCache(path, "", log)
+
+	// The first load completes (awaitFirstLoad is its observable); the SECOND -
+	// a ticker arm, the half of the motivating failure that was left intact -
+	// wedges.
+	var loads atomic.Int64
+	stalled, release := make(chan struct{}), make(chan struct{})
+	prevGate := snapshotLoadGate
+	snapshotLoadGate = func() {
+		if loads.Add(1) == 2 {
+			close(stalled)
+			<-release
+		}
+	}
+	var relOnce sync.Once
+	releaseLoad := func() { relOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() { releaseLoad(); snapshotLoadGate = prevGate })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); c.watch(ctx, 5*time.Millisecond) }()
+
+	<-c.firstLoad
+	<-stalled
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.Count(stallWARN) == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	got := rec.Count(stallWARN)
+	releaseLoad()
+	cancel()
+	<-done
+
+	if got != 1 {
+		t.Errorf("stall WARN count while a later load is wedged = %d, want exactly 1 bounded warning for the sole blocked loader; log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	if after := rec.Count(stallWARN); after != 1 {
+		t.Errorf("stall WARN count after the load returned = %d, want it to stay 1 (the watchdog retires, it does not re-warn per tick)", after)
+	}
+}
+
+// TestAnOlderLoadCannotOverwriteANewerPublish pins the install ORDER between the
+// two producers. A loader that opened generation N-1 and finishes after the
+// compare cycle persisted and published generation N must not install its bytes
+// over N: until the next tick, RSS and search would serve stale feed AND stale
+// curation data, so an arr asking in that window could miss a newly curated
+// release or accept one the completed pass removed - against the handoff contract
+// that a completed pass is servable immediately.
+//
+// Identity inequality cannot refuse it (N-1 differs from N, which is exactly why
+// the old code accepted it) and neither can the mtime (an older restored
+// timestamp is a legitimate reload), so the order is the cache's own install
+// sequence. The interleaving is built with the load gate rather than hoped for:
+// the loader is held INSIDE its load, having already recorded the position it
+// derives from.
+func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{},
+		NyaaFeed:  []journalItem{{item: item{Title: "generation-n-1", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"}},
+	})
+	ix := loadingIndexer(&Config{
+		SnapshotPath:   path,
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"},
+	}, nil, nil)
+
+	entered, release := heldLoad(t)
+	loaded := make(chan struct{})
+	go func() { defer close(loaded); ix.cache.refresh(context.Background()) }()
+	<-entered
+
+	// The compare cycle finishes while that read is in flight and publishes the
+	// newer generation in-process.
+	ix.cache.publish(nyaaFixtureSnapshot("generation-n", "2"), nil)
+
+	release()
+	<-loaded
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 1 || got[0].Title != "generation-n" {
+		t.Fatalf("served feed = %+v, want the published generation-n kept (an overtaken read must not move the cache backwards)", got)
+	}
+	if ix.cache.unavailable() {
+		t.Error("unavailable() = true after the publish, want false")
 	}
 }

@@ -341,8 +341,9 @@ const maxAttrBytes = logattr.MaxBytes
 // and well under the annotation budget even after markup escaping doubles it.
 const maxAlertTextBytes = 512
 
-// maxAlertURLBytes is the same budget for an ALERT-destined URL attribute, and
-// it is MEASURED rather than chosen. Across the whole live SeaDex catalogue
+// maxAlertURLBytes is the same budget for an ALERT-destined URL attribute - one
+// the shipped alerts.yaml actually interpolates - and it is MEASURED rather than
+// chosen. Across the whole live SeaDex catalogue
 // (2821 entries / 9208 torrents, measured 2026-08) the longest URL the publisher
 // can emit is 96 bytes; per tracker the maxima are AnimeTosho 96 (its path
 // carries a release-name slug, the only variable-length form), AnimeBytes 67,
@@ -353,12 +354,19 @@ const maxAlertTextBytes = 512
 // which 256 covers with room for a reverse-proxy path prefix.
 //
 // 256 is therefore ~2.7x the measured worst case, and choosing it rather than
-// reusing maxAttrBytes is what makes the WHOLE annotation provably fit: nine
-// interpolated values at 4 x maxAlertTextBytes + 5 x maxAlertURLBytes = 3328
-// bytes, inside Discord's 4096-rune description limit. On the Loki-log-line
-// budget the five URLs alone could reach ~40 KB, and alerts.yaml renders the
-// clickable links LAST, so an oversized earlier value deleted exactly the half
-// of the notification the operator acts on.
+// reusing maxAttrBytes is what makes the WHOLE annotation provably fit: the
+// eight budget-bearing values it interpolates come to 4 x maxAlertTextBytes +
+// 4 x maxAlertURLBytes = 3072 bytes, inside Discord's 4096-rune description
+// limit. On the Loki-log-line budget the URLs alone could reach ~32 KB, and
+// alerts.yaml renders the clickable links LAST, so an oversized earlier value
+// deleted exactly the half of the notification the operator acts on.
+//
+// It applies ONLY to the attributes that annotation renders (arr_url, nyaa_url,
+// public_url, ab_url). An attribute the annotation neither groups by nor renders
+// is not paying for space it cannot use - see release_url in findingKVs, which
+// takes the log-line budget - and the arithmetic above is checked against the
+// shipped rules file rather than a hand-copied inventory
+// (TestAlertAnnotationBudgetFitsTheEmbedLimit).
 //
 // A URL longer than this is by construction not one of the four standard forms.
 // That is an upstream DATA defect, and the app already has a vocabulary for it
@@ -411,9 +419,12 @@ func reboundTo(s string, budget int) string {
 // value would render as attacker-authored markdown.
 //
 // The re-cap uses maxAlertURLBytes, not maxAttrBytes: every consumer of this
-// function is an alert-destined attribute (findingKVs' five URL fields), so the
-// bound that applies is the annotation's, not the Loki log line's. See
-// maxAlertURLBytes for the measurement behind the number.
+// function is a URL attribute the shipped alerts.yaml INTERPOLATES into its
+// Discord annotation (findingKVs' arr_url, nyaa_url, public_url and ab_url), so
+// the bound that applies is the annotation's, not the Loki log line's. A URL
+// attribute the annotation does not render takes capAttr instead - the alert
+// budget would cost it bytes and buy the annotation nothing (release_url,
+// release_urls). See maxAlertURLBytes for the measurement behind the number.
 func capURLAttr(s string) string {
 	return reboundTo(logattr.EscapeLinkDestination(capAttr(s)), maxAlertURLBytes)
 }
@@ -507,9 +518,10 @@ func trimTruncatedEscape(s string) string {
 // report's slog path applies, because slog's JSONHandler escapes C0 controls
 // but emits C1 controls and bidi controls raw) plus a volume cap mirroring
 // the bound the dedupe-key path applies to the same data. A LINK-DESTINATION
-// attribute (arr_url, release_url, nyaa_url, public_url, ab_url) goes through
-// capURLAttr instead, which adds the Markdown escaping the shipped
-// alerts.yaml's `[label](<attr>)` rendering requires. A MULTI-SOURCE
+// attribute the shipped alerts.yaml renders (arr_url, nyaa_url, public_url,
+// ab_url) goes through capURLAttr instead, which adds the Markdown escaping
+// that `[label](<attr>)` rendering requires and the tighter annotation budget
+// it pays for. A MULTI-SOURCE
 // attribute (recommended_groups, release_urls) applies that same policy
 // through joinGroupsAttr / joinLinksAttr, which never materialize the
 // untrusted aggregate before the cap. Fixed-pattern app values (resolution,
@@ -541,7 +553,16 @@ func findingKVs(f *compare.Finding) []any {
 		"codec", f.Codec,
 		"kind", f.Kind,
 		"classification_reason", capAttr(f.Reason),
-		"release_url", capURLAttr(f.ReleaseURL),
+		// release_url takes the LOG-LINE budget (capAttr), not the alert one:
+		// alerts.yaml neither groups by it nor renders it, so capping it at
+		// maxAlertURLBytes bought zero annotation space while silently
+		// truncating the headline of the public slog contract - a value
+		// dashboards and Loki queries read, and one that can exceed 256 bytes
+		// because publishing enforces a canonical HOST and shape, never a
+		// length. It is rendered like release_urls, its own plural (see
+		// joinLinksAttr): the same reason applies to both, and neither is a
+		// Markdown link destination anywhere.
+		"release_url", capAttr(f.ReleaseURL),
 		"release_urls", joinLinksAttr(f.Links),
 		// nyaa_url keeps its name and its meaning: the shipped alerts.yaml
 		// renders it as a "[Nyaa]" link, so it may only ever hold a Nyaa URL.

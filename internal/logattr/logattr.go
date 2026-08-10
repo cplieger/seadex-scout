@@ -51,8 +51,8 @@ import (
 //
 // The bound is PER ATTRIBUTE, not per record: a record's worst case is its
 // untrusted-attribute count times this budget plus one TruncMarker each
-// (notify.findingKVs emits 17 such attributes - 6 capAttr, 4
-// capAlertTextAttr, 5 capURLAttr and 2 full-budget Joiners - so ~139 KiB of
+// (notify.findingKVs emits 17 such attributes - 7 capAttr, 4
+// capAlertTextAttr, 4 capURLAttr and 2 full-budget Joiners - so ~139 KiB of
 // attribute VALUES), and the JSON sink can double that on the wire -
 // Sanitize keeps CR and LF (the keepCRLF policy a JSON encoder needs) and
 // slog's appendEscapedJSONString expands each CR, LF, '"' and '\\' into two

@@ -90,9 +90,22 @@ type snapshotCache struct {
 	cur  curation
 	snap snapshot
 	// mu guards the published snapshot fields read per request: snap,
-	// snapID, installed, snapFailed, and snapFailedWarned (see the per-field
-	// comments).
+	// snapID, installed, installSeq, snapFailed, and snapFailedWarned (see the
+	// per-field comments).
 	mu sync.RWMutex
+	// installSeq is the cache's OWN install ordering, incremented on every
+	// accepted install: it is what orders the two producers against each other
+	// when neither's snapshot can be compared to the other's by identity or by
+	// timestamp. A producer records it BEFORE it derives a snapshot and hands it
+	// back at install time (installLoaded); an install whose recorded position
+	// is behind the cache's was overtaken while it was being derived, so it is
+	// refused rather than moving the served feed backwards. The file's mtime
+	// cannot serve as this order - a restored older generation must still
+	// install (see loadedSnapshotUnchanged) - and identity INEQUALITY is not an
+	// order at all: it accepts any snapshot that merely differs, which is how a
+	// loader that began reading generation N-1 used to overwrite a just-published
+	// generation N.
+	installSeq uint64
 	// snapMissing records that the snapshot file disappeared AFTER one was
 	// installed (deleted file, incomplete restore, lost volume), so the
 	// stale-feed WARN fires once per disappearance instead of once per reload;
@@ -127,7 +140,7 @@ type snapshotCache struct {
 	// Torznab <error>, like an unavailable Prowlarr dependency. Set on those
 	// failure paths only while nothing is installed (a fault AFTER a
 	// successful load keeps serving the last-good snapshot); cleared by the
-	// first successful installSnapshot, and by a genuinely absent file (deleting
+	// first successful install, and by a genuinely absent file (deleting
 	// the bad file returns to fresh-install semantics). Guarded by mu (read
 	// per request by unavailable, unlike the loader-owned flags above).
 	snapFailed bool
@@ -140,7 +153,9 @@ type snapshotCache struct {
 	// cycle (publish). It is the "has anything ever loaded" question the
 	// startup-window state machine asks - snapID cannot answer it, because it
 	// records WHICH FILE GENERATION is loaded and an in-process publish has no
-	// file generation to record. Guarded by mu.
+	// file generation to record. It is also the FIRST thing unavailable reads:
+	// readiness is whether something is installed, never whether a load is in
+	// flight. Guarded by mu.
 	installed bool
 	// watchStarted records that the reload clock was started, so unavailable
 	// can tell a cache still resolving its first load from one nobody started
@@ -175,6 +190,12 @@ func newSnapshotCache(path, abPasskey string, log *slog.Logger) *snapshotCache {
 //
 // A var, not a const, ONLY so the warm-load test can exercise the wait-expired
 // path (see queryGateWait for the pattern) without spending it in real time.
+//
+// It is ALSO the bound the loader's stall watchdog uses for every later load
+// (see watchedRefresh): the two observations measure the same thing - a load
+// that has not returned in the time startup was willing to wait for one is
+// stalled - and a second tunable would be a second number to keep in step for
+// no distinction.
 var warmLoadTimeout = 15 * time.Second
 
 // snapshotWatchInterval is the cache's OWN reload clock: how often watch
@@ -247,18 +268,59 @@ func (c *snapshotCache) watch(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.refresh(ctx)
+			c.watchedRefresh(ctx)
 		}
+	}
+}
+
+// watchedRefresh runs one reload under a liveness watchdog. Being the SOLE
+// loader is what makes the reload-only fields lock-free, and it is also what
+// makes a stall total: a load wedged in the filesystem cannot be interrupted, so
+// the ticker never arms again, every later snapshot generation is ignored for the
+// life of the process, and noteStatFault cannot report any of it because the
+// blocked syscall never returns. Nothing about the cache is observably broken in
+// that state - requests keep serving the last snapshot - which is exactly why it
+// needs an observable of its own.
+//
+// The watchdog is that observable: one bounded WARN per stalled load, from a
+// goroutine that retires the moment the load returns. It cannot end the stall
+// (nothing can, short of the process), so the operator signal IS the whole
+// mechanism.
+//
+// The first load is deliberately NOT wrapped: start's awaitFirstLoad already
+// observes it on the same bound, and doubling that would emit two lines for one
+// wedge.
+func (c *snapshotCache) watchedRefresh(ctx context.Context) {
+	done := make(chan struct{})
+	defer close(done)
+	go c.warnOnStalledLoad(done, warmLoadTimeout)
+	c.refresh(ctx)
+}
+
+// warnOnStalledLoad emits the loader's stall WARN when a load has not returned
+// within timeout, then retires. It fires at most once per load, which is at most
+// once per wedge: a wedged load holds the sole loader goroutine, so no further
+// tick - and no further watchdog - can arm behind it.
+func (c *snapshotCache) warnOnStalledLoad(done <-chan struct{}, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		c.log.Warn("indexer feed snapshot reload still running; this process will not pick up a new snapshot generation until it returns",
+			"path", c.path, "timeout", timeout)
 	}
 }
 
 // awaitFirstLoad waits for the loader's first load to resolve, bounded by
 // warmLoadTimeout and by ctx. Split from start so the bounded wait is
-// exercisable without a filesystem that can actually wedge.
+// exercisable without a filesystem that can actually wedge. It is also the first
+// load's LIVENESS observable, the role watchedRefresh plays for every later one.
 //
 // The WARN is the only signal that startup stopped waiting and began serving
-// without the persisted snapshot; every request until the load returns answers
-// a Torznab error, so the line names that consequence.
+// without the persisted snapshot, so the line names that consequence: until
+// something is installed - by this load or by an in-process publish from the
+// compare cycle - every request answers a Torznab error.
 func (c *snapshotCache) awaitFirstLoad(ctx context.Context) {
 	warmTimer := time.NewTimer(warmLoadTimeout)
 	defer warmTimer.Stop()
@@ -271,17 +333,21 @@ func (c *snapshotCache) awaitFirstLoad(ctx context.Context) {
 		c.log.Debug("feed snapshot warm load abandoned; shutting down",
 			"cause", context.Cause(ctx))
 	case <-warmTimer.C:
-		c.log.Warn("feed snapshot warm load still running; answering search and RSS requests with a Torznab error until it returns",
+		c.log.Warn("feed snapshot warm load still running; answering search and RSS requests with a Torznab error until a snapshot is installed",
 			"timeout", warmLoadTimeout)
 	}
 }
 
 // loadPending reports whether the reload clock was started and its first load
-// has not resolved yet. Until it does, nothing is installed and the empty
-// in-memory snapshot is indistinguishable from a fresh install, so requests
-// answer the snapshot-unavailable fault instead of a false-empty success (see
-// unavailable, its only caller). A cache nobody started - a direct publish
-// consumer, or a test - is never pending.
+// has not resolved yet. It is the LAST question unavailable asks and it never
+// outranks what is installed: the compare cycle can publish a complete snapshot
+// in-process while this load is still blocked, and a load in flight says nothing
+// about whether the served feed has something behind it (see unavailable, its
+// only caller). While nothing IS installed, a pending first load is the state
+// that must answer the snapshot-unavailable fault rather than a false-empty
+// success, because the empty in-memory snapshot is indistinguishable from a
+// fresh install. A cache nobody started - a direct publish consumer, or a test -
+// is never pending.
 func (c *snapshotCache) loadPending() bool {
 	if !c.watchStarted.Load() {
 		return false
@@ -440,6 +506,13 @@ func (c *snapshotCache) noteStatFault(msg string, attrs ...any) {
 	c.log.Warn(msg, append([]any{"path", c.path}, attrs...)...)
 }
 
+// snapshotLoadGate is a test seam (see snapshotUnavailableGate for the pattern)
+// marking the entry to a load, held open so the loader's stall watchdog and the
+// two producers' install ORDER are exercisable at all: both are about a load that
+// is in flight while something else happens, and a filesystem cannot be made to
+// wedge - or to be slow at a chosen instant - on demand. A no-op in production.
+var snapshotLoadGate = func() {}
+
 // reload refreshes the served feed from the persisted snapshot when the file
 // on disk differs from the loaded copy by mtime or file identity (or nothing
 // is loaded yet). A compare cycle in ANOTHER process (the `poll` subcommand)
@@ -462,6 +535,13 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 	if c.path == "" {
 		return
 	}
+	// Recorded BEFORE the file is opened: everything below derives from the
+	// generation on disk AS OF HERE, so this is the position installLoaded
+	// orders the result against (see the installSeq field). Reading it after
+	// the load would compare the read against its own outcome and order
+	// nothing.
+	readFrom := c.installedSeq()
+	snapshotLoadGate()
 	f, info, ok := c.openSnapshot()
 	if !ok {
 		return
@@ -490,7 +570,13 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 		c.reloadDegraded = false
 		c.log.Info("indexer feed snapshot reload recovered", "path", c.path)
 	}
-	if !c.installSnapshot(info, &snap) {
+	if !c.installLoaded(info, &snap, readFrom) {
+		// Either the generation is already installed (the ordinary skip) or a
+		// newer snapshot was installed while this one was being read, in which
+		// case discarding it is the point (see installLoaded). Neither is a
+		// fault; the next tick reloads if the file's identity says to.
+		c.log.Debug("indexer feed snapshot reload discarded; nothing newer to install",
+			"path", c.path)
 		return
 	}
 	c.log.Info("indexer feed snapshot loaded",
@@ -569,13 +655,12 @@ func (c *snapshotCache) matchesFailedFile(info os.FileInfo) bool {
 // installed. A nil info records no identity - the in-process publish path, whose
 // snapshot came from memory rather than from a generation of the file - which
 // makes the next stat reload, the safe fail direction (a spurious reload costs
-// one read; a missed one serves stale data). The re-check under the write lock
-// is what keeps that honest across the two producers: the loader goroutine and
-// the compare cycle can both reach here, and neither must re-install a copy of
-// what is already loaded. Same identity test as loadedSnapshotUnchanged.
+// one read; a missed one serves stale data). Same identity test as
+// loadedSnapshotUnchanged.
+//
+// It is the shared body of the two producers' entry points, installLoaded and
+// installPublished, which own the ORDER between them; the caller holds mu.
 func (c *snapshotCache) installSnapshot(info os.FileInfo, snap *snapshot) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if info != nil && c.snapID.Matches(info) {
 		return false
 	}
@@ -583,11 +668,53 @@ func (c *snapshotCache) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 	c.cur = projectCuration(snap.Owners)
 	c.snapID = atomicfile.Identify(info)
 	c.installed = true
+	c.installSeq++
 	// A successful install ends any startup snapshot-unavailable state and
 	// re-arms its per-onset WARN (see snapFailed).
 	c.snapFailed = false
 	c.snapFailedWarned = false
 	return true
+}
+
+// installedSeq reads the cache's current install ordering position, which a
+// producer records BEFORE it derives a snapshot (see the installSeq field).
+func (c *snapshotCache) installedSeq() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.installSeq
+}
+
+// installLoaded installs a snapshot the loader READ FROM the file, ordered
+// against readFrom - the install position the loader recorded before it opened
+// that file. When the cache has moved on since, this read was overtaken while it
+// was in flight and its bytes are older than what is installed, so it is refused:
+// a load must never move the served feed backwards, whatever the interleaving.
+//
+// That is the ordering test identity inequality could not give. The two producers
+// derive their snapshots from different places - one from a generation of the
+// file, one from the compare cycle's memory - so neither the recorded identity
+// nor the file's mtime relates them (an older restored timestamp is a legitimate
+// reload), while the cache's own install sequence relates every install to every
+// other one by construction.
+func (c *snapshotCache) installLoaded(info os.FileInfo, snap *snapshot, readFrom uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if readFrom != c.installSeq {
+		return false
+	}
+	return c.installSnapshot(info, snap)
+}
+
+// installPublished installs the snapshot the in-process compare cycle just
+// built. It carries no ordering position because it needs none: the pass that
+// produced it ran to completion before publish was called, and it is the only
+// producer with a snapshot that is not a generation of the file, so it is newer
+// than every install that precedes the call. Only the identity re-check can
+// refuse it (the generation it just persisted is already installed).
+func (c *snapshotCache) installPublished(info os.FileInfo, snap *snapshot) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.installSnapshot(info, snap)
 }
 
 // publish installs a snapshot the in-process compare cycle just built, so the
@@ -610,15 +737,15 @@ func (c *snapshotCache) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 // publishing the pre-strip render, would make the served feed depend on WHICH
 // producer installed it.
 //
-// Two producers means one interleaving is possible and is deliberately NOT
-// guarded: a loader that began reading generation N-1 and finishes after this
-// publish installs generation N will install N-1 over it. It needs a file read
-// that outlives the rest of a compare cycle, it loses nothing (the snapshot is a
-// materialized view), and the next tick reloads N because the recorded identity
-// no longer matches the file - so the exposure is at most one tick of staleness,
-// narrower than the one-tick cross-process lag this shape already accepts. An
-// install sequence to close it would be a mechanism at the one site whose whole
-// point was to stop accreting them.
+// Two producers means one interleaving is possible and it is REFUSED rather than
+// accepted: a loader that began reading generation N-1 and finishes after this
+// publish installs generation N would install N-1 over it, serving stale feed and
+// curation data to every RSS and search request until the next tick - so an arr
+// asking in that window could miss a newly curated release, or accept one the
+// completed pass removed. The ordering that refuses it is the cache's own install
+// sequence (see installLoaded and the installSeq field), not this method's
+// business: publish holds the newest snapshot in the process by construction and
+// says so by taking the unordered entry point.
 func (c *snapshotCache) publish(snap *snapshot, info os.FileInfo) {
 	// The maps and slices are shared with the caller's snapshot rather than
 	// deep-copied, which is sound because the producer never mutates a snapshot
@@ -628,7 +755,7 @@ func (c *snapshotCache) publish(snap *snapshot, info os.FileInfo) {
 	pub := *snap
 	pub.ABFeed = c.rebuildABDownloadURLs(pub.ABFeed)
 	pub.NyaaFeed = c.rebuildNyaaDownloadURLs(pub.NyaaFeed)
-	if !c.installSnapshot(info, &pub) {
+	if !c.installPublished(info, &pub) {
 		return
 	}
 	cur := c.curation()
@@ -1076,17 +1203,28 @@ func snapshotInfoURLAllowed(raw, host string) (cleaned string, ok bool) {
 // no-op in production.
 var snapshotUnavailableGate = func() {}
 
-// unavailable reports whether the served feed has NO snapshot behind it: the
-// reload clock's first load has not resolved yet (loadPending), or it faulted
-// before anything was installed (the snapFailed field). Both reduce to the one
-// question the request path needs answered - has anything ever loaded - which is
-// why they are single-homed here rather than asked separately at the call site,
-// and why snapshotUnavailableFault's wire detail names both states.
+// unavailable reports whether the served feed has NO snapshot behind it. It
+// derives readiness from what is INSTALLED - whichever producer installed it -
+// and never from whether a load is in flight: a load is the cache's business,
+// not the request's. That ordering is the whole point. loadPending() stays true
+// from start() until the loader's first refresh returns, that load is an
+// uninterruptible os.OpenFile + File.Stat on /config/feed.json (warmLoadTimeout
+// bounds the WAIT, never the load), so on a wedged /config mount it is true for
+// the process's whole life - and consulting it first meant every Torznab request
+// answered a fault even after the compare cycle had published a complete
+// snapshot in-process. Serving must not depend on the snapshot's load: neither
+// performing it nor being failed by it.
+//
+// So the questions are asked in that order: something installed is served; else
+// a load fault that happened before anything was installed (the snapFailed
+// field) answers the fault; else a first load still resolving answers it too,
+// because until it does the empty in-memory snapshot is indistinguishable from a
+// fresh install. A genuinely absent file is NOT unavailable - that is the
+// intentional fresh-install state.
 //
 // It is deliberately startup-window-only: markSnapshotFailedIfUnloaded sets the
 // flag only while nothing is installed, so once a snapshot is being served a
-// later load fault keeps serving it instead of failing requests. A genuinely
-// absent file is NOT unavailable - that is the intentional fresh-install state.
+// later load fault keeps serving it instead of failing requests.
 //
 // The once-per-onset WARN fires on the first report of the failed state so the
 // local fault is visible without a per-request log storm (the still-loading
@@ -1095,14 +1233,14 @@ var snapshotUnavailableGate = func() {}
 // loses the race to an install/clear before acquiring the write lock answers
 // from the fresh snapshot instead of rendering a stale Torznab error.
 func (c *snapshotCache) unavailable() bool {
-	if c.loadPending() {
-		return true
-	}
 	c.mu.RLock()
-	failed, warned := c.snapFailed, c.snapFailedWarned
+	installed, failed, warned := c.installed, c.snapFailed, c.snapFailedWarned
 	c.mu.RUnlock()
-	if !failed {
+	if installed {
 		return false
+	}
+	if !failed {
+		return c.loadPending()
 	}
 	if warned {
 		return true
@@ -1114,9 +1252,10 @@ func (c *snapshotCache) unavailable() bool {
 	defer c.mu.Unlock()
 	// Re-check under the write lock, authoritatively: concurrent requests
 	// racing the onset must still emit the WARN exactly once, and an install
-	// that cleared snapFailed between the read-unlock and here must make THIS
-	// request answer from the fresh snapshot rather than render a stale error.
-	if !c.snapFailed {
+	// that landed between the read-unlock and here (a load returning, or an
+	// in-process publish) must make THIS request answer from the fresh snapshot
+	// rather than render a stale error.
+	if c.installed || !c.snapFailed {
 		return false
 	}
 	if !c.snapFailedWarned {
