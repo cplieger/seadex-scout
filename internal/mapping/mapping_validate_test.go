@@ -196,8 +196,8 @@ func TestValidateRefreshedRecordsPopulationExtinctionRejected(t *testing.T) {
 	extinct := base(func(r *Record, id int) {})
 	// Extinction is a guard refusal like any other, so it needs no extra streak
 	// wiring: validateRefreshedRecords' verdict reaches the streak through
-	// failureValidation, which classifyRefreshFailure grades persistent
-	// (TestClassifyRefreshFailure) - the same route the coverage and shrink
+	// failureValidation, which isPersistentRefreshFailure grades persistent
+	// (TestIsPersistentRefreshFailure) - the same route the coverage and shrink
 	// guards already take.
 	if err := validateRefreshedRecords(sparsePrev, extinct, len(extinct)); err == nil {
 		t.Error("a sparse population going 3 -> 0 was accepted, want rejection (extinction needs no significance gate)")

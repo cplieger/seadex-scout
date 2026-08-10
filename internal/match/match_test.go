@@ -590,15 +590,17 @@ func TestFindMovieSkipsBlankIMDbIDs(t *testing.T) {
 	}
 }
 
-// TestFindByIDMatchesPaddedIMDbID pins imdbKey's trimming on BOTH sides of the
-// IMDb lookup, the reason the canonicalization exists: RoutedIDs judges an
-// IMDb id usable on its TRIMMED value but returns the value verbatim, so a
-// padded operator-override id ("  tt0123456") reads as a usable identifier -
-// which suppresses the AniList title fallback - and must therefore still
-// resolve the item indexed under the trimmed key. The converse holds for a
-// padded id on the library item. Without this, a padded override silently
-// yields no match and no fallback, and the reverse catalogue reports the item
-// as not_on_seadex.
+// TestFindByIDMatchesPaddedIMDbID pins the canonicalization that keeps a padded
+// operator-override IMDb id ("  tt0123456") resolvable on BOTH sides of the
+// lookup, and WHERE each side's trim lives. On the MAPPING side the invariant is
+// the index's: Record.canonicalize trims at every producer and buildIndex
+// reapplies it to a decoded cache, so a record that reaches RoutedIDs carries
+// only canonical ids - which is why the padded-record case reads its record back
+// through mapping.NewIndex instead of hand-building one. On the LIBRARY side
+// imdbKey trims the Item's own id at index time. Without either, a padded id
+// reads as a usable identifier - which suppresses the AniList title fallback -
+// then silently yields no match, and the reverse catalogue reports the item as
+// not_on_seadex.
 func TestFindByIDMatchesPaddedIMDbID(t *testing.T) {
 	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", ImdbID: "tt0123456"},
@@ -613,8 +615,13 @@ func TestFindByIDMatchesPaddedIMDbID(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			rec := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{tc.recIMDb}}
-			got := li.FindByID(rec)
+			rec, ok := mapping.NewIndex([]mapping.Record{
+				{AniListID: 1, Type: "MOVIE", IMDbIDs: []string{tc.recIMDb}},
+			}).Lookup(1)
+			if !ok {
+				t.Fatalf("mapping.NewIndex did not index the record carrying IMDb id %q", tc.recIMDb)
+			}
+			got := li.FindByID(&rec)
 			if got == nil || got.ArrID != tc.wantArrID {
 				t.Fatalf("FindByID(%q) = %+v, want the Radarr movie ArrID %d", tc.recIMDb, got, tc.wantArrID)
 			}

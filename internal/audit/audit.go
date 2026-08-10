@@ -598,12 +598,16 @@ func groupSets(releases []Release) (best, alt []string) {
 
 // forfeitsBest reports whether a best release contributes no BEST evidence to
 // the verdict: the operator's filters.exclude_tags policy excludes it from the
-// report surface, or it is unreachable (no usable link, an upstream url the
-// publisher refused, a tracker this app cannot resolve). It is deliberately
+// report surface, or it is unreachable (no usable link). It is deliberately
 // NARROWER than the render layer's annotated(): a curation warning is display,
 // this is policy, and by default no tag is filtered at all.
+//
+// Release.URLError and Release.UnknownTracker are display diagnostics only, and
+// are deliberately NOT operands here: both name a publisher refusal that returns
+// an empty URL, which classify.Obtainable then rejects, so Unobtainable is
+// already true whenever either is set.
 func forfeitsBest(rel *Release) bool {
-	return rel.Filtered || rel.Unobtainable || rel.URLError || rel.UnknownTracker
+	return rel.Filtered || rel.Unobtainable
 }
 
 // addUnique appends g to out if not already seen.

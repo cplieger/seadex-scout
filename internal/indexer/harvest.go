@@ -362,14 +362,10 @@ func harvestCursorKey(g harvestGroup) string {
 // restarts the rotation at the head, and because the value is re-persisted each
 // rebuild a recurring corruption never self-heals.
 //
-// A cursor over maxPersistedCursorBytes (writer.go, the one home of the
-// persisted-snapshot size caps, enforced first at loadPrevious) cannot come
-// from this writer - a cursor is one group key - so it is external corruption
-// and takes the same baseline.
+// The persisted value's SIZE is bounded once, at ingress: loadPrevious
+// (writer.go, the one home of the persisted-snapshot size caps) replaces an
+// over-cap cursor with the empty baseline before it ever reaches this decoder.
 func decodeHarvestCursor(raw string) (cursor, degradedReason string) {
-	if len(raw) > maxPersistedCursorBytes {
-		return "", "exceeds size cap"
-	}
 	if _, _, ok := parseRotationCursor(raw); ok {
 		return raw, ""
 	}
@@ -982,7 +978,7 @@ func harvestParams(meta EntryInfo, scope, title string) url.Values {
 	return q
 }
 
-// harvestTitleCandidates returns the ordered, deduplicated titles the harvest
+// harvestTitleCandidates returns the ordered titles the harvest
 // queries for one show: the synthesis title as-is first, then the same title
 // with its trailing parenthetical groups stripped one at a time ("A (B) (C)" ->
 // "A (B)" -> "A"). The as-is title is always tried first and harvestShow stops
@@ -1002,23 +998,20 @@ func harvestParams(meta EntryInfo, scope, title string) url.Values {
 // parenthetical is part of the name itself ("Evangelion: 1.0 You Are (Not)
 // Alone", "(A)Torsion"). A candidate is never empty or whitespace-only, so a
 // title that is entirely a parenthetical ("(2023)") yields just the as-is form.
+// Each strip returns a non-empty strict prefix of its input, so the ladder both
+// terminates and cannot repeat a candidate - the list needs no deduplication.
 func harvestTitleCandidates(title string) []string {
 	cur := strings.TrimSpace(title)
 	if cur == "" {
 		return nil
 	}
 	candidates := []string{cur}
-	seen := map[string]struct{}{cur: {}}
 	for {
 		next, ok := trimTrailingParenthetical(cur)
 		if !ok {
 			return candidates
 		}
 		cur = next
-		if _, dup := seen[cur]; dup {
-			return candidates
-		}
-		seen[cur] = struct{}{}
 		candidates = append(candidates, cur)
 	}
 }
@@ -1240,9 +1233,6 @@ func pendingHarvestRefusal(it *item, index, titles map[string]string, groupKeys 
 // vocabulary must never cost the item its harvested title and send it back to
 // the synthesized one.
 func preferredHarvestTitle(candidates []string, showTitle string) string {
-	if len(candidates) == 1 {
-		return candidates[0]
-	}
 	if want := titlekey.Normalize(showTitle); want != "" {
 		for _, c := range candidates {
 			if titlekey.ContainsKey(c, want) {
@@ -1310,20 +1300,19 @@ func resolveHarvestKey(it *item, index map[string]string) (key string, conflict 
 	if kc != "" && kg != "" && kc != kg {
 		return "", true
 	}
-	for _, id := range []string{kc, kg} {
-		if id == "" {
-			continue
-		}
-		k, ok := index[id]
+	trackerID := kc
+	if trackerID == "" {
+		trackerID = kg
+	}
+	if trackerID != "" {
+		var ok bool
+		key, ok = index[trackerID]
 		if !ok {
 			// A parseable tracker key the pending index does not hold names a
-			// release that is not ours; kc == kg here, so nothing disagrees.
+			// release that is not ours; when both URL fields are present, the
+			// conflict check above has already proved they agree.
 			return "", false
 		}
-		if key != "" && k != key {
-			return "", true
-		}
-		key = k
 	}
 	if it.InfoHash == "" {
 		return key, false

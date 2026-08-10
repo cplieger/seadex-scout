@@ -43,7 +43,7 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 		},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	for i := 1; i <= degradation.EscalationThreshold; i++ {
+	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
 		next, err := l.refreshCache(context.Background(), prev)
 		var stale *StaleMapError
 		if !errors.As(err, &stale) {
@@ -97,7 +97,7 @@ func TestLoader_refreshCache_notModifiedResetsRejectionStreak(t *testing.T) {
 // response at all) neither advances the persisted streak nor resets it, so the
 // scout never escalates on an outage. It used to assert this with a 404, which l-f100
 // reclassified as PERSISTENT - see
-// TestLoader_refreshCache_terminalNon2xxAdvancesRejectionStreak - so the
+// TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak - so the
 // transient side is now pinned with the one fetch failure that carries no HTTP
 // status at all.
 func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) {
@@ -117,15 +117,14 @@ func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) 
 	}
 }
 
-// TestLoader_refreshCache_terminalNon2xxAdvancesRejectionStreak pins l-f100: a
-// terminal non-2xx status on the FIXED Fribb URL is a persistent refusal, not a
-// transient outage. Before this, only *httpx.ResponseTooLargeError advanced the
-// streak, so a 404/410/500 warned forever from a zero streak and the scout's
-// WARN never escalated. There is deliberately no status allowlist: the streak's
-// own degradation.EscalationThreshold consecutive cycles IS the transient
-// filter, which is what the 7-versus-8 assertion below pins.
-func TestLoader_refreshCache_terminalNon2xxAdvancesRejectionStreak(t *testing.T) {
-	for _, status := range []int{http.StatusNotFound, http.StatusGone, http.StatusInternalServerError} {
+// TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak pins
+// l-f100's persistent half: a status on the FIXED Fribb URL whose only remedy is
+// the operator (a 404 or 410 on a URL that is a package constant) is a
+// persistent refusal, not a transient outage. Before l-f100, only
+// *httpx.ResponseTooLargeError advanced the streak, so such a status warned
+// forever from a zero streak and the scout's WARN never escalated.
+func TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusGone} {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boom", status)
 		}))
@@ -141,16 +140,48 @@ func TestLoader_refreshCache_terminalNon2xxAdvancesRejectionStreak(t *testing.T)
 			continue
 		}
 		if next.RejectedRefreshes != 1 {
-			t.Errorf("status %d RejectedRefreshes = %d, want 1 (a terminal non-2xx never self-heals)", status, next.RejectedRefreshes)
+			t.Errorf("status %d RejectedRefreshes = %d, want 1 (only the operator clears this status)", status, next.RejectedRefreshes)
 		}
+	}
+}
+
+// TestLoader_refreshCache_comeBackLaterStatusKeepsRejectionStreak pins the other
+// half: a come-back-later status (a 5xx here; a 408 and a 429 take the same
+// arm) neither advances the persisted streak nor resets it, however many cycles
+// in a row it arrives. Exhausting one cycle's retry budget is not evidence of
+// permanence, and the ERROR the streak escalates to at
+// degradation.TickEscalationThreshold tells the operator to inspect the upstream
+// or delete state.json - the wrong instruction for an outage that clears on its
+// own.
+func TestLoader_refreshCache_comeBackLaterStatusKeepsRejectionStreak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
+		next, err := l.refreshCache(context.Background(), prev)
+		if _, ok := errors.AsType[*StaleMapError](err); !ok {
+			t.Fatalf("500 %d error = %v, want a *StaleMapError", i, err)
+		}
+		if next.RejectedRefreshes != 3 {
+			t.Fatalf("RejectedRefreshes after %d server errors = %d, want 3 (a self-healing status neither advances nor resets the streak)", i, next.RejectedRefreshes)
+		}
+		*prev = next
 	}
 }
 
 // TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold pins the
 // operator-visible half of l-f100: a permanently 404ing Fribb URL escalates the
 // scout's mapping log from WARN to ERROR only once the streak reaches
-// degradation.EscalationThreshold consecutive cycles, so a temporary status
-// incident (which cannot survive that many cycles) stays a WARN.
+// degradation.TickEscalationThreshold consecutive cycles, so the first refusals
+// stay a WARN.
 func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gone for good", http.StatusNotFound)
@@ -162,7 +193,7 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	for i := 1; i <= degradation.EscalationThreshold; i++ {
+	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
 		next, err := l.refreshCache(context.Background(), prev)
 		if err == nil {
 			t.Fatalf("refresh %d returned nil error, want a degraded refresh", i)
@@ -170,8 +201,8 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 		if next.RejectedRefreshes != i {
 			t.Fatalf("RejectedRefreshes after %d refusals = %d, want %d", i, next.RejectedRefreshes, i)
 		}
-		if escalates := next.RejectedRefreshes >= degradation.EscalationThreshold; escalates != (i >= degradation.EscalationThreshold) {
-			t.Fatalf("after %d refusals the scout escalation gate = %v, want %v (only the threshold escalates)", i, escalates, i >= degradation.EscalationThreshold)
+		if escalates := next.RejectedRefreshes >= degradation.TickEscalationThreshold; escalates != (i >= degradation.TickEscalationThreshold) {
+			t.Fatalf("after %d refusals the scout escalation gate = %v, want %v (only the threshold escalates)", i, escalates, i >= degradation.TickEscalationThreshold)
 		}
 		*prev = next
 	}
@@ -184,7 +215,7 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 // must route it through rejectRefresh — the errors.Is-matchable sentinel
 // survives the *StaleMapError wrap, the stale map is kept, and the persisted
 // streak advances so rejections reaches
-// degradation.EscalationThreshold (the scout's WARN→ERROR escalation point)
+// degradation.TickEscalationThreshold (the scout's WARN→ERROR escalation point)
 // instead of degrading at WARN forever.
 func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T) {
 	var b strings.Builder
@@ -205,7 +236,7 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 	prev := &Cache{
 		FetchedAt:         time.Now().Add(-2 * time.Hour),
 		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-		RejectedRefreshes: degradation.EscalationThreshold - 1,
+		RejectedRefreshes: degradation.TickEscalationThreshold - 1,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
@@ -218,8 +249,8 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
 		t.Fatalf("cap-breach refresh records = %+v, want stale record id 1", next.Records)
 	}
-	if next.RejectedRefreshes != degradation.EscalationThreshold {
-		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, degradation.EscalationThreshold)
+	if next.RejectedRefreshes != degradation.TickEscalationThreshold {
+		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, degradation.TickEscalationThreshold)
 	}
 }
 
@@ -335,7 +366,7 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 
 	prev := &Cache{} // first boot: no records, no validators
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	for i := 1; i <= degradation.EscalationThreshold; i++ {
+	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
 		next, err := l.refreshCache(context.Background(), prev)
 		if err == nil {
 			t.Fatalf("refresh %d returned nil error, want the no-cache error", i)
@@ -349,8 +380,8 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 		}
 		*prev = next
 	}
-	if prev.RejectedRefreshes < degradation.EscalationThreshold {
-		t.Errorf("streak reached %d, want >= %d so the scout can escalate", prev.RejectedRefreshes, degradation.EscalationThreshold)
+	if prev.RejectedRefreshes < degradation.TickEscalationThreshold {
+		t.Errorf("streak reached %d, want >= %d so the scout can escalate", prev.RejectedRefreshes, degradation.TickEscalationThreshold)
 	}
 }
 
@@ -363,7 +394,7 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 // existing unusable-cache 304 tests assert only the error and the suppressed
 // validators, so a regression back to staleOrFail would freeze the streak at 0
 // and the scout's WARN would never escalate to ERROR at
-// degradation.EscalationThreshold - a permanently broken upstream degrading
+// degradation.TickEscalationThreshold - a permanently broken upstream degrading
 // silently at WARN forever.
 func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +407,7 @@ func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *test
 
 	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), ETag: "v1"}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	for i := 1; i <= degradation.EscalationThreshold; i++ {
+	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
 		next, err := l.refreshCache(context.Background(), prev)
 		if err == nil {
 			t.Fatalf("304 %d over an unusable cache returned nil error, want the no-cache error", i)
@@ -392,12 +423,12 @@ func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *test
 	}
 }
 
-// TestClassifyRefreshFailure is the table over the ONE home of the
+// TestIsPersistentRefreshFailure is the table over the ONE home of the
 // transient-vs-persistent refresh classification (l-f100's structural half).
 // Before it, each failure arm of refreshCache chose staleOrFail or
 // rejectRefresh for itself, so Cache.RejectedRefreshes' documented list and the
 // code implementing it could drift - and had, in three arms. Every class named
-// persistent in classifyRefreshFailure's doc comment appears here, so adding a
+// persistent in isPersistentRefreshFailure's doc comment appears here, so adding a
 // class to the doc without the code (or the reverse) fails.
 //
 // The ACCEPTED third outcome is not a failure and so is not classified here:
@@ -406,34 +437,41 @@ func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *test
 // and TestLoader_refreshCache_notModifiedResetsRejectionStreak (a 304 over a
 // usable cache, including its "rejection streak ended by 304 revalidation"
 // INFO, pinned by TestLoader_refreshCache_notModifiedLogsEndedRejectionStreak).
-func TestClassifyRefreshFailure(t *testing.T) {
+func TestIsPersistentRefreshFailure(t *testing.T) {
 	for name, tc := range map[string]struct {
 		cause error
 		class refreshFailureClass
-		want  refreshDisposition
+		want  bool
 	}{
 		// Persistent: each one re-downloads or re-refuses identically forever.
-		"parse-time record cap":      {fmt.Errorf("parse: %w", errRecordCapExceeded), failureParse, refreshPersistent},
-		"identifier budget":          {fmt.Errorf("parse: %w", errIdentifierBudgetExceeded), failureParse, refreshPersistent},
-		"non-array document":         {logSafeCause(fmt.Errorf("%w (got null)", errNotJSONArray)), failureParse, refreshPersistent},
-		"download size cap":          {&httpx.ResponseTooLargeError{Limit: maxMapBytes}, failureFetch, refreshPersistent},
-		"validator-less 304":         {nil, failureNotModifiedUnusable, refreshPersistent},
-		"acceptance invariant":       {errors.New("arr identifier coverage 1/200 is below minimum 2"), failureValidation, refreshPersistent},
-		"whole-map shrink guard":     {nil, failureShrunk, refreshPersistent},
-		"terminal 404":               {&httpx.HTTPStatusError{Code: http.StatusNotFound}, failureFetch, refreshPersistent},
-		"terminal 410":               {&httpx.HTTPStatusError{Code: http.StatusGone}, failureFetch, refreshPersistent},
-		"terminal 500":               {&httpx.HTTPStatusError{Code: http.StatusInternalServerError}, failureFetch, refreshPersistent},
-		"terminal 503 after retries": {&httpx.HTTPStatusError{Code: http.StatusServiceUnavailable}, failureFetch, refreshPersistent},
-		"terminal 401":               {&httpx.AuthError{Msg: "invalid API key (401)"}, failureFetch, refreshPersistent},
-		"terminal 429":               {&httpx.RateLimitError{Msg: "rate limited (429)"}, failureFetch, refreshPersistent},
-		"wrapped terminal status":    {fmt.Errorf("fetch: %w", &httpx.HTTPStatusError{Code: http.StatusNotFound}), failureFetch, refreshPersistent},
+		"parse-time record cap":   {fmt.Errorf("parse: %w", errRecordCapExceeded), failureParse, true},
+		"identifier budget":       {fmt.Errorf("parse: %w", errIdentifierBudgetExceeded), failureParse, true},
+		"non-array document":      {logSafeCause(fmt.Errorf("%w (got null)", errNotJSONArray)), failureParse, true},
+		"download size cap":       {&httpx.ResponseTooLargeError{Limit: maxMapBytes}, failureFetch, true},
+		"validator-less 304":      {nil, failureNotModifiedUnusable, true},
+		"acceptance invariant":    {errors.New("arr identifier coverage 1/200 is below minimum 2"), failureValidation, true},
+		"whole-map shrink guard":  {nil, failureShrunk, true},
+		"operator-remedy 404":     {&httpx.HTTPStatusError{Code: http.StatusNotFound}, failureFetch, true},
+		"operator-remedy 410":     {&httpx.HTTPStatusError{Code: http.StatusGone}, failureFetch, true},
+		"operator-remedy 301":     {&httpx.HTTPStatusError{Code: http.StatusMovedPermanently}, failureFetch, true},
+		"operator-remedy 400":     {&httpx.HTTPStatusError{Code: http.StatusBadRequest}, failureFetch, true},
+		"terminal 401":            {&httpx.AuthError{Msg: "invalid API key (401)"}, failureFetch, true},
+		"wrapped operator status": {fmt.Errorf("fetch: %w", &httpx.HTTPStatusError{Code: http.StatusNotFound}), failureFetch, true},
 		// Transient: can succeed on the next attempt.
-		"mid-stream truncation":      {logSafeCause(errors.New("unexpected EOF at element 4")), failureParse, refreshTransient},
-		"transport error":            {errors.New("transport refused by test"), failureFetch, refreshTransient},
-		"2xx without representation": {errors.New("unexpected status 204 on conditional request"), failureFetch, refreshTransient},
+		"mid-stream truncation":      {logSafeCause(errors.New("unexpected EOF at element 4")), failureParse, false},
+		"transport error":            {errors.New("transport refused by test"), failureFetch, false},
+		"2xx without representation": {errors.New("unexpected status 204 on conditional request"), failureFetch, false},
+		// Come-back-later statuses: retry exhaustion within one cycle is not
+		// evidence the upstream needs an operator, so they must NOT advance the
+		// streak toward the operator-action ERROR.
+		"come-back-later 408":     {&httpx.HTTPStatusError{Code: http.StatusRequestTimeout}, failureFetch, false},
+		"come-back-later 500":     {&httpx.HTTPStatusError{Code: http.StatusInternalServerError}, failureFetch, false},
+		"come-back-later 503":     {&httpx.HTTPStatusError{Code: http.StatusServiceUnavailable}, failureFetch, false},
+		"come-back-later 429":     {&httpx.RateLimitError{Msg: "rate limited (429)"}, failureFetch, false},
+		"wrapped come-back-later": {fmt.Errorf("fetch: %w", &httpx.HTTPStatusError{Code: http.StatusBadGateway}), failureFetch, false},
 	} {
-		if got := classifyRefreshFailure(tc.class, tc.cause); got != tc.want {
-			t.Errorf("classifyRefreshFailure(%v, %v) = %v, want %v (%s)", tc.class, tc.cause, got, tc.want, name)
+		if got := isPersistentRefreshFailure(tc.class, tc.cause); got != tc.want {
+			t.Errorf("isPersistentRefreshFailure(%v, %v) = %v, want %v (%s)", tc.class, tc.cause, got, tc.want, name)
 		}
 	}
 }

@@ -15,20 +15,16 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
-// Fribb type strings. MOVIE routes to Radarr (TMDB movie / IMDb); every other
-// type routes to Sonarr (TVDB). The token vocabulary itself lives in the
-// dependency-free internal/mediatype leaf, shared with the anilist client that
-// ACCEPTS the wire tokens this package then classifies (l-f87).
-const typeMovie = mediatype.Movie
-
-// normalizeType canonicalizes a raw Fribb/AniList type/format string to the
-// upper-cased, trimmed form Record.Type invariants (IsMovie/IsSpecial) rely on.
-func normalizeType(s string) string { return mediatype.Normalize(s) }
+// Fribb type strings route the arr: MOVIE goes to Radarr (TMDB movie / IMDb);
+// every other type goes to Sonarr (TVDB). The token vocabulary and its
+// canonicalization live in the dependency-free internal/mediatype leaf, shared
+// with the anilist client that ACCEPTS the wire tokens this package then
+// classifies (l-f87).
 
 // RecordFromFormat builds the type-only Record a consumer uses to reuse the
 // arr/season routing decisions (IsMovie/IsSpecial/HasMappedSeason) for an
 // AniList media format that has no Fribb record.
-func RecordFromFormat(format string) Record { return Record{Type: normalizeType(format)} }
+func RecordFromFormat(format string) Record { return Record{Type: mediatype.Normalize(format)} }
 
 // nullLiteral is the JSON null token, checked before decoding tolerant fields.
 const nullLiteral = "null"
@@ -64,10 +60,10 @@ func (r *fribbRecord) toRecord() (Record, bool) {
 	if r.AniListID <= 0 {
 		return Record{}, false
 	}
-	typ := normalizeType(string(r.Type))
+	typ := mediatype.Normalize(string(r.Type))
 	rec := Record{
 		IMDbIDs:    r.IMDbID,
-		TmdbMovies: r.TmdbID.movieIDs(typ == typeMovie),
+		TmdbMovies: r.TmdbID.movieIDs(typ == mediatype.Movie),
 		Type:       typ,
 		AniListID:  int(r.AniListID),
 		TvdbID:     int(r.TvdbID),
@@ -92,7 +88,7 @@ const maxFribbRecords = 1 << 16
 // failure: it re-downloads the multi-MB body and rejects it every cycle,
 // never self-healing, so acceptRefresh routes it through rejectRefresh — the
 // consecutive-rejection streak advances and the scout escalates at
-// degradation.EscalationThreshold instead of degrading at WARN forever.
+// degradation.TickEscalationThreshold instead of degrading at WARN forever.
 var errRecordCapExceeded = fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
 
 // errNotJSONArray rejects a Fribb body whose top-level value is not a JSON
@@ -103,7 +99,7 @@ var errRecordCapExceeded = fmt.Errorf("mapping: Fribb list exceeds cap %d record
 // re-download the multi-MB body and fail identically - it never self-heals.
 // acceptRefresh therefore routes it through rejectRefresh (advancing the
 // persisted rejection streak so the scout escalates at
-// degradation.EscalationThreshold) instead of treating it as a transient parse
+// degradation.TickEscalationThreshold) instead of treating it as a transient parse
 // failure. Mid-stream truncation stays transient: a partial download of a
 // genuinely array-shaped body CAN succeed on the next attempt.
 var errNotJSONArray = errors.New("mapping: Fribb list is not a JSON array")
@@ -138,7 +134,7 @@ const maxFribbIdentifiersTotal = 1 << 20
 // incomplete map (later records become false unmapped/title-fallback cases and
 // vanish from the report catalogue) that every count floor still passes. Like
 // errRecordCapExceeded it never self-heals, so it advances the persisted
-// rejection streak toward degradation.EscalationThreshold instead of degrading
+// rejection streak toward degradation.TickEscalationThreshold instead of degrading
 // at WARN forever.
 var errIdentifierBudgetExceeded = fmt.Errorf("mapping: Fribb identifiers exceed cap %d", maxFribbIdentifiersTotal)
 

@@ -41,26 +41,56 @@ func TestAttrJoinerRecapsAfterSanitizeGrowth(t *testing.T) {
 }
 
 // TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator pins the honesty of
-// the "..." marker on the exact-fit boundary: when the first source consumes
-// the whole per-attribute budget, every later source is silently dropped at
-// the separator, and the attribute must still be marked truncated. Without
-// the drop marker the joined attribute renders as a complete list, so an
-// operator reading recommended_groups or release_urls in Loki cannot tell
-// sources were discarded. This is the only path that reaches write's
-// budget-exhausted branch (capAttr writes a single piece and the aggregate
-// tests always truncate mid-piece).
+// the "..." marker on the exact-fit boundary: when the pieces consume the whole
+// per-attribute budget, every later source is silently dropped at the
+// separator, and the attribute must still be marked truncated. Without the drop
+// marker the joined attribute renders as a complete list, so an operator reading
+// recommended_groups or release_urls in Loki cannot tell sources were discarded.
+// This is the only path that reaches the joiner's budget-exhausted branch (a
+// single-value attribute writes one piece and the aggregate tests always
+// truncate mid-piece).
+//
+// The fill is COMPUTED from maxRetainedElemBytes and maxAttrBytes rather than
+// written as one pathological 8 KiB element, because retention now bounds each
+// element at maxRetainedElemBytes - so no single element can fill the joiner's
+// budget on its own, and reaching the separator boundary takes many of them.
+// Computing it keeps this test correct if either constant moves.
 func TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	exactGroup := strings.Repeat("g", maxAttrBytes)
+
+	// Groups join with a 1-byte "," separator.
+	groupFull, groupFiller, wantGroups := exactFitFill(maxRetainedElemBytes, 1)
+	groupsIn := make([]string, 0, groupFull+2)
+	for range groupFull {
+		groupsIn = append(groupsIn, strings.Repeat("g", maxRetainedElemBytes))
+	}
+	if groupFiller > 0 {
+		groupsIn = append(groupsIn, strings.Repeat("g", groupFiller))
+	}
+	f := testFinding("exact", "Frieren")
+	f.RecommendedGroups = append(groupsIn, "dropped-group")
+
+	// Links join as `tracker=url` with a 1-byte " " separator between links, so
+	// one link's piece is len(tracker)+1+len(url); size the URL so the piece
+	// lands on the element budget with the tracker included.
 	const tracker = "Nyaa"
 	const urlPrefix = "https://nyaa.si/"
-	exactURL := urlPrefix + strings.Repeat("u", maxAttrBytes-len(tracker)-len("=")-len(urlPrefix))
-	f := testFinding("exact", "Frieren")
-	f.RecommendedGroups = []string{exactGroup, "dropped-group"}
-	f.Links = gradedLinks(
-		compare.ReleaseLink{Tracker: tracker, URL: exactURL},
-		compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"},
-	)
+	linkURL := urlPrefix + strings.Repeat("u", maxRetainedElemBytes-len(urlPrefix))
+	pieceLen := len(tracker) + len("=") + len(linkURL)
+	linkFull, linkFiller, wantLinks := exactFitFill(pieceLen, 1)
+	links := make([]compare.ReleaseLink, 0, linkFull+2)
+	for range linkFull {
+		links = append(links, compare.ReleaseLink{Tracker: tracker, URL: linkURL})
+	}
+	if linkFiller > 0 {
+		// The filler's whole piece is tracker + "=" + url, so trim the URL.
+		links = append(links, compare.ReleaseLink{
+			Tracker: tracker,
+			URL:     linkURL[:max(0, linkFiller-len(tracker)-len("="))],
+		})
+	}
+	links = append(links, compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"})
+	f.Links = gradedLinks(links...)
 
 	notifier.Report([]compare.Finding{f}, nil)
 
@@ -68,18 +98,43 @@ func TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator(t *testing.T) {
 	if !ok {
 		t.Fatal("finding line carries no recommended_groups attribute")
 	}
-	if want := exactGroup + "..."; groups != want {
-		t.Errorf("recommended_groups = %d bytes ending %q, want the exact-fit group plus the ... marker (%d bytes)",
-			len(groups), lastAttrBytes(groups), len(want))
+	if len(groups) != wantGroups+len("...") || !strings.HasSuffix(groups, "...") {
+		t.Errorf("recommended_groups = %d bytes ending %q, want %d (the exact-fit fill) plus the ... marker",
+			len(groups), lastAttrBytes(groups), wantGroups)
 	}
-	links, ok := recorder.AttrValue("better release available", "release_urls")
+	if strings.Contains(groups, "dropped-group") {
+		t.Error("the group past the budget must be DROPPED, not rendered")
+	}
+	linksAttr, ok := recorder.AttrValue("better release available", "release_urls")
 	if !ok {
 		t.Fatal("finding line carries no release_urls attribute")
 	}
-	if want := tracker + "=" + exactURL + "..."; links != want {
-		t.Errorf("release_urls = %d bytes ending %q, want the exact-fit first source plus the ... marker (%d bytes)",
-			len(links), lastAttrBytes(links), len(want))
+	if len(linksAttr) != wantLinks+len("...") || !strings.HasSuffix(linksAttr, "...") {
+		t.Errorf("release_urls = %d bytes ending %q, want %d (the exact-fit fill) plus the ... marker",
+			len(linksAttr), lastAttrBytes(linksAttr), wantLinks)
 	}
+	if strings.Contains(linksAttr, "animebytes.tv") {
+		t.Error("the link past the budget must be DROPPED, not rendered")
+	}
+}
+
+// exactFitFill reports how many pieces of pieceLen bytes, joined by a sepLen
+// separator, fill the joiner's budget EXACTLY - so the next separator is what
+// fails and the drop marker is what proves it. It returns the piece count, the
+// size of a final short filler piece that closes the budget (0 when the full
+// pieces already land on it), and the exact joined length to expect.
+//
+// The caller builds its own pieces, because a group is a plain string while a
+// link is a `tracker=url` pair; only the shape of the arithmetic is shared.
+func exactFitFill(pieceLen, sepLen int) (full, filler, joined int) {
+	for (full+1)*pieceLen+full*sepLen <= maxAttrBytes {
+		full++
+	}
+	joined = full*pieceLen + (full-1)*sepLen
+	if gap := maxAttrBytes - joined - sepLen; gap > 0 && gap < pieceLen {
+		filler, joined = gap, maxAttrBytes
+	}
+	return full, filler, joined
 }
 
 // lastAttrBytes returns a short tail of s for a failure message, so a
@@ -92,13 +147,14 @@ func lastAttrBytes(s string) string {
 	return s[len(s)-tail:]
 }
 
-// TestCapAlertTextAttrNeutralizesMarkupAndMentions pins the alert-sink output
+// TestCapAlertTextAttrEscapesDiscordMarkup pins the alert-sink output
 // encoding: capAttr bounds and sanitizes a value for the JSON slog sink but
 // performs no markup encoding, and alerts.yaml interpolates alert_title /
-// alert_recommended_group into a Discord annotation, so an untrusted
-// SeaDex title must not be able to render as a link, a code span, or a
-// receiver mention (CWE-116).
-func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
+// alert_recommended_group into a Discord annotation, so an untrusted SeaDex
+// title must not be able to render as a link or a code span (CWE-116). Mention
+// delivery is controlled by the sender's allowed_mentions policy, not by this
+// byte encoder, so no case here asserts anything about '@'.
+func TestCapAlertTextAttrEscapesDiscordMarkup(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -109,12 +165,6 @@ func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
 			in:   "[security update](https://attacker.example)",
 			want: `\[security update\]\(https://attacker.example\)`,
 		},
-		{name: "everyone mention", in: "@everyone", want: `\@everyone`},
-		{name: "here mention", in: "@here", want: `\@here`},
-		// The Discord user-mention form is neutralized by the '@' escape
-		// alone: the angle brackets are not markup for this sink and now
-		// survive as the honest text they are.
-		{name: "discord user mention", in: "<@123>", want: `<\@123>`},
 		{name: "html tag", in: "<script>", want: "<script>"},
 		{name: "ampersand", in: "Tiger & Bunny", want: "Tiger & Bunny"},
 		{name: "emphasis and code", in: "*a*_b_`c`~d~|e|", want: `\*a\*\_b\_` + "\\`c\\`" + `\~d\~\|e\|`},
@@ -188,7 +238,7 @@ func TestCapAlertTextAttrRecapsAfterEscapeGrowth(t *testing.T) {
 func TestFindingKVsCarriesEscapedAlertLabels(t *testing.T) {
 	f := compare.Finding{
 		Title:            "[phish](https://attacker.example)",
-		RecommendedGroup: "@everyone",
+		RecommendedGroup: "*PMR*",
 	}
 	kvs := findingKVs(&f)
 	got := map[string]string{}
@@ -205,7 +255,7 @@ func TestFindingKVsCarriesEscapedAlertLabels(t *testing.T) {
 		"title":                   f.Title,
 		"recommended_group":       f.RecommendedGroup,
 		"alert_title":             `\[phish\]\(https://attacker.example\)`,
-		"alert_recommended_group": `\@everyone`,
+		"alert_recommended_group": `\*PMR\*`,
 	} {
 		if got[key] != want {
 			t.Errorf("%s = %q, want %q", key, got[key], want)

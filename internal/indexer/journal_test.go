@@ -1397,23 +1397,6 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 	}
 }
 
-// TestRenderJournalItemNoOccurrencesRejected pins renderJournalItem's
-// defensive empty-refs guard: a journal key with no curated occurrences
-// renders no item (ok=false) and never counts as an AB passkey skip, so an
-// inconsistent or hand-edited snapshot can never materialize a bogus feed
-// item. Unreachable through Rebuild today (carryJournal and growJournal only
-// pass curated occurrences), so it is pinned by direct call.
-func TestRenderJournalItemNoOccurrencesRejected(t *testing.T) {
-	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
-	it, ok, noPasskey := w.renderJournalItem("nyaa:1", nil, func(int) EntryInfo { return EntryInfo{} })
-	if ok || noPasskey {
-		t.Errorf("renderJournalItem(no refs) = (ok=%v, noPasskey=%v), want (false, false)", ok, noPasskey)
-	}
-	if it.Key != "" || it.Title != "" || it.DownloadURL != "" {
-		t.Errorf("renderJournalItem(no refs) item = %+v, want the zero item", it)
-	}
-}
-
 // TestRenderJournalItemFallsBackToRenderableOccurrence pins the multi-entry
 // fallback contract: when the lowest-AniList-ID occurrence of a journal key
 // cannot synthesize a title (no files, no release group) but a higher sibling

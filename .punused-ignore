@@ -17,8 +17,9 @@
 # So three real mechanisms are structurally invisible to it, and every entry
 # below is one of them:
 #   (a) a method the STANDARD LIBRARY calls through an interface the app never
-#       names: encoding/json's json.Unmarshaler, encoding/xml's xml.Unmarshaler,
-#       and errors.Is/As/Unwrap's anonymous interface{ Unwrap() error }.
+#       names: encoding/json's json.Marshaler and json.Unmarshaler, encoding/xml's
+#       xml.Unmarshaler, and errors.Is/As/Unwrap's anonymous
+#       interface{ Unwrap() error }.
 #   (b) a method a DEPENDENCY MODULE calls through its own interface; that
 #       module's packages are outside the workspace gopls indexes.
 #   (c) an exported constructor whose only callers are _test.go files in OTHER
@@ -57,6 +58,18 @@ method (*stringList).UnmarshalJSON is
 method (*boundedMediaList).UnmarshalJSON is
 method (*gqlErrors).UnmarshalJSON is
 #
+# internal/align/align.go: ScopeKind's pair is the same mechanism on the ENCODE
+# side (json.Marshaler), reached by encoding/json from audit.renderJSON's
+# json.MarshalIndent of a Report whose every Row carries a Scope. It publishes
+# the kind's String() vocabulary instead of its iota, so deleting it silently
+# republishes the audit report's scope key as an integer whose meaning is a
+# source-order accident. UnmarshalJSON is its inverse and is reached the same
+# invisible way, by the render tests' json.Unmarshal of a rendered report back
+# into Report - it exists so a custom encoding does not break round-tripping for
+# a caller with no reason to expect asymmetry.
+method (ScopeKind).MarshalJSON is
+method (*ScopeKind).UnmarshalJSON is
+#
 # --- (a) xml.Unmarshaler ----------------------------------------------------
 # Same shape, encoding/xml side, all in internal/indexer/torznab.go:
 # parseTorznab's xml.Unmarshal decodes feedXML.Channel (channelXML), whose
@@ -70,21 +83,15 @@ method (*errorXML).UnmarshalXML is
 # --- (b) httpx.Transient (cross-module interface dispatch) ------------------
 # httpx/v4 declares `type Transient interface { IsTransient() bool }` and
 # reaches an implementation with errors.As; the retry loop calls it on every
-# attempt error. Both types are returned from INSIDE an httpx.Do body, so this
-# method IS the retry decision for a 500/408 AniList fault and for a Prowlarr
-# timeout or malformed body. A dependency module's interface can never produce
-# a workspace reference.
-method (*transientStatusError).IsTransient is
+# attempt error. The type is returned from INSIDE an httpx.Do body, so this
+# method IS the retry decision for a Prowlarr timeout or malformed body. A
+# dependency module's interface can never produce a workspace reference.
 method (*transientUpstreamError).IsTransient is
 #
 # --- (a) errors.Is/As/Unwrap, with a load-bearing non-test consumer ---------
 # The stdlib walks a chain through an anonymous interface{ Unwrap() error }, so
-# no syntactic reference to Unwrap can exist anywhere. These three are reached
+# no syntactic reference to Unwrap can exist anywhere. These two are reached
 # by a production classification that would change its answer without them:
-#  - *BatchRecordError: match's prefetchPass classifies FetchMany's error with
-#    errors.Is(err, context.Canceled), and a batch cancelled AFTER its first
-#    chunk completed returns exactly this wrapper - without Unwrap a shutdown
-#    is misread as a fault.
 #  - *walkSideError: scout hands the walk error to httpx.LogSafeError, which
 #    does errors.As(&urlErr) to reduce a credential-bearing *url.Error; without
 #    Unwrap the reduction stops finding it and a configured userinfo credential
@@ -93,7 +100,6 @@ method (*transientUpstreamError).IsTransient is
 #    wraps report failures in it, while cycle.NormalizeShutdownError and
 #    dispatchOutcome classify that same error with errors.Is - the redaction
 #    sits UPSTREAM of the classification boundary.
-method (*BatchRecordError).Unwrap is
 method (*walkSideError).Unwrap is
 method (*redactedError).Unwrap is
 #
@@ -104,11 +110,10 @@ method (*redactedError).Unwrap is
 # errors.Is(context.Canceled/DeadlineExceeded) over the whole chain before it
 # checks Transient - and they are kept because a wrapper that hides its cause
 # is a latent correctness bug, not because someone unwraps them today:
-#  - *transientStatusError (internal/anilist/anilist.go) wraps
-#    httpx.CheckHTTPStatus's *httpx.HTTPStatusError.
 #  - *transientUpstreamError (internal/indexer/prowlarr.go, built by
-#    (*upstream).attemptError and classifyParseError) wraps that same status
-#    error, or a *torznabLimitError for a decode-limit breach.
+#    (*upstream).attemptError and classifyParseError) wraps
+#    httpx.CheckHTTPStatus's *httpx.HTTPStatusError, or a *torznabLimitError for
+#    a decode-limit breach.
 #  - *torznabLimitError (internal/indexer/torznab.go) wraps xmlx's *LimitError
 #    so errors.Is(err, xmlx.ErrLimit) holds; nothing asks that today (both
 #    consumers use errors.AsType[*torznabLimitError], which matches the type
@@ -120,7 +125,6 @@ method (*redactedError).Unwrap is
 #    every production consumer - scout's mappingDegradedAttrs and mapUsable,
 #    mapping's own rejectRefresh - matches the TYPE via errors.AsType, so only
 #    the mapping tests unwrap it, which is why this one reports EU1001.
-method (*transientStatusError).Unwrap is
 method (*transientUpstreamError).Unwrap is
 method (*torznabLimitError).Unwrap is
 method (*StaleMapError).Unwrap is

@@ -56,8 +56,8 @@ const (
 	maxMapBytes = 16 << 20
 	// mapSizeWarnBytes is maxMapBytes' pre-cliff warning threshold (80%, the
 	// app-wide degradation fraction). A body past the cap is a PERSISTENT
-	// refresh refusal (classifyRefreshFailure grades
-	// *httpx.ResponseTooLargeError refreshPersistent), so it never self-heals:
+	// refresh refusal (isPersistentRefreshFailure grades
+	// *httpx.ResponseTooLargeError persistent), so it never self-heals:
 	// every cycle re-downloads the body, re-refuses it, and the map stays
 	// frozen stale until an operator ships a raised cap. That is the same class
 	// as the record cap and the aggregate identifier budget, which
@@ -186,7 +186,7 @@ func (r *Record) HasMappedSeason() bool { return r.SeasonTvdb > 0 }
 // Fribb path the tolerant decoders already emit these forms, so the call is a
 // no-op that pins the agreement structurally.
 func (r *Record) canonicalize() {
-	r.Type = normalizeType(r.Type)
+	r.Type = mediatype.Normalize(r.Type)
 	r.IMDbIDs = trimmed(r.IMDbIDs)
 	r.TmdbMovies = positiveInts(r.TmdbMovies)
 	r.TvdbID = max(0, r.TvdbID)
@@ -216,14 +216,15 @@ type Cache struct {
 	// the cache; the scout therefore reads it off this Cache rather than
 	// depending on a *StaleMapError to carry it.
 	//
-	// WHICH failures advance it is classifyRefreshFailure's decision and its
+	// WHICH failures advance it is isPersistentRefreshFailure's decision and its
 	// doc comment is the single home of that list - every failure arm of
 	// refreshCache reaches this counter through it (degradeRefresh), so the
 	// list and the code cannot drift. In outline: a persistent failure (one
 	// that repeats identically every cycle until the operator acts - a guard
-	// refusal, a moved upstream shape, a terminal non-2xx status) advances it;
-	// a TRANSIENT failure - one that can succeed on the next attempt - neither
-	// advances nor resets it.
+	// refusal, a moved upstream shape, a status only the operator can clear)
+	// advances it; a TRANSIENT failure - one that can succeed on the next
+	// attempt, including a come-back-later 408/429/5xx - neither advances nor
+	// resets it.
 	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
 }
 
@@ -555,8 +556,8 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 // streak (Cache.RejectedRefreshes) and carrying it on the *StaleMapError so
 // the scout can escalate its degraded-mapping log after
 // degradation.TickEscalationThreshold consecutive rejections. It is reached ONLY
-// through degradeRefresh, on a failure classifyRefreshFailure graded
-// refreshPersistent; a transient failure takes plain staleOrFail there, so it
+// through degradeRefresh, on a failure isPersistentRefreshFailure graded
+// persistent; a transient failure takes plain staleOrFail there, so it
 // neither advances the streak nor resets it. The streak resets only on an
 // accepted refresh or a 304 that revalidates a usable cache.
 //
@@ -574,25 +575,8 @@ func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, e
 	return next, err
 }
 
-// refreshDisposition is what one FAILED refresh does to the persisted
-// consecutive-rejection streak (Cache.RejectedRefreshes). The third possible
-// outcome of a refresh - accepted, which RESETS the streak to 0 - is not a
-// failure and so has no value here: it is applied by the two success paths
-// that own it (acceptRefresh's fresh Cache literal, and reuseCachedRecords'
-// explicit reset on a 304 that revalidated a usable cache).
-type refreshDisposition int
-
-const (
-	// refreshTransient is a failure that can succeed on the next attempt: it
-	// neither advances nor resets the streak.
-	refreshTransient refreshDisposition = iota
-	// refreshPersistent is a failure that repeats identically every cycle until
-	// the operator acts: it advances the streak.
-	refreshPersistent
-)
-
 // refreshFailureClass names WHICH step of a refresh failed. It is the
-// vocabulary classifyRefreshFailure maps to a disposition, so a call site says
+// vocabulary isPersistentRefreshFailure grades, so a call site says
 // what happened and never what the streak should do about it.
 type refreshFailureClass int
 
@@ -617,15 +601,21 @@ const (
 	failureNotModifiedUnusable
 )
 
-// classifyRefreshFailure is the ONE home of the transient-vs-persistent refresh
-// classification: every failure arm of refreshCache reaches the streak through
-// it (via degradeRefresh), so the documented persistent set and the code that
-// implements it cannot drift apart the way a per-arm choice between staleOrFail
-// and rejectRefresh could - and did.
+// isPersistentRefreshFailure is the ONE home of the transient-vs-persistent
+// refresh classification: every failure arm of refreshCache reaches the streak
+// through it (via degradeRefresh), so the documented persistent set and the code
+// that implements it cannot drift apart the way a per-arm choice between
+// staleOrFail and rejectRefresh could - and did.
 //
-// PERSISTENT (advances Cache.RejectedRefreshes), because each one re-downloads
-// or re-refuses identically every cycle and never self-heals without the
-// operator:
+// A refresh has three outcomes and only two of them are failures, which is why
+// this is a predicate over failures rather than a three-valued grade: the
+// ACCEPTED outcome RESETS Cache.RejectedRefreshes to 0 and is applied by the two
+// success paths that own it (acceptRefresh's fresh Cache literal, and
+// reuseCachedRecords' explicit reset on a 304 that revalidated a usable cache).
+//
+// PERSISTENT (true; advances Cache.RejectedRefreshes), because each one
+// re-downloads or re-refuses identically every cycle and never self-heals
+// without the operator:
 //
 //   - a parse-time record-cap breach (errRecordCapExceeded);
 //   - an aggregate identifier-budget breach (errIdentifierBudgetExceeded);
@@ -638,60 +628,70 @@ const (
 //   - an acceptance-invariant refusal (failureValidation) or a whole-map
 //     below-half shrink refusal (failureShrunk) - deterministic guard verdicts
 //     on the body the upstream keeps serving;
-//   - a TERMINAL non-2xx status on the fixed Fribb URL (*httpx.HTTPStatusError,
-//     *httpx.AuthError, *httpx.RateLimitError). "Terminal" means the status
-//     survived httpx's retry policy - a status httpx itself retried and
-//     recovered from never reaches here. There is deliberately NO status
-//     allowlist: the streak's own degradation.TickEscalationThreshold consecutive
-//     cycles IS the transient filter (a temporary 503 cannot survive eight
-//     cycles ~3h apart at the deployed interval), whereas a per-status policy
-//     list would silently drift against upstream behavior.
+//   - a status on the fixed Fribb URL whose remedy is the OPERATOR
+//     (*httpx.AuthError for 401/403, and every *httpx.HTTPStatusError outside
+//     the come-back-later set below: a 3xx from a redirect-refusing client, a
+//     404 or 410 on a URL that is a package constant, any other 4xx). Each one
+//     re-refuses identically until someone changes the URL or the credentials.
 //
-// Everything else is TRANSIENT: a transport error, a mid-stream truncation or
-// any other malformed-body class, and a 2xx that carries no usable
-// representation (a 204/206, which is not a non-2xx status). A transient
-// failure neither advances nor resets the streak.
+// Everything else is TRANSIENT (false): a transport error, a mid-stream
+// truncation or any other malformed-body class, a 2xx that carries no usable
+// representation (a 204/206, which is not a non-2xx status), and a
+// COME-BACK-LATER status - a 408, a 429 (*httpx.RateLimitError) and every 5xx.
+// Surviving one cycle's retry budget is not evidence of permanence: the streak
+// escalates to ERROR at degradation.TickEscalationThreshold consecutive ticks
+// (~2h at the 15m default), and that ERROR's remediation tells the operator to
+// inspect the upstream or delete state.json - the wrong instruction for an
+// outage that clears without them. A transient failure neither advances nor
+// resets the streak.
 //
 // Cache.RejectedRefreshes points here rather than restating the list.
-func classifyRefreshFailure(class refreshFailureClass, cause error) refreshDisposition {
+func isPersistentRefreshFailure(class refreshFailureClass, cause error) bool {
 	switch class {
 	case failureValidation, failureShrunk, failureNotModifiedUnusable:
-		return refreshPersistent
+		return true
 	case failureFetch:
-		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](cause); ok {
-			return refreshPersistent
-		}
-		// Every terminal non-2xx httpx surfaces for a conditional GET: the
-		// status mapping (CheckHTTPStatus) is 401/403 -> *AuthError, 429 ->
-		// *RateLimitError, and every other non-2xx (including a 3xx from a
-		// redirect-refusing client) -> *HTTPStatusError.
-		if _, ok := errors.AsType[*httpx.HTTPStatusError](cause); ok {
-			return refreshPersistent
-		}
-		if _, ok := errors.AsType[*httpx.AuthError](cause); ok {
-			return refreshPersistent
-		}
-		if _, ok := errors.AsType[*httpx.RateLimitError](cause); ok {
-			return refreshPersistent
-		}
-		return refreshTransient
+		return isPersistentFetchFailure(cause)
 	case failureParse:
-		if errors.Is(cause, errRecordCapExceeded) || errors.Is(cause, errIdentifierBudgetExceeded) || errors.Is(cause, errNotJSONArray) {
-			return refreshPersistent
-		}
-		return refreshTransient
+		return errors.Is(cause, errRecordCapExceeded) || errors.Is(cause, errIdentifierBudgetExceeded) || errors.Is(cause, errNotJSONArray)
 	}
-	return refreshTransient
+	return false
+}
+
+// isPersistentFetchFailure grades a failed conditional GET, the one failure
+// class whose disposition is carried entirely by the error VALUE. Every terminal
+// non-2xx httpx surfaces here: the status mapping (CheckHTTPStatus) is 401/403
+// -> *AuthError, 429 -> *RateLimitError, and every other non-2xx (including a
+// 3xx from a redirect-refusing client) -> *HTTPStatusError. It is split out of
+// isPersistentRefreshFailure so that function stays a dispatcher over the class
+// vocabulary; isPersistentRefreshFailure's doc comment is still the single home
+// of which failures are persistent.
+func isPersistentFetchFailure(cause error) bool {
+	if _, ok := errors.AsType[*httpx.ResponseTooLargeError](cause); ok {
+		return true
+	}
+	if _, ok := errors.AsType[*httpx.AuthError](cause); ok {
+		return true
+	}
+	if _, ok := errors.AsType[*httpx.RateLimitError](cause); ok {
+		return false
+	}
+	if status, ok := errors.AsType[*httpx.HTTPStatusError](cause); ok {
+		// A 408 and every 5xx ask the caller to come back later; any other
+		// status on a URL that is a package constant needs the operator.
+		return status.Code != http.StatusRequestTimeout && status.Code < 500
+	}
+	return false
 }
 
 // degradeRefresh is the single exit from every refreshCache failure arm: it
 // degrades to the stale map (or returns noCache when there is no usable one)
-// and lets classifyRefreshFailure - never the call site - decide whether the
+// and lets isPersistentRefreshFailure - never the call site - decide whether the
 // failure advances the persisted rejection streak. No other code picks
 // staleOrFail or rejectRefresh; a call site names only the failure's class, its
 // fixed stale_reason string, and its two error values.
 func degradeRefresh(prev *Cache, class refreshFailureClass, staleMsg string, cause, noCache error) (Cache, error) {
-	if classifyRefreshFailure(class, cause) == refreshPersistent {
+	if isPersistentRefreshFailure(class, cause) {
 		return rejectRefresh(prev, staleMsg, cause, noCache)
 	}
 	return staleOrFail(prev, staleMsg, cause, noCache)
@@ -699,7 +699,7 @@ func degradeRefresh(prev *Cache, class refreshFailureClass, staleMsg string, cau
 
 // logSafeCause reduces an untrusted-input-derived parse error to log-safe text
 // (single-line, control-stripped, capped at maxLoggedErrorBytes) WITHOUT
-// discarding its wrap chain, so classifyRefreshFailure can still recognize a
+// discarding its wrap chain, so isPersistentRefreshFailure can still recognize a
 // sentinel class (errNotJSONArray) on the value the caller passes it. Building
 // a plain errors.New from the sanitized text - the earlier form - dropped that
 // chain, which is safe only while the branch that sanitizes also hard-codes the
@@ -751,7 +751,7 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 	if err != nil {
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
 			// The branch chooses only the stale_reason class; whether it advances
-			// the streak is classifyRefreshFailure's call.
+			// the streak is isPersistentRefreshFailure's call.
 			return degradeRefresh(prev, failureFetch, "refresh exceeded size cap", err,
 				fmt.Errorf("mapping: refresh exceeded size cap and no cache available: %w", err))
 		}
@@ -807,12 +807,12 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 		if errors.Is(err, errRecordCapExceeded) {
 			// The branch chooses only the stale_reason class; the disposition
 			// (persistent - a permanently over-cap upstream list never
-			// self-heals) is classifyRefreshFailure's call.
+			// self-heals) is isPersistentRefreshFailure's call.
 			return degradeRefresh(prev, failureParse, "refresh exceeded record cap", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
 		if errors.Is(err, errIdentifierBudgetExceeded) {
-			// Persistent per classifyRefreshFailure: the aggregate identifier
+			// Persistent per isPersistentRefreshFailure: the aggregate identifier
 			// budget truncates the tail of the list, so accepting the prefix
 			// would persist a knowably incomplete map that every count floor
 			// still passes.
@@ -823,7 +823,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 		// parseFribbForRefresh classifies it at the source as a transient empty-body parse
 		// failure (fribb.go's io.EOF arm) rather than wrapping errNotJSONArray.
 		if errors.Is(err, errNotJSONArray) {
-			// Persistent per classifyRefreshFailure: a moved top-level shape is
+			// Persistent per isPersistentRefreshFailure: a moved top-level shape is
 			// content evidence, not transport damage, so it never self-heals -
 			// unlike mid-stream truncation below.
 			err = logSafeCause(err)

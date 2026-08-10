@@ -164,7 +164,7 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 	if err != nil {
 		return nil, 0, err
 	}
-	return u.filterDownloadURLs(items), len(items), nil
+	return u.filterDownloadURLs(items, parsed), len(items), nil
 }
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
@@ -508,14 +508,12 @@ func malformedUpstreamBody(err error) bool {
 // A healthy Prowlarr hands out its own proxy links on the queried endpoint's
 // origin, so same-origin is the safe default; the rejected URL itself is never
 // logged.
-func (u *upstream) filterDownloadURLs(items []item) []item {
-	feedURL, err := url.Parse(u.feed)
-	if err != nil {
-		// An unparseable configured endpoint cannot anchor the origin check;
-		// fail closed rather than passing unvalidated download targets through.
-		u.log.Warn("upstream feed URL unparseable; dropping all items", "upstream", u.name)
-		return nil
-	}
+//
+// feedURL is the endpoint search already parsed for the request, which is the
+// only origin this filter may anchor on: search returns "invalid upstream feed
+// URL" before any fetch when it does not parse, so there is no reachable state
+// in which the filter runs without one. Only its scheme, host and port are read.
+func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 	out := make([]item, 0, len(items))
 	dropped := 0
 	blankedDisplay := 0

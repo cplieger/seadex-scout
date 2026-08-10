@@ -108,35 +108,24 @@ const (
 // ErrNotFound reports that AniList has no media for the requested ID.
 var ErrNotFound = errors.New("anilist: media not found")
 
-// ErrBatchRecord marks a record-local validation failure inside an otherwise
+// errBatchRecord marks a record-local validation failure inside an otherwise
 // well-formed batch response, distinguishing it from a request/envelope failure
 // so FetchMany keeps fetching later chunks instead of reading one poisoned
-// record as a total outage. It is FetchMany's own internal classification: what
-// a CALLER reads is BatchResult.Verdicts, which already says per id whether the
-// answer is trustworthy, so no production caller matches on this sentinel.
-var ErrBatchRecord = errors.New("anilist: batch response")
-
-// BatchRecordError is FetchMany's diagnostic for a batch that did not run
-// cleanly end to end. Err is whichever failure produced it - a record-local
-// error wrapping ErrBatchRecord, or an aborting envelope/request error that
-// does NOT wrap it (joined with an earlier chunk's record error when there was
-// one). So errors.Is(err, ErrBatchRecord) classifies the FAILURE and must not
-// be read as "a *BatchRecordError was returned"; use errors.As for that.
+// record as a total outage. It is FetchMany's own internal classification and is
+// deliberately unexported: what a CALLER reads is BatchResult.Verdicts, which
+// already says per id whether the answer is trustworthy. An aborting
+// envelope/request error does NOT wrap it (it is joined with an earlier chunk's
+// record error when there was one), so errors.Is classifies the FAILURE rather
+// than naming a wrapper type.
 //
-// It carries NO id sets. Which ids a failure makes untrustworthy is
-// BatchResult.Verdicts' job (VerdictUnverified for a chunk that answered
-// poisoned, VerdictUnrequested for one never asked), so a caller never joins an
-// error's id lists against the media map to work out what it may memoize.
-// Getting that join wrong was compile-clean and cost ~450 already-answered ids
-// a rate-limited per-id Fetch each - the ~1700-request cold cycle batching
-// exists to avoid.
-type BatchRecordError struct {
-	Err error
-}
-
-func (e *BatchRecordError) Error() string { return e.Err.Error() }
-
-func (e *BatchRecordError) Unwrap() error { return e.Err }
+// No error out of FetchMany carries id sets. Which ids a failure makes
+// untrustworthy is BatchResult.Verdicts' job (VerdictUnverified for a chunk that
+// answered poisoned, VerdictUnrequested for one never asked), so a caller never
+// joins an error's id lists against the media map to work out what it may
+// memoize. Getting that join wrong was compile-clean and cost ~450
+// already-answered ids a rate-limited per-id Fetch each - the ~1700-request cold
+// cycle batching exists to avoid.
+var errBatchRecord = errors.New("anilist: batch response")
 
 // --- upstream failure classification ---
 
@@ -409,7 +398,7 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // reads VerdictUnrequested and the caller can tell an all-not-found batch apart
 // from an outage without a completion flag.
 //
-// A record-local failure (ErrBatchRecord, a poisoned record inside an otherwise
+// A record-local failure (errBatchRecord, a poisoned record inside an otherwise
 // well-formed response) does NOT abort the batch: the chunk still counts as
 // completed, later chunks are still fetched,
 // and the first record error is surfaced alongside the merged result, so one
@@ -426,7 +415,7 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (BatchResult, error) 
 	for chunk := range slices.Chunk(ids, batchSize) {
 		page, err := c.fetchBatchChunk(ctx, chunk)
 		maps.Copy(out, page)
-		if err != nil && !errors.Is(err, ErrBatchRecord) {
+		if err != nil && !errors.Is(err, errBatchRecord) {
 			return abortedBatch(out, verdicts, completed, err, firstRecordErr)
 		}
 		completed = true
@@ -443,7 +432,7 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (BatchResult, error) 
 		recordChunkVerdicts(verdicts, chunk, page, absent)
 	}
 	if firstRecordErr != nil {
-		return BatchResult{Media: out, Verdicts: verdicts}, &BatchRecordError{Err: firstRecordErr}
+		return BatchResult{Media: out, Verdicts: verdicts}, firstRecordErr
 	}
 	return BatchResult{Media: out, Verdicts: verdicts}, nil
 }
@@ -465,7 +454,7 @@ func abortedBatch(
 	if !completed {
 		return BatchResult{}, err
 	}
-	return BatchResult{Media: out, Verdicts: verdicts}, &BatchRecordError{Err: err}
+	return BatchResult{Media: out, Verdicts: verdicts}, err
 }
 
 // recordChunkVerdicts records one completed chunk's per-id verdicts: an id the
@@ -486,7 +475,7 @@ func recordChunkVerdicts(verdicts map[int]Verdict, chunk []int, page map[int]Med
 // request failure returns a nil page (nothing to merge); otherwise the parsed
 // page is returned alongside the joined parse and identity-set errors, so
 // FetchMany's caller-facing contract logic reads as one linear loop. A
-// record-local failure (ErrBatchRecord) still returns the chunk's valid
+// record-local failure (errBatchRecord) still returns the chunk's valid
 // records, matching FetchMany's does-not-abort-the-batch rule.
 func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Media, error) {
 	raw, err := c.request(ctx, batchQuery, map[string]any{"ids": chunk})
@@ -503,7 +492,7 @@ func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Medi
 // could inject an unrelated Media or overwrite a value an earlier chunk
 // legitimately resolved - and one such id (the first encountered in map
 // iteration order, so arbitrary when several are unsolicited) is reported as
-// an ErrBatchRecord-wrapped error so the caller sees the malformed response
+// an errBatchRecord-wrapped error so the caller sees the malformed response
 // without losing the chunk's valid records. When MORE than one id is
 // unsolicited the count rides the error too, so one stray id reads differently
 // from a wholesale identity-set violation.
@@ -521,7 +510,7 @@ func retainRequested(page map[int]Media, chunk []int) error {
 		delete(page, id)
 		unsolicited++
 		if first == nil {
-			first = fmt.Errorf("%w unexpected media id %d", ErrBatchRecord, id)
+			first = fmt.Errorf("%w unexpected media id %d", errBatchRecord, id)
 		}
 	}
 	if unsolicited > 1 {
@@ -682,7 +671,7 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 // contains it, so it needs no operator action here.
 func (c *Client) backOff(wait time.Duration) time.Duration {
 	if wait >= implausibleWindow {
-		slog.Warn("anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead",
+		c.log.Warn("anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead",
 			"stated", wait, "ceiling", maxThrottlePenalty)
 	}
 	wait = min(wait, maxThrottlePenalty)
@@ -1101,7 +1090,7 @@ type gqlPage struct {
 //
 // The elements are retained RAW and materialized one at a time by
 // parsePageRecords, so an element whose field types are out of schema is a
-// record-local failure (ErrBatchRecord) like every other per-record defect
+// record-local failure (errBatchRecord) like every other per-record defect
 // instead of failing the whole envelope - the classification FetchMany reads
 // to decide whether the remaining chunks are still worth fetching.
 type boundedMediaList struct {
@@ -1113,7 +1102,7 @@ type boundedMediaList struct {
 // boundedMediaList via jsonx/bounded's Array (cap checked BEFORE the element
 // is decoded, so over-cardinality never materializes the excess).
 // Over-cardinality is an envelope error (the whole batch fails), not an
-// ErrBatchRecord: the response shape itself violates the query's perPage
+// errBatchRecord: the response shape itself violates the query's perPage
 // contract, so no record in it is trustworthy.
 func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 	// encoding/json processes duplicate object keys in order, invoking this
@@ -1152,7 +1141,7 @@ type gqlPageResponse struct {
 // fails the batch; the record loop's per-record invariants (a decodable
 // element, positive id, valid fields, no duplicate ids) live in
 // parsePageRecords - a rejected record is skipped and surfaced via an
-// ErrBatchRecord-wrapped error alongside the chunk's valid records, so one
+// errBatchRecord-wrapped error alongside the chunk's valid records, so one
 // poisoned record cannot discard
 // the chunk or read as a total outage - a skipped id is absent from the map
 // AND covered by the non-nil error, so the caller never negative-memoizes it,
@@ -1187,7 +1176,7 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 // claiming one identity - so NO record for that id is returned
 // (the earlier occurrence is deleted and the id stays excluded however many
 // duplicates follow) rather than silently letting the last write win. Each
-// failure surfaces the first offender via an ErrBatchRecord-wrapped error
+// failure surfaces the first offender via an errBatchRecord-wrapped error
 // beside the valid sibling records. When MORE than one record is rejected the
 // count rides the error too, so one poisoned record reads differently from a
 // wholesale schema drift.
@@ -1241,7 +1230,7 @@ func (s *pageRecordSet) claim(id int) bool {
 }
 
 // add validates one batch element into the set, returning the
-// ErrBatchRecord-wrapped reason it was skipped (nil when it was accepted).
+// errBatchRecord-wrapped reason it was skipped (nil when it was accepted).
 func (s *pageRecordSet) add(raw json.RawMessage, i int) error {
 	var decoded gqlMedia
 	if err := json.Unmarshal(raw, &decoded); err != nil {
@@ -1252,17 +1241,17 @@ func (s *pageRecordSet) add(raw json.RawMessage, i int) error {
 		if decoded.ID > 0 {
 			s.claim(decoded.ID)
 		}
-		return fmt.Errorf("%w media record %d is undecodable: %s", ErrBatchRecord, i, sanitizeUpstreamMessage(err.Error()))
+		return fmt.Errorf("%w media record %d is undecodable: %s", errBatchRecord, i, sanitizeUpstreamMessage(err.Error()))
 	}
 	if decoded.ID <= 0 {
-		return fmt.Errorf("%w media record %d missing id", ErrBatchRecord, i)
+		return fmt.Errorf("%w media record %d missing id", errBatchRecord, i)
 	}
 	if s.claim(decoded.ID) {
-		return fmt.Errorf("%w media record %d duplicates id %d", ErrBatchRecord, i, decoded.ID)
+		return fmt.Errorf("%w media record %d duplicates id %d", errBatchRecord, i, decoded.ID)
 	}
 	parsed, err := decoded.toMedia()
 	if err != nil {
-		return fmt.Errorf("%w media record %d (id %d): %v", ErrBatchRecord, i, decoded.ID, err)
+		return fmt.Errorf("%w media record %d (id %d): %v", errBatchRecord, i, decoded.ID, err)
 	}
 	s.out[decoded.ID] = parsed
 	return nil

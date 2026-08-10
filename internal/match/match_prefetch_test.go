@@ -3,7 +3,6 @@ package match
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"testing"
 
@@ -71,9 +70,11 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 }
 
 // batchRecordErrAniList fails every batch record-locally: FetchMany returns
-// per-id verdicts marking every id UNVERIFIED plus anilist.ErrBatchRecord (the
+// per-id verdicts marking every id UNVERIFIED plus a record-local error (the
 // completed chunks held only malformed records), while single Fetch still
-// resolves from the canned map.
+// resolves from the canned map. The error is an ordinary one: production match
+// code classifies the failure from BatchResult.Verdicts, never from the error's
+// type or sentinel.
 type batchRecordErrAniList struct {
 	batchCountingAniList
 }
@@ -86,11 +87,11 @@ func (b *batchRecordErrAniList) FetchMany(_ context.Context, ids []int) (anilist
 			Media:    media,
 			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
 		},
-		fmt.Errorf("%w media record 0 missing id", anilist.ErrBatchRecord)
+		errors.New("anilist: batch response media record 0 missing id")
 }
 
 // TestPrefetchEmptyRecordLocalBatchFallsBackPerID pins the outage
-// classification boundary: an all-unverified batch result plus ErrBatchRecord is
+// classification boundary: an all-unverified batch result plus an error is
 // a record-local failure (the chunks completed; every record was malformed),
 // NOT a total AniList outage, so prefetch must leave the pending ids uncached
 // for the documented per-id Fetch fallback instead of failing them fast - the
@@ -140,9 +141,7 @@ func (s *scopedBatchRecordAniList) FetchMany(_ context.Context, _ []int) (anilis
 				33: anilist.VerdictAbsent,
 			},
 		},
-		&anilist.BatchRecordError{
-			Err: fmt.Errorf("%w: media record 0 missing id", anilist.ErrBatchRecord),
-		}
+		errors.New("anilist: batch response: media record 0 missing id")
 }
 
 // TestPrefetchScopesNegativeMemoToVerifiedChunks pins the chunk-scoping half of
@@ -225,9 +224,7 @@ func (a *abortingBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 				verdicts[id] = anilist.VerdictUnrequested
 			}
 		}
-		return anilist.BatchResult{Media: out, Verdicts: verdicts}, &anilist.BatchRecordError{
-			Err: errors.New("anilist: 503 service unavailable"),
-		}
+		return anilist.BatchResult{Media: out, Verdicts: verdicts}, errors.New("anilist: 503 service unavailable")
 	}
 	return anilist.BatchResult{Media: out, Verdicts: batchVerdicts(ids, out)}, nil
 }

@@ -841,9 +841,6 @@ func validMarker(m string) string {
 // (2000) or hide a movie from it. Emptying the list falls back to writeItem's
 // documented catAnime default, the same degradation validMarker relies on.
 func validCategories(cats []int) []int {
-	if len(cats) == 0 {
-		return cats
-	}
 	out := cats[:0]
 	for _, c := range cats {
 		if c == catTV || c == catAnime || c == catMovies {

@@ -55,10 +55,8 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 				c.tmdb[id] = struct{}{}
 			}
 		}
-		for _, im := range imdbIDs {
-			// RoutedIDs judges usability on the TRIMMED value, so a returned id is
-			// non-blank once trimmed; the trim is here for the padded-override case.
-			c.imdb[imdbKey(im)] = struct{}{}
+		for _, im := range imdbIDs { // RoutedIDs returns only canonical, usable ids
+			c.imdb[im] = struct{}{}
 		}
 	})
 	return c

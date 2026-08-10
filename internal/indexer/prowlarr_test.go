@@ -103,16 +103,16 @@ func TestUpstreamSearchDropsForeignDownloadURLs(t *testing.T) {
 	}
 }
 
-// TestFilterDownloadURLsFailsClosedOnUnparseableFeedURL pins the fail-closed
-// arm of the SSRF guard: when the configured Torznab endpoint URL cannot be
-// parsed, no origin can anchor the check, so every item is dropped rather than
-// passed through unvalidated.
-func TestFilterDownloadURLsFailsClosedOnUnparseableFeedURL(t *testing.T) {
-	u := &upstream{log: slog.Default(), name: upstreamNyaa, feed: "http://prowlarr:9696/api%zz"}
-	items := []item{{Title: "x", DownloadURL: "http://prowlarr:9696/1/download"}}
-	if got := u.filterDownloadURLs(items); len(got) != 0 {
-		t.Fatalf("unparseable feed URL passed %d items, want 0 (fail closed)", len(got))
+// mustFeedURL parses an upstream's configured Torznab endpoint the way search
+// does, so a test calling filterDownloadURLs directly anchors the origin check
+// on the same *url.URL production hands it.
+func mustFeedURL(t *testing.T, u *upstream) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(u.feed)
+	if err != nil {
+		t.Fatalf("parse upstream feed %q: %v", u.feed, err)
 	}
+	return parsed
 }
 
 // TestSanitizeDisplayURL pins the display-URL gate on the passthrough
@@ -1001,7 +1001,7 @@ func TestFilterDownloadURLsWarnsOnBlankedDisplayURLs(t *testing.T) {
 			InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1",
 		},
 	}
-	got := u.filterDownloadURLs(items)
+	got := u.filterDownloadURLs(items, mustFeedURL(t, u))
 	if len(got) != 2 {
 		t.Fatalf("kept items = %d, want 2 (a bad display URL blanks the field, never drops the item)", len(got))
 	}
@@ -1029,7 +1029,7 @@ func TestFilterDownloadURLsWarnsOnBlankedDisplayURLs(t *testing.T) {
 	cu.filterDownloadURLs([]item{{
 		Title: "clean", DownloadURL: "http://prowlarr:9696/1/download?link=b",
 		InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1",
-	}})
+	}}, mustFeedURL(t, cu))
 	if n := cleanRec.CountExact(msg); n != 0 {
 		t.Errorf("clean response blanked-display WARN count = %d, want 0", n)
 	}
@@ -1196,7 +1196,7 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped(t *testing.T) {
 	u.filterDownloadURLs([]item{{
 		Title: "hostile display", DownloadURL: "http://prowlarr:9696/1/download?link=a",
 		InfoURL: "https://evil.example/phish", GUID: "https://nyaa.si/view/1",
-	}})
+	}}, mustFeedURL(t, u))
 	if n := rec.CountExact(blankedMsg); n != 1 {
 		t.Fatalf("blanked-display WARN count = %d, want 1 (the onset)", n)
 	}
@@ -1206,7 +1206,7 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped(t *testing.T) {
 	if got := u.filterDownloadURLs([]item{{
 		Title: "off-origin", DownloadURL: "https://attacker.example/poison.torrent",
 		InfoURL: "https://nyaa.si/view/2", GUID: "https://nyaa.si/view/2",
-	}}); len(got) != 0 {
+	}}, mustFeedURL(t, u)); len(got) != 0 {
 		t.Fatalf("kept items = %d, want 0 (the off-origin download URL is dropped)", len(got))
 	}
 	if n := rec.CountExact(recoveryMsg); n != 0 {
@@ -1221,7 +1221,7 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped(t *testing.T) {
 	u.filterDownloadURLs([]item{{
 		Title: "clean", DownloadURL: "http://prowlarr:9696/1/download?link=b",
 		InfoURL: "https://nyaa.si/view/3", GUID: "https://nyaa.si/view/3",
-	}})
+	}}, mustFeedURL(t, u))
 	if n := rec.CountExact(recoveryMsg); n != 1 {
 		t.Errorf("display-recovery INFO count = %d, want 1 once a clean page is observed", n)
 	}
@@ -1245,7 +1245,7 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenSurvivorsCarryNoDisplayURL(t *te
 	u.filterDownloadURLs([]item{{
 		Title: "hostile display", DownloadURL: "http://prowlarr:9696/1/download?link=a",
 		InfoURL: "https://evil.example/phish", GUID: "https://nyaa.si/view/1",
-	}})
+	}}, mustFeedURL(t, u))
 	if n := rec.CountExact(blankedMsg); n != 1 {
 		t.Fatalf("blanked-display WARN count = %d, want 1 (the onset)", n)
 	}
@@ -1253,7 +1253,7 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenSurvivorsCarryNoDisplayURL(t *te
 	// A surviving item with neither display field observes nothing about the gate.
 	if got := u.filterDownloadURLs([]item{{
 		Title: "no display fields", DownloadURL: "http://prowlarr:9696/1/download?link=b",
-	}}); len(got) != 1 {
+	}}, mustFeedURL(t, u)); len(got) != 1 {
 		t.Fatalf("kept items = %d, want 1 (the on-origin download URL survives)", len(got))
 	}
 	if n := rec.CountExact(recoveryMsg); n != 0 {

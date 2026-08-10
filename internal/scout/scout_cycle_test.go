@@ -1909,24 +1909,26 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 }
 
 // TestLoadMappingEscalatesOnTerminalNon2xxStreak pins l-f100 at the operator
-// boundary: a terminal non-2xx on the fixed Fribb URL now advances the
-// persisted rejection streak, so a permanently 404ing (or 410/500ing) upstream
-// escalates the scout's mapping log from WARN to ERROR once the streak reaches
-// degradation.TickEscalationThreshold consecutive cycles. Before this it warned
-// forever from a frozen zero streak. The below-threshold row is the transient
-// filter the user's deliberate no-status-allowlist decision relies on: a
-// temporary status incident cannot survive that many cycles, so it never
-// reaches ERROR.
+// boundary: a status whose only remedy is the operator (a 404 or 410 on the
+// fixed Fribb URL) advances the persisted rejection streak, so a permanently
+// refusing upstream escalates the scout's mapping log from WARN to ERROR once
+// the streak reaches degradation.TickEscalationThreshold consecutive cycles.
+// Before this it warned forever from a frozen zero streak. The come-back-later
+// row is the other side (h-f3): a 5xx neither advances the streak nor escalates,
+// however long it lasts, because this ERROR's remediation tells the operator to
+// inspect the upstream or delete state.json and an outage that clears on its own
+// needs neither.
 func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 	for name, tc := range map[string]struct {
 		status      int
 		priorStreak int
+		wantStreak  int
 		wantError   bool
 	}{
-		"404 below threshold stays WARN": {http.StatusNotFound, degradation.TickEscalationThreshold - 2, false},
-		"404 at threshold escalates":     {http.StatusNotFound, degradation.TickEscalationThreshold - 1, true},
-		"410 at threshold escalates":     {http.StatusGone, degradation.TickEscalationThreshold - 1, true},
-		"500 at threshold escalates":     {http.StatusInternalServerError, degradation.TickEscalationThreshold - 1, true},
+		"404 below threshold stays WARN": {http.StatusNotFound, degradation.TickEscalationThreshold - 2, degradation.TickEscalationThreshold - 1, false},
+		"404 at threshold escalates":     {http.StatusNotFound, degradation.TickEscalationThreshold - 1, degradation.TickEscalationThreshold, true},
+		"410 at threshold escalates":     {http.StatusGone, degradation.TickEscalationThreshold - 1, degradation.TickEscalationThreshold, true},
+		"500 never escalates":            {http.StatusInternalServerError, degradation.TickEscalationThreshold - 1, degradation.TickEscalationThreshold - 1, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1948,8 +1950,8 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 			if mapErr == nil {
 				t.Fatal("loadMapping with a terminal non-2xx returned nil error, want the degraded stale map")
 			}
-			if mapCache.RejectedRefreshes != tc.priorStreak+1 {
-				t.Errorf("RejectedRefreshes = %d, want %d (a terminal non-2xx advances the streak)", mapCache.RejectedRefreshes, tc.priorStreak+1)
+			if mapCache.RejectedRefreshes != tc.wantStreak {
+				t.Errorf("RejectedRefreshes = %d, want %d (only an operator-remedy status advances the streak)", mapCache.RejectedRefreshes, tc.wantStreak)
 			}
 			warns := recorder.CountLevel(slog.LevelWarn, "mapping degraded")
 			errs := recorder.CountLevel(slog.LevelError, "mapping degraded")

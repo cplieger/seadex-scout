@@ -748,7 +748,7 @@ func TestParseFribb_ordinaryBodyUnaffectedByIdentifierBudget(t *testing.T) {
 // seam scout.applyMemoTyping and match.formatArr route an unmapped entry
 // through. anilist.knownFormat deliberately preserves an accepted LOWERCASE
 // format token verbatim, and every existing consumer test supplies uppercase
-// MOVIE/OVA, so dropping the normalizeType call here would silently route a
+// MOVIE/OVA, so dropping the mediatype.Normalize call here would silently route a
 // movie to Sonarr/Anime and lose an OVA's season-zero classification without
 // failing any other test.
 func TestRecordFromFormat_normalizesRoutingType(t *testing.T) {

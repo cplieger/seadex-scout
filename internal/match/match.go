@@ -514,11 +514,8 @@ func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	if it := li.findMovieByTMDB(tmdbMovies); it != nil {
 		return it
 	}
-	for _, imdb := range imdbIDs { // RoutedIDs returns only usable ids
-		// RoutedIDs judges usability on the TRIMMED value, so a returned id is
-		// non-blank once trimmed; the trim is here for the padded-override case.
-		key := imdbKey(imdb)
-		if it := li.byImdb[key]; it != nil { // byImdb holds only Radarr items
+	for _, imdb := range imdbIDs { // RoutedIDs returns only canonical, usable ids
+		if it := li.byImdb[imdb]; it != nil { // byImdb holds only Radarr items
 			return it
 		}
 	}
@@ -537,12 +534,12 @@ func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 	return nil
 }
 
-// imdbKey canonicalizes an IMDb id into its index/lookup key. HasArrIdentifier
-// judges usability on the TRIMMED value, so the key must be trimmed too: a
-// padded override id ("  tt0123456") otherwise reads as usable (suppressing the
-// AniList title fallback) while never matching the item indexed under its own
-// value. A blank or whitespace-only id yields "", which the two callers reading a
-// library Item's own ImdbID skip; the RoutedIDs-fed callers cannot see one.
+// imdbKey canonicalizes a library Item's IMDb id into its index/lookup key.
+// Only library-side inputs reach it: a mapping Record's ids are already
+// canonical, because Record.canonicalize trims them at every producer and
+// mapping.buildIndex reapplies the invariant to a decoded cache, so RoutedIDs
+// cannot return a padded or blank id. A blank or whitespace-only Item id yields
+// "", which both callers skip.
 func imdbKey(id string) string { return strings.TrimSpace(id) }
 
 // narrowByYear applies the AniList year constraint to a title-fallback

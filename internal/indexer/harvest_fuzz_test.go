@@ -11,9 +11,8 @@ import (
 // or corrupted snapshots). Invariants: decode never panics, the surviving
 // rotation cursor is always either empty or exactly the "<scope>:<alID>" shape
 // harvestCursorKey produces (a garbage value must never be carried forward
-// verbatim into every future snapshot), it never exceeds
-// maxPersistedCursorBytes (the reader discards an over-cap cursor whole), and
-// decode is its own fixpoint now that the persisted form is the bare cursor.
+// verbatim into every future snapshot), and decode is its own fixpoint now that
+// the persisted form is the bare cursor.
 // The JSON object forms a pre-paging-removal binary could persist stay in the
 // seed corpus: no released binary can write them, so they must now decode to
 // the empty baseline rather than being carried forward.
@@ -32,10 +31,6 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 			if _, _, ok := parseRotationCursor(cursor); !ok {
 				t.Fatalf("decodeHarvestCursor(%q) = %q, want empty or a valid rotation cursor", raw, cursor)
 			}
-		}
-		if len(cursor) > maxPersistedCursorBytes {
-			t.Fatalf("decodeHarvestCursor kept %d bytes, want <= %d (the reader discards an over-cap cursor whole)",
-				len(cursor), maxPersistedCursorBytes)
 		}
 		if again, _ := decodeHarvestCursor(cursor); again != cursor {
 			t.Fatalf("decode not a fixpoint: decode(%q) = %q, re-decode gives %q", raw, cursor, again)

@@ -997,12 +997,10 @@ func attrInt(attrs map[string]string, name string) int {
 // pubDateLayouts are the date formats seen on Torznab <pubDate> elements.
 var pubDateLayouts = []string{time.RFC1123Z, time.RFC1123, time.RFC822Z, time.RFC822, time.RFC3339}
 
-// parsePubDate parses a Torznab pubDate, returning the zero time on failure.
+// parsePubDate parses a Torznab pubDate, returning the zero time on failure
+// (an empty or unparseable value is the same outcome: no layout accepts one).
 func parsePubDate(s string) time.Time {
 	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}
-	}
 	for _, layout := range pubDateLayouts {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t

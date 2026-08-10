@@ -130,7 +130,9 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"`filtered` means one of the release's SeaDex tags is listed for the `report` " +
 	"surface in your `filters.exclude_tags`, so you asked for it not to count, and " +
 	"`unobtainable` means the release has no usable link or sits on a tracker you do not use. An " +
-	"annotated release stays listed but never drives the verdict and is never offered as a link. " +
+	"annotated release stays listed. `filtered`, `url error`, `unknown tracker`, and `unobtainable` " +
+	"releases never drive the verdict; `broken` / `incomplete` releases still drive it unless their tags " +
+	"are configured under `filters.exclude_tags`. Annotated releases are never offered as a link. " +
 	"`(N best hidden: animebytes)` means N of the entry's SeaDex BEST releases were withheld because you " +
 	"have `animebytes` off, so an empty best column there means \"not on a tracker you use\", not \"SeaDex " +
 	"lists no best\". An entry whose withheld releases are only alts carries no marker: SeaDex really lists " +

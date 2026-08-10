@@ -377,7 +377,7 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 // TestParseMediaPageBoundsMediaCardinality pins the wire-cardinality bound on
 // the untrusted batch decode: exactly batchSize compact valid records parse,
 // while batchSize+1 records fail the whole batch as an envelope error (never
-// ErrBatchRecord) rejected before the extra element is decoded — so a hostile
+// errBatchRecord) rejected before the extra element is decoded — so a hostile
 // endpoint cannot expand an attacker-sized media array into []gqlMedia under
 // the 1 MiB body cap.
 func TestParseMediaPageBoundsMediaCardinality(t *testing.T) {
@@ -402,7 +402,7 @@ func TestParseMediaPageBoundsMediaCardinality(t *testing.T) {
 	if err == nil {
 		t.Fatalf("parseMediaPage with %d records must be rejected", batchSize+1)
 	}
-	if errors.Is(err, ErrBatchRecord) {
+	if errors.Is(err, errBatchRecord) {
 		t.Errorf("over-cardinality must be an envelope error, got record-local %v", err)
 	}
 }

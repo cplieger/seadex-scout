@@ -674,7 +674,7 @@ func TestConsumerWarningsStayIndependent(t *testing.T) {
 				Title: "foreign display", DownloadURL: "http://prowlarr:9696/1/download?link=ok",
 				InfoURL: "https://evil.example/phish",
 			},
-		})
+		}, mustFeedURL(t, u))
 	}
 
 	warnCounts := map[string]int{droppedMsg: 0, blankedMsg: 0}

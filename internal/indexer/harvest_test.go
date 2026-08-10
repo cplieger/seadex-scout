@@ -1953,23 +1953,6 @@ func TestPendingHarvestKeepsAnAmbiguousInfoHashRetired(t *testing.T) {
 	}
 }
 
-// TestHarvestCheckpointDropsOverCapCursor pins the size-cap arm of the
-// persisted harvest_cursor decoder: a cursor longer than maxPersistedCursorBytes
-// cannot come from this writer, so it is external corruption and must degrade
-// to the baseline instead of being kept and re-persisted
-// forever. The decoder's degradation table covers every other arm; the fuzz
-// target's committed seeds are all far below the cap.
-func TestHarvestCheckpointDropsOverCapCursor(t *testing.T) {
-	const payload = "nyaa:7"
-	if cursor, _ := decodeHarvestCursor(payload); cursor != payload {
-		t.Fatalf("decode under-cap cursor = %q, want the cursor kept", cursor)
-	}
-	overcap := strings.Repeat(" ", maxPersistedCursorBytes) + payload
-	if cursor, _ := decodeHarvestCursor(overcap); cursor != "" {
-		t.Errorf("decode over-cap cursor (%d bytes) = %q, want the empty baseline", len(overcap), cursor)
-	}
-}
-
 // TestPreferredHarvestTitlePicksTheArrsVocabulary pins the alias policy
 // (l-f142). AnimeBytes lists ONE torrent three times - English, Japanese and
 // Romaji titles, distinct ?nh= GUIDs, the same torrent id - so all three resolve

@@ -124,7 +124,7 @@ func TestParseMediaPage_roundTripsGeneratedBatchesProperty(t *testing.T) {
 // one injected id the fixed tables use: every unsolicited id is deleted from
 // the page (so it can never be merged, nor overwrite a value an earlier chunk
 // resolved), every requested record survives with its value untouched, and the
-// error is non-nil with ErrBatchRecord classification exactly when at least one
+// error is non-nil with errBatchRecord classification exactly when at least one
 // unsolicited id was present (the classification FetchMany depends on to keep
 // fetching later chunks instead of reading the response as a total outage).
 func TestRetainRequested_dropsOnlyUnsolicitedIDsProperty(t *testing.T) {
@@ -147,8 +147,8 @@ func TestRetainRequested_dropsOnlyUnsolicitedIDsProperty(t *testing.T) {
 		if (err != nil) != (len(extra) > 0) {
 			t.Fatalf("retainRequested(chunk=%v, unsolicited=%v) err = %v, want an error exactly when an unsolicited id is present", chunk, extra, err)
 		}
-		if err != nil && !errors.Is(err, ErrBatchRecord) {
-			t.Fatalf("retainRequested err = %v, want ErrBatchRecord classification", err)
+		if err != nil && !errors.Is(err, errBatchRecord) {
+			t.Fatalf("retainRequested err = %v, want errBatchRecord classification", err)
 		}
 		if len(page) != answered {
 			t.Fatalf("page retained %d records, want the %d requested ones", len(page), answered)

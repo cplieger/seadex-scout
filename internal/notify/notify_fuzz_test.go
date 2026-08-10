@@ -91,17 +91,17 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 
 // FuzzCapAlertTextAttrBoundedAndInertMarkup fuzzes the alert-annotation text
 // encoder. alerts.yaml interpolates alert_title / alert_recommended_group into
-// a Discord annotation BODY, so an untrusted SeaDex title must never
-// render as a link, a code span, or a receiver mention (CWE-116). The escaper
-// emits every dangerous byte as a two-byte backslash escape, so walking escape
-// pairs is an exact oracle rather than a second
-// copy of the replacer - and it covers the growth re-cap boundary, where a cut
-// can land inside an escape pair, which the value-level table cannot reach.
+// a Discord annotation BODY, so an untrusted SeaDex title must never render as
+// a link or a code span (CWE-116). The escaper emits every dangerous byte as a
+// two-byte backslash escape, so walking escape pairs is an exact oracle rather
+// than a second copy of the replacer - and it covers the growth re-cap
+// boundary, where a cut can land inside an escape pair, which the value-level
+// table cannot reach.
 //
-// '<' and '>' are deliberately NOT in the live-markup set: this encoder targets
-// Discord, where they are ordinary text (the Slack-mrkdwn entity half was
-// dropped in l-f84), and Discord's `<@id>` mention is neutralized by the '@'
-// escape the walk already checks.
+// '<', '>' and '@' are deliberately NOT in the live-markup set. The angle
+// brackets are ordinary text for Discord (the Slack-mrkdwn entity half was
+// dropped in l-f84), and mention delivery is controlled by the sender's
+// allowed_mentions policy, not by a backslash inserted into annotation text.
 func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 	f.Add("")
 	f.Add("Frieren")
@@ -126,7 +126,7 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 				i++ // whatever this escape covers is inert
 				continue
 			}
-			if strings.IndexByte("`*_[]()~|@", got[i]) >= 0 {
+			if strings.IndexByte("`*_[]()~|", got[i]) >= 0 {
 				t.Errorf("capAlertTextAttr(%d bytes) leaves live markup byte %q at offset %d", len(raw), got[i], i)
 			}
 		}

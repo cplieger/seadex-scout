@@ -386,8 +386,8 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchMany must surface the unsolicited id as a record error")
 	}
-	if !errors.Is(err, ErrBatchRecord) {
-		t.Errorf("error = %v, want ErrBatchRecord classification (later chunks must not be aborted)", err)
+	if !errors.Is(err, errBatchRecord) {
+		t.Errorf("error = %v, want errBatchRecord classification (later chunks must not be aborted)", err)
 	}
 	if !strings.Contains(err.Error(), "unexpected media id 999") {
 		t.Errorf("error = %q, want the unexpected-id context", err.Error())
@@ -415,8 +415,8 @@ func TestParseMediaPageDuplicateIDExcluded(t *testing.T) {
 	if err == nil {
 		t.Fatal("parseMediaPage must surface the duplicate id")
 	}
-	if !errors.Is(err, ErrBatchRecord) {
-		t.Errorf("error = %v, want ErrBatchRecord classification", err)
+	if !errors.Is(err, errBatchRecord) {
+		t.Errorf("error = %v, want errBatchRecord classification", err)
 	}
 	if want := "(3 of 4 records rejected)"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %v, want magnitude %q: every record the conflict excluded counts, not just the later duplicates", err, want)
@@ -451,8 +451,8 @@ func TestParseMediaPageUndecodableDuplicateIDExcluded(t *testing.T) {
 			if err == nil {
 				t.Fatal("parseMediaPage must surface the undecodable record")
 			}
-			if !errors.Is(err, ErrBatchRecord) {
-				t.Errorf("error = %v, want ErrBatchRecord classification", err)
+			if !errors.Is(err, errBatchRecord) {
+				t.Errorf("error = %v, want errBatchRecord classification", err)
 			}
 			if got, ok := out[1]; ok {
 				t.Errorf("out[1] = %+v, want the conflicting id excluded regardless of order", got)
@@ -862,10 +862,6 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 	// match.prefetch would stop negative-memoizing ids it legitimately proved
 	// absent; if it regressed to exclude the aborting chunk's, it would
 	// negative-memoize ids whose chunk never ran.
-	var batchErr *BatchRecordError
-	if !errors.As(err, &batchErr) {
-		t.Fatalf("error = %v, want *BatchRecordError diagnosing the abort", err)
-	}
 	for _, id := range ids[batchSize:] {
 		if got := res.Verdicts[id]; got != VerdictUnrequested {
 			t.Errorf("Verdicts[%d] = %s, want VerdictUnrequested (the aborting second chunk)", id, verdictName(got))
@@ -941,12 +937,8 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchMany must surface a record error")
 	}
-	if !errors.Is(err, ErrBatchRecord) {
-		t.Errorf("error = %v, want ErrBatchRecord classification", err)
-	}
-	var batchErr *BatchRecordError
-	if !errors.As(err, &batchErr) {
-		t.Fatalf("error = %T %v, want *BatchRecordError", err, err)
+	if !errors.Is(err, errBatchRecord) {
+		t.Errorf("error = %v, want errBatchRecord classification", err)
 	}
 	for _, id := range ids {
 		want := VerdictUnverified
@@ -1103,12 +1095,11 @@ func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
 	res, err := c.FetchMany(context.Background(), ids)
 
-	var batchErr *BatchRecordError
-	if !errors.As(err, &batchErr) {
-		t.Fatalf("FetchMany() error = %v, want a *BatchRecordError", err)
+	if err == nil {
+		t.Fatal("FetchMany() error = nil, want the record-local failure")
 	}
-	if !errors.Is(err, ErrBatchRecord) {
-		t.Errorf("errors.Is(err, ErrBatchRecord) = false, want true (the sentinel must survive)")
+	if !errors.Is(err, errBatchRecord) {
+		t.Errorf("errors.Is(err, errBatchRecord) = false, want true (the sentinel must survive)")
 	}
 	for _, id := range ids[:batchSize] {
 		if got := res.Verdicts[id]; got != VerdictUnverified {
@@ -1228,10 +1219,6 @@ func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 	if !strings.Contains(err.Error(), "media record 0 missing id") {
 		t.Errorf("error = %q, want the earlier chunk's record diagnostic preserved", err.Error())
 	}
-	var batchErr *BatchRecordError
-	if !errors.As(err, &batchErr) {
-		t.Fatalf("error = %T %v, want *BatchRecordError diagnosing the abort", err, err)
-	}
 	if got := res.Verdicts[1]; got != VerdictFound {
 		t.Errorf("Verdicts[1] = %s, want VerdictFound (the poisoned chunk's valid record is still valid)", verdictName(got))
 	}
@@ -1319,10 +1306,6 @@ func TestFetchManyScopesUnrequestedIDsToTheAbandonedTail(t *testing.T) {
 	mu.Unlock()
 	if gotCalls != 2 {
 		t.Errorf("batch calls = %d, want 2 (the third chunk must never be requested after an abort)", gotCalls)
-	}
-	var batchErr *BatchRecordError
-	if !errors.As(err, &batchErr) {
-		t.Fatalf("error = %T %v, want *BatchRecordError", err, err)
 	}
 	for _, id := range ids[batchSize:] {
 		if got := res.Verdicts[id]; got != VerdictUnrequested {

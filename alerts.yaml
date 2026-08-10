@@ -78,7 +78,18 @@ groups:
             frequent ERROR is a health-marker write failure ("queued rerun could
             not record poll health"); check the /tmp mount and free space, since
             in external-scheduler mode a stale marker never turns the container
-            unhealthy on its own. What deliberately does NOT reach this rule:
+            unhealthy on its own. A wrong or revoked indexer.prowlarr_api_key
+            (or a per-tracker Torznab URL pointing at the wrong Prowlarr
+            indexer) also reaches this rule, on either the title harvest or a
+            search: an upstream that answers 401/403 or a Torznab error code in
+            the 100-199 credentials band cannot clear without an operator, and
+            left un-alerted it is the worst case here - every search answers the
+            arr an error, the arr counts those toward disabling this indexer with
+            RSS included, and meanwhile the container stays healthy and the
+            compare loop keeps logging "cycle complete". Bounded to one line per
+            upstream per rebuild. A 404 from the same upstream stays a WARN: a
+            removed Prowlarr indexer is a config question but not provably a
+            credential one. What deliberately does NOT reach this rule:
             a shutdown-interrupted run, a state save the store refused in order
             to preserve unclassifiable bytes ("state save skipped; on-disk state
             preserved"), a report skipped because another report holds the lock,
@@ -266,8 +277,10 @@ groups:
       # tracker page is offered under that tracker's own name.
       # The annotations render alert_title / alert_recommended_group, the
       # markdown-safe twins of title / recommended_group: an untrusted SeaDex
-      # title cannot become an active link or an @everyone mention in the
-      # Discord/Slack body, while the raw labels stay for search and grouping.
+      # title cannot become an active link or code span in the Discord/Slack
+      # body, while the raw labels stay for search and grouping. Mention
+      # suppression is NOT this: it is the receiver's own control (an empty
+      # allowed_mentions.parse on a Discord webhook payload).
       # The markdown
       # links render in Discord/Slack; simplify the annotation for a plain-text
       # receiver. Note: receivers that echo an alert's labels (a generic footer)

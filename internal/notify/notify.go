@@ -422,15 +422,20 @@ func capURLAttr(s string) string {
 // carry into a Markdown annotation BODY. capAttr bounds and sanitizes a
 // value for the JSON slog sink, but it deliberately performs no output
 // encoding for a downstream markup sink, so a title such as
-// `[security update](https://attacker.example)` or `@everyone` survives it and
-// the shipped alerts.yaml interpolates it verbatim into the annotation, where
-// it renders as active markup (CWE-116, context-confused output encoding).
-// CommonMark/Discord punctuation is backslash-escaped (including '@', which is
-// how Discord suppresses an @everyone / @here mention and also covers the
-// '<@id>' user-mention form). Unlike logattr.EscapeLinkDestination this is for
-// a text SPAN, not a link destination, so '[' and ']' ARE escaped - there is no
-// IPv6-literal case to preserve here. It also flattens CR/LF, which capAttr's
-// raw label deliberately keeps.
+// `[security update](https://attacker.example)` survives it and the shipped
+// alerts.yaml interpolates it verbatim into the annotation, where it renders as
+// active markup (CWE-116, context-confused output encoding).
+// CommonMark/Discord punctuation is backslash-escaped. Unlike
+// logattr.EscapeLinkDestination this is for a text SPAN, not a link
+// destination, so '[' and ']' ARE escaped - there is no IPv6-literal case to
+// preserve here. It also flattens CR/LF, which capAttr's raw label
+// deliberately keeps.
+//
+// It does NOT suppress a Discord MENTION, and cannot: Discord parses
+// `@everyone`, `@here` and `<@id>` whether or not a backslash precedes them, so
+// '@' is left literal rather than escaped into a false assurance. Complete
+// suppression is the SENDER's control - an empty `allowed_mentions.parse` in the
+// webhook payload - and this app is slog-only, so it has no sender to configure.
 //
 // This encoder targets ONE sink: Discord. The receiver is decided outside this
 // repo, in cplieger/homelab's `apps/mimir/mimir.yaml`, which provisions the
@@ -440,14 +445,13 @@ func capURLAttr(s string) string {
 // annotation as `Tiger &amp; Bunny`. The Slack-only half - entity-encoding
 // '&', '<' and '>' for mrkdwn's `<url|text>` and `<!everyone>` forms - is
 // therefore GONE: it never protected against Discord's own mention syntax
-// (`@everyone` / `@here` carry no '<') and Discord's `<@id>` mention is already
-// covered by the '@' escape, so dropping it removes no Discord defense. The
-// backslash escapes are what keep the alert-template link-injection class shut
-// and must stay. Switching that Alertmanager receiver to Slack (or any
-// mrkdwn sink) requires revisiting this escaper.
+// (`@everyone` / `@here` carry no '<'), which no output encoding here can
+// reach. The backslash escapes are what keep the alert-template
+// link-injection class shut and must stay. Switching that Alertmanager receiver
+// to Slack (or any mrkdwn sink) requires revisiting this escaper.
 var mdTextEscaper = strings.NewReplacer(
 	"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
-	"(", "\\(", ")", "\\)", "~", "\\~", "|", "\\|", "@", "\\@",
+	"(", "\\(", ")", "\\)", "~", "\\~", "|", "\\|",
 	// CR/LF survive capAttr on purpose (runesafe.Sanitize is the
 	// keepCRLF=true policy, because the JSON slog handler escapes them for
 	// its own sink), but the annotation body is a single line: a newline
@@ -518,8 +522,9 @@ func findingKVs(f *compare.Finding) []any {
 		// title / recommended_group: the raw labels keep their meaning for
 		// Loki search and `sum by` grouping, while alerts.yaml interpolates
 		// these into its Discord annotations so an untrusted title can
-		// never render as active markup or a mention (see capAlertTextAttr,
-		// which targets that one sink).
+		// never render as active markup (see capAlertTextAttr, which targets
+		// that one sink; mention delivery is the sender's allowed_mentions
+		// policy, not this encoder's).
 		"alert_title", capAlertTextAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,

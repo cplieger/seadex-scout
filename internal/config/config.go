@@ -463,7 +463,7 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 				"filters.exclude_tags holds a blank tag key")
 		case len(key) > maxExcludeTagLen:
 			return tagfilter.Filter{}, fmt.Errorf(
-				"a filters.exclude_tags tag key is longer than %d characters", maxExcludeTagLen)
+				"a filters.exclude_tags tag key is longer than %d bytes", maxExcludeTagLen)
 		case len(raw[tag]) == 0:
 			return tagfilter.Filter{}, fmt.Errorf(
 				"a filters.exclude_tags tag lists no surfaces; list at least one of %s, "+
@@ -1353,12 +1353,8 @@ func validateArrPair(name, rawURL, key string) error {
 	// (ForceQuery) is accepted by arrapi but turns every appended API path
 	// into a query. Reject both here, field-name-only like the shared
 	// validator's branches, so the failure is early and never URL-echoing.
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		// Unreachable after validateHTTPURL parsed the same string; kept for
-		// the same field-name-only posture rather than a panic.
-		return fmt.Errorf("%s.url is not a valid URL", name)
-	}
+	// validateHTTPURL parsed this same immutable string above.
+	u, _ := url.Parse(rawURL)
 	if u.RawQuery != "" || u.ForceQuery {
 		return fmt.Errorf("%s.url must not contain a query", name)
 	}

@@ -31,7 +31,7 @@ import (
 const (
 	// maxStateBytes bounds the state file on read AND write (Save refuses to
 	// persist what Load would reject). An honest state file (library snapshot
-	// + mapping cache + memo + dedupe records) runs ~10-20 MB, so 32 MB keeps
+	// + mapping cache + memo) runs ~10-20 MB, so 32 MB keeps
 	// real headroom while fitting the 256 MiB deployment container: Load
 	// holds the raw JSON and the decoded State simultaneously, so the cap
 	// must leave room for both — a larger bound would let a valid at-cap file
@@ -46,8 +46,9 @@ const (
 	// feedSizeWarnBytes.
 	stateSizeWarnBytes = maxStateBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// dirMode / fileMode are applied to the created state directory and file.
-	// The file holds the operator's library inventory and finding history, so
-	// it stays owner-only (least privilege). dirMode matches every other
+	// The file holds the operator's library snapshot, mapping cache, AniList
+	// memo, and degradation streaks, so it stays owner-only (least
+	// privilege). dirMode matches every other
 	// creator of this same directory - it is config.DefaultConfigDir, also
 	// created by main.go's starter-config write, cycle.NewExclusive's cycle
 	// lock and the indexer feed snapshot, all at 0o700 - so which writer
@@ -176,10 +177,10 @@ type Store struct {
 	// could NOT preserve it (the quarantine rename failed, so the live file
 	// is still the only copy). While set, Save is refused - the unread bytes
 	// may be fully recoverable (a permissions mistake, a transient I/O
-	// fault), and an unpreserved corrupt file is the only forensic evidence
-	// plus the finding-dedupe baseline, so both must be preserved like every
-	// classified failure preserves its evidence, instead of the cold-started
-	// cycle overwriting them at its end. The scout loads at the start of
+	// fault), and an unpreserved corrupt file is the only forensic evidence,
+	// so it must be preserved like every classified failure preserves its
+	// evidence, instead of the cold-started cycle overwriting it at its end.
+	// The scout loads at the start of
 	// every cycle, so the block clears as soon as a Load succeeds, or
 	// classifies AND preserves the file.
 	loadFailed bool
@@ -483,7 +484,7 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 	// Require a JSON object envelope before unmarshalling: json.Unmarshal
 	// accepts a literal null into a struct, so a corrupt file holding "null"
 	// would otherwise load as a silently-empty state (a fake cold start that
-	// baselines findings and discards every cache) instead of surfacing the
+	// discards every cache) instead of surfacing the
 	// corruption. Save can never produce anything but an object.
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
 		s.maybeQuarantine(root)
@@ -543,8 +544,8 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 // SUCCEEDING clears the Save block (the corrupt bytes are safe at the
 // .corrupt path, so the next Save may replace the live file), while
 // preservation FAILING arms it, so Save refuses rather than atomically
-// overwriting the still-live corrupt file - the only forensic copy and the
-// finding-dedupe baseline - with a cold envelope.
+// overwriting the still-live corrupt file - the only forensic copy - with a
+// cold envelope.
 func (s *Store) maybeQuarantine(root *os.Root) {
 	// Load positively classified the live file as corrupt, so a newer-schema
 	// block remembered from an earlier Load no longer describes the file at
@@ -625,7 +626,7 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 // unclassified-read-failure block (a read that failed without classifying the
 // file must not be overwritten by a cold envelope), and classified corruption
 // the load could NOT preserve (the quarantine rename failed, so the live file
-// is still the only forensic copy and the only dedupe baseline). It is never a
+// is still the only forensic copy). It is never a
 // write fault - nothing was lost by the refusal itself - so a caller that
 // would otherwise log a failed save at ERROR should classify it instead. Note
 // the third case is not benign like the first two: the on-disk state stays

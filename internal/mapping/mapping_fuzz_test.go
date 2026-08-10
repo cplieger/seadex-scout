@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // FuzzParseOverrides exercises the operator-overrides parse boundary against
@@ -47,7 +49,7 @@ func FuzzParseOverrides(f *testing.F) {
 			if r.AniListID <= 0 {
 				t.Errorf("parseOverrides retained a non-positive-AniList-ID record: %+v", r)
 			}
-			if r.Type != normalizeType(r.Type) {
+			if r.Type != mediatype.Normalize(r.Type) {
 				t.Errorf("parseOverrides record Type %q not normalized", r.Type)
 			}
 		}
