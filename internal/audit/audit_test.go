@@ -954,3 +954,62 @@ func TestBestCellMarksOnlyHiddenBests(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditGroupsUnknownMarksPlaceholders pins the fact d-u2-2 was filed against:
+// a library item whose file data the walk could not establish carries NO group
+// evidence, and both row producers must say so rather than publishing an empty
+// group set that reads as "nothing identifiable is on disk".
+//
+// The two producers reach it by different routes and both matter: the matched row
+// goes through align.Decide (which answers a placeholder with StandingUnverified),
+// while uncoveredRows never calls Decide at all and its not_on_seadex verdict stays
+// TRUE - so the marker is that row's only way to qualify its own groups column.
+func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
+	a := NewAuditor(Config{})
+
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "MatchedPlaceholder", TvdbID: 100, Failed: true},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredPlaceholder", TvdbID: 200, Failed: true},
+		{Arr: library.ArrSonarr, ArrID: 3, Title: "UncoveredHealthy", TvdbID: 300, Groups: []string{"erai"}, HasFile: true},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "TV", TvdbID: 200},
+		{AniListID: 3, Type: "TV", TvdbID: 300},
+	})
+	matches := []match.Match{{
+		Item:   &snap.Items[0],
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 1},
+		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+	}}
+
+	rep := a.Audit(matches, snap, idx, nil)
+
+	byTitle := map[string]*Row{}
+	for i := range rep.Rows {
+		byTitle[rep.Rows[i].Title] = &rep.Rows[i]
+	}
+	for _, tc := range []struct {
+		title string
+		want  bool
+	}{
+		{"MatchedPlaceholder", true},
+		{"UncoveredPlaceholder", true},
+		{"UncoveredHealthy", false},
+	} {
+		row, ok := byTitle[tc.title]
+		if !ok {
+			t.Fatalf("row %q missing from the report", tc.title)
+		}
+		if row.GroupsUnknown != tc.want {
+			t.Errorf("%s: GroupsUnknown = %v, want %v", tc.title, row.GroupsUnknown, tc.want)
+		}
+		if got := groupsCell(row); tc.want && got != unknownCell {
+			t.Errorf("%s: groups cell = %q, want %q", tc.title, got, unknownCell)
+		} else if !tc.want && got == unknownCell {
+			t.Errorf("%s: groups cell must not read %q for an item with real evidence", tc.title, unknownCell)
+		}
+	}
+}

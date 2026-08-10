@@ -19,6 +19,8 @@
 package align
 
 import (
+	"encoding/json"
+	"fmt"
 	"slices"
 
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -153,6 +155,46 @@ func (k ScopeKind) String() string {
 	default:
 		return "series"
 	}
+}
+
+// MarshalJSON encodes the kind as its String() name, so a machine-readable
+// consumer reads the same vocabulary a human does ("season", "movie", "special",
+// "series") instead of an integer whose meaning is this file's iota order.
+//
+// The type owns its own encoding deliberately. The alternative was for a consumer
+// to carry a second, stringly-typed copy of the same fact beside the typed one,
+// which is exactly the split that kept this value off the audit report's wire
+// shape in the first place (l-f18): two of three renderers could read the typed
+// field and the JSON could not, so the JSON's consumer had to re-derive the scope
+// from other keys - and that derivation IS this package's dispatch, re-implemented
+// elsewhere. This app has already paid for that class of drift once, when
+// internal/indexer re-derived the season rule from raw Fribb fields (l-f4).
+func (k ScopeKind) MarshalJSON() ([]byte, error) {
+	return json.Marshal(k.String())
+}
+
+// UnmarshalJSON reads the String() vocabulary back. It exists because publishing a
+// custom encoding without its inverse breaks round-tripping SILENTLY for the
+// encoding/json caller who has no reason to expect asymmetry - the audit package's
+// own render tests decode a rendered report back into its struct as a
+// completeness check, and would have failed on a type error rather than on
+// anything they were written to detect.
+//
+// An unrecognized token is an error rather than the ScopeWholeSeries zero value:
+// String() maps every unknown kind TO "series", so silently accepting one would
+// turn a future vocabulary this build does not know into a confident wrong scope.
+func (k *ScopeKind) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err != nil {
+		return err
+	}
+	for _, candidate := range []ScopeKind{ScopeWholeSeries, ScopeMovie, ScopeSeason, ScopeSpecial} {
+		if candidate.String() == name {
+			*k = candidate
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown scope kind %q", name)
 }
 
 // ItemKind resolves the comparison scope kind of a library item that has no
