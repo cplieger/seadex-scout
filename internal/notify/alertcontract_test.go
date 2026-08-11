@@ -245,3 +245,42 @@ func TestCapURLAttrHoldsTheAlertBound(t *testing.T) {
 			got, honest)
 	}
 }
+
+// TestCapAlertTextAttrHoldsTheAlertBound is the TEXT twin of
+// TestCapURLAttrHoldsTheAlertBound: it checks the annotation's text budget is
+// actually APPLIED, not merely declared. capAlertTextAttr re-caps on
+// maxAlertTextBytes rather than the multi-KB Loki log-line budget, and that is
+// what makes TestAlertAnnotationBudgetFitsTheEmbedLimit's arithmetic
+// (4 x maxAlertTextBytes + 4 x maxAlertURLBytes inside Discord's 4096-rune
+// description limit) describe the shipped template rather than just its
+// constants. Every other assertion on this function bounds it by maxAttrBytes,
+// 16x looser, so a regression to the log-line budget - exactly the defect
+// capURLAttr already had - would let an oversized SeaDex title push the
+// clickable tracker links out of the embed with the whole suite green.
+func TestCapAlertTextAttrHoldsTheAlertBound(t *testing.T) {
+	t.Parallel()
+	for name, raw := range map[string]string{
+		"plain oversized title":  strings.Repeat("A", 4*maxAttrBytes),
+		"escape-growing title":   strings.Repeat("*", 4*maxAttrBytes),
+		"multi-byte CJK title":   strings.Repeat("葬", 4*maxAttrBytes),
+		"oversized group marker": strings.Repeat("[PMR]", maxAttrBytes),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := capAlertTextAttr(raw)
+			if len(got) > maxAlertTextBytes {
+				t.Errorf("capAlertTextAttr returned %d bytes, over maxAlertTextBytes (%d)", len(got), maxAlertTextBytes)
+			}
+			if !strings.HasSuffix(got, attrTruncMarker) {
+				t.Errorf("a truncated alert text must carry the %q marker so a reader can tell it "+
+					"from an honest one; got the tail %q", attrTruncMarker, got[max(0, len(got)-12):])
+			}
+		})
+	}
+	// An honest value well inside the budget passes through with only the markup
+	// escaping applied - the property that makes the tighter bound safe.
+	const honest = "Sousou no Frieren [SubsPlease]"
+	if got, want := capAlertTextAttr(honest), `Sousou no Frieren \[SubsPlease\]`; got != want {
+		t.Errorf("capAlertTextAttr(%q) = %q, want %q", honest, got, want)
+	}
+}

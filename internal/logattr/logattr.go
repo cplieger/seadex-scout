@@ -49,15 +49,16 @@ import (
 // dedupe-key path already applies to the same SeaDex data - so one hostile
 // entry cannot amplify memory in the 256 MiB container.
 //
-// The bound is PER ATTRIBUTE, not per record: a record's worst case is its
-// untrusted-attribute count times this budget plus one TruncMarker each
-// (notify.findingKVs emits 17 such attributes - 7 capAttr, 4
-// capAlertTextAttr, 4 capURLAttr and 2 full-budget Joiners - so ~139 KiB of
-// attribute VALUES), and the JSON sink can double that on the wire -
+// The bound is PER ATTRIBUTE, not per record: a record's worst case is the sum over
+// its untrusted attributes of each one's own budget plus a TruncMarker
+// (notify.findingKVs emits 17 such attributes, and only 9 take this budget - 7
+// capAttr plus 2 full-budget Joiners - while 4 capAlertTextAttr take 512 bytes and 4
+// capURLAttr take 256, so ~75 KiB of attribute VALUES), and the JSON sink can double
+// that on the wire -
 // Sanitize keeps CR and LF (the keepCRLF policy a JSON encoder needs) and
 // slog's appendEscapedJSONString expands each CR, LF, '"' and '\\' into two
 // bytes, so a control-dense value emits at up to twice its capped size
-// (~278 KiB per record). Adding an untrusted attribute therefore raises the record ceiling,
+// (~150 KiB per record). Adding an untrusted attribute therefore raises the record ceiling,
 // and past the log pipeline's line limit the WHOLE record is dropped -
 // suppressing the very finding an alert keys on. Check the record budget when
 // adding one.

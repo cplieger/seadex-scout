@@ -134,6 +134,24 @@ func (c UpstreamConfig) enabled(scope string) bool {
 	return c.torznabURL(scope) != ""
 }
 
+// enablementOnly returns the ENABLEMENT half of c for a process-lifetime field:
+// the per-tracker off switches plus the AB passkey gate, with ProwlarrAPIKey
+// dropped. Both constructors hold their operator input through this, so the
+// server's gates and the writer's read the same expression and neither retains
+// the Prowlarr credential (that field is REACHABILITY, consumed only inside the
+// upstreams wireUpstreams builds).
+//
+// Stated as an EXCLUSION rather than a list of fields to keep: a third tracker's
+// Torznab URL (SeaDex carries AnimeTosho and RuTracker torrents today) is then
+// carried by both halves automatically, where two inclusion lists would each
+// have to be edited and either one could silently omit it - leaving that scope
+// wired but never served, the enablement/reachability disagreement wireUpstreams
+// exists to prevent (l-f246).
+func (c UpstreamConfig) enablementOnly() UpstreamConfig {
+	c.ProwlarrAPIKey = ""
+	return c
+}
+
 // Config is the indexer server's runtime settings: the embedded shared
 // upstream wiring, APIKey (the feed's own gate - a secret, never logged), and
 // SnapshotPath, where the compare cycle persists the materialized feed
@@ -240,8 +258,8 @@ type Indexer struct {
 	// process-lifetime server retains no ProwlarrAPIKey: that field is
 	// reachability, consumed only inside the wired upstreams. It keeps the
 	// UpstreamConfig type so the scope -> config-field vocabulary stays
-	// single-homed (see UpstreamConfig.torznabURL); ProwlarrAPIKey is
-	// deliberately left unset here.
+	// single-homed (see UpstreamConfig.torznabURL); the projection that drops
+	// ProwlarrAPIKey is enablementOnly, shared with the writer.
 	enablement UpstreamConfig
 	// upstreams is wired once in New; immutable afterwards.
 	upstreams []*upstream
@@ -278,12 +296,8 @@ func New(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		log: log,
-		enablement: UpstreamConfig{
-			NyaaTorznabURL: cfg.NyaaTorznabURL,
-			ABTorznabURL:   cfg.ABTorznabURL,
-			ABPasskey:      cfg.ABPasskey,
-		},
+		log:              log,
+		enablement:       cfg.enablementOnly(),
 		verifyKey:        webhttp.NewStaticTokenVerifier(cfg.APIKey),
 		keyUnusable:      unusableFeedKey(cfg.APIKey),
 		cache:            newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),

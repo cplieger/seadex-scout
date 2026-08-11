@@ -3,11 +3,14 @@ package mapping
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestParseOverrides_boundsUnknownKeyRetention pins the diagnostic-state
@@ -100,43 +103,12 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 	}
 }
 
-// TestRecord_MovieTMDBIDs pins the cross-type movie evidence the ID bridge's
-// two secondary sites share (h-f9/l-f73): a themoviedb_id.movie id is a Radarr
-// id by construction, so it is returned whatever the record's type label says -
-// unlike an IMDb id, which TVDB reuses on the parent series and which this
-// accessor deliberately never exposes. Usability is a Record invariant applied by
-// canonicalize (both producers, and again on insertion into the index), so this
-// accessor returns the already-canonical list rather than re-filtering it.
-func TestRecord_MovieTMDBIDs(t *testing.T) {
-	tests := []struct {
-		name string
-		rec  Record
-		want []int
-	}{
-		{"movie record", Record{Type: "MOVIE", TmdbMovies: []int{4}}, []int{4}},
-		{"ova record with a movie id", Record{Type: "OVA", TmdbMovies: []int{4}}, []int{4}},
-		{"untyped record with a movie id", Record{TmdbMovies: []int{4}}, []int{4}},
-		{"series record with a movie id and a tvdb id", Record{Type: "TV", TvdbID: 100, TmdbMovies: []int{4}}, []int{4}},
-		{"no movie ids", Record{Type: "OVA", TvdbID: 100, IMDbIDs: []string{"tt1"}}, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.rec.MovieTMDBIDs(); !slices.Equal(got, tt.want) {
-				t.Errorf("MovieTMDBIDs() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestRecord_MovieTMDBIDsDoesNotWidenRouting guards the seam the accessor keeps:
-// exposing cross-type movie evidence must NOT make a non-MOVIE record read as
+// TestRecord_CrossTypeMovieIDDoesNotWidenRouting guards the seam the ID bridge
+// keeps: exposing cross-type movie evidence must NOT make a non-MOVIE record read as
 // id-ful, because HasArrIdentifier is what gates the AniList title fallback -
 // widening it there would strand such a record with no fallback at all.
-func TestRecord_MovieTMDBIDsDoesNotWidenRouting(t *testing.T) {
+func TestRecord_CrossTypeMovieIDDoesNotWidenRouting(t *testing.T) {
 	rec := Record{Type: "OVA", TmdbMovies: []int{4}}
-	if got := rec.MovieTMDBIDs(); len(got) != 1 {
-		t.Fatalf("MovieTMDBIDs() = %v, want the movie id", got)
-	}
 	if rec.HasArrIdentifier() {
 		t.Error("HasArrIdentifier() = true for a non-MOVIE record carrying only movie ids, want false")
 	}
@@ -576,5 +548,62 @@ func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
 				t.Errorf("stale_reason attrs = %v, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// approachingSizeCapMessage is the fixed WARN message acceptRefresh emits
+// before the download size cap becomes a hard refusal. It is a Loki-queryable
+// log contract (the class is the message, the facts ride as structured
+// fields), so the test pins it verbatim.
+const approachingSizeCapMessage = "mapping: Fribb body approaching the download size cap; " +
+	"a body past it refuses every refresh and freezes the map stale"
+
+// TestAcceptRefresh_approachingDownloadSizeCapWarns pins the operator's only
+// advance notice before maxMapBytes becomes a permanent refusal - the third
+// member of a family whose other two are already pinned
+// (TestParseFribb_approachingRecordCapWarns and
+// TestParseFribb_approachingIdentifierBudgetWarns). A body past the download
+// cap grades PERSISTENT (isPersistentRefreshFailure over
+// *httpx.ResponseTooLargeError), so every later cycle re-downloads the
+// multi-MB body, re-refuses it, and the map stays frozen stale while the
+// persisted rejection streak escalates to ERROR - with no signal at all while
+// refreshes were still succeeding.
+//
+// At exactly mapSizeWarnBytes the WARN fires once (the guard is inclusive) and
+// carries the body size and the cap; one byte below it stays silent. It drives
+// acceptRefresh directly, like the identifier-budget sibling, because the
+// threshold arithmetic is what is under test rather than the transport that
+// delivers the body - and the body's CONTENT is deliberately irrelevant: the
+// guard reads len(res.Body) before the parse, so the refresh is refused either
+// way and the usable stale cache is kept.
+func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
+	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+
+	logger, rec := capture.New()
+	at := &Loader{log: logger}
+	next, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, mapSizeWarnBytes)})
+	if err == nil {
+		t.Fatal("acceptRefresh(at-threshold body) = nil error, want the stale-map refusal")
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Fatalf("acceptRefresh kept %+v, want the stale record id 1", next.Records)
+	}
+	if n := rec.CountLevel(slog.LevelWarn, approachingSizeCapMessage); n != 1 {
+		t.Fatalf("a body at the threshold warned %d times at WARN, want exactly 1 (the guard is inclusive, and a demoted level vanishes from the deployed info-level stream): %v", n, rec.Messages())
+	}
+	if !rec.HasAttr(approachingSizeCapMessage, "bytes", strconv.Itoa(mapSizeWarnBytes)) {
+		t.Errorf("approaching-cap log = %v, want bytes=%d", rec.Messages(), mapSizeWarnBytes)
+	}
+	if !rec.HasAttr(approachingSizeCapMessage, "cap", strconv.Itoa(maxMapBytes)) {
+		t.Errorf("approaching-cap log = %v, want cap=%d", rec.Messages(), maxMapBytes)
+	}
+
+	belowLogger, belowRec := capture.New()
+	below := &Loader{log: belowLogger}
+	if _, err := below.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, mapSizeWarnBytes-1)}); err == nil {
+		t.Fatal("acceptRefresh(below-threshold body) = nil error, want the stale-map refusal")
+	}
+	if n := belowRec.CountExact(approachingSizeCapMessage); n != 0 {
+		t.Errorf("a body one byte below the threshold warned %d times, want 0: %v", n, belowRec.Messages())
 	}
 }

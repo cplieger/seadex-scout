@@ -40,13 +40,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 
-// msgCoordErrorAfterRun is the WARN message for a coordination-bookkeeping
-// error observed after a cycle actually ran (the run stands; only the
-// demand-coalescing accounting degraded). Emitted by warnCoordinationError,
-// the one classifier both RunOnce and RunLoop route a coordination error
-// through, so the two Loki-queried diagnostics cannot drift.
-const msgCoordErrorAfterRun = "cycle coordination error after run"
-
 // errRecordPollHealth marks a health-marker WRITE failure so the shutdown-wins
 // branch in RunOnce can tell it apart from an ordinary cycle error. A cycle
 // fault already logs its own ERROR inside Cycle, but this write is the marker's
@@ -57,11 +50,10 @@ var errRecordPollHealth = errors.New("record poll health")
 
 // --- Cycle coalescing: the cross-process lock shared by poll and the daemon ---
 
-// dirMode is applied when creating a lock's parent directory: the cycle-lock
-// dir (normally /config, which already exists as the mounted volume holding the
-// config and state files this lock guards) and the report dir when the report
-// lock creates it (owner-only, matching the report writer's own mode - reports
-// enumerate the operator's library).
+// dirMode is applied when creating the cycle-lock's parent directory (normally
+// /config, which already exists as the mounted volume holding the config and
+// state files this lock guards). The report dir's mode is reportfs.DirMode's,
+// pinned by reportfs.MakeDir for both of that directory's creators.
 const dirMode = 0o700
 
 // NewExclusive builds the cross-process cycle coalescer shared by every
@@ -202,12 +194,16 @@ func recordRunHealth(ctx context.Context, marker *health.Marker, healthy bool, r
 // recorded (Queued/Discarded), a run completed (Ran/RanQueued/Skipped), or
 // Exclusive failed before recording demand (anything else - reachable only
 // from RunOnce's shutdown branch).
+//
+// It is the ONE classifier both RunOnce and RunLoop route a coordination error
+// through, which is what keeps the Loki-queried messages, levels and attrs from
+// drifting between the two entry points.
 func warnCoordinationError(outcome scheduler.Outcome, err error) {
 	switch outcome {
 	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
 		slog.Warn("cycle coordination error after queueing; demand stands", "outcome", outcome.String(), "error", err)
 	case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
-		slog.Warn(msgCoordErrorAfterRun, "outcome", outcome.String(), "error", err)
+		slog.Warn("cycle coordination error after run", "outcome", outcome.String(), "error", err)
 	default:
 		slog.Warn("cycle coordination failed during shutdown", "outcome", outcome.String(), "error", err)
 	}

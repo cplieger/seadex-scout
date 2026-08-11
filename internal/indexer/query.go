@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/cplieger/keyenc"
 )
 
 const (
@@ -38,10 +40,17 @@ type curation struct {
 }
 
 // pairKey joins a validated info hash and a tracker key into the byPair
-// relation key. The "|" separator appears in neither component (the hash is a
-// 40-char hex run, the key is "<scope>:<digits>"), so two distinct hash/key
-// pairs can never collide onto one relation key.
-func pairKey(hash, key string) string { return hash + "|" + key }
+// relation key. keyenc.Join is the app's ONE home for a composite key no
+// field's content can forge - it was extracted from this app for exactly this
+// question, and internal/notify and internal/compare assemble their keys
+// through it at every level. Escaping is element-wise, so two distinct
+// hash/key pairs cannot collide onto one relation key whatever either
+// component carries; the old bare-'|' join was sound only while both
+// producers' alphabets held (validInfoHash's hex run, extractID's digits),
+// which is an argument that lives two packages away from this line.
+// The relation is derived in memory on every load (projectCuration) and
+// never persisted, so the encoding is free to change.
+func pairKey(hash, key string) string { return keyenc.Join(hash, key) }
 
 // curationMatch accumulates the best/alt agreement state across an item's
 // identity signals: accept admits a signal only when it resolves to a curated
@@ -262,14 +271,20 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	if !servesQuery(q) {
 		return nil, queryStats{}, nil
 	}
-	// A disabled tracker has NO feed to read, whatever the snapshot's state, so
-	// its documented off-switch response cannot be gated by snapshot state:
-	// feedFor already serves an unconfigured scope nothing, and
-	// rejectMissingABPasskey promises that same empty feed earlier in the same
-	// request. Answering the snapshot-unavailable fault here instead would make a
-	// deliberately-off tracker's Prowlarr save-test fail on a local fault that
-	// has nothing to do with it.
-	if isFeedRequest(q) && !ix.enablement.enabled(scope) {
+	// A disabled tracker has NO feed to read and NO upstream to search,
+	// whatever the snapshot's state, so NEITHER of its documented off-switch
+	// responses may be gated by snapshot state: feedFor already serves an
+	// unconfigured scope nothing, rejectMissingABPasskey promises that same
+	// empty feed earlier in the same request, and fetchRaw answers a search on
+	// an unwired scope with its own once-per-onset WARN (wireUpstreams never
+	// builds an upstream for a scope whose Torznab URL is blank). Answering the
+	// snapshot-unavailable fault for either leg would fail a deliberately-off
+	// tracker on a local fault that has nothing to do with it - the Prowlarr
+	// save-test for the RSS leg, and every search the arr still sends for the
+	// other, where an <error> is a FAILED search counted toward disabling this
+	// indexer, RSS included.
+	enabled := ix.enablement.enabled(scope)
+	if isFeedRequest(q) && !enabled {
 		return nil, queryStats{answered: true, feed: true}, nil
 	}
 	// Nothing here LOADS. The served snapshot is installed off the request path -
@@ -286,7 +301,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	// clean no-match during a local fault. Answer with a fault (serve renders a
 	// Torznab <error>, exactly like an unavailable Prowlarr dependency) without
 	// contacting a tracker.
-	if ix.cache.unavailable() {
+	if enabled && ix.cache.unavailable() {
 		return nil, queryStats{answered: true}, snapshotUnavailableFault()
 	}
 
@@ -346,11 +361,10 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 }
 
 // isFeedRequest reports whether a request is the empty-query periodic RSS check
-// served from the synthesized journal rather than a proxied search - the
-// condition query dispatches on. server.go's rejectMissingABPasskey applies the
-// same emptiness test inline, earlier in the same request, so the two readings
-// must agree: the AnimeBytes passkey error is rendered for exactly the requests
-// this predicate selects.
+// served from the synthesized journal rather than a proxied search. It is the ONE
+// home of that reading: query dispatches on it, and server.go's
+// rejectMissingABPasskey selects the same requests through it, so the AnimeBytes
+// passkey error is rendered for exactly the requests the synthesized feed answers.
 func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == "" }
 
 // --- Serving the synthesized feed ---

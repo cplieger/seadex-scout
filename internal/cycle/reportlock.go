@@ -48,7 +48,7 @@ var ErrReportRunning = errors.New("another report is already running")
 // injecting a redaction func here, so a coordination leaf does not re-state a
 // masking rule that has one home of its own.
 func TryReportLock(dir string) (func(), error) {
-	if err := makeReportDir(dir); err != nil {
+	if err := reportfs.MakeDir(dir); err != nil {
 		return nil, fmt.Errorf("create report dir: %w", err)
 	}
 	path := filepath.Join(dir, reportLockName)
@@ -61,9 +61,3 @@ func TryReportLock(dir string) (func(), error) {
 	}
 	return lock.Unlock, nil
 }
-
-// makeReportDir creates dir owner-only with its mode pinned. The rule (and the
-// reason MkdirAll's perm argument alone is not enough: a umask or an inherited
-// default ACL filters it) has ONE home, internal/reportfs, because the report
-// writer creates the same directory on its own path.
-func makeReportDir(dir string) error { return reportfs.MakeDir(dir) }

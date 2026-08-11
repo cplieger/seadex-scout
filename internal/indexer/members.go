@@ -26,10 +26,15 @@ import (
 // the present is upsert-what-you-evaluated, a fact about the past is
 // append-only. It is NOT an append-or-replace choice made at write time, and
 // that is the whole point: the rule is a PROPERTY OF THE MEMBER, so a
-// rule-less field is impossible to add. buildSnapshot walks the members
-// applying each rule and REFUSES a member with no rule; the totality test
+// rule-less field is impossible to add. buildSnapshot walks the members and
+// REFUSES one with no rule; the totality test
 // (TestEverySnapshotMemberHasAWriteRule) fails the gate for a member added to
-// the struct but not to the table.
+// the struct but not to the table. Where each rule is APPLIED differs: the
+// envelope, the ownership upsert and the publication append happen inside
+// buildSnapshot, while the journal age-out and the two carried members are
+// applied by the pass that produces them (pass.go's runPass), because they
+// need inputs buildSnapshot does not take - the previous journals and the
+// pass clock for the age-out, the harvest's earned titles for the carry.
 //
 // THE ONE LAW ALL FOUR RULES ARE CONSEQUENCES OF: a pass may act on evidence
 // it HOLDS - the item's own fields, or the entries it actually evaluated - and
@@ -105,35 +110,21 @@ const (
 	ruleCarryValidated
 )
 
-// reversibility is how long a WRONG write to a member survives. It sits in the
-// same table as the rules deliberately: one append mechanism may serve two
-// members, but the two risk models must not be unified. A wrong search key
-// costs at most one reconcile interval; a wrong journal item costs fourteen
-// days of a served release plus a permanent publication record. An engine that
-// treats the two as equally safe to append to is the defect this field exists
-// to prevent.
-type reversibility int
-
-const (
-	// selfHealingWithinOneReconcile: the catalogue pass rewrites the member
-	// wholesale, so a wrong value cannot outlive one reconcile interval.
-	selfHealingWithinOneReconcile reversibility = iota + 1
-	// boundedByJournalWindow: a wrong item is served for up to
-	// feedJournalMaxAge and its publication record is permanent.
-	boundedByJournalWindow
-	// permanent: never rewritten, never deleted.
-	permanent
-)
-
 // memberRule is one member's entry in the rule table: the rule, the UNIT the
 // rule's "what you evaluated" is measured in (naming the unit is what lets ONE
-// rule cover both an entry-scoped and an item-scoped member), whether a
-// deletion is authorized from a window, and how reversible a wrong write is.
+// rule cover both an entry-scoped and an item-scoped member), and whether a
+// deletion is authorized from a window.
+//
+// It deliberately carries no reversibility column: how long a wrong write
+// survives differs per member (a wrong search key self-heals within one
+// reconcile; a wrong journal item costs feedJournalMaxAge of a served release
+// plus a permanent publication record), and that asymmetry is stated where it
+// is read - the rule and deleteScope columns below, and the snapshotRules
+// comment - rather than as a field nothing consults.
 type memberRule struct {
-	unit          string
-	rule          writeRule
-	deleteScope   passScope
-	reversibility reversibility
+	unit        string
+	rule        writeRule
+	deleteScope passScope
 }
 
 // snapshotRules is THE rule table. Every member of snapshot must appear here.
@@ -167,31 +158,31 @@ const (
 var snapshotRules = map[snapshotMember]memberRule{
 	memberVersion: {
 		rule: ruleEnvelope, unit: unitSnapshot,
-		deleteScope: scopeCatalogue, reversibility: selfHealingWithinOneReconcile,
+		deleteScope: scopeCatalogue,
 	},
 	memberOwners: {
 		rule: ruleUpsertEvaluated, unit: unitEntry,
-		deleteScope: scopeCatalogue, reversibility: selfHealingWithinOneReconcile,
+		deleteScope: scopeCatalogue,
 	},
 	memberPublished: {
 		rule: ruleAppendOnly, unit: unitIdentity,
-		deleteScope: scopeNever, reversibility: permanent,
+		deleteScope: scopeNever,
 	},
 	memberNyaaFeed: {
 		rule: ruleAppendAndAgeOut, unit: unitItem,
-		deleteScope: scopeAny, reversibility: boundedByJournalWindow,
+		deleteScope: scopeAny,
 	},
 	memberABFeed: {
 		rule: ruleAppendAndAgeOut, unit: unitItem,
-		deleteScope: scopeAny, reversibility: boundedByJournalWindow,
+		deleteScope: scopeAny,
 	},
 	memberTitles: {
 		rule: ruleCarryValidated, unit: unitKey,
-		deleteScope: scopeCatalogue, reversibility: selfHealingWithinOneReconcile,
+		deleteScope: scopeCatalogue,
 	},
 	memberHarvestCursor: {
 		rule: ruleCarryValidated, unit: unitSnapshot,
-		deleteScope: scopeCatalogue, reversibility: selfHealingWithinOneReconcile,
+		deleteScope: scopeCatalogue,
 	},
 }
 
@@ -366,8 +357,16 @@ type passWrites struct {
 	scope    passScope
 }
 
-// buildSnapshot folds one pass's writes onto the previous state by applying
-// EACH MEMBER'S RULE, and is the only constructor of a persisted snapshot.
+// buildSnapshot folds one pass's writes onto the previous state, member by
+// member in the canonical order, and is the only constructor of a persisted
+// snapshot.
+//
+// It APPLIES three rules itself: ruleEnvelope (the version stamp),
+// ruleUpsertEvaluated (upsertOwners, the one reader of a member's
+// deleteScope) and ruleAppendOnly (appendPublished). ruleAppendAndAgeOut and
+// ruleCarryValidated are applied by runPass before it calls here, so those
+// four members are taken from w verbatim - a NEW member with either rule
+// therefore needs its application wired in pass.go, not just a write below.
 //
 // It errors when a member has no rule. That is the totality gate at runtime;
 // TestEverySnapshotMemberHasAWriteRule is the same gate at build time, and it

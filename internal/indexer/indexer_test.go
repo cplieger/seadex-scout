@@ -728,7 +728,7 @@ func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	}
 
 	// The loader resolves: requests serve the loaded snapshot.
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	close(ix.cache.firstLoad)
 	items, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if fault != nil {

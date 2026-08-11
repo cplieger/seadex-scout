@@ -925,8 +925,8 @@ func TestValidPersistedItemRejectsOversizedCategoryList(t *testing.T) {
 // TestValidPersistedItemAcceptsMaxFieldLength pins the inclusive endpoint of
 // the persisted string-field cap: the documented contract rejects only values
 // PAST maxPersistedFieldBytes, so an exactly-at-limit field stays valid. The
-// oversized-field tests alone leave a `>=` boundary slip undetected (a live
-// CONDITIONALS_BOUNDARY mutant on writer.go's length check).
+// oversized-field tests alone leave a boundary slip from `>` to `>=` undetected,
+// which would reject every at-limit title the harvest can legitimately produce.
 func TestValidPersistedItemAcceptsMaxFieldLength(t *testing.T) {
 	atLimit := strings.Repeat("x", maxPersistedFieldBytes)
 	it := journalItem{item: item{Title: atLimit}}
@@ -1953,5 +1953,73 @@ func TestPassWithoutAnInProcessServerOnlyWritesTheFile(t *testing.T) {
 	tick(ix)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("served feed after one tick = %d items, want the persisted snapshot loaded (1)", len(got))
+	}
+}
+
+// TestDecodeSnapshotBoundsOneItemsInteriorArray pins the PER-ITEM byte bound,
+// the one cardinality dimension neither the file's byte cap nor the per-array
+// item cap can express: a single journal item's own Categories array is decoded
+// by encoding/json, so one hand-edited item can amplify a few hundred KiB of
+// document into a hundreds-of-MB int slice BEFORE validPersistedItem's
+// maxPersistedCategories check can reject it - OOMing the 256 MiB container
+// inside the warm-up load and crashlooping the compare loop with it (CWE-400).
+// Without this assertion the bound can be widened or deleted with the whole
+// suite still green: the over-long item is then pruned by the per-item gate, so
+// decodeSnapshot reports no error and drops it silently, which is exactly what a
+// caller-side check cannot distinguish from a clean load.
+func TestDecodeSnapshotBoundsOneItemsInteriorArray(t *testing.T) {
+	var it strings.Builder
+	it.WriteString(`{"Key":"nyaa:1","FirstSeen":"2026-07-01T00:00:00Z","Categories":[`)
+	for i := 0; it.Len() <= maxPersistedItemBytes; i++ {
+		if i > 0 {
+			it.WriteByte(',')
+		}
+		it.WriteString("5070")
+	}
+	it.WriteString(`]}`)
+	doc := `{"version":2,"owners":{},"published":{},"ab_feed":[],"nyaa_feed":[` + it.String() + `]}`
+	if len(doc) > maxFeedBytes {
+		t.Fatalf("document = %d bytes, want it under the %d byte read cap (the premise: only the per-item bound can reject it)", len(doc), maxFeedBytes)
+	}
+	_, _, reason, err := decodeSnapshot([]byte(doc))
+	if err == nil {
+		t.Fatalf("decodeSnapshot accepted a %d-byte journal item (reason=%q), want the per-item byte bound to reject it before encoding/json allocates its Categories slice", it.Len(), reason)
+	}
+	if !strings.Contains(err.Error(), "item exceeds") {
+		t.Errorf("error = %q, want the per-item byte-bound error", err)
+	}
+}
+
+// TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey pins the SECOND cardinality
+// dimension of the ownership fact, which the per-owner-key charge cannot see:
+// owners is a map of ARRAYS, so a million releases can hide inside ONE owner's
+// list while the document carries a single key. A million owners with one
+// release each and one owner with a million releases cost the same live heap, so
+// a bound that only charges keys leaves the decode unbounded in the dimension a
+// hand-edited or corrupted feed.json is cheapest to grow. Nothing else in the
+// suite exercises a long release list: the aggregate-budget test gives every
+// owner an EMPTY array precisely so only the outer keys are charged, so widening
+// the decoder's element budget passes the whole suite today.
+//
+// The assertion is deliberately on the REFUSAL and not on which bound produced
+// it: at the current sizes the decoder's own element budget answers first, and
+// the point is that some bound must.
+func TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey(t *testing.T) {
+	const releases = 2*maxSnapshotFeedItems + 1
+	var b strings.Builder
+	b.WriteString(`{"version":2,"published":{},"nyaa_feed":[],"ab_feed":[],"owners":{"1":[`)
+	for i := range releases {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString("{}")
+	}
+	b.WriteString(`]}}`)
+	doc := b.String()
+	if len(doc) > maxFeedBytes {
+		t.Fatalf("document = %d bytes, want it under the %d byte read cap (the premise: only a cardinality bound can reject it)", len(doc), maxFeedBytes)
+	}
+	if _, _, reason, err := decodeSnapshot([]byte(doc)); err == nil {
+		t.Fatalf("decodeSnapshot accepted %d releases under ONE owner key (reason=%q), want a bounded-decode error before the releases are allocated", releases, reason)
 	}
 }

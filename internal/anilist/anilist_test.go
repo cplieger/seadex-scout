@@ -125,6 +125,7 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 		{name: "decorated title keeps a match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"(A)"}}}}`, wantErr: false, wantNotFound: false},
 		{name: "invalid UTF-8 in title rejected before decode", raw: "{\"data\":{\"Media\":{\"format\":\"TV\",\"title\":{\"romaji\":\"A\xff\"}}}}", wantErr: true, wantNotFound: false},
 		{name: "lone surrogate escape decoding to U+FFFD rejected", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"A\ud800"}}}}`, wantErr: true, wantNotFound: false},
+		{name: "explicit null errors field is not an envelope error", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"A"}}},"errors":null}`, wantErr: false, wantNotFound: false},
 		{name: "media present", raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`, wantErr: false, wantNotFound: false},
 	}
 	for _, tt := range tests {
@@ -353,6 +354,7 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "record with no title fails batch", raw: `{"data":{"Page":{"media":[{"id":1}]}}}`, wantErr: true},
 		{name: "invalid UTF-8 in title rejected before decode", raw: "{\"data\":{\"Page\":{\"media\":[{\"id\":1,\"title\":{\"romaji\":\"A\xff\"}}]}}}", wantErr: true},
 		{name: "lone surrogate escape decoding to U+FFFD fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A\ud800"}}]}}}`, wantErr: true},
+		{name: "explicit null errors field is not an envelope error", raw: `{"data":{"Page":{"media":[]}},"errors":null}`, wantErr: false},
 		{name: "empty media array", raw: `{"data":{"Page":{"media":[]}}}`, wantErr: false},
 	}
 	for _, tt := range tests {

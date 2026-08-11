@@ -240,7 +240,11 @@ func pruneExpired(memo *Memo, now time.Time, entries []seadex.Entry) {
 			continue
 		}
 		_, stillCurated := active[id]
-		usefulStale := !ent.NotFound && (len(ent.Titles) > 0 || ent.Format != "")
+		// The serviceability half is staleMedia's own admissibility rule, read rather
+		// than restated: retention exists exactly so the entries staleMedia and the
+		// feed's stale-title tier can still serve survive, so the two must not be two
+		// lists.
+		_, usefulStale := memo.staleMedia(id)
 		if stillCurated && usefulStale {
 			continue
 		}
@@ -317,6 +321,16 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		res := m.prefetchPass(ctx, pending, memo, now)
 		if res.outage != nil {
 			return res.outage
+		}
+		// A CANCELLATION is not an upstream abort, and the ids no request
+		// covered would only be refused by the same done context - so
+		// re-batching buys one doomed request and its WARN would blame
+		// AniList for a routine redeploy. prefetchPass already logged the
+		// cancellation at Debug, and Match's per-entry loop flags the pass
+		// degraded on the same context, so nothing is lost by stopping here.
+		// Same contract as the arm below and as handleLookupFailure's.
+		if errors.Is(res.err, context.Canceled) {
+			return nil
 		}
 		// A shrinking worklist means the pass abandoned chunks it never asked:
 		// re-batch exactly those. A worklist that did NOT shrink means the pass

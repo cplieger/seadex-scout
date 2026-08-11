@@ -180,20 +180,37 @@ func specialsEpisodeMarker(marker string, meta EntryInfo) string {
 	if !meta.SeasonKnown || meta.Season != 0 {
 		return ""
 	}
-	number, ok := strings.CutPrefix(marker, "- ")
+	n, ok := absoluteEpisodeNumber(marker)
 	if !ok {
 		return ""
 	}
-	n, err := strconv.Atoi(episodeVersion.ReplaceAllString(number, ""))
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%sE%02d", seasonLabel(0), n)
+	return seasonLabel(0) + episodeLabel(n)
 }
 
 // seasonLabel renders a season number as the SNN token the arrs parse
 // (the one wire format every season marker in this file must agree on).
 func seasonLabel(s int) string { return fmt.Sprintf("S%02d", s) }
+
+// absoluteEpisodeNumber reads the episode number out of a census
+// single-episode marker in the absolute "- NN" form, stripping a version
+// suffix exactly as the census keys it (episodeVersion). ok is false for a
+// marker in any other form - an SxxExx token, or the empty marker.
+func absoluteEpisodeNumber(marker string) (int, bool) {
+	number, found := strings.CutPrefix(marker, "- ")
+	if !found {
+		return 0, false
+	}
+	n, err := strconv.Atoi(episodeVersion.ReplaceAllString(number, ""))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// episodeLabel renders an episode number as the ENN token the arrs parse -
+// the episode twin of seasonLabel, so both halves of the marker wire format
+// are single-homed together.
+func episodeLabel(e int) string { return fmt.Sprintf("E%02d", e) }
 
 // packSeasonLabel resolves the season token a PACK is labeled with, in the one
 // precedence both title paths share: the entry's resolved season outvotes the
@@ -472,16 +489,11 @@ func packSeason(files []seadex.File) (season int, ok bool) {
 // marker after the title).
 func seasonCounts(files []seadex.File) map[int]int {
 	counts := make(map[int]int)
-	// Judge the episode population, not the raw list: a bonus video far below
-	// the real episodes (and any marked sample, which the type gate drops by
-	// name) must not contribute a false season count. The census rule, not
-	// payload's primary-payload rule: a legitimately shorter episode still
-	// votes for its season, so the floor is median-anchored.
-	files = payload.Population(files)
+	// The census population, not the raw list: contentPopulation is the one home
+	// of that rule (the episode pool, then content media files only), so the
+	// season tally and the pack verdict read the same file set by construction.
+	files = contentPopulation(files)
 	for i := range files {
-		if !isContentMediaFile(files[i].Name) {
-			continue
-		}
 		name := stripExt(files[i].Name)
 		l := lastSubmatchIndex(episodeToken, name)
 		if l == nil {
@@ -555,9 +567,6 @@ func titleBase(name string) string {
 	// per comparison. Splitting the already-cleaned prefix visits exactly the
 	// same components in the same order, in O(len) total.
 	rest := path.Dir(name)
-	if rest == "." || rest == "/" {
-		return base
-	}
 	for rest != "" {
 		component := rest
 		if i := strings.LastIndexByte(rest, '/'); i >= 0 {
@@ -669,20 +678,39 @@ func distinctEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	for i := range files {
 		base := episodeKeyBase(files[i].Name)
+		qualifier := sharedTokenQualifier(files[i].Name)
 		if l := lastSubmatchIndex(episodeToken, base); l != nil {
 			// Key on the LAST token: scene naming puts the episode marker
 			// after the title, so a title containing an SxxExx-shaped
 			// substring must not shadow the real episode marker.
 			tok := strings.ToUpper(base[l[2]:l[3]])
-			seen["e"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
+			seen["e"+episodeVersion.ReplaceAllString(tok, "")+qualifier] = struct{}{}
 			continue
 		}
 		if l := lastSubmatchIndex(absoluteEpisode, base); l != nil {
 			tok := base[l[2]:l[3]]
-			seen["a"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
+			seen["a"+episodeVersion.ReplaceAllString(tok, "")+qualifier] = struct{}{}
 		}
 	}
 	return len(seen)
+}
+
+// sharedTokenQualifier returns the per-file suffix an episode key needs when
+// the token episodeKeyBase found does NOT come from the file's own base name.
+// A token that lives only in a PATH component names the whole RELEASE rather
+// than this file, so keying on it alone merges every file under that
+// component: a batch directory ("[Grp] Show S01E01-E12 [1080p]/01.mkv") gave a
+// whole twelve-episode season ONE key, which packEvidenceOf then graded as
+// POSITIVE single-episode evidence - the grade packEvidenceUnknown exists to
+// keep separate. Qualifying with the file's own (version-stripped) base name
+// keeps the count honest for that shape while leaving a per-file token keyed
+// exactly as before, so a v2 re-release of one episode still counts once.
+func sharedTokenQualifier(name string) string {
+	own := stripExt(path.Base(name))
+	if hasEpisodeEvidence(own) {
+		return ""
+	}
+	return "|" + episodeVersion.ReplaceAllString(own, "")
 }
 
 // --- Season-pack verdict: title first, file census as the fallback ---
@@ -855,15 +883,11 @@ func episodeSuffix(marker string) (string, bool) {
 		// between the season half's end and the token's end is the episode half.
 		return episodeVersion.ReplaceAllString(strings.ToUpper(marker[l[5]:l[3]]), ""), true
 	}
-	number, found := strings.CutPrefix(marker, "- ")
-	if !found {
+	n, ok := absoluteEpisodeNumber(marker)
+	if !ok {
 		return "", false
 	}
-	n, err := strconv.Atoi(episodeVersion.ReplaceAllString(number, ""))
-	if err != nil {
-		return "", false
-	}
-	return fmt.Sprintf("E%02d", n), true
+	return episodeLabel(n), true
 }
 
 // --- Media-file classification helpers ---
@@ -873,9 +897,6 @@ func episodeSuffix(marker string) (string, bool) {
 // which lack one, are skipped in favour of a real episode), or the first file
 // when none match (a movie/single release).
 func representativeFile(files []seadex.File) string {
-	if len(files) == 0 {
-		return ""
-	}
 	// Derive the title from the episode population, so a first-listed sample or
 	// featurette can never headline the synthesized title while a legitimately
 	// shorter first episode still can (a marked sample is dropped by name in

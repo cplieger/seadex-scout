@@ -13,6 +13,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadexapi"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 	"github.com/cplieger/seadex-scout/internal/state"
 )
 
@@ -164,7 +165,7 @@ func (r *Reporter) Report(ctx context.Context) (audit.Report, error) {
 		// for main's shutdown classification (errors.Is context.Canceled,
 		// keeping a routine SIGTERM off the ERROR alert) plus the signal
 		// cause for display.
-		return audit.Report{}, fmt.Errorf("report interrupted: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
+		return audit.Report{}, shutdown.InterruptedAs(ctx, "report interrupted")
 	}
 	if result.Degraded {
 		// A transient AniList failure left some entries' library mapping

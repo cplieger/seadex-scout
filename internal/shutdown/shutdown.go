@@ -41,7 +41,27 @@ import (
 // classifies classifiable at all, since net/http reports a cancelled request as
 // context.Cause(ctx).)
 func Interrupted(ctx context.Context) error {
-	return fmt.Errorf("poll interrupted: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
+	// The prefix keeps poll's historical wording: it is what an operator greps for.
+	return InterruptedAs(ctx, "poll interrupted")
+}
+
+// InterruptedAs is Interrupted with a caller-chosen prefix: the ONE place the
+// interruption vocabulary is assembled, so no boundary re-derives which token
+// carries the classification. ctx.Err() is the classification token the root's
+// single errors.Is(err, context.Canceled) reads; context.Cause(ctx) rides along
+// as prose and must never be the token (see IsShutdownError).
+func InterruptedAs(ctx context.Context, prefix string) error {
+	return fmt.Errorf("%s: %w (cause: %w)", prefix, ctx.Err(), context.Cause(ctx))
+}
+
+// WrapAs re-expresses err as this context's interruption under a caller-chosen
+// prefix, adding ctx.Err() as the classification token. An empty prefix yields
+// the bare NormalizeShutdownError shape.
+func WrapAs(ctx context.Context, prefix string, err error) error {
+	if prefix == "" {
+		return fmt.Errorf("%w (cause: %w): %w", ctx.Err(), context.Cause(ctx), err)
+	}
+	return fmt.Errorf("%s: %w (cause: %w): %w", prefix, ctx.Err(), context.Cause(ctx), err)
 }
 
 // IsShutdownError reports whether err is the observable form of THIS context's
@@ -71,5 +91,5 @@ func NormalizeShutdownError(ctx context.Context, err error) error {
 	if err == nil || errors.Is(err, ctx.Err()) || !IsShutdownError(ctx, err) {
 		return err
 	}
-	return fmt.Errorf("%w (cause: %w): %w", ctx.Err(), context.Cause(ctx), err)
+	return WrapAs(ctx, "", err)
 }

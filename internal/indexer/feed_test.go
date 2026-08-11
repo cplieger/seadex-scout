@@ -767,7 +767,7 @@ func TestTitleBasePromotesReleaseNameDirectory(t *testing.T) {
 		{Name: "[Grp] Show S01E01-E12 (1080p)/01.mkv"},
 		{Name: "[Grp] Show S01E01-E12 (1080p)/02.mkv"},
 	}}
-	if got, want := derivedTitle(pack, EntryInfo{}), "[Grp] Show S01E01-E12 (1080p)"; got != want {
+	if got, want := derivedTitle(pack, EntryInfo{}), "[Grp] Show S01 (1080p)"; got != want {
 		t.Errorf("derivedTitle(directory-named pack) = %q, want %q", got, want)
 	}
 	single := &seadex.Torrent{Files: []seadex.File{{Name: "Show S02E05 [Grp]/video.mkv"}}}
@@ -1150,6 +1150,43 @@ func TestHomographVocabularyAgreesWithTheReleaseClassifier(t *testing.T) {
 			}
 			if got := release.Classify(&release.Input{Names: []string{tc.file}}); got.Kind != tc.wantKind {
 				t.Errorf("release.Classify(%+q).Kind = %q (%s), want %q", tc.file, got.Kind, got.Reason, tc.wantKind)
+			}
+		})
+	}
+}
+
+// TestPackFromTitleReadsSonarrCleanedTitles pins the quality-token strip
+// (sonarrSimpleNoise) that makes the season-only reading answer for a REAL
+// tracker title. Sonarr deletes those tokens (SimpleTitleRegex) before its
+// season/episode patterns run, so the lookahead must be applied to the CLEANED
+// tail: on a raw title the digits after the season number are the RESOLUTION's,
+// the title answers UNKNOWN, and titleAudit.served makes no correction - while
+// Sonarr, reading "Show S01", sets FullSeason, grabs the release as a whole
+// season and suppresses that season's real episodes.
+//
+// The shapes TestPackFromTitle covers all separate the season number from the
+// resolution with a bracket, which reads as a pack with or without the strip.
+// The last row is the companion guarantee: stripping the noise must not defeat
+// the season-only lookahead - a real episode number after the quality tokens
+// still refuses.
+func TestPackFromTitleReadsSonarrCleanedTitles(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		title     string
+		wantPack  bool
+		wantKnown bool
+	}{
+		{"unbracketed resolution after the season", "Show S01 1080p BluRay [G]", true, true},
+		{"720p tail", "Show - S01 720p", true, true},
+		{"resolution plus DD5.1", "Show - S01 2160p DD5.1", true, true},
+		{"WxH dimensions", "Show - S01 1920x1080", true, true},
+		{"bit-depth marker", "Show - S01 10-bit", true, true},
+		{"episode number after the quality tokens", "Show S01 1080p 05", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pack, known := packFromTitle(tc.title)
+			if pack != tc.wantPack || known != tc.wantKnown {
+				t.Errorf("packFromTitle(%q) = (%v, %v), want (%v, %v)", tc.title, pack, known, tc.wantPack, tc.wantKnown)
 			}
 		})
 	}

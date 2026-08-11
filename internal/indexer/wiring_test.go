@@ -19,7 +19,7 @@ import (
 // that does not passes nil.
 func warmedIndexer(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 	ix := New(cfg, log, client)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	return ix
 }
 
@@ -27,7 +27,7 @@ func warmedIndexer(cfg *Config, log *slog.Logger, client *http.Client) *Indexer 
 // does per snapshotWatchInterval. Requests never load (see snapshotCache), so a
 // test that changes the snapshot FILE and then asserts on the served feed says
 // so with this rather than relying on a request to pick the change up.
-func tick(ix *Indexer) { ix.cache.refresh(context.Background()) }
+func tick(ix *Indexer) { ix.cache.loader.refresh(context.Background()) }
 
 // loadingIndexer builds a server whose reload clock is RUNNING with its first
 // load unresolved - the state start leaves behind while the loader is still

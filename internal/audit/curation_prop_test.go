@@ -1,4 +1,4 @@
-package release
+package audit
 
 import (
 	"slices"
@@ -12,7 +12,7 @@ import (
 // canonical values (nil, [broken], [incomplete], [broken incomplete]) so raw
 // upstream tag bytes can never leak; input tag order never changes the
 // result; and appending a canonical warning tag in any casing always trips
-// both CurationWarnings and the curationWarned boolean helper (whose full
+// both curationWarnings and the curationWarned boolean helper (whose full
 // delegated behavior curation_test.go's table pins).
 func TestCurationWarningsProperties(t *testing.T) {
 	tag := rapid.OneOf(
@@ -28,7 +28,7 @@ func TestCurationWarningsProperties(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		tags := tagsGen.Draw(t, "tags")
 
-		warns := CurationWarnings(tags)
+		warns := curationWarnings(tags)
 		bounded := false
 		for _, c := range canonical {
 			if slices.Equal(warns, c) {
@@ -37,12 +37,12 @@ func TestCurationWarningsProperties(t *testing.T) {
 			}
 		}
 		if !bounded {
-			t.Fatalf("CurationWarnings(%q) = %q, want one of the four canonical values (constants, deduped, canonical order)", tags, warns)
+			t.Fatalf("curationWarnings(%q) = %q, want one of the four canonical values (constants, deduped, canonical order)", tags, warns)
 		}
 
 		reversed := slices.Clone(tags)
 		slices.Reverse(reversed)
-		if got := CurationWarnings(reversed); !slices.Equal(got, warns) {
+		if got := curationWarnings(reversed); !slices.Equal(got, warns) {
 			t.Fatalf("input tag order changed the result: %q vs %q", got, warns)
 		}
 
@@ -50,8 +50,8 @@ func TestCurationWarningsProperties(t *testing.T) {
 		if !curationWarned(augmented) {
 			t.Fatalf("curationWarned(%q) = false after appending a canonical warning tag", augmented)
 		}
-		if got := CurationWarnings(augmented); !slices.Contains(got, "broken") {
-			t.Fatalf("CurationWarnings(%q) = %q, want to contain the canonical constant broken", augmented, got)
+		if got := curationWarnings(augmented); !slices.Contains(got, "broken") {
+			t.Fatalf("curationWarnings(%q) = %q, want to contain the canonical constant broken", augmented, got)
 		}
 	})
 }

@@ -8,7 +8,7 @@ import (
 // per-side resolvability of the routing floor: a candidate that keeps every
 // type label and every TVDB id but loses all movie TMDB/IMDb ids preserves the
 // global arr-identifier floor and the type-label routing counts, yet the
-// matcher could then resolve no Radarr entry at all. routingCounts must count
+// matcher could then resolve no Radarr entry at all. censusOf must count
 // records that can actually resolve in their routed arr (HasArrIdentifier),
 // so a collapse of one arr's resolvable population is rejected in favour of
 // the stale map.
@@ -358,7 +358,7 @@ func TestValidateRefreshedRecordsPreviousPopulationAtSignificanceGateRejected(t 
 		previous = append(previous, p)
 		candidate = append(candidate, c)
 	}
-	if got, want := typedRecordCount(previous), coverageFloor(len(previous)); got != want {
+	if got, want := censusOf(previous).typed, coverageFloor(len(previous)); got != want {
 		t.Fatalf("previous typed population = %d, want exactly the significance gate %d", got, want)
 	}
 	err := validateRefreshedRecords(previous, candidate, len(candidate))

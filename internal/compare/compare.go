@@ -187,7 +187,7 @@ func (c *Comparer) Compare(matches []match.Match) []Finding {
 		if !m.InLibrary() {
 			continue
 		}
-		if filter.ExcludeSpecial(m.Record.IsSpecial(), c.excludeSpecials) {
+		if c.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		if f := c.compareOne(m); f != nil {
@@ -283,16 +283,14 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		if c.tags.Excludes(t.Tags, tagfilter.SurfaceFindings) {
 			continue
 		}
-		// AB guard before classification; the raw-URL invariant lives in
-		// classify.ABVisible. Obtainable below re-checks the label as defense
-		// in depth.
-		if !classify.ABVisible(t, c.animeBytes) {
-			continue
-		}
 		rel := classify.Torrent(entry, t)
-		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
+		if !filter.KeepNonTracker(&rel, c.opts) {
 			continue
 		}
+		// The ONE AnimeBytes visibility gate on this path: Obtainable applies
+		// filter.ABVisible to the RAW upstream URL (t.URL, never the published
+		// link) in both its public and its private arm, so an AB-hosted or
+		// AB-labelled release is invisible with the toggle off.
 		if !classify.Obtainable(&rel, t, c.animeBytes) {
 			continue
 		}
@@ -306,7 +304,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 // is incomplete (nothing complete to grab).
 func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, recGroups []string) *Finding {
 	status := StatusBetter
-	if classify.DivergedIncomplete(entry) {
+	if entry.Incomplete {
 		status = StatusIncomplete
 	}
 	fillBest(base, recommended, recGroups)

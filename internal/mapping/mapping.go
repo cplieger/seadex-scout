@@ -86,13 +86,34 @@ type Loader struct {
 
 // Record is the resolved mapping for one AniList entry: its media type and the
 // arr IDs it corresponds to. Fields are ordered for govet fieldalignment.
+//
+// The json tags below are read by TWO decoders and only one of them reads
+// them automatically: the persisted mapping.Cache in state.json decodes
+// through encoding/json, while overrides.json is walked key-by-key by
+// decodeOverrideRecord, whose switch restates these six names as literals
+// (a bounded token walk cannot consult struct tags). Adding, renaming or
+// removing a field here therefore REQUIRES the matching edit there - nothing
+// enforces it, and the failure is silent in the direction that matters: an
+// override spelling the new key falls to the unknown-key arm, so the
+// operator is told a documented field is "unknown" and its value is dropped.
 type Record struct {
-	Type       string   `json:"type"`
-	IMDbIDs    []string `json:"imdb_ids,omitempty"`
-	TmdbMovies []int    `json:"tmdb_movies,omitempty"`
-	AniListID  int      `json:"anilist_id"`
-	TvdbID     int      `json:"tvdb_id,omitempty"`
-	SeasonTvdb int      `json:"season_tvdb,omitempty"`
+	Type    string   `json:"type"`
+	IMDbIDs []string `json:"imdb_ids,omitempty"`
+	// TmdbMovies is the record's themoviedb_id.movie list, decoded for EVERY
+	// record type and read by the ID bridge regardless of the type label: a TMDB
+	// *movie* id is a Radarr id by construction (its namespace is disjoint from
+	// the TV namespace RoutedIDs' series arm routes), and the live upstream body
+	// carries ~300 keyed records shaped non-MOVIE type + no tvdb_id + a positive
+	// movie id, so keying only on the label lost the operator's Radarr copy in
+	// BOTH directions of the bridge (h-f9/l-f73). Deliberately NOT the IMDb list:
+	// TVDB reuses a film's IMDb id on the parent series, so a non-MOVIE record's
+	// IMDb id claims nothing - the arr-consistency rule RoutedIDs enforces.
+	// Canonical form (positive ids only) is a Record invariant applied by
+	// canonicalize at every producer, so readers take the slice as-is.
+	TmdbMovies []int `json:"tmdb_movies,omitempty"`
+	AniListID  int   `json:"anilist_id"`
+	TvdbID     int   `json:"tvdb_id,omitempty"`
+	SeasonTvdb int   `json:"season_tvdb,omitempty"`
 }
 
 // IsMovie reports whether the entry maps to a Radarr movie (Fribb type MOVIE).
@@ -107,14 +128,14 @@ func (r *Record) IsMovie() bool { return mediatype.IsMovie(r.Type) }
 // re-implement which identifier fields belong to which arr.
 //
 // The TYPE LABEL is what routes here. A record's unambiguous movie TMDB ids are
-// separately reachable through MovieTMDBIDs regardless of that label, which is
+// separately reachable as Record.TmdbMovies regardless of that label, which is
 // what lets the ID bridge resolve the ~300 live Fribb records that carry a
 // movie id under a non-MOVIE type (h-f9/l-f73); this function deliberately does
 // not fold that in, so "which fields does my routed arr consume" keeps one
 // answer.
 func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	if r.IsMovie() {
-		return 0, r.MovieTMDBIDs(), r.IMDbIDs
+		return 0, r.TmdbMovies, r.IMDbIDs
 	}
 	// Zero out a non-usable TVDB id here so the usability rule has ONE home:
 	// callers do a presence check, never a policy check. The test itself is the
@@ -124,29 +145,6 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 		return 0, nil, nil
 	}
 	return r.TvdbID, nil, nil
-}
-
-// MovieTMDBIDs returns the record's usable themoviedb_id.movie ids REGARDLESS of
-// its type label, for the ID-bridge sites that need cross-type movie evidence.
-//
-// A TMDB *movie* id is a Radarr id by construction: it names a row in TMDB's
-// movie namespace, which is disjoint from the TV namespace RoutedIDs' series arm
-// routes. Fribb's object-form themoviedb_id.movie list is decoded for every
-// record type, and the live upstream body carries ~300 keyed records shaped
-// non-MOVIE type + no tvdb_id + a positive movie id (a split AniList<->arr
-// mapping, common for films/OVAs) - so keying only on the type label lost the
-// operator's Radarr copy in BOTH directions of the bridge (h-f9/l-f73).
-//
-// It is deliberately NOT the IMDb list: TVDB reuses a film's IMDb id on the
-// parent series, so a non-MOVIE record's IMDb id claims nothing - that is the
-// arr-consistency rule RoutedIDs enforces and the collision this narrower
-// evidence does not reopen.
-//
-// Both directions of the bridge read this one method - match's FindByID (the
-// secondary movie lookup) and match's reverse Catalogue - so which ids count as
-// cross-type movie evidence cannot drift between them.
-func (r *Record) MovieTMDBIDs() []int {
-	return r.TmdbMovies
 }
 
 // HasArrIdentifier reports whether the record carries a USABLE identifier
@@ -201,7 +199,20 @@ type Cache struct {
 	FetchedAt    time.Time `json:"fetched_at"`
 	ETag         string    `json:"etag,omitempty"`
 	LastModified string    `json:"last_modified,omitempty"`
-	Records      []Record  `json:"records,omitempty"`
+	// RefusedETag / RefusedLastModified are the validators of the last body a
+	// refresh REFUSED (the same refusals RejectedRefreshes counts). While they are
+	// set the conditional GET asks about THAT body instead of the accepted one, so
+	// a persistent refusal costs one 304 per cycle instead of one full ~5.9 MB
+	// download: the accepted validators cannot match an upstream body a refusal
+	// proves has changed, which is exactly the state a refusal leaves the loader
+	// in. Cleared by any accepted refresh and by a 304 that revalidates the
+	// accepted body. Empty when the refusal carried no response (a fetch failure)
+	// or the 200 carried no validators (the revalidatable=false case), in which
+	// case the accepted validators are sent unchanged and the download recurs -
+	// all the upstream allows.
+	RefusedETag         string   `json:"refused_etag,omitempty"`
+	RefusedLastModified string   `json:"refused_last_modified,omitempty"`
+	Records             []Record `json:"records,omitempty"`
 	// RejectedRefreshes is the persisted streak of consecutive persistent
 	// refresh refusals. It persists across cycles and restarts, resets
 	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
@@ -331,6 +342,18 @@ func indexedRecordCount(records []Record) int {
 		}
 	}
 	return len(seen)
+}
+
+// IndexedRecords reports how many of the cached records survive into the served
+// index (distinct positive AniList IDs, per buildIndex) - the one count every
+// mapping log attribute reports. Exported for internal/state's "state loaded"
+// line, which logged the raw persisted row count and could therefore
+// over-report the size of the map consumers receive.
+func (c *Cache) IndexedRecords() int {
+	if c == nil {
+		return 0
+	}
+	return indexedRecordCount(c.Records)
 }
 
 // cacheUsable reports whether a cached record set is usable as an effective
@@ -553,9 +576,11 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 
 // rejectRefresh degrades a persistent refresh refusal to the stale map via
 // staleOrFail, additionally advancing the persisted consecutive-rejection
-// streak (Cache.RejectedRefreshes) and carrying it on the *StaleMapError so
-// the scout can escalate its degraded-mapping log after
-// degradation.TickEscalationThreshold consecutive rejections. It is reached ONLY
+// streak (Cache.RejectedRefreshes), which is what lets the scout escalate its
+// degraded-mapping log after degradation.TickEscalationThreshold consecutive
+// rejections (it reads the streak off the returned Cache - see the third
+// paragraph, and Cache.RejectedRefreshes for why the error is not a carrier).
+// It is reached ONLY
 // through degradeRefresh, on a failure isPersistentRefreshFailure graded
 // persistent; a transient failure takes plain staleOrFail there, so it
 // neither advances the streak nor resets it. The streak resets only on an
@@ -599,6 +624,10 @@ const (
 	// validators (conditionalGet suppresses them whenever the cache is
 	// unusable).
 	failureNotModifiedUnusable
+	// failureRefusedUnchanged is a 304 answered to a request that carried the
+	// REFUSED body's validators: the body a previous cycle refused is still what
+	// the upstream serves, so the refusal stands and the streak keeps advancing.
+	failureRefusedUnchanged
 )
 
 // isPersistentRefreshFailure is the ONE home of the transient-vs-persistent
@@ -625,6 +654,9 @@ const (
 //     since truncation cannot change a body's first token);
 //   - a 304 answered to a validator-less request (failureNotModifiedUnusable -
 //     a protocol violation, not an outage);
+//   - a 304 answered to a request carrying the REFUSED body's validators
+//     (failureRefusedUnchanged - the body a previous cycle refused is still the
+//     one the upstream serves, so the refusal stands);
 //   - an acceptance-invariant refusal (failureValidation) or a whole-map
 //     below-half shrink refusal (failureShrunk) - deterministic guard verdicts
 //     on the body the upstream keeps serving;
@@ -648,7 +680,7 @@ const (
 // Cache.RejectedRefreshes points here rather than restating the list.
 func isPersistentRefreshFailure(class refreshFailureClass, cause error) bool {
 	switch class {
-	case failureValidation, failureShrunk, failureNotModifiedUnusable:
+	case failureValidation, failureShrunk, failureNotModifiedUnusable, failureRefusedUnchanged:
 		return true
 	case failureFetch:
 		return isPersistentFetchFailure(cause)
@@ -677,9 +709,16 @@ func isPersistentFetchFailure(cause error) bool {
 		return false
 	}
 	if status, ok := errors.AsType[*httpx.HTTPStatusError](cause); ok {
-		// A 408 and every 5xx ask the caller to come back later; any other
-		// status on a URL that is a package constant needs the operator.
-		return status.Code != http.StatusRequestTimeout && status.Code < 500
+		// A come-back-later status is httpx's own rule, READ from the library
+		// rather than restated: IsRetryableStatus is the same predicate the
+		// library's own doors classify a response with, so this verdict and the
+		// door's cannot drift when the set moves (408 joined it in v4.1.0, which
+		// this app drove). Any other status on a URL that is a package constant
+		// needs the operator.
+		//
+		// The predicate also names 429, which cannot reach here: CheckHTTPStatus
+		// maps a 429 to *RateLimitError, graded transient by the arm above.
+		return !httpx.IsRetryableStatus(status.Code)
 	}
 	return false
 }
@@ -747,6 +786,7 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 		return *prev, nil
 	}
 
+	askedAboutRefused := refusedValidators(prev) != (httpx.Validators{})
 	res, err := l.conditionalGet(ctx, prev)
 	if err != nil {
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
@@ -759,6 +799,14 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 			fmt.Errorf("mapping: initial fetch failed and no cache available: %w", err))
 	}
 	if res.NotModified {
+		if askedAboutRefused {
+			// The body a previous cycle already refused is unchanged, so there is
+			// nothing new to evaluate and nothing to affirm: keep serving the stale
+			// map, keep the streak advancing toward escalation, and - the point of
+			// this arm - do not re-download the body.
+			return degradeRefresh(prev, failureRefusedUnchanged, "refused body unchanged", nil,
+				errors.New("mapping: refused body unchanged and no cache available"))
+		}
 		return l.reuseCachedRecords(prev)
 	}
 	return l.acceptRefresh(prev, res)
@@ -790,14 +838,30 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 		l.log.Info("mapping: rejection streak ended by 304 revalidation", "ended_rejection_streak", prev.RejectedRefreshes, "records", indexedRecordCount(prev.Records))
 	}
 	refreshed.RejectedRefreshes = 0
+	// A 304 against the ACCEPTED validators affirms the cached body is current, so
+	// any remembered refused body is history.
+	refreshed.RefusedETag, refreshed.RefusedLastModified = "", ""
 	return refreshed, nil
 }
 
-// acceptRefresh parses a fresh 200 body and runs the cache-acceptance
+// acceptRefresh evaluates a fresh 200 body and, when the acceptance pipeline REFUSED
+// it persistently, remembers that body's validators so the next cycle asks about it
+// with a conditional GET instead of re-downloading it. The streak advancing is the
+// signal: rejectRefresh is the only path that increments it.
+func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
+	next, err := l.evaluateRefresh(prev, res)
+	if err != nil && next.RejectedRefreshes > prev.RejectedRefreshes {
+		next.RefusedETag = res.Validators.ETag
+		next.RefusedLastModified = res.Validators.LastModified
+	}
+	return next, err
+}
+
+// evaluateRefresh parses a fresh 200 body and runs the cache-acceptance
 // invariants (the parse-time record cap, deduplication, the validation floor,
 // and the shrink guard), degrading to the stale map when any step rejects the
 // refresh.
-func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
+func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
 	if n := len(res.Body); n >= mapSizeWarnBytes {
 		l.log.Warn("mapping: Fribb body approaching the download size cap; a body past it refuses every refresh and freezes the map stale",
 			"bytes", n, "cap", maxMapBytes)
@@ -874,9 +938,30 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	// at replay) every following cycle re-downloads the whole body instead of
 	// taking a cheap 304, which is DefaultRefresh's documented cost assumption
 	// failing silently.
+	//
+	// The five per-population guards refuse only a below-half collapse too, so an
+	// accepted refresh can have lost just under half of any one of them with the
+	// record count unmoved (the records themselves survive - only their type,
+	// season or arr ids are gone, which is what fribb.go's tolerant per-field
+	// decoders make the EXPECTED shape of an upstream schema drift). The census
+	// attributes below carry previous_records' reasoning to the populations the
+	// guards are defined over, so a routing loss is one queryable line rather than
+	// an inference from the scout's mapped/unmapped drift. elements is the
+	// denominator both absolute floors divide by, so it belongs on the same line as
+	// the numerators. Counted here rather than threaded out of
+	// validateRefreshedRecords, which stays the acceptance invariant's one entry
+	// point; the pass is O(records) and runs only on an accepted refresh.
+	pop := censusOf(records)
 	attrs := []any{
 		"records", len(records),
 		"previous_records", indexedRecordCount(prev.Records),
+		"elements", parsed.elements,
+		"routed_identifiers", pop.identifiers,
+		"movie_routed", pop.movieRouted,
+		"series_routed", pop.seriesRouted,
+		"typed_records", pop.typed,
+		"season_scoped_records", pop.positiveSeason,
+		"special_records", pop.special,
 		"revalidatable", res.Validators.ETag != "" || res.Validators.LastModified != "",
 	}
 	if prev.RejectedRefreshes > 0 {
@@ -993,13 +1078,16 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 	// carried a meaningful population".
 	previousMinimum := coverageFloor(len(previous))
 	floors := acceptanceFloors{total: len(records), previousMinimum: previousMinimum, minimum: minimum}
-	if err := validateTypeCoverage(previous, records, floors); err != nil {
+	// One census per side, counted once: every population guard below reads it,
+	// so five separate passes over ~40k records collapse into two.
+	prevPop, pop := censusOf(previous), censusOf(records)
+	if err := validateTypeCoverage(prevPop, pop, floors); err != nil {
 		return err
 	}
-	if err := validateScopeCoverage(previous, records, floors); err != nil {
+	if err := validateScopeCoverage(prevPop, pop, floors); err != nil {
 		return err
 	}
-	return validateRoutingCoverage(previous, records, floors)
+	return validateRoutingCoverage(prevPop, pop, floors)
 }
 
 // validateTypeCoverage rejects a candidate refresh that lost type coverage
@@ -1016,8 +1104,8 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 // record is the catalogue growing, not type data degrading. An established
 // type-sparse cache or a first boot against a type-sparse catalogue is the
 // catalogue's valid shape, not a regression to reject.
-func validateTypeCoverage(previous, records []Record, f acceptanceFloors) error {
-	return validatePopulation("type", "typed", typedRecordCount(previous), typedRecordCount(records), f)
+func validateTypeCoverage(previous, candidate populations, f acceptanceFloors) error {
+	return validatePopulation("type", "typed", previous.typed, candidate.typed, f)
 }
 
 // acceptanceFloors carries the three per-refresh quantities every population
@@ -1030,6 +1118,55 @@ type acceptanceFloors struct {
 	total           int
 	previousMinimum int
 	minimum         int
+}
+
+// populations is the per-refresh census of the five semantic populations every
+// acceptance guard is defined over, counted in ONE pass. Threading the value
+// serves both consumers: the guards compare candidate against previous, and the
+// accepted-refresh log line reports the candidate's census - which is what makes
+// a loss BELOW each guard's threshold visible. Every guard here refuses only a
+// below-half collapse, so up to half of any one population can vanish on an
+// accepted refresh; previous_records exists for exactly that reason on the
+// whole-map count and was never extended to these five.
+type populations struct {
+	typed          int
+	positiveSeason int
+	special        int
+	movieRouted    int
+	seriesRouted   int
+	identifiers    int
+}
+
+// censusOf counts every population in one pass over records. The routed
+// populations count only records that can actually RESOLVE in their arr
+// (HasArrIdentifier), because consumers rely on both resolvable sides surviving
+// a refresh, not on type labels alone - a candidate that keeps every type but
+// loses one side's usable ids must read as a collapse of that side, not as
+// healthy routing. identifiers is their sum, the same population
+// arrIdentifierCount reports for the callers that want nothing else.
+func censusOf(records []Record) populations {
+	var p populations
+	for i := range records {
+		r := &records[i]
+		if r.Type != "" {
+			p.typed++
+		}
+		if r.HasMappedSeason() {
+			p.positiveSeason++
+		}
+		if r.IsSpecial() {
+			p.special++
+		}
+		if r.HasArrIdentifier() {
+			p.identifiers++
+			if r.IsMovie() {
+				p.movieRouted++
+			} else {
+				p.seriesRouted++
+			}
+		}
+	}
+	return p
 }
 
 // validatePopulation applies the shared guards every semantic population
@@ -1066,40 +1203,11 @@ func validatePopulation(floorNoun, collapseNoun string, prevCount, count int, f 
 // population (positive-season, special-type) is guarded only when the prior
 // cache met the floor for it, and an additive refresh that merely grows the
 // record count passes.
-func validateScopeCoverage(previous, records []Record, f acceptanceFloors) error {
-	if err := validatePopulation("positive-season", "season-scoped", positiveSeasonCount(previous), positiveSeasonCount(records), f); err != nil {
+func validateScopeCoverage(previous, candidate populations, f acceptanceFloors) error {
+	if err := validatePopulation("positive-season", "season-scoped", previous.positiveSeason, candidate.positiveSeason, f); err != nil {
 		return err
 	}
-	return validatePopulation("special-type", "special", specialRecordCount(previous), specialRecordCount(records), f)
-}
-
-// positiveSeasonCount returns how many records carry a positive TVDB season.
-// It backs validateScopeCoverage's season floor: align keys season-exact
-// comparison on SeasonTvdb > 0, so a refresh that wholesale zeroed the season
-// field silently degrades every mapped cour to whole-series scope.
-func positiveSeasonCount(records []Record) int {
-	n := 0
-	for i := range records {
-		if records[i].HasMappedSeason() {
-			n++
-		}
-	}
-	return n
-}
-
-// specialRecordCount returns how many records carry a special type (IsSpecial:
-// OVA/ONA/SPECIAL/MUSIC). It backs validateScopeCoverage's special floor:
-// exclude_specials filtering and the report's season-0 bucketing key on
-// IsSpecial, so a refresh that relabeled every special as TV silently routes
-// them through whole-series scope while passing the typed and routing floors.
-func specialRecordCount(records []Record) int {
-	n := 0
-	for i := range records {
-		if records[i].IsSpecial() {
-			n++
-		}
-	}
-	return n
+	return validatePopulation("special-type", "special", previous.special, candidate.special, f)
 }
 
 // validateRoutingCoverage rejects a candidate refresh that collapsed a
@@ -1116,40 +1224,16 @@ func specialRecordCount(records []Record) int {
 // update that keeps both sides populated passes, and individual or future
 // non-movie labels stay legal because every non-MOVIE type counts toward the
 // same side.
-func validateRoutingCoverage(previous, records []Record, f acceptanceFloors) error {
-	prevMovies, prevOthers := routingCounts(previous)
-	movies, others := routingCounts(records)
-	if err := validatePopulation("movie-routed", "movie-routed", prevMovies, movies, f); err != nil {
+func validateRoutingCoverage(previous, candidate populations, f acceptanceFloors) error {
+	if err := validatePopulation("movie-routed", "movie-routed", previous.movieRouted, candidate.movieRouted, f); err != nil {
 		return err
 	}
-	return validatePopulation("series-routed", "series-routed", prevOthers, others, f)
-}
-
-// routingCounts returns how many records route to each arr side AND can
-// actually resolve there: MOVIE records (Radarr) and everything else (Sonarr,
-// per RoutedIDs' branch), counting only records that retain an identifier
-// their routed arr consumes (HasArrIdentifier). It backs
-// validateRefreshedRecords' routing-distribution floor: consumers rely on
-// both resolvable populations surviving a refresh, not on type labels alone —
-// a candidate that keeps every type but loses one side's usable ids must read
-// as a collapse of that side, not as healthy routing.
-func routingCounts(records []Record) (movies, others int) {
-	for i := range records {
-		if !records[i].HasArrIdentifier() {
-			continue
-		}
-		if records[i].IsMovie() {
-			movies++
-		} else {
-			others++
-		}
-	}
-	return movies, others
+	return validatePopulation("series-routed", "series-routed", previous.seriesRouted, candidate.seriesRouted, f)
 }
 
 // absentRoutingClasses names the routing classes a body carries no record for
 // ("movie-routed" / "series-routed"), in a stable order (movie side first). It
-// reads the counts from routingCounts, so a class is present only when at
+// reads the counts from censusOf, so a class is present only when at
 // least one record can actually RESOLVE in that arr (HasArrIdentifier) - the
 // same population validateRoutingCoverage guards - rather than merely carrying
 // the type label.
@@ -1166,30 +1250,15 @@ func routingCounts(records []Record) (movies, others int) {
 // carry zero of those - no special, no season-scoped cour, no type label at
 // all - so a zero-guard there would invent policy rather than report a fact.
 func absentRoutingClasses(records []Record) []string {
-	movies, others := routingCounts(records)
+	pop := censusOf(records)
 	var absent []string
-	if movies == 0 {
+	if pop.movieRouted == 0 {
 		absent = append(absent, "movie-routed")
 	}
-	if others == 0 {
+	if pop.seriesRouted == 0 {
 		absent = append(absent, "series-routed")
 	}
 	return absent
-}
-
-// typedRecordCount returns how many records carry a non-empty normalized
-// type. It backs the type-coverage acceptance floor: routing (IsMovie /
-// RoutedIDs / IsSpecial) keys entirely on Type, so a refresh whose records
-// wholesale lost the field cannot be trusted to route to the right arr even
-// when its id fields survive.
-func typedRecordCount(records []Record) int {
-	n := 0
-	for i := range records {
-		if records[i].Type != "" {
-			n++
-		}
-	}
-	return n
 }
 
 // arrIdentifierCount returns how many records retain an arr identifier the
@@ -1208,6 +1277,21 @@ func arrIdentifierCount(records []Record) int {
 	return n
 }
 
+// refusedValidators returns the validators of the body the last refusal refused,
+// or the zero value when there is none to ask about. It is gated on a USABLE cache
+// so the suppression invariant is UNCHANGED: an unusable cache still sends no
+// validators at all, and a 304 can therefore never revalidate a map the loader
+// refuses to serve (the invariant h-f25 and the two unusable-cache 304 tests pin).
+func refusedValidators(prev *Cache) httpx.Validators {
+	if !cacheUsable(prev.Records) {
+		return httpx.Validators{}
+	}
+	if prev.RefusedETag == "" && prev.RefusedLastModified == "" {
+		return httpx.Validators{}
+	}
+	return httpx.Validators{ETag: prev.RefusedETag, LastModified: prev.RefusedLastModified}
+}
+
 // conditionalGet issues a GET with the cached ETag / Last-Modified validators
 // via httpx.DoConditional, retrying transient failures. A 304 reports
 // NotModified; a 200 returns the bounded body and fresh validators. Validators
@@ -1215,8 +1299,11 @@ func arrIdentifierCount(records []Record) int {
 // validator-only or effectively-empty cache must force a full 200 download
 // rather than being eligible for a 304 that would reuse an unusable map.
 func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.ConditionalResult, error) {
-	validators := httpx.Validators{}
-	if cacheUsable(prev.Records) {
+	// Ask about the REFUSED body when there is one: sending the accepted
+	// validators against a body a refusal proves has changed re-downloads the
+	// whole ~5.9 MB list every cycle for as long as the refusal lasts.
+	validators := refusedValidators(prev)
+	if validators == (httpx.Validators{}) && cacheUsable(prev.Records) {
 		validators = httpx.Validators{ETag: prev.ETag, LastModified: prev.LastModified}
 	}
 	return httpx.Do(ctx,
@@ -1297,6 +1384,17 @@ const maxLoggedDuplicateIDs = 20
 // each effective record onto the index, keyed by AniList ID. A missing file is
 // not an error; an unreadable or malformed file is logged at ERROR (see
 // readOverrides) and ignored, so a bad override never blocks a cycle.
+//
+// The overlay is WHOLESALE, not a merge, so a record that carries no
+// identifier its routed arr consumes (HasArrIdentifier) replaces a mapped
+// Fribb record with one that resolves to nothing. That is left applied - an
+// operator entry wins by design, and blanking a mapping may be intended -
+// but it is reported: a mistyped id key is otherwise visible only as an
+// "unknown keys" WARN that never names the mapping it cost, and an override
+// restating only the fields the operator meant to CORRECT has every key
+// canonical and so produces no signal at all. This is the overrides-side
+// counterpart of the arr-identifier coverage floor validateRefreshedRecords
+// applies to the OTHER producer into this same Index.
 func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if l.overridesPath == "" {
 		return
@@ -1305,7 +1403,16 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if !ok {
 		return
 	}
-	for _, record := range set.records {
+	unroutable := 0
+	var unroutableIDs []int
+	for i := range set.records {
+		record := set.records[i]
+		if !record.HasArrIdentifier() {
+			unroutable++
+			if len(unroutableIDs) < maxLoggedDuplicateIDs {
+				unroutableIDs = append(unroutableIDs, record.AniListID)
+			}
+		}
 		idx.byAniList[record.AniListID] = record
 	}
 	if len(set.duplicates) > 0 {
@@ -1322,6 +1429,10 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 		l.log.Warn("mapping: overrides with oversized id arrays skipped",
 			"skipped", set.oversized, "ids", set.oversizedIDs,
 			"max_ids", maxOverrideIDsPerRecord, "path", l.overridesPath)
+	}
+	if unroutable > 0 {
+		l.log.Warn("mapping: overrides carry no arr identifier and un-map their entry; check for a mistyped tvdb_id/tmdb_movies/imdb_ids key, and restate the ids when overriding only a type or season",
+			"count", unroutable, "ids", unroutableIDs, "path", l.overridesPath)
 	}
 	if set.applied > 0 {
 		l.log.Info("mapping: applied overrides", "count", set.applied)
@@ -1476,7 +1587,9 @@ const maxOverrideIDsPerRecord = 64
 // Skipped rows (non-positive IDs, e.g. semantically empty objects) are
 // discarded during the stream and never retained, so they stay uncapped.
 // An over-cap file errors out and routes through readOverrides' existing
-// malformed-file WARN (overlay ignored loudly).
+// malformed-file ERROR (the whole overlay is refused, so it is levelled the
+// way readOverrides' doc explains - unlike maxOverrideIDsPerRecord above,
+// whose over-cap RECORD is skipped at WARN while the overlay still applies).
 const maxOverrideRecords = 1 << 16
 
 // recordUnknownKey retains one unknown override key for the diagnostic (seen
@@ -1526,7 +1639,9 @@ func decodeCappedArray[T any](dec *bounded.Decoder, target *[]T, what string) (o
 }
 
 // decodeOverrideRecord walks one override object off the token stream in a
-// single bounded pass: the six canonical keys (matched with strings.EqualFold
+// single bounded pass: the six canonical keys - Record's own json tags,
+// restated here because a token walk cannot read them, so a field added to
+// Record must be added here too - (matched with strings.EqualFold
 // for encoding/json's case-insensitive field fallback, duplicate keys merging
 // last-wins like Unmarshal) decode directly into the Record, the id arrays
 // are capped BEFORE their 65th element allocates (decodeCappedArray), and an

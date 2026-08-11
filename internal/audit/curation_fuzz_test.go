@@ -1,4 +1,4 @@
-package release
+package audit
 
 import (
 	"slices"
@@ -24,9 +24,9 @@ func FuzzCurationWarnings(f *testing.F) {
 		tags := []string{a, b, c}
 		canonical := [][]string{nil, {"broken"}, {"incomplete"}, {"broken", "incomplete"}}
 
-		warns := CurationWarnings(tags)
+		warns := curationWarnings(tags)
 		if len(warns) == 0 && warns != nil {
-			t.Errorf("CurationWarnings(%q) = non-nil empty slice, want nil when no warning is present", tags)
+			t.Errorf("curationWarnings(%q) = non-nil empty slice, want nil when no warning is present", tags)
 		}
 		bounded := false
 		for _, want := range canonical {
@@ -36,21 +36,21 @@ func FuzzCurationWarnings(f *testing.F) {
 			}
 		}
 		if !bounded {
-			t.Errorf("CurationWarnings(%q) = %q, want one of the four canonical values", tags, warns)
+			t.Errorf("curationWarnings(%q) = %q, want one of the four canonical values", tags, warns)
 		}
 
 		if warned := curationWarned(tags); warned != (warns != nil) {
-			t.Errorf("curationWarned(%q) = %v, disagrees with CurationWarnings = %q", tags, warned, warns)
+			t.Errorf("curationWarned(%q) = %v, disagrees with curationWarnings = %q", tags, warned, warns)
 		}
 
 		reversed := []string{c, b, a}
-		if got := CurationWarnings(reversed); !slices.Equal(got, warns) {
-			t.Errorf("input order changed the result: CurationWarnings(%q) = %q, want %q", reversed, got, warns)
+		if got := curationWarnings(reversed); !slices.Equal(got, warns) {
+			t.Errorf("input order changed the result: curationWarnings(%q) = %q, want %q", reversed, got, warns)
 		}
 
 		doubled := []string{a, b, c, a, b, c}
-		if got := CurationWarnings(doubled); !slices.Equal(got, warns) {
-			t.Errorf("duplicated tags changed the result: CurationWarnings(%q) = %q, want %q", doubled, got, warns)
+		if got := curationWarnings(doubled); !slices.Equal(got, warns) {
+			t.Errorf("duplicated tags changed the result: curationWarnings(%q) = %q, want %q", doubled, got, warns)
 		}
 
 		augmented := []string{a, b, c, " BrOkEn "}

@@ -98,6 +98,12 @@ type Coverage struct {
 // from the set (the caller treats a shutdown as a whole-cycle event). With a
 // live context, Degraded is true exactly when IncompleteIDs is non-empty.
 type Result struct {
+	// at is the pass's single clock reading, carried so PruneMemo prunes against
+	// the same instant every lookup and stamp in the pass compared against. It is
+	// unexported because only this package produces or consumes it (Memo.dirty is
+	// the same shape); a zero value - a hand-built Result - prunes nothing, which
+	// is the safe fail direction.
+	at            time.Time
 	Coverage      Coverage
 	Memo          Memo
 	IncompleteIDs map[int]struct{}
@@ -182,7 +188,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	// WHOLE catalogue, and Match is called with a bounded window too (the tick),
 	// which has no standing to decide that an id it never fetched is no longer
 	// curated. The caller that holds a catalogue calls PruneMemo.
-	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
+	return Result{at: now, Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
 }
 
 // PruneMemo garbage-collects res.Memo against the WHOLE SeaDex catalogue,
@@ -200,8 +206,8 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 // anything less is a defect, not a scoped variant, which is why there is no
 // scoped door onto this operation.
 //
-// It lives on the Matcher for the clock (m.now), so a caller needs no clock seam
-// of its own to test it.
+// It lives on the Matcher for symmetry with Match, whose clock reading it reuses
+// through Result.at - so a caller needs no clock seam of its own to test it.
 func (m *Matcher) PruneMemo(res *Result, catalogue []seadex.Entry) {
 	if res.Degraded {
 		// A degraded pass (outage, tripped breaker, shutdown) could not renew
@@ -210,7 +216,11 @@ func (m *Matcher) PruneMemo(res *Result, catalogue []seadex.Entry) {
 		// retention costs no AniList traffic.
 		return
 	}
-	pruneExpired(&res.Memo, m.now(), catalogue)
+	// The PASS's clock, not a fresh reading: pruning has to agree with the
+	// lookups (matchRun.now), and a cold reconcile's match runs for ~25 minutes,
+	// so a second reading can classify as expired an entry the pass just served
+	// live and therefore never renewed.
+	pruneExpired(&res.Memo, res.at, catalogue)
 }
 
 // matchRun carries one Match call's shared state so the per-entry helpers do
@@ -479,7 +489,7 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 //
 // A record that routes NO series id and is not typed MOVIE still gets one more
 // chance, against its unambiguous movie TMDB ids
-// (mapping.Record.MovieTMDBIDs): a TMDB movie id is a Radarr id by
+// (mapping.Record.TmdbMovies): a TMDB movie id is a Radarr id by
 // construction, and the live Fribb body carries ~300 records shaped non-MOVIE
 // type + no tvdb_id + a positive movie id, whose Radarr copy the type label
 // alone could never resolve (h-f9). It is a SECONDARY lookup on purpose - a
@@ -502,7 +512,7 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 		// so the map miss IS the arr gate.
 		return li.byTvdb[tvdb]
 	}
-	return li.findMovieByTMDB(rec.MovieTMDBIDs())
+	return li.findMovieByTMDB(rec.TmdbMovies)
 }
 
 // findMovie resolves a MOVIE record to a Radarr movie by TMDB movie id, then by

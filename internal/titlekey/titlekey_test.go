@@ -27,11 +27,15 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
-// TestContainsKey pins the two arms of the containment test the indexer's title
-// harvest reads: a key of real length keeps the punctuation-tolerant normalized
-// substring, while a SHORT key needs boundary evidence - an exact match against
-// a run of the candidate's own alphanumeric tokens - so ordinary release
-// metadata ("Remux", "x265") cannot satisfy it.
+// TestContainsKey pins the containment rule the indexer's title harvest reads:
+// a key matches only as an EXACT run of the candidate's own alphanumeric
+// tokens, at every key length. Normalize strips every separator, so a plain
+// normalized-substring test carries no boundary evidence at any length - "x"
+// is satisfied by "Remux", and a real title-length key just as blindly
+// ("gate" inside "Propagate", "bleach" inside "Unbleached", "zero" inside
+// "ReZero"). Both directions are pinned here: a token run matches across the
+// decoration a release name carries, and a key buried inside a longer token
+// does not.
 func TestContainsKey(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -47,6 +51,11 @@ func TestContainsKey(t *testing.T) {
 		{"short key across adjacent tokens", "[Grp] A B - S01", "ab", true},
 		{"short key needs an exact token run", "[Grp] Abc - S01", "ab", false},
 		{"empty candidate never matches a short key", "", "x", false},
+		{"title-length key inside a longer word is refused", "[Grp] Unbleached Cotton - S01 (BD 1080p)", "bleach", false},
+		{"title-length key as a word suffix is refused", "[Grp] Propagate - S01 (BD 1080p)", "gate", false},
+		{"title-length key inside a CamelCase token is refused", "[Grp] ReZero - S01 (BD 1080p)", "zero", false},
+		{"key straddling token boundaries is refused", "[Grp] Sousou no Frieren - S01", "ousounofrier", false},
+		{"Unicode capital in the candidate lowercases into a token", "[Grp] \u0130stanbul - S01 (BD 1080p)", "istanbul", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

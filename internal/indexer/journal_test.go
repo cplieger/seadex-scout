@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -680,34 +681,6 @@ func TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsUnknownTracker pins the tail-drop: a SeaDex torrent on a
-// tracker other than Nyaa/AB (the negligible AnimeTosho/RuTracker tail) never
-// enters a journal feed and is not classified into a configured scope (a tail
-// tracker resolves to no scope, so it is not counted as unresolvable either).
-func TestRebuildDropsUnknownTracker(t *testing.T) {
-	entries := []seadex.Entry{{
-		AniListID: 5,
-		Torrents: []seadex.Torrent{{
-			Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyFeed(t, path)
-	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}}, log, nil).Rebuild(context.Background(), entries, nil); err != nil {
-		t.Fatalf("Rebuild: %v", err)
-	}
-	snap := readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
-		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d, want 0 and 0", len(snap.NyaaFeed), len(snap.ABFeed))
-	}
-	if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != "0" {
-		t.Errorf("skipped_unresolvable = %q (found=%v), want 0: an unknown tracker must not be classified into a configured scope; log output:\n%s",
-			got, ok, strings.Join(rec.Messages(), "\n"))
-	}
-}
-
 // TestRebuildIdlessABNotCountedAsPasskeySkip pins the precision of the
 // missing-passkey nudge: an AnimeBytes release whose URL carries no parseable
 // torrent id is un-grabbable regardless of the passkey, so it is excluded from
@@ -1198,32 +1171,13 @@ func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 	}
 }
 
-// TestPrepareCarriedItemDropsBookkeepinglessItem pins prepareCarriedItem's
-// bookkeeping guard directly, the only arm of this unit no test reaches since
-// the shared decode gate (validJournalRecord) started pruning such an item
-// before carryJournal ever sees it: a carried item with no Key or a
-// zero FirstSeen is a DROP, not a prune. The distinction is the operator's
-// signal on the snapshot log line - a zero FirstSeen otherwise reads as an
-// item aged out of a 14-day window it never entered - and the guard is the
-// last defense for any snapshot that reaches carryJournal without the gate.
-func TestPrepareCarriedItemDropsBookkeepinglessItem(t *testing.T) {
+// TestPrepareCarriedItemCarriesAnInWindowItem pins the phase's surviving
+// verdict. The Key/FirstSeen cases it used to carry are gone with the branch
+// that produced them: the shared decode gate (validJournalRecord, applied by
+// pruneJournalFeed) is the one home of that invariant, and the persisted-input
+// boundary is covered by TestRebuildDropsKeylessSeededItem.
+func TestPrepareCarriedItemCarriesAnInWindowItem(t *testing.T) {
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
-	tests := map[string]journalItem{
-		"no key":        {item: item{Title: "Show - S01 (1080p) [G]"}, FirstSeen: now.Add(-time.Hour)},
-		"no first seen": {item: item{Title: "Show - S01 (1080p) [G]"}, Key: "nyaa:42"},
-	}
-	for name, it := range tests {
-		t.Run(name, func(t *testing.T) {
-			var js journalStats
-			p := &journalPass{js: &js, now: now}
-			if p.prepareCarriedItem(&it) {
-				t.Errorf("prepareCarriedItem(%+v) = true, want false", it)
-			}
-			if js.dropped != 1 || js.pruned != 0 || js.rebased != 0 {
-				t.Errorf("stats = dropped %d / pruned %d / rebased %d, want 1 / 0 / 0", js.dropped, js.pruned, js.rebased)
-			}
-		})
-	}
 	carryable := journalItem{item: item{Title: "Show - S01 (1080p) [G]"}, Key: "nyaa:42", FirstSeen: now.Add(-time.Hour)}
 	var js journalStats
 	if p := (&journalPass{js: &js, now: now}); !p.prepareCarriedItem(&carryable) {
@@ -2175,11 +2129,19 @@ func TestApplyTitlesLeavesUnknownCensusEvidenceAlone(t *testing.T) {
 		{item: item{Title: "Synth 2"}, Key: "nyaa:2"},
 	}
 	titles := map[string]string{"nyaa:1": "Show - S01", "nyaa:2": "Show - S01"}
+	// Captured BEFORE the call: applyTitles writes the SERVED title back into the
+	// cache, so reading the map afterwards would compare it against itself.
+	want := maps.Clone(titles)
 	applyTitles(items, titles, titleAudit{census: censusPacks(cur), report: w.packDisagreementReporter()})
 
 	for i := range items {
-		if want := titles[items[i].Key]; items[i].Title != want {
+		if want := want[items[i].Key]; items[i].Title != want {
 			t.Errorf("item %s title = %q, want the harvested title untouched %q", items[i].Key, items[i].Title, want)
+		}
+	}
+	for key, wantTitle := range want {
+		if titles[key] != wantTitle {
+			t.Errorf("cache[%s] = %q, want the harvested title unchanged %q (nothing was corrected)", key, titles[key], wantTitle)
 		}
 	}
 	if rec.Contains("disagree about a season pack") {
@@ -2254,6 +2216,52 @@ func TestPublishedReleaseIsNeverReadmitted(t *testing.T) {
 		if len(snap.NyaaFeed) != 1 {
 			t.Fatalf("pass %d: nyaa feed = %d items, want exactly 1 (journaled once, carried thereafter): %v",
 				pass, len(snap.NyaaFeed), feedKeys(snap.NyaaFeed))
+		}
+	}
+}
+
+// TestCensusMarkerIgnoresOccurrencesWithoutAMarker pins how the census picks the
+// single-episode marker a title correction splices in, across a journal key's
+// several occurrences: an occurrence whose file list yields no marker is SKIPPED,
+// and among those that do yield one the smallest wins, so the choice cannot
+// depend on catalogue order. Occurrences of one key are the same tracker torrent
+// attached to several SeaDex entries - a duplicated relation row can repeat the
+// id, URL and hash while carrying different Files - so a marker-less sibling is a
+// reachable shape.
+//
+// The consequence of losing the skip is silent and one-directional: the marker
+// goes empty, the correction is refused as unreadable, and the harvested title
+// keeps a whole-season claim the file list positively disproves. Sonarr parses
+// FullSeason from it, ranks it above loose episodes, and once it grabs it treats
+// the season as covered - so the operator ends up missing that season's real
+// episodes. The existing census fold test gives every single-evidence key exactly
+// one occurrence, so it stays green through that regression.
+func TestCensusMarkerIgnoresOccurrencesWithoutAMarker(t *testing.T) {
+	single := func(name string) *seadex.Torrent {
+		return &seadex.Torrent{Files: []seadex.File{{Name: name, Length: 1 << 30}}}
+	}
+	entry := &seadex.Entry{AniListID: 7}
+	cur := map[string][]curatedRef{
+		// A marker-less sibling either side of the one that names the episode,
+		// and two markers to close the ordering leg.
+		"nyaa:5": {
+			{entry: entry, torrent: single("Show S01E07 [1080p].mkv")},
+			{entry: entry, torrent: &seadex.Torrent{}},
+		},
+		"nyaa:6": {
+			{entry: entry, torrent: &seadex.Torrent{}},
+			{entry: entry, torrent: single("Show S01E07 [1080p].mkv")},
+		},
+		"nyaa:7": {
+			{entry: entry, torrent: single("Show S01E09 [1080p].mkv")},
+			{entry: entry, torrent: single("Show S01E07 [1080p].mkv")},
+		},
+	}
+	got := censusPacks(cur)
+	want := packCensus{evidence: packEvidenceSingle, marker: "S01E07"}
+	for _, key := range []string{"nyaa:5", "nyaa:6", "nyaa:7"} {
+		if got[key] != want {
+			t.Errorf("censusPacks[%s] = %+v, want %+v (a marker-less occurrence must not win the marker)", key, got[key], want)
 		}
 	}
 }

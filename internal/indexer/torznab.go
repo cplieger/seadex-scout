@@ -262,8 +262,9 @@ func esc(s string) string {
 // --- Parsing Prowlarr's per-indexer Torznab responses ---
 
 // feedXML / channelXML / itemXML / attrXML mirror the Torznab RSS a Prowlarr
-// indexer endpoint returns. `xml:"attr"` matches the torznab:attr elements by
-// local name regardless of the declared namespace prefix.
+// indexer endpoint returns. The manual decoders switch on each element's LOCAL
+// name, so a torznab:attr element matches regardless of the declared namespace
+// prefix.
 type feedXML struct {
 	XMLName xml.Name   `xml:"rss"`
 	Channel channelXML `xml:"channel"`
@@ -277,7 +278,7 @@ type channelXML struct {
 	// Items across invocations - a per-call budget would reset while the
 	// retained items kept growing.
 	budget *xmlx.Budget
-	Items  []itemXML `xml:"item"`
+	Items  []itemXML
 }
 
 // Decode limits on an untrusted upstream Torznab response. The transport cap
@@ -488,6 +489,12 @@ func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	return nil
 }
 
+// The element names this type decodes are NOT struct tags: itemXML implements
+// UnmarshalXML, so encoding/xml never reads them. decodeChild owns the
+// child-element vocabulary (dispatching to decodeField, decodeUntrustedField,
+// decodeSizeField, decodeEnclosure and decodeAttr); decodeEnclosure and
+// decodeAttr own the attribute vocabulary. Adding a field here decodes nothing
+// until it is wired into one of those.
 type itemXML struct {
 	// Title is the tracker-controlled release title. It is tagged
 	// runesafe.Untrusted at this decode boundary — the one place Prowlarr
@@ -503,14 +510,14 @@ type itemXML struct {
 	// budget every sibling item charges, so repetition across items is bounded
 	// by one cumulative cap rather than per item.
 	budget    *xmlx.Budget
-	Attrs     []attrXML          `xml:"attr"`
-	Title     runesafe.Untrusted `xml:"title"`
-	GUID      string             `xml:"guid"`
-	Comments  string             `xml:"comments"`
-	Link      string             `xml:"link"`
-	PubDate   string             `xml:"pubDate"`
-	Enclosure enclosureXML       `xml:"enclosure"`
-	Size      int64              `xml:"size"`
+	Attrs     []attrXML
+	Title     runesafe.Untrusted
+	GUID      string
+	Comments  string
+	Link      string
+	PubDate   string
+	Enclosure enclosureXML
+	Size      int64
 }
 
 // UnmarshalXML decodes one <item> child-by-child so the attr-count and
@@ -537,17 +544,23 @@ func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	}
 }
 
-// decodeChild decodes and validates one child element of an <item>: the
-// plain string scalars route through stringField's destination lookup, the
-// remaining recognized children keep their dedicated decoders, and unknown
-// children are skipped. Each recognized field is bounded as it decodes; an
+// decodeChild decodes and validates one child element of an <item>: each
+// recognized child decodes into its own destination - the plain string
+// scalars through decodeField's bounded text decode, the rest through their
+// dedicated decoders - and unknown children are skipped. Each recognized
+// field is bounded as it decodes; an
 // <attr> is rejected BEFORE decoding once the per-item attr cap is reached,
 // so the cap bounds the allocation instead of merely reporting it.
 func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
-	if dst := x.stringField(t.Name.Local); dst != nil {
-		return x.decodeField(d, dst)
-	}
 	switch t.Name.Local {
+	case "guid":
+		return x.decodeField(d, &x.GUID)
+	case "comments":
+		return x.decodeField(d, &x.Comments)
+	case "link":
+		return x.decodeField(d, &x.Link)
+	case "pubDate":
+		return x.decodeField(d, &x.PubDate)
 	case "title":
 		return x.decodeUntrustedField(d, &x.Title)
 	case "size":
@@ -561,25 +574,6 @@ func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 		return x.decodeAttr(d, t)
 	default:
 		return d.Skip()
-	}
-}
-
-// stringField maps a recognized plain string child element to its
-// destination field, or nil for anything needing more than decodeField's
-// bounded string decode (the untrusted title, the numeric size, the two
-// structured children).
-func (x *itemXML) stringField(name string) *string {
-	switch name {
-	case "guid":
-		return &x.GUID
-	case "comments":
-		return &x.Comments
-	case "link":
-		return &x.Link
-	case "pubDate":
-		return &x.PubDate
-	default:
-		return nil
 	}
 }
 
@@ -719,14 +713,17 @@ func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) 
 // rejection.
 func (x *itemXML) account(s string) error { return asLimitError(x.budget.Charge(s)) }
 
+// enclosureXML and attrXML are decoded-value carriers, not XML schema:
+// decodeEnclosure and decodeAttr read the attributes off the start element by
+// hand so each retained value is charged to the budget before it is stored.
 type enclosureXML struct {
-	URL    string `xml:"url,attr"`
-	Length int64  `xml:"length,attr"`
+	URL    string
+	Length int64
 }
 
 type attrXML struct {
-	Name  string `xml:"name,attr"`
-	Value string `xml:"value,attr"`
+	Name  string
+	Value string
 }
 
 // errorXML mirrors a Newznab/Torznab <error> document an upstream can return

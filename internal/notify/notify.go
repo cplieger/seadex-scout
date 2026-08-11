@@ -137,7 +137,8 @@ func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs, incompl
 // Every row is reported as carried, which is what it is: nothing was
 // re-evaluated, so nothing was eligible for deletion.
 func (n *Notifier) Reemit() {
-	n.emitAll(0, len(n.current))
+	// Nothing was evaluated, so nothing was eligible for deletion: resolved is 0.
+	n.emitAll(0, len(n.current), 0)
 }
 
 // report is the shared body. comparedIDs nil means FULL deletion authority
@@ -153,7 +154,7 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 		boundRetained(&retained)
 		next[key] = retained
 	}
-	preserved, carried := 0, 0
+	preserved, carried, resolved := 0, 0, 0
 	for key := range n.current {
 		if _, present := next[key]; present {
 			continue
@@ -165,15 +166,19 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 			continue
 		}
 		if comparedIDs == nil {
+			// Full authority: absence IS resolution.
+			resolved++
 			continue
 		}
 		if _, authorized := comparedIDs[owner]; !authorized {
 			next[key] = n.current[key]
 			carried++
+			continue
 		}
+		resolved++
 	}
 	n.current = next
-	n.emitAll(preserved, carried)
+	n.emitAll(preserved, carried, resolved)
 }
 
 // maxRetainedListItems bounds how many elements of a retained row's untrusted
@@ -206,10 +211,16 @@ const maxRetainedListItems = 64
 // FILE NAMES rather than SeaDex, and a group parsed out of a filename is bounded
 // well below this too.
 //
-// The row bound is therefore 64 x 256 x 4 = 64 KiB, a 32x reduction, and it is
-// pinned by a test rather than left to this comment. Truncating here cannot
-// resolve or re-alert anything: the dedupe key is derived from the FULL row
-// before retention (see capRetainedList).
+// The SLICE contribution is therefore 64 x 256 x 4 = 64 KiB, a 32x reduction of the
+// 2 MiB above, and TestReportBoundsRetainedUntrustedStrings pins the per-field
+// ceiling. It is not the whole ROW: boundRetained still caps its 8 single-value
+// untrusted fields with capAttr, i.e. at logattr.MaxBytes each (64 KiB), so a row's
+// ceiling is ~128 KiB and the resident set's is that times the matched-library row
+// count (~629 live, so ~79 MiB worst case in a 256 MiB container). Adding another
+// untrusted single-value field therefore costs 8 KiB per resident row, not 256
+// bytes - budget it against that number, and see logattr.MaxBytes for the emitted
+// record's own budget. Truncating here cannot resolve or re-alert anything: the
+// dedupe key is derived from the FULL row before retention (see capRetainedList).
 const maxRetainedElemBytes = 256
 
 // capRetainedList clones the retained PREFIX of an untrusted slice, dropping
@@ -227,12 +238,21 @@ func capRetainedList[T any](s []T) []T {
 	return slices.Clone(s)
 }
 
-// boundRetained caps the untrusted strings of a row about to be RETAINED, in
-// place. Every value here is parsed from SeaDex data or library file names, and
-// a retained row outlives the pass that produced it, so the cap has to happen
-// on the way IN - the emit path's own caps bound only what is written to the
-// log and leave the resident value whole. capAttr is idempotent, so a row
+// boundRetained caps the UNTRUSTED strings of a row about to be RETAINED, in
+// place. Every value it caps is parsed from SeaDex data or library file names,
+// and a retained row outlives the pass that produced it, so the cap has to
+// happen on the way IN - the emit path's own caps bound only what is written to
+// the log and leave the resident value whole. capAttr is idempotent, so a row
 // carried forward across passes is bounded once and passes through unchanged.
+//
+// It deliberately does NOT cap Arr, Kind, Resolution, Codec, Scope or Status:
+// those are the app's OWN closed vocabularies, each written at one
+// internal/compare site from package constants (library.ArrSonarr/ArrRadarr,
+// release.Kind*, release.resolutionHeights, codecX265/codecX264,
+// align.ScopeKind.String, compare.Status*), longest token 16 bytes. This is the
+// same per-field classification findingKVs applies when it emits those six raw
+// as "fixed-pattern app values"; a new field is capped here only if upstream
+// data can reach it.
 //
 // Links is the field that most needs it: the old persisted projection carried
 // no URL at all, and one entry can publish many, each an untrusted string.
@@ -247,18 +267,12 @@ func boundRetained(f *compare.Finding) {
 	f.RecommendedGroups = capRetainedList(f.RecommendedGroups)
 	f.CurrentGroups = capRetainedList(f.CurrentGroups)
 	f.Links = capRetainedList(f.Links)
-	f.Arr = capAttr(f.Arr)
 	f.Title = capAttr(f.Title)
-	f.Kind = capAttr(f.Kind)
 	f.Reason = capAttr(f.Reason)
 	f.Tracker = capAttr(f.Tracker)
-	f.Resolution = capAttr(f.Resolution)
-	f.Codec = capAttr(f.Codec)
-	f.Scope = capAttr(f.Scope)
 	f.InfoHash = capAttr(f.InfoHash)
 	f.CurrentGroup = capAttr(f.CurrentGroup)
 	f.RecommendedGroup = capAttr(f.RecommendedGroup)
-	f.Status = compare.Status(capAttr(string(f.Status)))
 	// capAttr, NOT capURLAttr: the retention bound is a SIZE bound, while
 	// capURLAttr is the emit path's link-destination ENCODER (it percent-encodes
 	// for a Markdown sink). Encoding here would hand the emit path an
@@ -290,8 +304,12 @@ func capRetainedElem(s string) string { return reboundTo(capAttr(s), maxRetained
 // emitAll logs every row of the current set, in a deterministic order so a
 // pass is diffable against the one before it, and closes with one summary line.
 // preserved is the count carried forward under incompleteIDs; carried is the
-// count a partial pass left alone for want of deletion authority.
-func (n *Notifier) emitAll(preserved, carried int) {
+// count a partial pass left alone for want of deletion authority; resolved is
+// the count this pass DELETED under authority, which is the only fact about a
+// pass that nothing else records - the set is in memory and a resolution is an
+// absence, so without this count a pass that resolves K rows and adds K new
+// ones is indistinguishable from a pass that changed nothing.
+func (n *Notifier) emitAll(preserved, carried, resolved int) {
 	keys := make([]string, 0, len(n.current))
 	for key := range n.current {
 		keys = append(keys, key)
@@ -310,7 +328,8 @@ func (n *Notifier) emitAll(preserved, carried int) {
 	}
 	n.log.Info("findings reported",
 		"total", len(n.current), "emitted", emitted,
-		"suppressed", suppressed, "preserved", preserved, "carried", carried)
+		"suppressed", suppressed, "preserved", preserved, "carried", carried,
+		"resolved", resolved)
 }
 
 // --- Emission / rendering ---
@@ -559,9 +578,12 @@ func findingKVs(f *compare.Finding) []any {
 		// truncating the headline of the public slog contract - a value
 		// dashboards and Loki queries read, and one that can exceed 256 bytes
 		// because publishing enforces a canonical HOST and shape, never a
-		// length. It is rendered like release_urls, its own plural (see
-		// joinLinksAttr): the same reason applies to both, and neither is a
-		// Markdown link destination anywhere.
+		// length. Neither it nor release_urls is a Markdown link destination
+		// anywhere, so neither takes capURLAttr - but the two are NOT equally
+		// bounded and a budget decision must not assume they are: release_urls
+		// streams f.Links, whose every element boundRetained already cut to
+		// maxRetainedElemBytes (256) at RETENTION, so the plural carries a
+		// 256-byte-per-element view of the very URL this attribute carries whole.
 		"release_url", capAttr(f.ReleaseURL),
 		"release_urls", joinLinksAttr(f.Links),
 		// nyaa_url keeps its name and its meaning: the shipped alerts.yaml

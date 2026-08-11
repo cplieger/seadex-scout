@@ -220,8 +220,10 @@ func trackerOwnForm(scope string, f *urlform.Form) bool {
 		if !ownableHostForm(f) || f.HasUserInfo {
 			return false
 		}
-		return scope != "" && scopeOfHost(f.Host) == scope &&
-			isCanonicalTrackerHost(scope, f.Host)
+		// scope is app-produced and both callers refuse an empty one before
+		// calling; isCanonicalTrackerHost fails closed on an unknown scope
+		// regardless, so the emptiness test has one home rather than three.
+		return scopeOfHost(f.Host) == scope && isCanonicalTrackerHost(scope, f.Host)
 	}
 	// No host evidence: only AnimeBytes accepts a rooted relative reference, and
 	// a form whose host could not be recovered (HostUnrecoverable) is a parse

@@ -9,7 +9,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -46,9 +45,10 @@ import (
 // one background loader instead of every handler that asked for a feed.
 //
 // That single background owner is also why there is no coalescing here: refresh
-// has exactly one production caller (watch, sequential), so the reload-only
-// fields need no lock of their own and there is nothing for concurrent requests
-// to queue behind.
+// has exactly one production caller (watch, sequential), so the loader's
+// reload-only fields need no lock of their own and there is nothing for
+// concurrent requests to queue behind. Those fields live on snapshotLoader
+// rather than here, so a serving method cannot name one at all.
 type snapshotCache struct {
 	// snapID identifies the successfully loaded snapshot file, installed
 	// together with snap (guarded by mu). atomicfile.FileIdentity owns the
@@ -59,18 +59,9 @@ type snapshotCache struct {
 	// than be skipped, while an in-place rewrite keeps the inode and only the
 	// mtime leg catches it.
 	snapID atomicfile.FileIdentity
-	// failedID identifies the last snapshot file whose CONTENT failed
-	// deterministically: malformed JSON, a structurally invalid document, or a
-	// file over the shared maxFeedBytes cap (persist enforces the same cap, so
-	// an oversized snapshot is external corruption that never shrinks on its
-	// own). An unchanged bad file is then not re-read and re-warned on every
-	// reload; cleared on a successful load. Only deterministic content
-	// failures are memoized: a read failure (EIO, EACCES) can recover without
-	// changing inode or mtime (a chmod, a transient filesystem repair), so it
-	// stays retryable. The same identity test as snapID, for the same reason -
-	// a repaired file published at the failed file's timestamp must be retried,
-	// not skipped. Owned by the loader goroutine (see below).
-	failedID atomicfile.FileIdentity
+	// loader owns the reload clock and the reload-only state (see
+	// snapshotLoader). Set once by newSnapshotCache and never rewritten.
+	loader *snapshotLoader
 	// firstLoad is closed when the loader's initial load returns; watchStarted
 	// says whether anything will ever close it (a cache nobody started keeps
 	// serving whatever publish or a direct refresh installed). Allocated by
@@ -106,29 +97,6 @@ type snapshotCache struct {
 	// loader that began reading generation N-1 used to overwrite a just-published
 	// generation N.
 	installSeq uint64
-	// snapMissing records that the snapshot file disappeared AFTER one was
-	// installed (deleted file, incomplete restore, lost volume), so the
-	// stale-feed WARN fires once per disappearance instead of once per reload;
-	// cleared (with one INFO recovery line) on the first successful stat
-	// afterward. A fresh install with no prior snapshot stays silent. Owned by
-	// the loader goroutine (see below).
-	snapMissing bool
-	// reloadDegraded records that reloads are failing (a stat error or a
-	// read failure of an unchanged-identity file), so the WARN fires once
-	// per degradation onset instead of once per reload; cleared with one
-	// INFO recovery line on the next successful snapshot read, and cleared
-	// SILENTLY when the file goes absent (openSnapshot's ENOENT arm - the
-	// missing state has its own once-per-disappearance WARN) or when the
-	// stat lands on the memoized malformed file (skipMemoizedMalformed -
-	// access recovered, but nothing was reloaded). The retry itself is NOT
-	// suppressed (both faults can recover without an mtime change).
-	//
-	// It, failedID and snapMissing are the reload-only fields, and they carry
-	// no lock because they have exactly ONE writer: refresh, called only by the
-	// single loader goroutine watch owns. publish deliberately does not touch
-	// them - it is not a file read, and it runs on the compare cycle's
-	// goroutine - so there is no second writer to synchronize against.
-	reloadDegraded bool
 	// snapFailed records that snapshot loading failed BEFORE any snapshot was
 	// installed: a non-ENOENT stat or read fault, or a malformed or
 	// structurally invalid file, at startup leaves the zero-value in-memory
@@ -142,7 +110,8 @@ type snapshotCache struct {
 	// successful load keeps serving the last-good snapshot); cleared by the
 	// first successful install, and by a genuinely absent file (deleting
 	// the bad file returns to fresh-install semantics). Guarded by mu (read
-	// per request by unavailable, unlike the loader-owned flags above).
+	// per request by unavailable, unlike the loader-owned flags on
+	// snapshotLoader).
 	snapFailed bool
 	// snapFailedWarned bounds the snapshot-unavailable WARN to one per onset
 	// instead of one per request; re-armed whenever snapFailed clears.
@@ -163,16 +132,77 @@ type snapshotCache struct {
 	watchStarted atomic.Bool
 }
 
+// snapshotLoader is the cache's single background loader and the OWNER of the
+// reload-only state. It exists as its own type for the reason snapshotCache
+// does (l-f168/l-f174): the loader's fields carry no lock because they have
+// exactly ONE writer - refresh, called only by the single loader goroutine
+// watch owns - and that used to be a per-field comment on the same receiver the
+// request path calls, so a future serving method could read an unlocked field
+// and compile. Here it cannot name one. publish deliberately does not touch
+// them either - it is not a file read, and it runs on the compare cycle's
+// goroutine - so there is no second writer to synchronize against.
+//
+// The loader reaches the published state only through the cache's mu-guarded
+// entry points (installedSeq, loadedSnapshotUnchanged, installLoaded,
+// hasInstalled, markSnapshotFailedIfUnloaded, clearSnapshotFailed) and through
+// the cache-owned render/diagnostic helpers, so it names no lock primitive of
+// its own.
+type snapshotLoader struct {
+	// cache is the published state this loader installs into. Set once by
+	// newSnapshotCache and never rewritten.
+	cache *snapshotCache
+	// log is the cache's own logger, copied once at construction and read
+	// without a lock, never written afterwards.
+	log *slog.Logger
+	// failedID identifies the last snapshot file whose CONTENT failed
+	// deterministically: malformed JSON, a structurally invalid document, or a
+	// file over the shared maxFeedBytes cap (persist enforces the same cap, so
+	// an oversized snapshot is external corruption that never shrinks on its
+	// own). An unchanged bad file is then not re-read and re-warned on every
+	// reload; cleared on a successful load. Only deterministic content
+	// failures are memoized: a read failure (EIO, EACCES) can recover without
+	// changing inode or mtime (a chmod, a transient filesystem repair), so it
+	// stays retryable. The same identity test as snapshotCache.snapID, for the
+	// same reason - a repaired file published at the failed file's timestamp
+	// must be retried, not skipped.
+	//
+	// It sits here rather than beside path only to satisfy govet's
+	// fieldalignment: an interface-bearing value before the string keeps the
+	// struct's pointer prefix at 40 bytes.
+	failedID atomicfile.FileIdentity
+	// path is the cache's own snapshot path, copied once at construction and
+	// read without a lock, never written afterwards.
+	path string
+	// snapMissing records that the snapshot file disappeared AFTER one was
+	// installed (deleted file, incomplete restore, lost volume), so the
+	// stale-feed WARN fires once per disappearance instead of once per reload;
+	// cleared (with one INFO recovery line) on the first successful stat
+	// afterward. A fresh install with no prior snapshot stays silent.
+	snapMissing bool
+	// reloadDegraded records that reloads are failing (a stat error or a
+	// read failure of an unchanged-identity file), so the WARN fires once
+	// per degradation onset instead of once per reload; cleared with one
+	// INFO recovery line on the next successful snapshot read, and cleared
+	// SILENTLY when the file goes absent (openSnapshot's ENOENT arm - the
+	// missing state has its own once-per-disappearance WARN) or when the
+	// stat lands on the memoized malformed file (skipMemoizedMalformed -
+	// access recovered, but nothing was reloaded). The retry itself is NOT
+	// suppressed (both faults can recover without an mtime change).
+	reloadDegraded bool
+}
+
 // newSnapshotCache builds the cache for the snapshot file at path. It does not
 // load: the caller decides when the reload clock runs (Run starts it eagerly so
 // a restart serves the last feed immediately).
 func newSnapshotCache(path, abPasskey string, log *slog.Logger) *snapshotCache {
-	return &snapshotCache{
+	c := &snapshotCache{
 		log:       log,
 		path:      path,
 		abPasskey: abPasskey,
 		firstLoad: make(chan struct{}),
 	}
+	c.loader = &snapshotLoader{cache: c, log: log, path: path}
+	return c
 }
 
 // warmLoadTimeout bounds how long start WAITS for the initial load of the
@@ -182,11 +212,11 @@ func newSnapshotCache(path, abPasskey string, log *slog.Logger) *snapshotCache {
 // the compare loop), so an unbounded WAIT holds the whole daemon down instead of
 // one goroutine. A context deadline cannot deliver this bound: refresh opens and
 // stats the file before any ctx check, and atomicfile's bounded read only tests
-// ctx around its syscalls - it cannot interrupt an os.OpenFile, File.Stat, or
-// io.ReadAll already blocked in the filesystem. So the load runs on the cache's
-// own goroutine and start stops waiting after the deadline; the load may finish
-// in the background, which is safe because the cache is synchronized and the
-// loader is the only caller of refresh.
+// ctx around its syscalls - it cannot interrupt an atomicfile.OpenRegular,
+// File.Stat, or io.ReadAll already blocked in the filesystem. So the load runs
+// on the cache's own goroutine and start stops waiting after the deadline; the
+// load may finish in the background, which is safe because the cache is
+// synchronized and the loader is the only caller of refresh.
 //
 // A var, not a const, ONLY so the warm-load test can exercise the wait-expired
 // path (see queryGateWait for the pattern) without spending it in real time.
@@ -239,7 +269,7 @@ func (c *snapshotCache) start(ctx context.Context) {
 	if !c.watchStarted.CompareAndSwap(false, true) {
 		return
 	}
-	go c.watch(ctx, snapshotWatchInterval)
+	go c.loader.watch(ctx, snapshotWatchInterval)
 	c.awaitFirstLoad(ctx)
 }
 
@@ -258,9 +288,9 @@ func (c *snapshotCache) start(ctx context.Context) {
 // (readSnapshot treats a cancellation as silent, never as a fault). A read
 // already blocked inside the filesystem is uninterruptible either way and dies
 // with the process.
-func (c *snapshotCache) watch(ctx context.Context, every time.Duration) {
-	c.refresh(ctx)
-	close(c.firstLoad)
+func (l *snapshotLoader) watch(ctx context.Context, every time.Duration) {
+	l.refresh(ctx)
+	close(l.cache.firstLoad)
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -268,7 +298,7 @@ func (c *snapshotCache) watch(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.watchedRefresh(ctx)
+			l.watchedRefresh(ctx)
 		}
 	}
 }
@@ -290,25 +320,25 @@ func (c *snapshotCache) watch(ctx context.Context, every time.Duration) {
 // The first load is deliberately NOT wrapped: start's awaitFirstLoad already
 // observes it on the same bound, and doubling that would emit two lines for one
 // wedge.
-func (c *snapshotCache) watchedRefresh(ctx context.Context) {
+func (l *snapshotLoader) watchedRefresh(ctx context.Context) {
 	done := make(chan struct{})
 	defer close(done)
-	go c.warnOnStalledLoad(done, warmLoadTimeout)
-	c.refresh(ctx)
+	go l.warnOnStalledLoad(done, warmLoadTimeout)
+	l.refresh(ctx)
 }
 
 // warnOnStalledLoad emits the loader's stall WARN when a load has not returned
 // within timeout, then retires. It fires at most once per load, which is at most
 // once per wedge: a wedged load holds the sole loader goroutine, so no further
 // tick - and no further watchdog - can arm behind it.
-func (c *snapshotCache) warnOnStalledLoad(done <-chan struct{}, timeout time.Duration) {
+func (l *snapshotLoader) warnOnStalledLoad(done <-chan struct{}, timeout time.Duration) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-done:
 	case <-timer.C:
-		c.log.Warn("indexer feed snapshot reload still running; this process will not pick up a new snapshot generation until it returns",
-			"path", c.path, "timeout", timeout)
+		l.log.Warn("indexer feed snapshot reload still running; this process will not pick up a new snapshot generation until it returns",
+			"path", l.path, "timeout", timeout)
 	}
 }
 
@@ -402,63 +432,64 @@ func (c *snapshotCache) feed(scope string) []journalItem {
 // deterministically-bad generation refresh already memoized (nothing reloads,
 // so "resuming reloads" would be false).
 //
-// One descriptor is the point. The previous shape observed the pathname three
-// separate times - os.Stat, os.Lstat, then atomicfile.ReadBounded's own os.Open
-// - and the app's own writer publishes by atomic rename, so a replacement
-// landing between them let refresh decode one generation's bytes while
-// recording another's FileIdentity (a deterministic failure memoized against
-// the wrong inode), and made every non-regular-file rejection a
-// check-then-open TOCTOU: a FIFO swapped in after the Lstat still blocked
-// ReadBounded's open, wedging the loader on a file it had already decided to
-// refuse - permanently, since nothing can interrupt an open blocked in the
-// kernel, so the served feed would freeze on whatever was loaded and never
-// reload again. Binding validation, identity and bytes to one descriptor closes
-// both: O_NOFOLLOW refuses a final-component symlink at open time (matching the
-// writer's ErrSymlinkTarget contract, which atomicfile.ReadBounded cannot honor
-// because os.Open follows links) and O_NONBLOCK makes a raced FIFO open return
-// immediately so the regular-file check can reject it instead of blocking
-// forever. The gate is the full regular-file predicate rather than a symlink
-// test: a socket, device, or directory left at the path is the same non-regular
-// ingress. Every rejection takes the same arm as any other open fault: warn
-// once per onset, keep the current feed, and mark the snapshot-unavailable
-// state while nothing has loaded.
-func (c *snapshotCache) openSnapshot() (*os.File, os.FileInfo, bool) {
-	f, err := os.OpenFile(c.path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+// One descriptor is the point, and atomicfile.OpenRegular owns the sequence
+// that gets it. The previous shape observed the pathname three separate times -
+// os.Stat, os.Lstat, then atomicfile.ReadBounded's own os.Open - and the app's
+// own writer publishes by atomic rename, so a replacement landing between them
+// let refresh decode one generation's bytes while recording another's
+// FileIdentity (a deterministic failure memoized against the wrong inode), and
+// made every non-regular-file rejection a check-then-open TOCTOU: a FIFO
+// swapped in after the Lstat still blocked ReadBounded's open, wedging the
+// loader on a file it had already decided to refuse - permanently, since
+// nothing can interrupt an open blocked in the kernel, so the served feed would
+// freeze on whatever was loaded and never reload again. Binding validation,
+// identity and bytes to ONE descriptor closes both, and that is the library's
+// own stated reason for existing; the three details that achieve it are named
+// at the call site below. The gate is the full regular-file predicate rather
+// than a symlink test: a socket, device, or directory left at the path is the
+// same non-regular ingress. Every rejection takes the same arm as any other
+// open fault: warn once per onset, keep the current feed, and mark the
+// snapshot-unavailable state while nothing has loaded.
+func (l *snapshotLoader) openSnapshot() (*os.File, os.FileInfo, bool) {
+	// atomicfile.OpenRegular is the library's own form of this sequence and it
+	// owns the three non-obvious details its godoc says every hand-rolling
+	// consumer re-derives: O_NOFOLLOW so the KERNEL refuses a final-component
+	// symlink (reported as ErrSymlinkTarget, the writer's own vocabulary),
+	// O_NONBLOCK so a planted FIFO is an immediate rejection rather than an
+	// uninterruptible open, and a stat of the OPEN HANDLE so the returned
+	// FileInfo describes the very inode whose bytes readSnapshot reads and whose
+	// FileIdentity is recorded. It also refuses a relative or NUL-bearing path
+	// before opening anything.
+	f, info, err := atomicfile.OpenRegular(l.path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			c.noteSnapshotAbsent()
-			return nil, nil, false
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			l.noteSnapshotAbsent()
+		case errors.Is(err, atomicfile.ErrNotRegular):
+			// A directory, FIFO, socket, or device node left at the snapshot
+			// path; the error names the actual mode type.
+			l.noteStatFault("indexer feed snapshot path is not a regular file; refusing to load it", "error", err)
+		default:
+			// Anything else (EACCES, EIO, and ELOOP/ErrSymlinkTarget for a
+			// symlink at the final component) silently freezes the served
+			// feed, so make it visible - once per onset, not once per request.
+			l.noteStatFault("indexer feed snapshot open failed; keeping current feed", "error", err)
 		}
-		// Anything else (EACCES, EIO, and ELOOP for a symlink at the final
-		// component) silently freezes the served feed, so make it visible -
-		// once per onset, not once per request.
-		c.noteStatFault("indexer feed snapshot open failed; keeping current feed", "error", err)
 		return nil, nil, false
 	}
-	info, serr := f.Stat()
-	if serr != nil {
-		f.Close()
-		c.noteStatFault("indexer feed snapshot stat failed; keeping current feed", "error", serr)
-		return nil, nil, false
-	}
-	if !info.Mode().IsRegular() {
-		f.Close()
-		c.noteStatFault("indexer feed snapshot path is not a regular file; refusing to load it", "mode", info.Mode().String())
-		return nil, nil, false
-	}
-	if c.snapMissing {
-		c.snapMissing = false
-		if c.matchesFailedFile(info) {
+	if l.snapMissing {
+		l.snapMissing = false
+		if l.matchesFailedFile(info) {
 			// The file is back but it is the same deterministically-bad
 			// generation refresh already memoized, so nothing will reload
 			// (skipMemoizedMalformed returns before the read) and the served
 			// feed stays frozen on the last-good snapshot with no further
 			// signal. Saying "resuming reloads" here would be the last line the
 			// operator sees, and it would be false.
-			c.log.Warn("indexer feed snapshot reappeared but is the same malformed file; still serving the last loaded feed",
-				"path", c.path)
+			l.log.Warn("indexer feed snapshot reappeared but is the same malformed file; still serving the last loaded feed",
+				"path", l.path)
 		} else {
-			c.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", c.path)
+			l.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", l.path)
 		}
 	}
 	return f, info, true
@@ -475,21 +506,19 @@ func (c *snapshotCache) openSnapshot() (*os.File, os.FileInfo, bool) {
 // degradation episode: clear the transient flag (no recovery INFO - nothing was
 // reloaded; the missing state has its own once-per-disappearance WARN) so the
 // next fault onset warns again instead of being suppressed by a stale flag.
-func (c *snapshotCache) noteSnapshotAbsent() {
-	c.reloadDegraded = false
-	c.mu.RLock()
-	loaded := c.installed
-	c.mu.RUnlock()
+func (l *snapshotLoader) noteSnapshotAbsent() {
+	l.reloadDegraded = false
+	loaded := l.cache.hasInstalled()
 	if !loaded {
 		// A genuinely absent first snapshot IS the fresh-install state -
 		// serving the empty feed is intentional there - so an earlier load
 		// fault stops blocking requests once the bad file is gone (deleting it
 		// returns to fresh-install semantics).
-		c.clearSnapshotFailed()
+		l.cache.clearSnapshotFailed()
 	}
-	if loaded && !c.snapMissing {
-		c.snapMissing = true
-		c.log.Warn("indexer feed snapshot missing; serving last loaded feed until it reappears", "path", c.path)
+	if loaded && !l.snapMissing {
+		l.snapMissing = true
+		l.log.Warn("indexer feed snapshot missing; serving last loaded feed until it reappears", "path", l.path)
 	}
 }
 
@@ -497,13 +526,13 @@ func (c *snapshotCache) noteSnapshotAbsent() {
 // freezes the served feed (an unreadable file, a non-regular path): mark the
 // snapshot-unavailable state while nothing has loaded, then WARN once per onset
 // rather than once per request.
-func (c *snapshotCache) noteStatFault(msg string, attrs ...any) {
-	c.markSnapshotFailedIfUnloaded()
-	if c.reloadDegraded {
+func (l *snapshotLoader) noteStatFault(msg string, attrs ...any) {
+	l.cache.markSnapshotFailedIfUnloaded()
+	if l.reloadDegraded {
 		return
 	}
-	c.reloadDegraded = true
-	c.log.Warn(msg, append([]any{"path", c.path}, attrs...)...)
+	l.reloadDegraded = true
+	l.log.Warn(msg, append([]any{"path", l.path}, attrs...)...)
 }
 
 // snapshotLoadGate is a test seam (see snapshotUnavailableGate for the pattern)
@@ -513,7 +542,7 @@ func (c *snapshotCache) noteStatFault(msg string, attrs ...any) {
 // wedge - or to be slow at a chosen instant - on demand. A no-op in production.
 var snapshotLoadGate = func() {}
 
-// reload refreshes the served feed from the persisted snapshot when the file
+// refresh reloads the served feed from the persisted snapshot when the file
 // on disk differs from the loaded copy by mtime or file identity (or nothing
 // is loaded yet). A compare cycle in ANOTHER process (the `poll` subcommand)
 // rewrites the snapshot atomically, so a cheap stat per tick picks up its feed
@@ -531,8 +560,8 @@ var snapshotLoadGate = func() {}
 // is load-bearing rather than incidental: being sequential is what lets the
 // reload-only fields go unlocked and removes any need to coalesce. It is not
 // safe to call concurrently with the loader.
-func (c *snapshotCache) refresh(ctx context.Context) {
-	if c.path == "" {
+func (l *snapshotLoader) refresh(ctx context.Context) {
+	if l.path == "" {
 		return
 	}
 	// Recorded BEFORE the file is opened: everything below derives from the
@@ -540,14 +569,14 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 	// orders the result against (see the installSeq field). Reading it after
 	// the load would compare the read against its own outcome and order
 	// nothing.
-	readFrom := c.installedSeq()
+	readFrom := l.cache.installedSeq()
 	snapshotLoadGate()
-	f, info, ok := c.openSnapshot()
+	f, info, ok := l.openSnapshot()
 	if !ok {
 		return
 	}
 	defer f.Close()
-	if c.skipMemoizedMalformed(info) {
+	if l.skipMemoizedMalformed(info) {
 		return
 	}
 	// A degraded reload must not take the unchanged-loaded-snapshot fast
@@ -557,35 +586,36 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 	// warning is suppressed by the stale flag. Forcing one bounded read
 	// clears the state through the recovery block below; a persistent read
 	// fault keeps it degraded without falsely declaring recovery.
-	if c.loadedSnapshotUnchanged(info) && !c.reloadDegraded {
+	if l.cache.loadedSnapshotUnchanged(info) && !l.reloadDegraded {
 		return
 	}
-	snap, ok, memoize := c.readSnapshot(ctx, f)
+	snap, ok, memoize := l.readSnapshot(ctx, f)
 	if !ok {
-		c.recordSnapshotFailure(info, memoize)
+		l.recordSnapshotFailure(info, memoize)
 		return
 	}
-	c.failedID = atomicfile.FileIdentity{}
-	if c.reloadDegraded {
-		c.reloadDegraded = false
-		c.log.Info("indexer feed snapshot reload recovered", "path", c.path)
+	l.failedID = atomicfile.FileIdentity{}
+	if l.reloadDegraded {
+		l.reloadDegraded = false
+		l.log.Info("indexer feed snapshot reload recovered", "path", l.path)
 	}
-	if !c.installLoaded(info, &snap, readFrom) {
+	if !l.cache.installLoaded(info, &snap, readFrom) {
 		// Either the generation is already installed (the ordinary skip) or a
 		// newer snapshot was installed while this one was being read, in which
 		// case discarding it is the point (see installLoaded). Neither is a
 		// fault; the next tick reloads if the file's identity says to.
-		c.log.Debug("indexer feed snapshot reload discarded; nothing newer to install",
-			"path", c.path)
+		l.log.Debug("indexer feed snapshot reload discarded; nothing newer to install",
+			"path", l.path)
 		return
 	}
-	c.log.Info("indexer feed snapshot loaded",
-		"path", c.path, "owners", len(snap.Owners),
-		"hashes", len(c.curation().byHash), "keys", len(c.curation().byKey),
+	cur := l.cache.curation()
+	l.log.Info("indexer feed snapshot loaded",
+		"path", l.path, "owners", len(snap.Owners),
+		"hashes", len(cur.byHash), "keys", len(cur.byKey),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed))
 }
 
-// skipMemoizedMalformed applies reload's memoized-malformed-file arm: it
+// skipMemoizedMalformed applies refresh's memoized-malformed-file arm: it
 // reports whether the stat'ed file is the memoized malformed snapshot,
 // unchanged, and if so re-asserts the snapshot-unavailable state and clears
 // the transient degradation flag. The memoized malformed snapshot fails
@@ -603,16 +633,16 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 // without re-asserting here the pre-load state machine would treat the bad
 // snapshot as a valid fresh install and serve false-empty success instead of
 // a Torznab error.
-func (c *snapshotCache) skipMemoizedMalformed(info os.FileInfo) bool {
-	if !c.matchesFailedFile(info) {
+func (l *snapshotLoader) skipMemoizedMalformed(info os.FileInfo) bool {
+	if !l.matchesFailedFile(info) {
 		return false
 	}
-	c.markSnapshotFailedIfUnloaded()
-	c.reloadDegraded = false
+	l.cache.markSnapshotFailedIfUnloaded()
+	l.reloadDegraded = false
 	return true
 }
 
-// recordSnapshotFailure applies reload's failed-read memo policy. Only a
+// recordSnapshotFailure applies refresh's failed-read memo policy. Only a
 // deterministic content failure is memoized: bytes that decode the same way on
 // every read (malformed JSON, a structurally invalid document) or a file whose
 // size alone already exceeds the shared cap. Recoverable read failures can
@@ -622,10 +652,10 @@ func (c *snapshotCache) skipMemoizedMalformed(info os.FileInfo) bool {
 // memoize=false. memoize=true means the failure is reproducible from the same
 // inode/mtime, so the memo holds even when the requesting context was cancelled
 // after the read completed.
-func (c *snapshotCache) recordSnapshotFailure(info os.FileInfo, memoize bool) {
-	c.failedID = atomicfile.FileIdentity{}
+func (l *snapshotLoader) recordSnapshotFailure(info os.FileInfo, memoize bool) {
+	l.failedID = atomicfile.FileIdentity{}
 	if memoize {
-		c.failedID = atomicfile.Identify(info)
+		l.failedID = atomicfile.Identify(info)
 	}
 }
 
@@ -644,10 +674,10 @@ func (c *snapshotCache) loadedSnapshotUnchanged(info os.FileInfo) bool {
 // matchesFailedFile reports whether the stat'ed snapshot file is the memoized
 // malformed file, unchanged by the same identity test as the loaded leg: an
 // unchanged malformed file fails deterministically, so it is never re-read
-// (reload clears only the transient reloadDegraded flag and returns), while any
+// (refresh clears only the transient reloadDegraded flag and returns), while any
 // mtime or identity change means new bytes worth retrying.
-func (c *snapshotCache) matchesFailedFile(info os.FileInfo) bool {
-	return c.failedID.Matches(info)
+func (l *snapshotLoader) matchesFailedFile(info os.FileInfo) bool {
+	return l.failedID.Matches(info)
 }
 
 // installSnapshot publishes snap as the served feed under mu, recording the
@@ -674,6 +704,16 @@ func (c *snapshotCache) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 	c.snapFailed = false
 	c.snapFailedWarned = false
 	return true
+}
+
+// hasInstalled reports whether SOME snapshot is being served (see the installed
+// field). It is the loader's mu-guarded read of that fact: the loader owns no
+// lock primitive of its own, so the missing-file policy asks through here
+// instead of taking mu directly.
+func (c *snapshotCache) hasInstalled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.installed
 }
 
 // installedSeq reads the cache's current install ordering position, which a
@@ -786,7 +826,7 @@ func (c *snapshotCache) clearSnapshotFailed() {
 	c.snapFailedWarned = false
 }
 
-// readSnapshot is reload's read/decode error policy: it bounded-reads f - the
+// readSnapshot is refresh's read/decode error policy: it bounded-reads f - the
 // descriptor openSnapshot already validated, so the bytes decoded here are
 // exactly the ones the recorded FileIdentity describes - and decodes the
 // persisted feed snapshot, reporting ok=false on any failure so
@@ -799,17 +839,17 @@ func (c *snapshotCache) clearSnapshotFailed() {
 // never shrinks on its own; the writer's classifyPreviousReadError classifies
 // it the same way). A recoverable read failure (EIO, a fixable EACCES) can
 // succeed without changing inode or mtime, so it stays retryable.
-func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot, bool, bool) {
+func (l *snapshotLoader) readSnapshot(ctx context.Context, f *os.File) (snapshot, bool, bool) {
 	data, err := atomicfile.ReadBoundedFile(ctx, f, maxFeedBytes)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			// A shutdown cancellation is silent and never marks the
 			// snapshot-unavailable state (the file was never actually read;
 			// a retry could succeed).
-			c.markSnapshotFailedIfUnloaded()
-			if !c.reloadDegraded {
-				c.reloadDegraded = true
-				c.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", c.path, "error", err)
+			l.cache.markSnapshotFailedIfUnloaded()
+			if !l.reloadDegraded {
+				l.reloadDegraded = true
+				l.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", l.path, "error", err)
 			}
 		}
 		// An over-cap file is the one pre-decode failure that is deterministic
@@ -820,11 +860,11 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 	}
 	snap, scrub, reason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
-		c.markSnapshotFailedIfUnloaded()
+		l.cache.markSnapshotFailedIfUnloaded()
 		// Bounded through the shared emit-boundary policy: a decoder error can
 		// embed the offending document text (encoding/json quotes an over-range
 		// numeric literal verbatim), and feed.json is a tamperable boundary.
-		c.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", c.path, "error", capLogText(decodeErr.Error(), 256))
+		l.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", l.path, "error", capLogText(decodeErr.Error(), 256))
 		return snapshot{}, false, true
 	}
 	// `null` or `{}` decodes cleanly into a zero value; nil curation maps
@@ -835,11 +875,11 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 	// decodeSnapshot drops that item and reports the count per feed (see
 	// warnDroppedItems).
 	if reason != "" {
-		c.markSnapshotFailedIfUnloaded()
-		c.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", c.path, "reason", reason)
+		l.cache.markSnapshotFailedIfUnloaded()
+		l.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", l.path, "reason", reason)
 		return snapshot{}, false, true
 	}
-	reportUnsupportedVersion(c.log, c.path, &snap)
+	reportUnsupportedVersion(l.log, l.path, &snap)
 	// A persisted FirstSeen ahead of the wall clock is repaired on the writer's
 	// carry path (prepareCarriedItem), but the reader installs the decoded feed
 	// directly: without the same correction a restored future-skewed or
@@ -850,13 +890,13 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 	now := time.Now().UTC()
 	if rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now); rebased > 0 {
 		// Counts only; the rejected timestamp comes from a tamperable file.
-		c.log.Warn("indexer feed snapshot: future item timestamps rebased to load time",
-			"path", c.path, "rebased", rebased)
+		l.log.Warn("indexer feed snapshot: future item timestamps rebased to load time",
+			"path", l.path, "rebased", rebased)
 	}
-	snap.ABFeed = c.rebuildABDownloadURLs(snap.ABFeed)
-	snap.NyaaFeed = c.rebuildNyaaDownloadURLs(snap.NyaaFeed)
-	c.warnBlankedInfoURLs(scrub)
-	c.warnDroppedItems(scrub)
+	snap.ABFeed = l.cache.rebuildABDownloadURLs(snap.ABFeed)
+	snap.NyaaFeed = l.cache.rebuildNyaaDownloadURLs(snap.NyaaFeed)
+	l.cache.warnBlankedInfoURLs(scrub)
+	l.cache.warnDroppedItems(scrub)
 	return snap, true, false
 }
 
@@ -1208,12 +1248,12 @@ var snapshotUnavailableGate = func() {}
 // and never from whether a load is in flight: a load is the cache's business,
 // not the request's. That ordering is the whole point. loadPending() stays true
 // from start() until the loader's first refresh returns, that load is an
-// uninterruptible os.OpenFile + File.Stat on /config/feed.json (warmLoadTimeout
-// bounds the WAIT, never the load), so on a wedged /config mount it is true for
-// the process's whole life - and consulting it first meant every Torznab request
-// answered a fault even after the compare cycle had published a complete
-// snapshot in-process. Serving must not depend on the snapshot's load: neither
-// performing it nor being failed by it.
+// uninterruptible atomicfile.OpenRegular + File.Stat on /config/feed.json
+// (warmLoadTimeout bounds the WAIT, never the load), so on a wedged /config
+// mount it is true for the process's whole life - and consulting it first meant
+// every Torznab request answered a fault even after the compare cycle had
+// published a complete snapshot in-process. Serving must not depend on the
+// snapshot's load: neither performing it nor being failed by it.
 //
 // So the questions are asked in that order: something installed is served; else
 // a load fault that happened before anything was installed (the snapFailed

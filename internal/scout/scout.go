@@ -224,12 +224,17 @@ type Scout struct {
 	// pollInterval is the loop's own interval, which decides how many ticks
 	// separate two reconciles (see reconcileEvery).
 	pollInterval time.Duration
-	// iterations counts loop iterations, so every reconcileEvery-th one
-	// reconciles. It lives HERE and not in the loop closure: the scheduler's
-	// Cycler is Cycle(ctx) bool, and a counter in the closure would not advance
-	// on an iteration the cross-process lock skipped - silently losing a
-	// reconcile. Keeping it on the Scout also makes an exec'd `poll` participate
-	// without a flag of its own.
+	// iterations counts the loop iterations that actually RAN a cycle, so every
+	// reconcileEvery-th one reconciles. It lives HERE and not in cycle.RunLoop's
+	// outer tick closure, because that closure runs on EVERY timer tick -
+	// including one the cross-process lock skipped - so a counter there would
+	// consume a reconcile slot on a tick that ran nothing and silently lose that
+	// reconcile for a whole reconcileInterval. Held on the Scout it advances only
+	// when Cycle is actually invoked (ex.RunOrSkip calls the inner job body only
+	// after acquiring the lock), so a skipped tick DEFERS the reconcile by one
+	// iteration instead of dropping it. Keeping it here also makes an exec'd
+	// `poll` participate without a flag of its own: a fresh process starts at
+	// zero, so every poll is a full reconcile.
 	iterations int
 	// emptyRun counts consecutive ticks whose window held nothing,
 	// oversizeRun counts consecutive ticks whose window was too large to fetch,
@@ -360,9 +365,9 @@ func (s *Scout) cycleDegraded(reason string, attrs ...any) {
 
 // cycleGateDegraded closes a reconcile that was GATED before the compare: it
 // re-states the finding set and then emits the degraded completion line. It is
-// tickDegraded's reconcile twin, and it exists because the alerting contract has
-// TWO halves, not one. A pass that compared nothing learned nothing that could
-// resolve a standing finding, so staying silent through it lets the rules'
+// closeDegradedTick's reconcile twin, and it exists because the alerting contract
+// has TWO halves, not one. A pass that compared nothing learned nothing that
+// could resolve a standing finding, so staying silent through it lets the rules'
 // lookback expire every open row and then re-fire the whole set as new (see
 // notify.Reemit, and alerts.yaml's SeadexScoutBetterReleaseFound, whose [12h]
 // window is documented against "every iteration re-emits the whole open set").
@@ -478,9 +483,9 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		// whole-cycle skip for this one case; a transient AniList degradation
 		// instead carries Result.IncompleteIDs and flows into the compare
 		// below with exactly the affected entries' rows carried forward.
-		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, result)
+		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, &result)
 	}
-	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result, mapErr, shrunkArrs)
+	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, &result, mapErr, shrunkArrs)
 }
 
 // warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics
@@ -705,7 +710,7 @@ func (s *Scout) aniListCycleAttrs(startStats AniListStats) []any {
 // redeploy is not an ingest fault. A transient AniList degradation never lands
 // here - the completed match carries Result.IncompleteIDs and
 // finishCompletedCycle preserves exactly the affected entries' findings.
-func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
+func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result *match.Result) bool {
 	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
 	s.save(ctx, st)
 	attrs := append(s.aniListCycleAttrs(startStats),
@@ -734,7 +739,7 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 // entries' findings are recomputed from the carried items and re-reported by the
 // same full-authority Report call every clean cycle uses. It only decides the
 // completion line's severity. Always healthy.
-func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error, shrunkArrs []string) bool {
+func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result *match.Result, mapErr error, shrunkArrs []string) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.comparer.Compare(cleanMatches)
 	// Findings are reported as STATE: notify re-emits the whole current set and
@@ -766,9 +771,9 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	attrs = append(attrs,
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
 		"duration", time.Since(start).Round(time.Millisecond).String())
-	s.recordAniListDegradation(st, &result)
+	s.recordAniListDegradation(st, result)
 	s.recordPartialWalk(st, &snap)
-	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
+	s.logCompletedCycle(&snap, result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
 	// A SECOND line, deliberately, carrying nothing but the fact that a full
 	// pass finished. The scan deadman counts cycle/tick completion lines, and
 	// once most iterations are ticks it can no longer tell "the loop is alive"

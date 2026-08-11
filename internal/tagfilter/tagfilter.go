@@ -8,9 +8,9 @@
 // default: a zero Filter excludes nothing anywhere, so an absent config and a
 // test literal behave identically. Nothing here knows the SeaDex tag
 // vocabulary - any tag the operator names is filterable - and nothing here
-// decides DISPLAY: release.CurationWarnings still annotates a warned release
-// with its fixed broken/incomplete vocabulary whether or not this policy
-// filters it.
+// decides DISPLAY: internal/audit's curationWarnings still annotates a warned
+// release with its fixed broken/incomplete vocabulary whether or not this
+// policy filters it.
 //
 // Matching is exact and case-insensitive, never substring, so a stray upstream
 // tag that merely contains a configured tag cannot trip a gate.

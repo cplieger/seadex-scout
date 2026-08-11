@@ -466,6 +466,24 @@ func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 			wantError: "mapping: overrides.json unreadable",
 			wantLogs:  1,
 		},
+		"unreadable through a non-directory config dir": {
+			setup: func(t *testing.T) string {
+				// The overrides file's PARENT is a regular file, so os.OpenRoot
+				// fails before the bounded read runs. Its *fs.PathError carries
+				// ENOTDIR and does NOT satisfy errors.Is(err, fs.ErrNotExist),
+				// which is the only thing keeping this on the unreadable ERROR
+				// arm instead of the silent no-overrides-configured one - and
+				// a silent arm here leaves the overlay inert on every cycle
+				// with nothing in the log stream to say so.
+				dir := filepath.Join(t.TempDir(), "config")
+				if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+					t.Fatalf("write non-directory config path: %v", err)
+				}
+				return filepath.Join(dir, "overrides.json")
+			},
+			wantError: "mapping: overrides.json unreadable",
+			wantLogs:  1,
+		},
 		"malformed": {
 			setup: func(t *testing.T) string {
 				path := filepath.Join(t.TempDir(), "overrides.json")

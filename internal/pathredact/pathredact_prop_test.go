@@ -35,13 +35,13 @@ func TestTextPropertyMasksEveryPathForm(t *testing.T) {
 		}).Draw(t, "form")
 		text := noise.Draw(t, "prefix") + form + noise.Draw(t, "suffix")
 
-		got := Text(dir, marker, text)
+		got := Text(dir, text)
 
 		if strings.Contains(got, secret) {
 			t.Errorf("Text(%q, %q) = %q, leaked the secret-capable dir component", dir, text, got)
 		}
-		if !strings.Contains(got, marker) {
-			t.Errorf("Text(%q, %q) = %q, want the %q marker", dir, text, got, marker)
+		if !strings.Contains(got, ReportDirMarker) {
+			t.Errorf("Text(%q, %q) = %q, want the %q marker", dir, text, got, ReportDirMarker)
 		}
 	})
 }

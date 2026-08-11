@@ -399,7 +399,7 @@ func TestLookup(t *testing.T) {
 			t.Errorf("Lookup(%q) has an empty BaseURL; every table entry carries one", tc.in)
 		}
 	}
-	for _, in := range []string{"", "   ", "beyondhd", "bhd", "passthepopcorn", "ptp", "broadcasthenet", "btn", "hdbits", "blutopia", "aither", "SomeRandomTracker"} {
+	for _, in := range []string{"", "   ", "beyondhd", "bhd", "passthepopcorn", "ptp", "broadcasthenet", "btn", "hdbits", "blutopia", "aither", "SomeRandomTracker", "An\u0130meBytes", "rutrac\u212Aer", "an\u0130metosho"} {
 		if _, ok := Lookup(in); ok {
 			t.Errorf("Lookup(%q) found, want not found", in)
 		}

@@ -91,7 +91,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
 	if runHealthProbe(args) {
 		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
 		// (a contract change in the separately versioned health dependency),
@@ -103,6 +102,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Resolved after the health fast path: the probe reads only the marker, so it
+	// must not depend on anything the operator can set (see runHealthProbe).
+	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
 	cfg, err := loadRuntimeConfig(configPath)
 	if err != nil {
 		// Every terminal outcome (a starter written on first boot, a starter
@@ -297,7 +299,7 @@ func runReport(cfg *config.Config) (err error) {
 	// here, from the shared internal/pathredact leaf.
 	release, err := cycle.TryReportLock(cfg.ReportDir)
 	if err != nil {
-		return pathredact.Err(cfg.ReportDir, pathredact.ReportDirMarker, err)
+		return pathredact.Err(cfg.ReportDir, err)
 	}
 	defer release()
 
@@ -325,10 +327,10 @@ func runReport(cfg *config.Config) (err error) {
 	// diagnostics, the pair is the product. The row error is still reported when
 	// the write itself succeeds, so an interrupted run keeps its non-zero exit.
 	logErr := rep.Log(ctx, slog.Default())
-	writeCtx, cancel := cycle.DetachedWriteContext(ctx)
+	writeCtx, cancel := shutdown.DetachedWriteContext(ctx)
 	defer cancel()
 	if werr := rep.WriteFiles(writeCtx, cfg.ReportDir, slog.Default()); werr != nil {
-		return cycle.DetachedWriteError(ctx, werr)
+		return shutdown.DetachedWriteError(ctx, werr)
 	}
 	return logErr
 }

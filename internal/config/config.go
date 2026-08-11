@@ -327,16 +327,11 @@ type Config struct {
 // cannot carry an expanded secret — while duplicate-key names and scalar
 // excerpts stay redacted per the library default.
 func Load(path string) (Config, error) {
-	// The shared atomicfile bounded reader (the same primitive
-	// writeStarterConfig and internal/state use) enforces the size cap and
-	// returns the atomicfile.ErrFileTooLarge sentinel on an oversized file.
-	// Config load is a synchronous startup step with no cancellation point,
-	// so it passes context.Background(), matching writeStarterConfig.
-	raw, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
+	raw, info, err := readConfigFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	warnConfigPermissions(path)
+	warnConfigPermissions(info)
 	fc := defaultFileConfig()
 	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
 		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho()))
@@ -349,6 +344,48 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return fc.toConfig(), nil
+}
+
+// readConfigFile reads the config through an os.Root over its own directory,
+// so the read can neither be redirected out of the config directory nor
+// block: atomicfile.OpenRegularInRoot opens through the root with O_NONBLOCK
+// and refuses a directory, FIFO, device node or socket with ErrNotRegular,
+// where atomicfile.ReadBounded's own os.Open follows a symlink and blocks
+// indefinitely on a FIFO with no writer - and this read runs at startup on
+// context.Background(), before any diagnostic, so a planted FIFO wedges the
+// process silently and the health marker is never written.
+// internal/state.readState, internal/mapping.readOverridesFile and
+// internal/indexer.openSnapshot already read their /config files this way,
+// for this reason.
+//
+// It returns the FileInfo of the OPEN descriptor so the permission warning
+// certifies the inode whose bytes were loaded; stat'ing the pathname a second
+// time can report one file's mode for another file's contents.
+// ErrFileTooLarge is unchanged (ReadBoundedFile raises the same sentinel).
+func readConfigFile(path string) (raw []byte, info os.FileInfo, err error) {
+	dir := filepath.Dir(path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if clErr := root.Close(); clErr != nil {
+			slog.Warn("could not close config directory handle",
+				"field", "config dir", "error", clErr)
+		}
+	}()
+	f, info, err := atomicfile.OpenRegularInRoot(root, filepath.Base(path))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	// Config load is a synchronous startup step with no cancellation point,
+	// so it passes context.Background(), matching writeStarterConfig.
+	raw, err = atomicfile.ReadBoundedFile(context.Background(), f, maxConfigBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return raw, info, nil
 }
 
 // --- Flattening to the runtime Config ---
@@ -662,8 +699,13 @@ func (c *Config) warnPublicURLProblems() {
 // newly refuse configs that load today; field-name-only, since report.dir is
 // secret-capable (internal/audit redacts it for that reason).
 func (c *Config) warnRelativeReportDir() {
-	if c.ReportDir != "" && !filepath.IsAbs(c.ReportDir) {
-		slog.Warn("report.dir is not an absolute path; report writes are rejected "+
+	// The predicate is atomicfile.ValidatePath, not filepath.IsAbs: it is the
+	// exported face of the very rule the report write applies later, so this
+	// warning cannot accept a value that gate refuses (IsAbs admits an embedded
+	// NUL byte, which every atomicfile write rejects). Error text is not echoed:
+	// report.dir is secret-capable, so the diagnostic stays field-name-only.
+	if c.ReportDir != "" && atomicfile.ValidatePath(c.ReportDir) != nil {
+		slog.Warn("report.dir is not a usable absolute path; report writes are rejected "+
 			"at the end of a report run and neither report file is written - use an "+
 			"absolute path under the /config mount", "field", "report.dir")
 	}
@@ -702,9 +744,10 @@ func (c *Config) warnRelativeReportDir() {
 func (c *Config) warnUnexpandedSecretRefs() {
 	if secretref.Unexpanded(c.IndexerABPasskey) {
 		slog.Warn("a secret still holds a literal environment-variable reference; only "+
-			"${VAR} names prefixed SONARR_/RADARR_/SEADEX_SCOUT_ are expanded, so the "+
-			"literal placeholder is sent as the credential and every call to that "+
-			"upstream fails to authenticate", "field", "indexer.ab_passkey")
+			"${VAR} names prefixed "+envAllowlistSpelling+" are expanded, so the "+
+			"literal placeholder is baked into every /ab RSS download link - this app "+
+			"reports a served feed while every arr grab fails at AnimeBytes",
+			"field", "indexer.ab_passkey")
 	}
 }
 
@@ -892,10 +935,8 @@ func (c *Config) validateFeedAPIKey() error {
 		// subset of this one - a second, weaker spelling of a rule that already
 		// decided.
 		if strings.ContainsRune(c.IndexerAPIKey, '$') {
-			msg += "; it looks like an environment-variable reference left unexpanded, so the " +
-				"variable is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_) and the feed " +
-				"would be gated by that literal placeholder - a key guessable from the public " +
-				"README and config.example"
+			msg += unexpandedRefHint + " and the feed would be gated by that literal " +
+				"placeholder - a key guessable from the public README and config.example"
 		}
 		return errors.New(msg)
 	}
@@ -904,8 +945,9 @@ func (c *Config) validateFeedAPIKey() error {
 	// guessable hand-typed key deserves a config-time signal without rejecting
 	// a config that runs today. Field-name-only (never echo the key).
 	if len(c.IndexerAPIKey) < 16 {
-		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the " +
-			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
+		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the "+
+			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)",
+			"field", "indexer.feed_api_key")
 	}
 	return nil
 }
@@ -985,8 +1027,7 @@ func (c *Config) validateABPasskey() error {
 		"Prowlarr accept for the same credential) - copy it from your AnimeBytes profile, or " +
 		"leave it empty to serve the feed without AnimeBytes download links"
 	if secretref.Unexpanded(c.IndexerABPasskey) {
-		msg += "; it looks like an environment-variable reference left unexpanded, so the variable " +
-			"is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_)"
+		msg += unexpandedRefHint
 	}
 	return errors.New(msg)
 }
@@ -1083,9 +1124,7 @@ func checkAPIKeyShape(field, v string) error {
 		"with no spaces and no '$' - Sonarr, Radarr and Prowlarr generate a " +
 		"32-character hex key, shown under Settings -> General -> API Key"
 	if strings.ContainsRune(v, '$') {
-		msg += "; it looks like an environment-variable reference left unexpanded, so the " +
-			"variable is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_) and that " +
-			"literal placeholder would be sent as the credential"
+		msg += unexpandedRefHint + " and that literal placeholder would be sent as the credential"
 	}
 	return errors.New(msg)
 }
@@ -1097,7 +1136,9 @@ func checkAPIKeyShape(field, v string) error {
 // but a deliberately custom key is legitimate and must not be refused.
 // Field-name-only; never echoes the key.
 func warnUnexpectedAPIKeyShape(field, v string) {
-	if v == "" || generatedArrAPIKey(v) {
+	// v is non-empty by construction: both callers run this only after
+	// checkAPIKeyShape returned nil, and wellFormedCredential refuses "".
+	if generatedArrAPIKey(v) {
 		return
 	}
 	slog.Warn("api key is not the shape Sonarr/Radarr/Prowlarr generate "+
@@ -1168,10 +1209,10 @@ func (c *Config) warnNonPerIndexerEndpoints() {
 		if tu.val == "" {
 			continue
 		}
-		u, err := url.Parse(tu.val)
-		if err != nil {
-			continue // validateIndexerEndpoints already rejected it
-		}
+		// validateIndexerEndpoints parsed this same immutable string above and
+		// refused every value url.Parse rejects, so the error cannot occur here
+		// (the posture validateArrPair already takes on its own re-parse).
+		u, _ := url.Parse(tu.val)
 		if p := strings.TrimSuffix(u.Path, "/"); p == "" || strings.HasPrefix(p, "/api/v1") {
 			slog.Warn("torznab url is not a Prowlarr per-indexer Torznab endpoint "+
 				"(expected a path like /1/api); every proxied search "+
@@ -1197,8 +1238,9 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// the documented off switch. Testing for a placeholder here too would be a
 	// second spelling of a rule that already decided.
 	if c.IndexerABTorznabURL != "" && c.IndexerABPasskey == "" {
-		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, " +
-			"but the /ab RSS feed returns a Torznab error until a passkey is configured")
+		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, "+
+			"but the /ab RSS feed returns a Torznab error until a passkey is configured",
+			"field", "indexer.ab_passkey")
 	}
 	// The inverse half-configuration: a passkey with no AB Torznab URL is
 	// inert - the AB URL is the AnimeBytes on switch, so neither AB
@@ -1206,8 +1248,9 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// infoDisabledIndexerKeys: a deliberately parked passkey must not raise
 	// Loki alert noise. Field-name-only; never echoes the secret.
 	if c.IndexerABTorznabURL == "" && c.IndexerABPasskey != "" {
-		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; " +
-			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)")
+		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; "+
+			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)",
+			"field", "indexer.ab_passkey")
 	}
 	// The third AB half-configuration, and the only one that narrows the
 	// MONITORING half: the top-level animebytes toggle and the indexer's AB
@@ -1215,16 +1258,17 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// the filter keys) sitting in different config sections, so configuring AB
 	// for the feed while leaving animebytes at its false default is a plausible
 	// miss. The feed then hands the arrs grabbable AnimeBytes releases while
-	// compare and audit drop every AB release and link (classify.ABVisible /
-	// filter.Obtainable), so a show whose only best release is on AB is never
+	// compare and audit drop every AB release and link (classify.Obtainable /
+	// filter.ABVisible), so a show whose only best release is on AB is never
 	// alerted on and never appears in the report. Info, mirroring the other
 	// half-configuration signals: the split is legitimate (an operator may want
 	// arr-side grabs without AB alerts), so it must not raise Loki alert noise.
 	// Field-name-only; echoes no value.
 	if c.IndexerABTorznabURL != "" && !c.AnimeBytes {
-		slog.Info("indexer.ab_torznab_url is set but animebytes is false; the Torznab feed " +
-			"serves AnimeBytes releases while findings and the report drop every AB release " +
-			"and link - set animebytes: true to alert on them too")
+		slog.Info("indexer.ab_torznab_url is set but animebytes is false; the Torznab feed "+
+			"serves AnimeBytes releases while findings and the report drop every AB release "+
+			"and link - set animebytes: true to alert on them too",
+			"field", "animebytes")
 	}
 }
 
@@ -1264,9 +1308,10 @@ func (c *Config) warnReusedIndexerSecrets() {
 // validateProwlarrAPIKey, so this diagnostic never has to reason about shape.
 func (c *Config) warnMissingProwlarrKey() {
 	if c.IndexerProwlarrAPIKey == "" {
-		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key - " +
-			"unless Prowlarr auth is disabled for local addresses they fail upstream (401) and " +
-			"every search answers the arr with a Torznab <error code=\"900\"> instead of results")
+		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key - "+
+			"unless Prowlarr auth is disabled for local addresses they fail upstream (401) and "+
+			"every search answers the arr with a Torznab <error code=\"900\"> instead of results",
+			"field", "indexer.prowlarr_api_key")
 	}
 }
 
@@ -1279,7 +1324,8 @@ func (c *Config) warnMissingProwlarrKey() {
 func (c *Config) infoDisabledIndexerKeys() {
 	// indexer.feed_api_key is deliberately NOT a trigger, unlike the other two:
 	// the first-boot starter this app writes SEEDS it with a generated key
-	// (seedFeedAPIKey), so every default no-indexer deployment carries one.
+	// (SeedStarter, starter.go), so every default no-indexer deployment carries
+	// one.
 	// Including it made the signal fire on the correct default configuration at
 	// every start, telling an operator who never asked for the feed to go
 	// configure a torznab url - and destroyed the only thing the signal is for,
@@ -1451,10 +1497,29 @@ func urlEmbedsCredential(rawURL string) bool {
 // stray ${HOME} or ${PATH} in the file is left literal. It is the allowlist
 // policy Load hands to yamlenv.Expand (the shared post-parse, string-values-only
 // expansion engine).
+// allowedEnvPrefixes is the ${VAR} expansion allowlist and the ONE place the
+// set is written: isAllowedEnvVar is the rule, envAllowlistSpelling is its
+// operator-facing rendering, and unexpandedRefHint is the clause three
+// credential errors quote - so adding or renaming a prefix cannot leave a
+// diagnostic naming a set the expander no longer uses.
+var allowedEnvPrefixes = []string{"SONARR_", "RADARR_", "SEADEX_SCOUT_"}
+
+// envAllowlistSpelling renders allowedEnvPrefixes the way every config
+// diagnostic quotes it.
+var envAllowlistSpelling = strings.Join(allowedEnvPrefixes, "/")
+
+// unexpandedRefHint is the shared clause a credential error appends when the
+// refused value carries a '$'. Callers append their own per-field tail.
+var unexpandedRefHint = "; it looks like an environment-variable reference left unexpanded, so the " +
+	"variable is unset or not allowlisted (" + envAllowlistSpelling + ")"
+
 func isAllowedEnvVar(key string) bool {
-	return strings.HasPrefix(key, "SONARR_") ||
-		strings.HasPrefix(key, "RADARR_") ||
-		strings.HasPrefix(key, "SEADEX_SCOUT_")
+	for _, prefix := range allowedEnvPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // trimList trims entries and drops blanks, preserving order and case.
@@ -1488,13 +1553,10 @@ func warnAllBlankTagList(which string, raw, trimmed []string) {
 // 0644, exposing all of them to any other uid on the host that mounts /config.
 // Warn-only: a deliberately widened mode must not stop the daemon. The mode
 // itself is not secret, so it is the one value this diagnostic echoes.
-func warnConfigPermissions(path string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		// The bounded read already succeeded, so a stat failure here is a race
-		// or an exotic filesystem - not worth a second startup diagnostic.
-		return
-	}
+// warnConfigPermissions takes the FileInfo of the descriptor the config was
+// READ from (readConfigFile), never a second stat of the pathname: a mode
+// read from a fresh lookup can describe a different inode than the bytes.
+func warnConfigPermissions(info os.FileInfo) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		slog.Warn("config file is readable beyond its owner; it holds the arr api keys, "+
 			"the Prowlarr key and the AnimeBytes passkey - chmod 600 it",
@@ -1510,7 +1572,7 @@ func parseLogFormat(s string) slogx.Format {
 	if !ok {
 		// Field-name-only: the rejected value may be an expanded ${VAR} secret
 		// placed here by a config typo and must never reach the startup log.
-		slog.Warn("unrecognized log.format; defaulting to json")
+		slog.Warn("unrecognized log.format; defaulting to json", "field", "log.format")
 	}
 	return f
 }
@@ -1526,7 +1588,7 @@ func parseLogLevel(s string) slog.Level {
 	if !ok {
 		// Field-name-only: the rejected value may be an expanded ${VAR} secret
 		// placed here by a config typo and must never reach the startup log.
-		slog.Warn("unrecognized log.level; defaulting to info")
+		slog.Warn("unrecognized log.level; defaulting to info", "field", "log.level")
 	}
 	return lvl
 }

@@ -117,25 +117,30 @@ var ErrNotFound = errors.New("anilist: media not found")
 // envelope/request error does NOT wrap it (it is joined with an earlier chunk's
 // record error when there was one), so errors.Is classifies the FAILURE rather
 // than naming a wrapper type.
-//
-// No error out of FetchMany carries id sets. Which ids a failure makes
-// untrustworthy is BatchResult.Verdicts' job (VerdictUnverified for a chunk that
-// answered poisoned, VerdictUnrequested for one never asked), so a caller never
-// joins an error's id lists against the media map to work out what it may
-// memoize. Getting that join wrong was compile-clean and cost ~450
-// already-answered ids a rate-limited per-id Fetch each - the ~1700-request cold
-// cycle batching exists to avoid.
 var errBatchRecord = errors.New("anilist: batch response")
 
 // --- upstream failure classification ---
 
 // retryableUpstreamStatus reports whether an upstream status is a self-healing
-// server-side failure worth another attempt. It covers every 5xx (not just
-// httpx's 502/503/504) plus 408 Request Timeout; a 4xx other than 408 is the
-// client's own fault and never retried, and 429 has its own dedicated
-// rate-limit path.
+// server-side failure worth another attempt. It is httpx.IsRetryableStatus - the
+// same rule internal/indexer's Prowlarr door reads, so the two upstream doors
+// cannot drift as the library's set grows (it gained 408 in v4.1.0) - NARROWED
+// twice for this client:
+//
+//   - 429 is excluded because this client gives a rate limit its own dedicated
+//     path (rateLimitError / envelopeRateLimitError, which penalize the shared
+//     throttle). httpx includes 429 for the GetBytes door, which retries rate
+//     limits by default; request() is a Do caller, where they are not retryable
+//     except under WithRateLimitRetry - so excluding it here is the pairing the
+//     library's own doc asks for, not a disagreement with it.
+//   - a status of 600 or more is excluded because this predicate also reads
+//     e.Status out of the untrusted GraphQL errors[] envelope, where a value
+//     above the 5xx band is not a server status at all.
 func retryableUpstreamStatus(code int) bool {
-	return code == http.StatusRequestTimeout || (code >= 500 && code < 600)
+	if code == http.StatusTooManyRequests || code >= 600 {
+		return false
+	}
+	return httpx.IsRetryableStatus(code)
 }
 
 // envelopeErrors decodes the untrusted GraphQL errors[] list, the one shape
@@ -249,10 +254,12 @@ const (
 // through a set of mechanism-shaped channels the caller had to join (l-f5,
 // l-f135). The outcomes a caller must tell apart are then all one value: media
 // exists, absence is definitive, absence proves nothing, or no request covered
-// the id at all. Reading the old nil-versus-empty convention (and later the
-// Completed / UnverifiedIDs / UnrequestedIDs join) backwards was compile-clean
-// and flipped hundreds of ids between "retry per-id" and "negative-memoize for
-// the memo's TTL".
+// the id at all. No error out of FetchMany carries id sets either, so a caller
+// never joins an error's id lists against the media map to work out what it may
+// memoize: reading the old nil-versus-empty convention (and later the Completed /
+// UnverifiedIDs / UnrequestedIDs join) backwards was compile-clean and cost ~450
+// already-answered ids a rate-limited per-id Fetch each - the ~1700-request cold
+// cycle batching exists to avoid.
 type BatchResult struct {
 	// Media holds the media that exist, keyed by AniList id. An id AniList has
 	// no anime for is absent; whether that absence is trustworthy evidence is

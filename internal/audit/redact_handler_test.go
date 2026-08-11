@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/pathredact"
 )
 
 // TestRedactingHandlerRedactsAttachedAndGroupedAttrs pins the redaction
@@ -38,7 +40,7 @@ func TestRedactingHandlerRedactsAttachedAndGroupedAttrs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			log := redactingLogger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
+			log := pathredact.Logger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
 
 			tt.emit(log)
 
@@ -46,15 +48,15 @@ func TestRedactingHandlerRedactsAttachedAndGroupedAttrs(t *testing.T) {
 			if strings.Contains(out, "sekret-passkey-sentinel") {
 				t.Errorf("redacting handler leaked the report.dir value: %s", out)
 			}
-			if !strings.Contains(out, redactedPath) {
-				t.Errorf("redacting handler emitted no %q marker: %s", redactedPath, out)
+			if !strings.Contains(out, pathredact.ReportDirMarker) {
+				t.Errorf("redacting handler emitted no %q marker: %s", pathredact.ReportDirMarker, out)
 			}
 		})
 	}
 
 	t.Run("non-error any and numeric attrs pass through", func(t *testing.T) {
 		var buf bytes.Buffer
-		log := redactingLogger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
+		log := pathredact.Logger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
 
 		log.Info("passthrough", "rows", 3, "obj", struct{ N int }{N: 7})
 
@@ -87,7 +89,7 @@ func TestRedactingHandlerPassesTypedNilErrorThrough(t *testing.T) {
 	const dir = "/config/sekret-passkey-sentinel"
 	var typedNil *nilReceiverError
 	var buf bytes.Buffer
-	log := redactingLogger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
+	log := pathredact.Logger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
 
 	log.Info("typed nil error attr", "error", error(typedNil))
 
@@ -104,7 +106,7 @@ func TestRedactingHandlerPassesTypedNilErrorThrough(t *testing.T) {
 func TestRedactingHandlerRedactsRecordMessage(t *testing.T) {
 	const dir = "/config/sekret-passkey-sentinel"
 	var buf bytes.Buffer
-	log := redactingLogger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
+	log := pathredact.Logger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
 
 	log.Info("failed to write " + dir + "/report.json")
 
@@ -112,7 +114,7 @@ func TestRedactingHandlerRedactsRecordMessage(t *testing.T) {
 	if strings.Contains(out, "sekret-passkey-sentinel") {
 		t.Errorf("redacting handler leaked report.dir from the record message: %s", out)
 	}
-	if !strings.Contains(out, redactedPath) {
-		t.Errorf("redacting handler emitted no %q marker: %s", redactedPath, out)
+	if !strings.Contains(out, pathredact.ReportDirMarker) {
+		t.Errorf("redacting handler emitted no %q marker: %s", pathredact.ReportDirMarker, out)
 	}
 }

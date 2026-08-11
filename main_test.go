@@ -991,7 +991,7 @@ func TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence(t *testing.T) {
 // shutdown-truncated report write: it must read as a routine shutdown (WARN,
 // excluded from alerts.yaml's SeadexScoutCycleError rule) while a genuine write
 // fault keeps its ERROR classification. It stays in the root even though
-// cycle.DetachedWriteError is the mechanism, because what it pins is the
+// shutdown.DetachedWriteError is the mechanism, because what it pins is the
 // coupling to dispatchOutcome - the root's own exit-code/level contract. Three
 // non-obvious properties carry it - the multi-%w wrap surviving (fmt drops ALL
 // wrapping on a nil %w operand), the guard's asymmetry, and
@@ -1007,7 +1007,7 @@ func TestDetachedWriteError(t *testing.T) {
 	t.Run("a shutdown-truncated detached write classifies as a routine shutdown", func(t *testing.T) {
 		ctx := cancelled()
 		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
-		got := cycle.DetachedWriteError(ctx, werr)
+		got := shutdown.DetachedWriteError(ctx, werr)
 		if !errors.Is(got, context.Canceled) {
 			t.Errorf("errors.Is(err, context.Canceled) = false, want true (the multi-%%w wrap must survive; otherwise the redeploy ERROR alert returns): %v", got)
 		}
@@ -1025,14 +1025,14 @@ func TestDetachedWriteError(t *testing.T) {
 	})
 	t.Run("a genuine write failure keeps its fault classification", func(t *testing.T) {
 		werr := errors.New("write report pair: no space left on device")
-		if got := cycle.DetachedWriteError(cancelled(), werr); got != werr {
-			t.Errorf("cycle.DetachedWriteError(cancelled, non-timeout) = %v, want the error unchanged", got)
+		if got := shutdown.DetachedWriteError(cancelled(), werr); got != werr {
+			t.Errorf("shutdown.DetachedWriteError(cancelled, non-timeout) = %v, want the error unchanged", got)
 		}
 	})
 	t.Run("a live context never reclassifies", func(t *testing.T) {
 		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
-		if got := cycle.DetachedWriteError(context.Background(), werr); got != werr {
-			t.Errorf("cycle.DetachedWriteError(live, timeout) = %v, want the error unchanged", got)
+		if got := shutdown.DetachedWriteError(context.Background(), werr); got != werr {
+			t.Errorf("shutdown.DetachedWriteError(live, timeout) = %v, want the error unchanged", got)
 		}
 	})
 }

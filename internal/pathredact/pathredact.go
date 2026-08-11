@@ -7,9 +7,10 @@
 // It lives in a leaf so every package that needs the rule can reach it without
 // importing a domain package: the report generator (internal/audit) applies it
 // to its own pipeline, and the composition root applies it to the report-lock
-// errors internal/cycle returns. The marker text and the decision to
-// over-mask ancestors stay with the CALLER - this package knows nothing about
-// reports, verdicts or config keys.
+// errors internal/cycle returns. The marker text is fixed HERE rather than
+// passed in by the caller, because both consumers must spell it identically
+// and share no other home (see ReportDirMarker); beyond that one string this
+// package knows nothing about reports, verdicts or config keys.
 //
 // The masked value is secret-capable because config.Load expands any
 // allowlisted ${SEADEX_SCOUT_*} reference in every string field, so a paste
@@ -42,11 +43,11 @@ const minRedactablePath = 8
 
 // Text replaces every occurrence of dir - and of each of its path-prefix
 // ancestors, which an os.PathError for a failed intermediate component
-// (MkdirAll) can carry instead of the full dir - with marker. Ancestor
+// (MkdirAll) can carry instead of the full dir - with ReportDirMarker. Ancestor
 // redaction is deliberately broad: the texts this runs over are scoped
 // diagnostics whose only path-like content derives from dir, so over-masking a
 // benign ancestor costs nothing while a missed fragment could ship a secret.
-func Text(dir, marker, s string) string {
+func Text(dir, s string) string {
 	if dir == "" {
 		return s
 	}
@@ -60,10 +61,10 @@ func Text(dir, marker, s string) string {
 		return s
 	}
 	if redactablePath(dir) {
-		s = strings.ReplaceAll(s, dir, marker)
+		s = strings.ReplaceAll(s, dir, ReportDirMarker)
 	}
 	for p := c; redactablePath(p); {
-		s = strings.ReplaceAll(s, p, marker)
+		s = strings.ReplaceAll(s, p, ReportDirMarker)
 		parent := filepath.Dir(p)
 		if parent == p {
 			break
@@ -87,11 +88,11 @@ func redactablePath(p string) bool {
 // errors.Is/As classification (context cancellation, fs errnos, sentinel
 // errors) still walks the original chain. An err whose text is already clean is
 // returned unchanged.
-func Err(dir, marker string, err error) error {
+func Err(dir string, err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := Text(dir, marker, err.Error())
+	msg := Text(dir, err.Error())
 	if msg == err.Error() {
 		return err
 	}
@@ -115,8 +116,8 @@ func (e *redactedError) Unwrap() error { return e.cause }
 // library's own WithLogger diagnostics, which carry temp/target paths the app
 // never formats itself - has dir redacted out of its message and its
 // string/error attributes.
-func Logger(log *slog.Logger, dir, marker string) *slog.Logger {
-	return slog.New(&redactingHandler{inner: log.Handler(), dir: dir, marker: marker})
+func Logger(log *slog.Logger, dir string) *slog.Logger {
+	return slog.New(&redactingHandler{inner: log.Handler(), dir: dir})
 }
 
 // redactingHandler is the slog.Handler behind Logger: a pass-through to the
@@ -124,9 +125,8 @@ func Logger(log *slog.Logger, dir, marker string) *slog.Logger {
 // attributes (re-emitted as their redacted text), group members, and the
 // record message through Text.
 type redactingHandler struct {
-	inner  slog.Handler
-	dir    string
-	marker string
+	inner slog.Handler
+	dir   string
 }
 
 func (h *redactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -135,7 +135,7 @@ func (h *redactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 //nolint:gocritic // hugeParam: the by-value slog.Record is the slog.Handler interface signature.
 func (h *redactingHandler) Handle(ctx context.Context, rec slog.Record) error {
-	out := slog.NewRecord(rec.Time, rec.Level, Text(h.dir, h.marker, rec.Message), rec.PC)
+	out := slog.NewRecord(rec.Time, rec.Level, Text(h.dir, rec.Message), rec.PC)
 	rec.Attrs(func(a slog.Attr) bool {
 		out.AddAttrs(h.redactAttr(a))
 		return true
@@ -148,11 +148,11 @@ func (h *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	for i, a := range attrs {
 		red[i] = h.redactAttr(a)
 	}
-	return &redactingHandler{inner: h.inner.WithAttrs(red), dir: h.dir, marker: h.marker}
+	return &redactingHandler{inner: h.inner.WithAttrs(red), dir: h.dir}
 }
 
 func (h *redactingHandler) WithGroup(name string) slog.Handler {
-	return &redactingHandler{inner: h.inner.WithGroup(name), dir: h.dir, marker: h.marker}
+	return &redactingHandler{inner: h.inner.WithGroup(name), dir: h.dir}
 }
 
 // redactAttr rewrites one attribute: string values are redacted in place,
@@ -166,13 +166,13 @@ func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
 	switch v.Kind() {
 	case slog.KindString:
-		return slog.String(a.Key, Text(h.dir, h.marker, v.String()))
+		return slog.String(a.Key, Text(h.dir, v.String()))
 	case slog.KindAny:
 		// A typed-nil error (a non-nil interface holding a nil pointer)
 		// would panic in Error(); leave it to the wrapped handler, which
 		// renders it without calling Error() (and it can carry no path).
 		if err, ok := v.Any().(error); ok && err != nil && !isNilErrValue(err) {
-			return slog.String(a.Key, Text(h.dir, h.marker, err.Error()))
+			return slog.String(a.Key, Text(h.dir, err.Error()))
 		}
 		return a
 	case slog.KindGroup:
@@ -187,12 +187,14 @@ func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 	}
 }
 
-// isNilErrValue reports whether err is a non-nil error interface holding a
-// nil pointer/map/slice value, whose Error() method would dereference nil.
+// isNilErrValue reports whether err is a non-nil error interface holding a nil
+// pointer, map, slice or func value, whose Error() method would dereference nil.
+// reflect.ValueOf reports the interface's DYNAMIC type, so these are the only
+// IsNil-legal kinds an error can arrive as - a Kind Interface is unreachable here.
 func isNilErrValue(err error) bool {
 	rv := reflect.ValueOf(err)
 	switch rv.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func:
 		return rv.IsNil()
 	default:
 		return false

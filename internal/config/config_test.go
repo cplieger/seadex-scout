@@ -2021,7 +2021,7 @@ func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("Validate() error = %v, want a relative report.dir to remain warn-only", err)
 		}
-		if !rec.Contains("report.dir is not an absolute path") ||
+		if !rec.Contains("report.dir is not a usable absolute path") ||
 			!rec.AttrContains("", "field", "report.dir") {
 			t.Errorf("Validate() log = %v, want the relative-report.dir warning", rec.Messages())
 		}
@@ -2045,7 +2045,7 @@ func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if rec.Contains("report.dir is not an absolute path") {
+		if rec.Contains("report.dir is not a usable absolute path") {
 			t.Errorf("Validate() log = %v, want no relative-report.dir warning", rec.Messages())
 		}
 	})

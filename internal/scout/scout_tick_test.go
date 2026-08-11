@@ -680,6 +680,83 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 	}
 }
 
+// TestTickInterruptedDuringMatchingPublishesNothingAndPersists pins the tick's
+// post-match shutdown OUTCOME, which is the sharpest deletion-authority contract
+// on the fast path and the one exit whose three effects differ most from its
+// siblings'.
+//
+// match.Matcher.Match returns early on a cancelled context, so the match set it
+// hands back is TRUNCATED, and evaluatedIDs derives ReportScoped's deletion
+// authority from exactly that set - so a tick that published it would tell the
+// notifier that entries it never finished evaluating are resolved, silently, on
+// any redeploy that lands mid-match. It emits no completion line for the same
+// reason: an interrupted pass did not complete, and counting it turns a redeploy
+// into a pass that ran and failed.
+//
+// What it MUST still do is persist. The three effects are owned per cause
+// (tickInterrupted), and declining the completion line is not a reason to discard
+// the revalidated Fribb validators the pass already accepted - a discarded
+// revalidation re-downloads ~5.9 MB on the next boot, and the persisted
+// refresh-rejection streak the mapping escalation reads only means anything if it
+// survives a restart. The reconcile's finishInterruptedMatch draws exactly that
+// line one file over.
+//
+// The reconcile's half of the publication contract is pinned by
+// TestCycleShutdownDuringMatchingWarnsShutdownNotAniList; the tick's had no test,
+// so nothing failed if the check was removed - or if it kept declining to save.
+func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) {
+	logger, recorder := capture.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The window carries an id nothing in the test library maps to, so the matcher
+	// takes the AniList title fallback - the seam the cancellation lands in. The
+	// reconcile's own entry is id-mapped and never reaches it.
+	sea := &fakeSeaDex{
+		entries:       seadexFrierenEntry(),
+		windowEntries: []seadex.Entry{windowEntry(1003, 503)},
+	}
+	deps, store := tickDeps(logger, sea, nil, nil, 96)
+	deps.Matcher = match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger())
+	// An accepted mapping refresh on every load, so "did the interrupted tick
+	// persist what it learned" is observable at all: with a 304-shaped loader
+	// saveTick's own skip fires and the assertion could not tell a declined save
+	// from a vacuous one.
+	deps.Mapping = &refreshingMapping{}
+	s := New(deps)
+
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("reconcile healthy=false, want true")
+	}
+	s.notifier.Report([]compare.Finding{tickFinding(1003, 503)}, nil)
+	summariesAfterSeed := recorder.CountExact("findings reported")
+	savesAfterSeed := store.saves
+
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("tick healthy=false, want true (a shutdown mid-matching is not an ingest fault)")
+	}
+
+	if n := recorder.CountExact("tick interrupted by shutdown before comparison"); n != 1 {
+		t.Errorf("shutdown WARN count = %d, want 1", n)
+	}
+	if n := recorder.CountExact("tick complete"); n != 0 {
+		t.Errorf("'tick complete' count = %d, want 0 (an interrupted tick did not complete)", n)
+	}
+	if n := recorder.CountExact("tick degraded"); n != 0 {
+		t.Errorf("'tick degraded' count = %d, want 0 (an interrupted tick emits no completion line at all)", n)
+	}
+	if n := recorder.CountExact("findings reported") - summariesAfterSeed; n != 0 {
+		t.Errorf("the interrupted tick emitted %d new 'findings reported' summaries, want 0: publishing a truncated match set would resolve rows for entries it never finished evaluating", n)
+	}
+	if store.saves != savesAfterSeed+1 {
+		t.Errorf("saves = %d, want %d: a shutdown declines the completion line, never the persistence - the revalidated Fribb validators and the rejection streak the mapping escalation reads must survive the restart",
+			store.saves, savesAfterSeed+1)
+	}
+	// The one thing a tick must never write, on this exit as on every other.
+	if items := store.st.Library.Items; len(items) != 1 || items[0].Title != "Frieren" {
+		t.Errorf("library snapshot after the interrupted tick = %+v, want the reconcile's single Frieren item", items)
+	}
+}
+
 // tickFinding builds a standing finding under alID whose dedupe key is unique
 // per url id, for seeding the notifier's current set.
 func tickFinding(alID, urlID int) compare.Finding {
@@ -1260,6 +1337,82 @@ func TestReconcileAnnouncesItselfBeforeDoingWork(t *testing.T) {
 				t.Errorf("'reconcile started' was log line %d of %v, want the first thing the pass says", first, msgs)
 			}
 		})
+	}
+}
+
+// rejectingAfterFirstMapping loads successfully once - the startup reconcile
+// that establishes the library snapshot and the finding set - and then refuses
+// every later refresh with a plain error, no index, and an incremented rejection
+// streak, which is what the acceptance guard does once the persisted cache stops
+// being usable. unreachableMapLoader cannot drive this: it fails from the first
+// call, so no reconcile ever opens the ready gate and the loop never reaches a
+// tick.
+type rejectingAfterFirstMapping struct{ calls int }
+
+func (m *rejectingAfterFirstMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
+	m.calls++
+	if m.calls == 1 {
+		return *prev, mapping.NewIndex(prev.Records), nil
+	}
+	c := *prev
+	c.RejectedRefreshes = prev.RejectedRefreshes + 1
+	return c, nil, errors.New("fribb refresh refused: indexes to no usable records")
+}
+
+// TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow pins the tick's
+// mapping-unusable OUTCOME, whose three contracts are all silent when they break.
+// With no usable Fribb index nothing can be matched, so comparing anyway would
+// hand ReportScoped an empty finding set with authority over every entry the
+// window carried and resolve conditions that are still true. The scan deadman
+// needs the degraded completion line with reason=mapping-unusable, because a
+// silent iteration is indistinguishable from a wedged loop. And the
+// refresh-rejection streak the mapping escalation reads must still be persisted,
+// or a restart resets it.
+//
+// The reconcile's equivalent gate is pinned twice
+// (TestCycleMappingUnusableReportsNothing and
+// TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept); the tick's half had no
+// test, so a regression that dropped or inverted it kept every tick green.
+func TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow(t *testing.T) {
+	logger, recorder := capture.New()
+	sea := &fakeSeaDex{
+		entries:       seadexFrierenEntry(),
+		windowEntries: seadexFrierenEntry(),
+	}
+	deps, store := tickDeps(logger, sea, nil, nil, 96)
+	deps.Mapping = &rejectingAfterFirstMapping{}
+	s := New(deps)
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("reconcile healthy=false, want true")
+	}
+	// Seed a standing row AFTER the reconcile's full-authority pass, so only the
+	// tick under test could delete it.
+	s.notifier.Report([]compare.Finding{tickFinding(154587, 501)}, nil)
+	savesAfterSeed := store.saves
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("tick healthy=false, want true (a restart cannot fix a Fribb outage)")
+	}
+
+	if reasons := tickDegradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
+		t.Errorf("tick degraded reasons = %v, want [mapping-unusable] (the scan deadman counts this line)", reasons)
+	}
+	if n := recorder.CountExact("mapping unusable; skipping tick comparison"); n != 1 {
+		t.Errorf("'mapping unusable; skipping tick comparison' emitted %d times, want 1", n)
+	}
+	total, seen := lastSummaryCounter(t, recorder, "total")
+	if !seen {
+		t.Fatal("the gated tick emitted no 'findings reported' summary line")
+	}
+	if total != 1 {
+		t.Errorf("finding set after the gated tick = %d rows, want the seeded 1 re-stated unchanged (an unmatched window must not resolve a standing row)", total)
+	}
+	if store.saves != savesAfterSeed+1 {
+		t.Errorf("saves = %d, want %d: a gated tick must still persist the refresh-rejection streak the mapping escalation reads", store.saves, savesAfterSeed+1)
+	}
+	if got := store.st.Mapping.RejectedRefreshes; got != 1 {
+		t.Errorf("persisted RejectedRefreshes = %d, want 1", got)
 	}
 }
 

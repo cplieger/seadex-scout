@@ -44,11 +44,7 @@
 // POLICY over them. It is a leaf - it imports nothing of the app.
 package displaylink
 
-import (
-	"strings"
-
-	"github.com/cplieger/urlform"
-)
+import "github.com/cplieger/urlform"
 
 // VouchForm is Vouch over an already-classified form: an absolute http(s) URL,
 // free of a userinfo authority and of the smuggling shapes a browser reads
@@ -93,8 +89,16 @@ func VouchSanitizingForm(f *urlform.Form) bool {
 }
 
 // isHTTPScheme reports whether a classified scheme is http or https, matched
-// case-insensitively (a URL scheme is ASCII by grammar, so the fold cannot
-// launder a non-ASCII rune into one of these names).
+// case-insensitively through urlform.EqualASCIIFold - the library's own
+// ASCII-ONLY fold, deliberately not strings.EqualFold. urlform.Form.Scheme is
+// already lowercase ASCII (url.Parse folds it, and its grammar admits no
+// non-ASCII byte), so the two agree on every value Classify can produce; what
+// the library fold buys is that the agreement is structural rather than an
+// argument about the parameter's provenance. strings.EqualFold applies the full
+// Unicode simple fold, whose ASCII-PRODUCING mappings (U+017F -> 's',
+// U+0130 -> 'i', U+212A -> 'k') are what let a homograph spelling of a fixed
+// token compare equal to it - the reading internal/tracker and
+// internal/indexer already route through this same primitive.
 func isHTTPScheme(scheme string) bool {
-	return strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https")
+	return urlform.EqualASCIIFold(scheme, "http") || urlform.EqualASCIIFold(scheme, "https")
 }

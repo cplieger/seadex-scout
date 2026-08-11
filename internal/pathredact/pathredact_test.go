@@ -7,11 +7,6 @@ import (
 	"testing"
 )
 
-// marker is the marker text these tests mask with. The mechanism takes it as
-// an argument, so the tests spell one explicitly rather than reaching for a
-// caller's policy constant.
-const marker = "[report.dir]"
-
 // TestErrRedactsMessageAndPreservesCause pins Err's documented errors.Is/As
 // contract, not just its rendered text: the redacted wrapper must keep the
 // original cause reachable so shutdown/errno classification survives the
@@ -23,7 +18,7 @@ func TestErrRedactsMessageAndPreservesCause(t *testing.T) {
 	const dir = "/config/sekret-passkey/reports"
 	cause := &os.PathError{Op: "open", Path: dir + "/report.json", Err: os.ErrPermission}
 
-	got := Err(dir, marker, cause)
+	got := Err(dir, cause)
 
 	if got == nil {
 		t.Fatal("Err() = nil, want a wrapped error")
@@ -31,8 +26,8 @@ func TestErrRedactsMessageAndPreservesCause(t *testing.T) {
 	if strings.Contains(got.Error(), "sekret-passkey") {
 		t.Errorf("Err() leaked the masked dir in %q", got)
 	}
-	if !strings.Contains(got.Error(), marker) {
-		t.Errorf("Err() = %q, want the %q marker", got, marker)
+	if !strings.Contains(got.Error(), ReportDirMarker) {
+		t.Errorf("Err() = %q, want the %q marker", got, ReportDirMarker)
 	}
 	if !errors.Is(got, os.ErrPermission) {
 		t.Errorf("errors.Is(Err(), os.ErrPermission) = false")
@@ -41,11 +36,11 @@ func TestErrRedactsMessageAndPreservesCause(t *testing.T) {
 	if !errors.As(got, &pathErr) || pathErr != cause {
 		t.Errorf("errors.As(Err(), *os.PathError) = %v, want original cause %v", pathErr, cause)
 	}
-	if Err(dir, marker, nil) != nil {
+	if Err(dir, nil) != nil {
 		t.Error("Err(nil) must remain nil")
 	}
 	clean := errors.New("clean diagnostic")
-	if unchanged := Err(dir, marker, clean); unchanged != clean {
+	if unchanged := Err(dir, clean); unchanged != clean {
 		t.Errorf("Err(clean error) = %v, want the original error identity", unchanged)
 	}
 }
@@ -67,12 +62,12 @@ func TestTextGuards(t *testing.T) {
 		{"degenerate dot dir leaves dots alone", ".", "read report.json: unexpected EOF", "read report.json: unexpected EOF"},
 		{"degenerate root dir leaves slashes alone", "/", "mkdir /config/reports: denied", "mkdir /config/reports: denied"},
 		{"unclean degenerate dir is still skipped", "//", "mkdir /config/reports: denied", "mkdir /config/reports: denied"},
-		{"configured dir is masked", "/config/sekret/reports", "open /config/sekret/reports/report.json: denied", "open " + marker + "/report.json: denied"},
-		{"ancestor of the dir is masked", "/config/sekret/reports", "mkdir /config/sekret: denied", "mkdir " + marker + ": denied"},
+		{"configured dir is masked", "/config/sekret/reports", "open /config/sekret/reports/report.json: denied", "open " + ReportDirMarker + "/report.json: denied"},
+		{"ancestor of the dir is masked", "/config/sekret/reports", "mkdir /config/sekret: denied", "mkdir " + ReportDirMarker + ": denied"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Text(tt.dir, marker, tt.in); got != tt.want {
+			if got := Text(tt.dir, tt.in); got != tt.want {
 				t.Errorf("Text(%q, %q) = %q, want %q", tt.dir, tt.in, got, tt.want)
 			}
 		})
@@ -111,18 +106,18 @@ func TestTextKeepsShortSeparatorlessDirIntact(t *testing.T) {
 			name: "separator-less dir at the length floor is masked",
 			dir:  "reportdir",
 			in:   "open reportdir/report.json: denied",
-			want: "open " + marker + "/report.json: denied",
+			want: "open " + ReportDirMarker + "/report.json: denied",
 		},
 		{
 			name: "short dir carrying a separator is masked",
 			dir:  "out/rpt",
 			in:   "open out/rpt/report.json: denied",
-			want: "open " + marker + "/report.json: denied",
+			want: "open " + ReportDirMarker + "/report.json: denied",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Text(tt.dir, marker, tt.in); got != tt.want {
+			if got := Text(tt.dir, tt.in); got != tt.want {
 				t.Errorf("Text(%q, %q) = %q, want %q", tt.dir, tt.in, got, tt.want)
 			}
 		})

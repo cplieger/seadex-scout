@@ -787,6 +787,10 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 // URL would otherwise sit in a 256 MiB container bounded only by the fetch's own
 // budget - invisible, because the emit path caps per attribute on the way out
 // and never shrinks what it read from.
+//
+// The six closed-vocabulary fields (Arr, Kind, Resolution, Codec, Scope, Status) are
+// deliberately absent: internal/compare writes each from package constants, so no
+// oversized value can reach them and boundRetained does not cap them.
 func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 	t.Parallel()
 	huge := strings.Repeat("x", 4*maxAttrBytes)
@@ -795,15 +799,10 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 		AniListID:         7,
 		Status:            compare.StatusBetter,
 		Title:             huge,
-		Arr:               huge,
 		CurrentGroup:      huge,
 		RecommendedGroup:  huge,
 		Tracker:           huge,
-		Kind:              huge,
 		Reason:            huge,
-		Resolution:        huge,
-		Codec:             huge,
-		Scope:             huge,
 		InfoHash:          huge,
 		ReleaseURL:        huge,
 		ArrURL:            huge,
@@ -824,19 +823,13 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 			}
 		}
 		check("Title", got.Title)
-		check("Arr", got.Arr)
 		check("CurrentGroup", got.CurrentGroup)
 		check("RecommendedGroup", got.RecommendedGroup)
 		check("Tracker", got.Tracker)
-		check("Kind", got.Kind)
 		check("Reason", got.Reason)
-		check("Resolution", got.Resolution)
-		check("Codec", got.Codec)
-		check("Scope", got.Scope)
 		check("InfoHash", got.InfoHash)
 		check("ReleaseURL", got.ReleaseURL)
 		check("ArrURL", got.ArrURL)
-		check("Status", string(got.Status))
 		for _, g := range got.RecommendedGroups {
 			check("RecommendedGroups element", g)
 		}
@@ -846,6 +839,74 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 		for _, l := range got.Links {
 			check("Links element Tracker", l.Tracker)
 			check("Links element URL", l.URL)
+		}
+	}
+}
+
+// TestReportBoundsRetainedRowToItsDocumentedCeiling pins the RESIDENCY bound
+// maxRetainedElemBytes' comment states as a number: a retained row's three
+// untrusted slices are bounded at maxRetainedListItems elements, each element at
+// maxRetainedElemBytes, so the worst-case row is 64 x 256 x 4 = 64 KiB rather
+// than the 2 MiB the count cap alone left it at. Both halves are load-bearing
+// and neither is observable from the emit path, which caps per attribute on the
+// way out and never shrinks what it retained - so dropping capRetainedList's
+// truncation (one SeaDex entry admits 512 torrents, internal/seadex's
+// maxTorrentsPerEntry) or widening capRetainedElem's element budget restores a
+// multi-MB resident row in a 256 MiB container (CWE-400) while the rest of the
+// suite stays green. The sibling TestReportBoundsRetainedUntrustedStrings bounds
+// each element by the Loki LOG-LINE budget, 32x looser, so it cannot see either
+// regression.
+func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
+	t.Parallel()
+	const upstreamMax = 512 // internal/seadex's maxTorrentsPerEntry
+	huge := strings.Repeat("z", 4*maxAttrBytes)
+	groups := make([]string, upstreamMax)
+	current := make([]string, upstreamMax)
+	links := make([]compare.ReleaseLink, upstreamMax)
+	for i := range groups {
+		groups[i] = huge
+		current[i] = huge
+		links[i] = compare.ReleaseLink{Tracker: huge, URL: huge}
+	}
+
+	n, _ := newCapturedNotifier()
+	n.Report([]compare.Finding{{
+		AniListID:         5,
+		Status:            compare.StatusBetter,
+		Title:             "Frieren",
+		RecommendedGroups: groups,
+		CurrentGroups:     current,
+		Links:             links,
+	}}, nil)
+
+	if len(n.current) != 1 {
+		t.Fatalf("retained %d rows, want 1", len(n.current))
+	}
+	for _, got := range n.current {
+		for field, count := range map[string]int{
+			"RecommendedGroups": len(got.RecommendedGroups),
+			"CurrentGroups":     len(got.CurrentGroups),
+			"Links":             len(got.Links),
+		} {
+			if count != maxRetainedListItems {
+				t.Errorf("retained %s holds %d elements, want %d (the count cap)", field, count, maxRetainedListItems)
+			}
+		}
+		elems := map[string][]string{
+			"RecommendedGroups element": got.RecommendedGroups,
+			"CurrentGroups element":     got.CurrentGroups,
+		}
+		for _, l := range got.Links {
+			elems["Links element Tracker"] = append(elems["Links element Tracker"], l.Tracker)
+			elems["Links element URL"] = append(elems["Links element URL"], l.URL)
+		}
+		for field, values := range elems {
+			for _, v := range values {
+				if len(v) > maxRetainedElemBytes {
+					t.Errorf("retained %s is %d bytes, want <= %d (the element cap)", field, len(v), maxRetainedElemBytes)
+					break
+				}
+			}
 		}
 	}
 }

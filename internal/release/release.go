@@ -4,12 +4,11 @@
 // operates on strings, not on SeaDex or arr types) so both the SeaDex side and
 // the library side can classify into one shared vocabulary and be compared.
 // It also owns the group vocabulary that comparison rests on: NormalizeGroup
-// (the canonical spelling, with every no-group variant folded onto the NoGroup
-// sentinel) and GroupsOverlap, the three-valued group-set comparison in which
-// a NoGroup member is unknown evidence — it can neither prove an overlap nor
-// permit a divergence proof — rather than an identity token. The same
-// single-home rule extends to the curation-warning tag vocabulary
-// (curation.go), which this package owns so it cannot fork across consumers.
+// (the canonical LOWERCASED spelling, with every no-group variant folded onto
+// the lowercased NoGroup sentinel) and GroupsOverlap, the three-valued
+// group-set comparison in which a NoGroup member is unknown evidence — it can
+// neither prove an overlap nor permit a divergence proof — rather than an
+// identity token.
 // Tracker identity is NOT this package's: the canonical table, the
 // obtainability class, and the fail-closed host/relative-URL gates live in
 // internal/tracker, which this package reads only for a Release's
@@ -31,6 +30,7 @@
 package release
 
 import (
+	"cmp"
 	"regexp"
 	"slices"
 	"strconv"
@@ -178,37 +178,41 @@ const (
 	codecX264 = "x264"
 )
 
-// x265Tokens / x264Tokens are the codec markers accepted in the authoritative
-// MediaInfo codec value (canonicalCodec).
-// The x265 family takes precedence when input contains markers from both families.
+// The codec vocabulary has ONE home per family, split by the matching RULE each
+// spelling needs rather than by consumer - the same single-home rule
+// resolutionHeights and internal/tracker's table apply, so a spelling added for
+// one reader cannot silently miss the other.
+//
+// x265TextTokens / x264TextTokens are the spellings matched by SUBSTRING in
+// release text (compact spellings such as "BDx265" are real in the live
+// catalogue, so no boundary is applied). x265DottedTokens / x264DottedTokens are
+// the h-prefixed spellings - dotted and undotted - which need a
+// non-alphanumeric LEFT BOUNDARY: without it a title-glued episode number
+// ("Bleach.264.1080p", "Bleach264") contains "h.264"/"h264" and misclassifies
+// the release as an x264 encode.
+//
+// x265Tokens / x264Tokens are the FULL per-family vocabulary, and they are the
+// union of the two above rather than a third list: the authoritative MediaInfo
+// codec value (canonicalCodec) accepts every spelling by plain substring,
+// because it is a codec field rather than free release text and carries no
+// episode numbers to collide with. The x265 family takes precedence when input
+// contains markers from both families.
 var (
-	x265Tokens = []string{codecX265, "h265", "h.265", "hevc"}
-	x264Tokens = []string{codecX264, "h264", "h.264", "avc"}
-)
-
-// x265TextTokens / x264TextTokens are the codec markers detected in release
-// text by substring (compact spellings such as "BDx265" are real in the live
-// catalogue, so no boundary is applied). The h-prefixed spellings — dotted
-// and undotted — are excluded here and matched by reDottedX265/reDottedX264
-// instead, which require a non-alphanumeric left boundary: without it a
-// title-glued episode number ("Bleach.264.1080p", "Bleach264") contains the
-// substring "h.264"/"h264" and misclassifies the release as an x264 encode.
-var (
-	x265TextTokens = []string{codecX265, "hevc"}
-	x264TextTokens = []string{codecX264, "avc"}
+	x265TextTokens   = []string{codecX265, "hevc"}
+	x264TextTokens   = []string{codecX264, "avc"}
+	x265DottedTokens = []string{"h.265", "h265"}
+	x264DottedTokens = []string{"h.264", "h264"}
+	x265Tokens       = slices.Concat(x265TextTokens, x265DottedTokens)
+	x264Tokens       = slices.Concat(x264TextTokens, x264DottedTokens)
 	// reTextX265 / reTextX264 apply the text-token lists to raw evidence in
 	// place (ToLower-faithful case classes via nametoken.Alternation, no
-	// boundary — see above). The alternations derive from the token lists to
-	// keep the vocabulary single-homed.
-	reTextX265 = regexp.MustCompile(nametoken.Alternation(x265TextTokens))
-	reTextX264 = regexp.MustCompile(nametoken.Alternation(x264TextTokens))
-	// reDottedX265 / reDottedX264 require a non-word left boundary (the same
-	// shared raw-text word set the marker edges use). The
-	// undotted h-spellings ride the same boundary: "h264"/"h265" glued to a
-	// preceding word rune is a title-glued episode number ("Bleach264"), the
-	// same failure class as the dotted form, not a codec marker.
-	reDottedX265 = regexp.MustCompile(`(?:^|` + nametoken.NonWordEdge + `)(?:` + nametoken.Literal("h.265") + `|` + nametoken.Literal("h265") + `)`)
-	reDottedX264 = regexp.MustCompile(`(?:^|` + nametoken.NonWordEdge + `)(?:` + nametoken.Literal("h.264") + `|` + nametoken.Literal("h264") + `)`)
+	// boundary - see above). reDottedX265 / reDottedX264 apply the dotted lists
+	// behind the shared raw-text word boundary. All four alternations derive
+	// from the token lists, so the vocabulary stays single-homed.
+	reTextX265   = regexp.MustCompile(nametoken.Alternation(x265TextTokens))
+	reTextX264   = regexp.MustCompile(nametoken.Alternation(x264TextTokens))
+	reDottedX265 = regexp.MustCompile(`(?:^|` + nametoken.NonWordEdge + `)(?:` + nametoken.Alternation(x265DottedTokens) + `)`)
+	reDottedX264 = regexp.MustCompile(`(?:^|` + nametoken.NonWordEdge + `)(?:` + nametoken.Alternation(x264DottedTokens) + `)`)
 )
 
 // evidence accumulates the classification signals of one text source (the
@@ -286,21 +290,18 @@ func Classify(in *Input) Release {
 	// an encode. Only a codec token someone WROTE (release name or notes) is
 	// encode evidence, so the Kind reason names the written token, which can
 	// differ from the authoritative Codec field when they disagree.
-	mediaCodec := canonicalCodec(strings.ToLower(strings.TrimSpace(in.VideoCodec)))
-	nameCodec := nameEv.textCodec()
-	notesCodec := notesEv.textCodec()
-	codec := mediaCodec
-	if codec == "" {
-		codec = nameCodec
-	}
-	if codec == "" {
-		codec = notesCodec
-	}
+	// cmp.Or is this app's established first-non-empty fold (config's
+	// SonarrWebBase/RadarrWebBase, indexer/journal.go, main.go's CONFIG_PATH).
+	// Every argument is a pure accessor over already-accumulated evidence, so
+	// cmp.Or's eager evaluation matches the ladder it replaces exactly - the
+	// old code computed nameCodec and notesCodec unconditionally too.
+	codec := cmp.Or(
+		canonicalCodec(strings.ToLower(strings.TrimSpace(in.VideoCodec))),
+		nameEv.textCodec(),
+		notesEv.textCodec(),
+	)
 	kind, reason := classifyKind(&nameEv, &notesEv)
-	resolution := nameEv.resolution
-	if resolution == "" {
-		resolution = notesEv.resolution
-	}
+	resolution := cmp.Or(nameEv.resolution, notesEv.resolution)
 
 	return Release{
 		Group:       groupOrNoGroup(in.Group),
@@ -407,8 +408,9 @@ func groupOrNoGroup(group string) string {
 }
 
 // noGroupVariants are the spellings of "no release group" (lowercased) that
-// NormalizeGroup folds onto the canonical NoGroup, so a SeaDex side or library
-// side using any variant compares equal to a group-less release.
+// NormalizeGroup folds onto noGroupNormalized (the lowercased NoGroup), so a
+// SeaDex side or library side using any variant compares equal to a
+// group-less release.
 var noGroupVariants = map[string]bool{
 	"nogrp": true, "nogroup": true, "no-group": true, "no_group": true, "no group": true,
 }
@@ -417,8 +419,12 @@ var noGroupVariants = map[string]bool{
 // comparison lookups (SeaDex and arr casing differ), so the compare layer keys
 // group-membership sets the same way Classify keys overrides. An empty group
 // and every no-group spelling variant (NOGRP, NoGroup, no-group, ...)
-// normalizes to NoGroup, the canonical unknown-evidence token, so a missing
-// group serializes identically however it was spelled.
+// normalizes to the LOWERCASED unknown-evidence token ("nogrp", i.e.
+// noGroupNormalized) - NOT to the exported NoGroup constant, so
+// `NormalizeGroup(g) == NoGroup` is always false and is never the way to ask
+// whether a normalized group is unknown; GroupsOverlap is that question's one
+// consumer. A missing group still normalizes identically however it was
+// spelled.
 func NormalizeGroup(group string) string {
 	g := strings.ToLower(strings.TrimSpace(group))
 	if g == "" || noGroupVariants[g] {

@@ -253,10 +253,15 @@ func validJournalRecord(it *journalItem) bool {
 // (a second owners/published/nyaa_feed/...) fails closed, because at this boundary
 // a document that names the same accumulated map twice is evidence of
 // tampering and Unmarshal would silently resolve it to the last occurrence.
-// is deliberately limited to the schema members: it costs a fixed
-// small set, while extending it to every nested object is what
+// That duplicate detection is deliberately limited to the schema members: it
+// costs a fixed small set, while extending it to every nested object is what
 // bounds the gate's own memory (see the note on the removed whole-document
 // preflight below).
+//
+// The member switch below is TOTAL over allSnapshotMembers, the read-side twin
+// of buildSnapshot's write rules: every member has an explicit decode and an
+// unknown member fails closed, so the decoder and the rule table cannot drift
+// silently into one member's arm claiming another's bytes.
 //
 // No whole-document preflight runs (bounded.Preflight is deliberately NOT
 // used): it holds one fold-canonicalized key set per traversed object, which
@@ -317,8 +322,16 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 			return d.Decode(&snap.HarvestCursor)
 		case memberNyaaFeed:
 			return decodeSnapshotFeed(d, &snap.NyaaFeed, string(memberNyaaFeed))
-		default:
+		case memberABFeed:
 			return decodeSnapshotFeed(d, &snap.ABFeed, string(memberABFeed))
+		default:
+			// Unreachable for a member in allSnapshotMembers, and that is the
+			// point - the read-side twin of buildSnapshot's default: a member
+			// added to the vocabulary but not given a DECODE here must not be
+			// silently claimed by another member's arm. The message names only
+			// our own member literal, never the decoded key (attacker-shaped
+			// text at this boundary).
+			return fmt.Errorf("snapshot: persisted member %q has no decode", member)
 		}
 	})
 	if err != nil {
@@ -592,24 +605,13 @@ type snapshotScrub struct {
 // that diverged from FirstSeen (a hand-edited or legacy snapshot) would
 // otherwise be advertised to the arrs for the item's whole journal window - a
 // far-future value can hold a release behind a delay profile indefinitely and
-// mis-sorts a newest-first view. An item with no FirstSeen carries no journal
-// timestamp to mirror, so it has nothing vouching for its stored PubDate
-// either and the field is cleared rather than left alone.
+// mis-sorts a newest-first view.
+//
+// Every item reaching here carries a nonzero FirstSeen: decodeSnapshot runs
+// pruneJournalFeed first, and validJournalRecord drops a timestamp-less item
+// for both consumers.
 func normalizeSnapshotPubDates(feed []journalItem) {
 	for i := range feed {
-		if feed[i].FirstSeen.IsZero() {
-			// No journal timestamp to mirror, so there is nothing that
-			// vouches for the stored PubDate either: the writer stamps
-			// FirstSeen and PubDate together on every item it creates, and
-			// rebaseFutureFeed can only correct a value it can compare
-			// against FirstSeen. Clearing it makes writeItem omit
-			// <pubDate> instead of advertising a hand-edited far-future
-			// date the reader has no way to bound (the writer drops such
-			// an item at carry, so this only changes what the READER
-			// serves).
-			feed[i].PubDate = time.Time{}
-			continue
-		}
 		feed[i].PubDate = feed[i].FirstSeen
 	}
 }
@@ -727,9 +729,9 @@ type FeedWriter struct {
 	// enabled(scope) is the package's one home for the scope-to-config
 	// dispatch (see UpstreamConfig.torznabURL), so the writer evaluates the
 	// same expression the server's gates do and a third tracker stays one
-	// case. ProwlarrAPIKey is deliberately left unset - the same narrowing the
-	// server applies - because it is reachability, consumed only inside the
-	// wired upstreams.
+	// case. The ProwlarrAPIKey-dropping projection is enablementOnly, the same
+	// one the server holds: that field is reachability, consumed only inside
+	// the wired upstreams.
 	enablement UpstreamConfig
 }
 
@@ -759,15 +761,11 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 		log = slog.Default()
 	}
 	w := &FeedWriter{
-		log:  log,
-		now:  time.Now,
-		tags: cfg.TagFilter,
-		path: cfg.Path,
-		enablement: UpstreamConfig{
-			NyaaTorznabURL: cfg.NyaaTorznabURL,
-			ABTorznabURL:   cfg.ABTorznabURL,
-			ABPasskey:      cfg.ABPasskey,
-		},
+		log:        log,
+		now:        time.Now,
+		tags:       cfg.TagFilter,
+		path:       cfg.Path,
+		enablement: cfg.enablementOnly(),
 	}
 	if cfg.Server != nil {
 		w.cache = cfg.Server.cache
@@ -1053,17 +1051,6 @@ func publicationLogWithinLimits(published map[string]bool) bool {
 	return true
 }
 
-// classifyPreviousReadError is loadPrevious's transient-versus-baseline
-// decision for a snapshot read failure. A missing file (or a path whose
-// parent is not a directory) is the fresh-install baseline. An over-cap file
-// is deterministic, not transient: persist enforces the same maxFeedBytes
-// cap, so an over-cap snapshot can only come from external corruption or
-// hand-editing and never shrinks on its own - returning an error there would
-// wedge every future rebuild on the same file. Treat it like malformed JSON:
-// warn and re-baseline; the rebuild's persist atomically replaces the
-// oversized file, so the state self-heals. Any other read failure (EACCES,
-// EIO) is returned as an error so a TRANSIENT fault cannot blank a live
-// journal.
 // readPrevious reads the persisted snapshot CONFINED to its own directory, the
 // same shape h-f24 applied to the mapping loader's overrides read, which named
 // this call site as the sibling that should be swept with it.
@@ -1118,6 +1105,17 @@ func (w *FeedWriter) readPrevious(ctx context.Context) ([]byte, error) {
 	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(w.path), maxFeedBytes)
 }
 
+// classifyPreviousReadError is loadPrevious's transient-versus-baseline
+// decision for a snapshot read failure. A missing file (or a path whose
+// parent is not a directory) is the fresh-install baseline. An over-cap file
+// is deterministic, not transient: persist enforces the same maxFeedBytes
+// cap, so an over-cap snapshot can only come from external corruption or
+// hand-editing and never shrinks on its own - returning an error there would
+// wedge every future rebuild on the same file. Treat it like malformed JSON:
+// warn and re-baseline; the rebuild's persist atomically replaces the
+// oversized file, so the state self-heals. Any other read failure (EACCES,
+// EIO) is returned as an error so a TRANSIENT fault cannot blank a live
+// journal.
 func (w *FeedWriter) classifyPreviousReadError(err error) (feedState, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):

@@ -26,7 +26,6 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
-	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -107,7 +106,7 @@ type Release struct {
 	// report's DISPLAY vocabulary and nothing else: a warned release is
 	// always listed and always annotated with the warning marker, whether or
 	// not the operator's filters.exclude_tags policy also excludes it (see
-	// Filtered, release.CurationWarnings, and the render layer). The
+	// Filtered, curationWarnings, and the render layer). The
 	// vocabulary is fixed here on purpose - it names what SeaDex's curators
 	// said, not what the operator chose to filter.
 	Warnings []string `json:"warnings,omitempty"`
@@ -209,15 +208,20 @@ type Row struct {
 	// both render an empty best column, no qualifier, and a have_unlisted
 	// verdict.
 	HiddenAnimeBytes int `json:"hidden_animebytes,omitempty"`
-	// hiddenAnimeBytesBest counts only the withheld releases SeaDex marks BEST.
-	// The Markdown best column is annotated from this count, not from
-	// HiddenAnimeBytes: a hidden AnimeBytes ALT says nothing about whether a
-	// best exists, so annotating the best cell from the total would tell a
-	// reader an empty best column means "hidden on a tracker you do not use"
-	// for an entry SeaDex genuinely lists no best for. Unexported: in-process
-	// only, so the hidden_animebytes JSON key and slog attribute keep their
-	// established all-releases meaning.
-	hiddenAnimeBytesBest int
+	// HiddenAnimeBytesBest counts only the withheld releases SeaDex marks BEST.
+	// It is a SEPARATE key rather than a re-reading of HiddenAnimeBytes: a hidden
+	// AnimeBytes ALT says nothing about whether a best exists, so annotating from
+	// the total would tell a reader an empty best column means "hidden on a
+	// tracker you do not use" for an entry SeaDex genuinely lists no best for.
+	// HiddenAnimeBytes therefore keeps its established all-releases meaning and
+	// this carries the best-only projection.
+	//
+	// Published on all three renderers - the Markdown best column, this JSON key,
+	// and the slog attribute - because it is the ONLY fact that distinguishes
+	// "SeaDex lists no best" from "every best is on a tracker you turned off", and
+	// a machine consumer reading hidden_animebytes alone cannot make that
+	// distinction at all.
+	HiddenAnimeBytesBest int `json:"hidden_animebytes_best,omitempty"`
 }
 
 // IncompleteEntry is one SeaDex entry whose AniList lookup failed transiently
@@ -290,7 +294,7 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 			continue
 		}
 		covered[m.Item.Key()] = struct{}{}
-		if filter.ExcludeSpecial(m.Record.IsSpecial(), a.excludeSpecials) {
+		if a.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		rows = append(rows, a.assess(m))
@@ -337,7 +341,7 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 	// surface as not_on_seadex, while a mixed series stays catalogued through
 	// its non-special records sharing the same TVDB id.
 	cat := match.NewCatalogue(idx, func(r mapping.Record) bool {
-		return !filter.ExcludeSpecial(r.IsSpecial(), excludeSpecials)
+		return !excludeSpecials || !r.IsSpecial()
 	})
 	var rows []Row
 	for i := range snap.Items {
@@ -388,7 +392,7 @@ func (a *Auditor) assess(m *match.Match) Row {
 		if a.hiddenByABToggle(&m.Entry.Torrents[i]) {
 			row.HiddenAnimeBytes++
 			if m.Entry.Torrents[i].IsBest {
-				row.hiddenAnimeBytesBest++
+				row.HiddenAnimeBytesBest++
 			}
 		}
 	}
@@ -456,7 +460,7 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 	switch {
 	case d.Outcome == align.OutcomeMixed:
 		return QualifierMixed
-	case d.Outcome == align.OutcomeDiverged && classify.DivergedIncomplete(entry):
+	case d.Outcome == align.OutcomeDiverged && entry.Incomplete:
 		return QualifierIncomplete
 	default:
 		return ""
@@ -471,13 +475,13 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 // AnimeBytes off, so the report never surfaces AB releases or links they
 // cannot use (and cannot leak them). A public-labeled release whose URL
 // evidence is malformed or ambiguous is NOT dropped: the fail-closed
-// classify.ABVisible gate (kept for verdict eligibility) cannot prove it is
-// AB, and the report's contract is that a release with no usable link stays
-// listed with Unobtainable=true so the operator can see why it did not
-// affect the verdict. A curation-warned release (SeaDex tags it
-// Broken/Incomplete) stays listed AND annotated, and by default also counts:
-// the report enumerates raw SeaDex data by design, and whether a warning
-// removes the release from the verdict is now the operator's
+// filter.ABVisible gate inside classify.Obtainable (kept for verdict
+// eligibility) cannot prove it is AB, and the report's contract is that a
+// release with no usable link stays listed with Unobtainable=true so the
+// operator can see why it did not affect the verdict. A curation-warned
+// release (SeaDex tags it Broken/Incomplete) stays listed AND annotated, and by
+// default also counts: the report enumerates raw SeaDex data by design, and
+// whether a warning removes the release from the verdict is now the operator's
 // filters.exclude_tags call (carried on Release.Filtered, empty by default),
 // not this app's. The grab-links cell stays annotation-driven either way - the
 // report does not offer a one-click grab for a release SeaDex's own curators
@@ -522,7 +526,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			// An unknown tracker is the OTHER refusal, and its remedy is this
 			// app's, not the record's: nothing about the SeaDex data is wrong.
 			UnknownTracker: refusal == trackerlink.RefusalUnknownTracker,
-			Warnings:       release.CurationWarnings(t.Tags),
+			Warnings:       curationWarnings(t.Tags),
 			// The FILTER question, distinct from the annotation above: the
 			// operator's configured tag exclusions for this surface. Empty by
 			// default, so a warned release is annotated AND counted.

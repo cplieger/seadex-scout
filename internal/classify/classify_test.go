@@ -189,34 +189,6 @@ func TestFallbackPrecedence(t *testing.T) {
 	}
 }
 
-// TestABVisibleAdapterGatesOnRawEvidence pins the adapter's policy surface:
-// the operator toggle admits everything; with the toggle off an AB label or
-// an AB host in the RAW upstream URL hides the torrent, an absolute public
-// URL stays visible, an empty URL carries no host evidence to cross-check
-// (visible), and a hidden-host form hides conservatively.
-func TestABVisibleAdapterGatesOnRawEvidence(t *testing.T) {
-	tests := []struct {
-		name    string
-		torrent seadex.Torrent
-		include bool
-		want    bool
-	}{
-		{"AB label hidden when off", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, false, false},
-		{"AB label visible when on", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, true, true},
-		{"mislabeled AB URL hidden when off", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, false, false},
-		{"public tracker with absolute URL visible when off", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, false, true},
-		{"empty URL carries no host evidence and stays visible", seadex.Torrent{Tracker: "Nyaa", URL: ""}, false, true},
-		{"hidden-host URL form hidden conservatively when off", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ABVisible(&tt.torrent, tt.include); got != tt.want {
-				t.Errorf("ABVisible(%q, %q, %v) = %v, want %v", tt.torrent.Tracker, tt.torrent.URL, tt.include, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestObtainableAdapterPreservesRawURLForCrossCheck pins the adapter's wiring
 // invariant that filter.Obtainable's own tests cannot cover: the RAW upstream
 // URL must feed the AnimeBytes host cross-check (so a mislabeled schemeless AB
@@ -262,21 +234,6 @@ func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
 				t.Errorf("ABEvidence(%q, %q) = %d, want %d", tt.torrent.Tracker, tt.torrent.URL, got, tt.want)
 			}
 		})
-	}
-}
-
-// TestDivergedIncomplete pins the shared diverged-downgrade rule at its
-// defining site, mirroring TestFallbackPrecedence: an incomplete entry
-// downgrades a diverged comparison to the incomplete vocabulary, a complete
-// entry does not. Cross-package callers (compare, audit.rowQualifier) pin the
-// mapped vocabularies, but the one shared rule both map from had no test in
-// its own package.
-func TestDivergedIncomplete(t *testing.T) {
-	if !DivergedIncomplete(&seadex.Entry{Incomplete: true}) {
-		t.Error("DivergedIncomplete(incomplete entry) = false, want true")
-	}
-	if DivergedIncomplete(&seadex.Entry{}) {
-		t.Error("DivergedIncomplete(complete entry) = true, want false")
 	}
 }
 

@@ -85,9 +85,9 @@ var table = []Tracker{
 var byAlias = func() map[string]Tracker {
 	m := make(map[string]Tracker, len(table)*2)
 	for _, t := range table {
-		m[strings.ToLower(t.Name)] = t
+		m[urlform.FoldHostASCII(t.Name)] = t
 		for _, a := range t.aliases {
-			m[strings.ToLower(a)] = t
+			m[urlform.FoldHostASCII(a)] = t
 		}
 	}
 	return m
@@ -97,8 +97,19 @@ var byAlias = func() map[string]Tracker {
 // whitespace-insensitively) to its canonical table entry, reporting whether
 // the tracker is known. An empty or unrecognized name is not found.
 func Lookup(name string) (Tracker, bool) {
-	t, ok := byAlias[strings.ToLower(strings.TrimSpace(name))]
-	return t, ok
+	// The fold is urlform.EqualASCIIFold, not strings.ToLower: full Unicode simple folding has
+	// ASCII-PRODUCING mappings (U+0130 -> 'i', U+212A -> 'k'), so a pre-lookup ToLower launders a
+	// homograph label into a canonical alias key - the same class LookupByHost's ASCII gate exists
+	// to stop, on the axis that reads the same untrusted record. Every key is distinct lowercase
+	// ASCII and the fold is byte-length-preserving, so at most one key can match and the map's
+	// randomized iteration order cannot change the answer.
+	trimmed := strings.TrimSpace(name)
+	for key, t := range byAlias {
+		if urlform.EqualASCIIFold(trimmed, key) {
+			return t, true
+		}
+	}
+	return Tracker{}, false
 }
 
 // CanonicalName resolves the name to LABEL a link with, for a human-facing
@@ -197,7 +208,7 @@ func (t Tracker) Host() string {
 	if err != nil {
 		return ""
 	}
-	return strings.ToLower(u.Hostname())
+	return urlform.FoldHostASCII(u.Hostname())
 }
 
 // byHost indexes the table by canonical lowercased site hostname
@@ -247,7 +258,10 @@ func LookupByHost(host string) (Tracker, bool) {
 	if host == "" {
 		return Tracker{}, false
 	}
-	host = strings.ToLower(host)
+	// FoldHostASCII rather than strings.ToLower: the gate above already rejected non-ASCII, so the
+	// two agree today, but the library's fold cannot launder if that ordering ever moves - the
+	// safety stops resting on the call order the comment above has to explain.
+	host = urlform.FoldHostASCII(host)
 	// Most specific match wins, so the result cannot depend on Go's
 	// randomized map iteration order once the table holds a host that is
 	// a subdomain of another (sukebei.nyaa.si beside nyaa.si). Every

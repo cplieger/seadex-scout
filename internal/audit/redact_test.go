@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cplieger/seadex-scout/internal/pathredact"
 )
 
 // TestReportPathsRedactedFromLogsAndErrors pins the report pipeline's
@@ -21,7 +23,7 @@ import (
 //
 // The masking MECHANISM is exercised in internal/pathredact (Text/Err/Logger
 // and their guard branches); what these cases pin is this package's use of it:
-// the marker it spells, and every pipeline surface it must be applied at.
+// every pipeline surface it must be applied at.
 func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 	const sentinel = "sekret-passkey-sentinel"
 
@@ -72,8 +74,8 @@ func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 
 	t.Run("lock failure error carries no report path", func(t *testing.T) {
 		// The report lock lives in internal/cycle and returns the real path;
-		// redactPathErr is the report-dir policy applied to it (main spells
-		// the same policy through internal/pathredact). MkdirAll fails on
+		// pathredact.Err is the masking applied to it (main applies the same
+		// call to the same value). MkdirAll fails on
 		// the sentinel-named intermediate component, so the *os.PathError
 		// carries an ancestor of dir rather than dir itself; the ancestor
 		// redaction must still mask it.
@@ -87,7 +89,7 @@ func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 		if lockErr == nil {
 			t.Fatal("MkdirAll(parent is a regular file) = nil, want error")
 		}
-		err := redactPathErr(dir, fmt.Errorf("create report dir: %w", lockErr))
+		err := pathredact.Err(dir, fmt.Errorf("create report dir: %w", lockErr))
 
 		if strings.Contains(err.Error(), sentinel) {
 			t.Errorf("redacted lock error leaks the report.dir value: %v", err)

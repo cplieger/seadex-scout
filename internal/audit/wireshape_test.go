@@ -36,11 +36,12 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 			SeaDexURL: "https://releases.moe/154587", Verdict: VerdictAlt, Qualifier: QualifierMixed,
 			MatchSource: "id", CurrentGroups: []string{"erai"}, AniListID: 154587, Season: 2,
 			Scope:   align.ScopeSeason,
-			Special: true, Incomplete: true, Approx: true, HiddenAnimeBytes: 3,
+			Special: true, Incomplete: true, Approx: true, HiddenAnimeBytes: 3, HiddenAnimeBytesBest: 1,
 			GroupsUnknown: true,
 			Releases: []Release{{
 				Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/1",
-				Warnings: []string{"broken"}, Best: true, Unobtainable: true, URLError: true,
+				Warnings: []string{"broken"}, Best: true, Filtered: true,
+				Unobtainable: true, URLError: true, UnknownTracker: true,
 			}},
 		}},
 		Incomplete: []IncompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
@@ -63,8 +64,9 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 	row, _ := rows[0].(map[string]any)
 	assertJSONKeys(t, "row", row, []string{
 		"al_id", "approx", "arr", "arr_url", "current_groups", "groups_unknown",
-		"hidden_animebytes", "incomplete", "match_source", "qualifier", "releases",
-		"scope", "seadex_url", "season", "special", "title", "verdict",
+		"hidden_animebytes", "hidden_animebytes_best", "incomplete", "match_source",
+		"qualifier", "releases", "scope", "seadex_url", "season", "special", "title",
+		"verdict",
 	})
 
 	rels, _ := row["releases"].([]any)
@@ -73,7 +75,8 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 	}
 	rel, _ := rels[0].(map[string]any)
 	assertJSONKeys(t, "release", rel, []string{
-		"best", "group", "tracker", "unobtainable", "url", "url_error", "warnings",
+		"best", "filtered", "group", "tracker", "unknown_tracker", "unobtainable",
+		"url", "url_error", "warnings",
 	})
 
 	inc, _ := decoded["incomplete_mappings"].([]any)

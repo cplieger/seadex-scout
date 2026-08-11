@@ -197,9 +197,10 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 	}
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index, showTitles := pendingHarvest(feeds, titles, infoFor)
-	defer func() { cursor = last }()
 	if len(groups) == 0 || len(h.upstreams) == 0 {
-		return stats, cursor
+		// No group can consume a query, so the persisted rotation position is
+		// carried forward unchanged.
+		return stats, last
 	}
 	// The pacer's deadline only gates ADMISSION of the next query; an
 	// admitted u.search runs the whole Prowlarr retry tree (three 60s
@@ -231,7 +232,9 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 			break
 		}
 	}
-	return stats, cursor
+	// last is the rotation position the run advanced through run.cursor - the last
+	// group that CONSUMED a query - or the loaded value when none did.
+	return stats, last
 }
 
 // harvestRun is one harvestTitles run's mutable accounting: the per-rebuild
@@ -943,7 +946,12 @@ func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, in
 // serves a synthesized title, carries its journal bookkeeping, and its show
 // has a title source to query with.
 func harvestable(it *journalItem, titles map[string]string, infoFor EntryInfoFunc) bool {
-	if it.Key == "" || it.AniListID <= 0 {
+	// A journal item's Key is established before it can get here - the decode
+	// gate (pruneJournalFeed/validJournalRecord), the carry gate
+	// (prepareCarriedItem) and creation (journalIdentityMatches) each refuse a
+	// key-less item - so only the AniList id, which no gate in front of this one
+	// tests, is checked here.
+	if it.AniListID <= 0 {
 		return false
 	}
 	if _, done := titles[it.Key]; done {
@@ -1350,9 +1358,6 @@ func syntheticCount(feeds map[string][]journalItem, titles map[string]string) in
 	n := 0
 	for _, feed := range feeds {
 		for i := range feed {
-			if feed[i].Key == "" {
-				continue
-			}
 			if _, ok := titles[feed[i].Key]; !ok {
 				n++
 			}

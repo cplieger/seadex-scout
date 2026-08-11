@@ -541,13 +541,17 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 }
 
 // warnEmptyArrList warns when an enabled arr's own list call succeeded but
-// returned nothing at all. A zero-item list is not a walk failure, so no other
-// signal reports it: warnFilteredEmpty deliberately returns early when
-// listed == 0 (filtering is not the cause), and the scout's below-half shrink
-// gate is WHOLE-library, so emptying only one side of a two-arr library stays
-// under the threshold and mass-resolves that side's findings silently. Counts
-// only, never a URL: an arr pointed at a fresh or migrated instance, or one
-// whose database was restored empty, is the usual cause.
+// returned nothing at all. A zero-item list is not a walk failure, so on a
+// FIRST walk no other signal reports it: warnFilteredEmpty deliberately
+// returns early when listed == 0 (filtering is not the cause), and the
+// scout's shrink guard is per-arr but needs a PRIOR count for that arr
+// (scout.mergeShrunkSides skips a side whose prior[arr] is 0), so a first
+// boot, a wiped state.json, or a newly enabled arr has no baseline to be
+// suspicious of. Once a prior count exists that guard owns the case: it
+// carries the side's prior items, escalates to ERROR, and accepts only after
+// degradation.ShrunkWalkAcceptThreshold reconciles, loudly. Counts only,
+// never a URL: an arr pointed at a fresh or migrated instance, or one whose
+// database was restored empty, is the usual cause.
 func (w *Walker) warnEmptyArrList(arr string, listed int) {
 	if listed > 0 {
 		return
@@ -572,10 +576,14 @@ func (w *Walker) warnEmptyArrList(arr string, listed int) {
 // The returned flag rides the snapshot (library.Snapshot.FilteredEmpty) so the
 // cycle closes DEGRADED rather than clean: a WARN alone left a daemon watching
 // nothing while every completion line still read "cycle complete", and the
-// scout's shrink guard can catch it for exactly one cycle (it then persists the
-// empty snapshot as the new baseline) and never on a first-ever boot. An
-// EMPTY arr list is deliberately not this signal - a legitimately empty Radarr
-// would then degrade every cycle forever; warnEmptyArrList owns that case.
+// scout's per-arr shrink guard cannot see this at all on a first-ever boot
+// (scout.mergeShrunkSides skips a side whose prior[arr] is 0). Where a prior
+// count DOES exist that guard now carries the side's prior items and keeps
+// re-testing it until degradation.ShrunkWalkAcceptThreshold reconciles -
+// there is no one-cycle ratchet - so this flag's own job is the baseline case
+// plus naming tag filtering as the CAUSE, which no count can. An EMPTY arr
+// list is deliberately not this signal - a legitimately empty Radarr would
+// then degrade every cycle forever; warnEmptyArrList owns that case.
 func (w *Walker) warnFilteredEmpty(arr string, listed, kept int, filtered bool) bool {
 	if !filtered || listed == 0 || kept > 0 {
 		return false
@@ -601,7 +609,8 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 		fi := fileFromEpisode(&epFiles[i])
 		files = append(files, fi)
 		// fi.group is never empty: fileInfoFrom normalizes it via
-		// release.NormalizeGroup, which falls back to NOGRP for group-less files.
+		// release.NormalizeGroup, which falls back to the LOWERCASED NOGRP
+		// sentinel ("nogrp") for group-less files.
 		groupCounts[fi.group]++
 		addSeasonGroup(seasonCounts, epFiles[i].SeasonNumber, fi.group)
 	}
@@ -623,8 +632,8 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 		// A genuinely fileless series carries no comparable fingerprint: the
 		// zero Current (Group "") mirrors the fileless-movie shape, and the
 		// compare/audit paths read file presence before any group. Only a
-		// PRESENT file with an unparseable group falls back to NOGRP (via
-		// release.NormalizeGroup in fileInfoFrom).
+		// PRESENT file with an unparseable group falls back to the lowercased
+		// NOGRP sentinel ("nogrp", via release.NormalizeGroup in fileInfoFrom).
 		rep := representative(files, groupCounts)
 		item.Current = fingerprint(&rep)
 	}
@@ -647,7 +656,8 @@ func (w *Walker) movieItem(m *arrapi.Movie) library.Item {
 	if item.HasFile {
 		fi := fileFromMovie(m.MovieFile)
 		// fi.group is never empty: fileInfoFrom normalizes it via
-		// release.NormalizeGroup, which falls back to NOGRP for group-less files.
+		// release.NormalizeGroup, which falls back to the LOWERCASED NOGRP
+		// sentinel ("nogrp") for group-less files.
 		item.Groups = []string{fi.group}
 		item.Current = fingerprint(&fi)
 	}

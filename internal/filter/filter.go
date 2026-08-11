@@ -26,17 +26,17 @@ type Options struct {
 }
 
 // KeepNonTracker reports whether a release passes the content filters (remux
-// policy, dual-audio), ignoring the tracker, and the drop reason otherwise.
-// Tracker obtainability is applied separately via Obtainable. An unknown-kind
-// release is never dropped by the remux policy.
-func KeepNonTracker(r *release.Release, opts Options) (keep bool, reason string) {
+// policy, dual-audio), ignoring the tracker. Tracker obtainability is applied
+// separately via Obtainable. An unknown-kind release is never dropped by the
+// remux policy.
+func KeepNonTracker(r *release.Release, opts Options) bool {
 	if r.Kind == release.KindRemux && opts.ExcludeRemux {
-		return false, "remux excluded (exclude_remux is true)"
+		return false
 	}
 	if opts.RequireDualAudio && !r.DualAudio {
-		return false, "not dual-audio"
+		return false
 	}
-	return true, ""
+	return true
 }
 
 // Obtainable reports whether the operator could actually get this release: a
@@ -86,11 +86,4 @@ func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) b
 // the operator POLICY over it.
 func ABVisible(trackerName, rawURL string, animeBytes bool) bool {
 	return animeBytes || tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone
-}
-
-// ExcludeSpecial reports whether an entry classified special should be dropped
-// under the exclude_specials filter; shared by compare and audit so the two
-// consumers cannot drift.
-func ExcludeSpecial(isSpecial, excludeSpecials bool) bool {
-	return excludeSpecials && isSpecial
 }

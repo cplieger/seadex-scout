@@ -214,7 +214,9 @@ const staleTempMaxAge = time.Hour
 
 // schemaVersion independently decodes the persisted envelope's schema version
 // discriminator straight from the wire bytes, reporting the effective (last)
-// decoded version, whether the key was present, and any wire-level failure.
+// decoded version - zero when the key is absent, which the envelope's
+// contract treats as the legacy pre-version shape (see SchemaVersion) -
+// and any wire-level failure.
 // It is the single source of truth for the discriminator on BOTH the clean
 // and error decode paths: decode must never read it from State.Version. Go
 // documents that json.Unmarshal may populate fields before returning a type
@@ -232,7 +234,7 @@ const staleTempMaxAge = time.Hour
 // of reading as newer-schema 99. Any error (a non-object, a malformed member,
 // a null, negative, or non-integer version occurrence, trailing data) sends
 // the caller to the quarantine path.
-func schemaVersion(data []byte) (version int, found bool, err error) {
+func schemaVersion(data []byte) (version int, err error) {
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	err = dec.Object(func(key string) error {
 		if !strings.EqualFold(key, "version") {
@@ -260,16 +262,16 @@ func schemaVersion(data []byte) (version int, found bool, err error) {
 			// cycle) instead of quarantining as corruption.
 			return fmt.Errorf("invalid negative schema version %d", *decoded)
 		}
-		version, found = *decoded, true
+		version = *decoded
 		return nil
 	})
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	if endErr := dec.End(); endErr != nil {
-		return 0, false, endErr
+		return 0, endErr
 	}
-	return version, found, nil
+	return version, nil
 }
 
 // Load reads and decodes the state file. A missing file returns a zero State
@@ -347,7 +349,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	attrs := []any{
 		"path", s.path,
 		"library_items", len(st.Library.Items),
-		"mapping_records", len(st.Mapping.Records),
+		"mapping_records", st.Mapping.IndexedRecords(),
 		"memo_entries", len(st.Memo.Entries),
 	}
 	if !st.Library.TakenAt.IsZero() {
@@ -512,12 +514,14 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 	// silently - see schemaVersion). A wire-level failure - a malformed
 	// member, a null or non-integer version occurrence, trailing data - is
 	// corruption Save can never have produced; quarantine it.
-	wireVersion, found, err := schemaVersion(data)
+	wireVersion, err := schemaVersion(data)
 	if err != nil {
 		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
-	if found && wireVersion > SchemaVersion {
+	// An absent version key decodes as zero, which is below SchemaVersion,
+	// so the legacy envelope takes the ordinary load path here.
+	if wireVersion > SchemaVersion {
 		// A file stamped by a newer binary (an image rollback): its members
 		// may have moved, so field-by-field zero-loading is exactly the
 		// silent discard SchemaVersion exists to prevent - and a type-level

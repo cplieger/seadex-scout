@@ -87,7 +87,8 @@ func WatchdogLease(interval time.Duration) time.Duration {
 const watchdogPollDivisor = 6
 
 // StartWedgeWatchdog marks the container unhealthy when no pass has completed
-// within lease. It returns a stop function.
+// within lease. It returns a func that stops the watchdog and waits for its
+// goroutine to exit; calling it more than once is safe.
 //
 // This is the wedge detection that used to live in the health subcommand as
 // health.WithMaxAge, sized from a config read. It belongs beside the cycle
@@ -108,12 +109,21 @@ func StartWedgeWatchdog(ctx context.Context, marker *health.Marker, path string,
 	if lease <= 0 {
 		return func() {}
 	}
+	// The watchdog runs on its OWN cancellable child of ctx, so the returned
+	// func can STOP it rather than only wait for it: ctx also drives the cycle
+	// loop, so a caller that stops the watchdog before that shared context is
+	// cancelled would otherwise block forever on a goroutine nothing had asked
+	// to exit.
+	watchCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		watchMarker(ctx, marker, path, lease)
+		watchMarker(watchCtx, marker, path, lease)
 	}()
-	return func() { <-done }
+	return func() {
+		stop()
+		<-done
+	}
 }
 
 // watchMarker is StartWedgeWatchdog's loop body: it re-checks the marker's age

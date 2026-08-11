@@ -363,7 +363,7 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 
 // TestAuditMalformedPublicURLListedUnobtainable pins the report contract for
 // a public-labeled release with MALFORMED URL evidence: the fail-closed
-// verdict gate (classify.ABVisible) cannot prove it is AnimeBytes, so with
+// verdict gate (filter.ABVisible) cannot prove it is AnimeBytes, so with
 // the toggle off the row must remain LISTED with an empty URL and
 // Unobtainable=true - the operator sees why it did not affect the verdict -
 // while a definite AB release in the same entry stays hidden. Regression
@@ -1011,5 +1011,68 @@ func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
 		} else if !tc.want && got == unknownCell {
 			t.Errorf("%s: groups cell must not read %q for an item with real evidence", tc.title, unknownCell)
 		}
+	}
+}
+
+// TestClassifyReleasesMapsPublisherRefusalToItsOwnMarker pins the two report
+// diagnostics classifyReleases derives from the publisher's refusal REASON, and
+// the implication forfeitsBest now rests on. A refused url value and a tracker
+// this build does not carry get their OWN marker because the remedies differ (an
+// upstream SeaDex record to fix vs an internal/tracker table entry to ship,
+// l-f127), and BOTH leave the release Unobtainable - which is the only thing
+// keeping a refused best out of the verdict's BEST set now that forfeitsBest
+// names neither flag.
+//
+// Nothing else pins either half: the render tests build a Release literal by
+// hand, so they never exercise the assignment, and no test anywhere feeds an
+// unknown tracker through the report pipeline. The groupSets assertion is what
+// makes the implication itself falsifiable rather than assumed.
+func TestClassifyReleasesMapsPublisherRefusalToItsOwnMarker(t *testing.T) {
+	tests := map[string]struct {
+		tracker            string
+		url                string
+		wantURLError       bool
+		wantUnknownTracker bool
+	}{
+		"a structureless url value is an upstream data defect": {
+			tracker:      "Nyaa",
+			url:          "Chihiro",
+			wantURLError: true,
+		},
+		"a tracker this build does not carry is an app-table gap": {
+			tracker:            "beyondhd",
+			url:                "https://beyondhd.co/t/1",
+			wantUnknownTracker: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			a := NewAuditor(Config{})
+			entry := seadex.Entry{AniListID: 42, Torrents: []seadex.Torrent{
+				{Tracker: tc.tracker, URL: tc.url, ReleaseGroup: "PMR", IsBest: true},
+			}}
+
+			rels := a.classifyReleases(&entry)
+
+			if len(rels) != 1 {
+				t.Fatalf("classifyReleases() = %+v, want the release listed", rels)
+			}
+			rel := &rels[0]
+			if rel.URLError != tc.wantURLError {
+				t.Errorf("URLError = %v, want %v", rel.URLError, tc.wantURLError)
+			}
+			if rel.UnknownTracker != tc.wantUnknownTracker {
+				t.Errorf("UnknownTracker = %v, want %v", rel.UnknownTracker, tc.wantUnknownTracker)
+			}
+			if rel.URL != "" {
+				t.Errorf("URL = %q, want empty: the publisher refused the value", rel.URL)
+			}
+			if !rel.Unobtainable {
+				t.Error("Unobtainable = false: forfeitsBest names neither refusal flag, so a refused best would count as BEST evidence")
+			}
+			if best, _ := groupSets(rels); len(best) != 0 {
+				t.Errorf("groupSets best = %v, want none for a release the publisher refused", best)
+			}
+		})
 	}
 }

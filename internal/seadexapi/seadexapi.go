@@ -65,14 +65,18 @@ const (
 	// decode, guarding against an oversized or malicious payload.
 	maxPageBytes = 48 << 20
 
-	// MaxWindowEntries is the largest window a caller should fetch in one pass.
-	// It is perPage, so a window at or under it is always ONE request: the
-	// bound exists to keep a bulk upstream edit from turning every tick into a
-	// multi-page walk, which at a 15-minute cadence costs more than the full
-	// pass it was meant to replace. A caller over the bound defers to a full
-	// pass rather than fetching a truncated prefix - and it must, because the
-	// walk sorts on `created`, so the first page of an oversized window holds
-	// the OLDEST records, the opposite of what a freshness pass wants.
+	// MaxWindowEntries is the window size a caller must NOT reach: the bound is
+	// exclusive, so a window strictly under it is always ONE request. It is
+	// perPage, and a chunk of exactly perPage reads as 'more may follow'
+	// (chunkComplete), so a window AT the bound would cost a second, empty
+	// request plus a pageDelay - which is why internal/scout defers at `count >=
+	// MaxWindowEntries`. The bound exists to keep a bulk upstream edit from
+	// turning every tick into a multi-page walk, which at a 15-minute cadence
+	// costs more than the full pass it was meant to replace. A caller at or over
+	// the bound defers to a full pass rather than fetching a truncated prefix -
+	// and it must, because the walk sorts on `created`, so the first page of an
+	// oversized window holds the OLDEST records, the opposite of what a freshness
+	// pass wants.
 	MaxWindowEntries = perPage
 
 	// maxProbeBytes bounds CountWindow's response. It carries one id and the
@@ -556,7 +560,16 @@ func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) 
 	}
 	var list pbList
 	if err := json.Unmarshal(body, &list); err != nil {
-		return 0, fmt.Errorf("seadex: decode window count: %w", err)
+		// Bounded like the page decoder's arm (see fetchPage): stdlib json
+		// renders a rejected NUMBER literal verbatim, so this message is
+		// otherwise bounded only by maxProbeBytes and lands whole in the
+		// tick's WARN attribute (measured: a 3915-byte body yields a
+		// 4010-byte message, and scout's own 8 KiB reduction is above that
+		// ceiling so nothing downstream trims it). maxLoggedDecodeBytes keeps
+		// the offending value's kind plus the head of its literal, which is
+		// all this diagnostic owes the operator.
+		return 0, fmt.Errorf("seadex: decode window count: %s",
+			runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes))
 	}
 	if list.TotalItems < 0 {
 		return 0, fmt.Errorf("seadex: window count reported a negative total (%d); "+
@@ -645,10 +658,7 @@ func walkBudgetError(parent, walk context.Context, err error, page, fetched int)
 // app-wide shrink policy - no credible mid-fetch delete loses half a
 // catalogue, and this was the last path accepting a truncated view), and a
 // smaller disagreement logs the alert-stable count-mismatch WARN but still
-// returns the entries. Entries
-// whose non-empty updated timestamp failed to parse (zeroed, sorting to the
-// feed's tail) are surfaced as one aggregate WARN so an upstream format drift
-// that zeroes the whole catalogue is alertable without per-record noise.
+// returns the entries.
 //
 // The catalogue's TRACKER-LINK quality — how many torrents carry a URL the
 // publisher refuses, and how many of those name a tracker this build does not
@@ -717,12 +727,31 @@ func (c *Client) finishFetch(all []seadex.Entry, tot fetchTotals, mode FetchMode
 // remains a benign explanation. Refusing would discard the freshness the
 // response did deliver.
 func (c *Client) warnWindowShortfall(count int, tot fetchTotals) {
-	if tot.chunks != 1 || tot.reportedTotal <= 0 || count >= tot.reportedTotal {
+	// A non-positive reported total needs no arm of its own: count is a slice
+	// length, so count >= tot.reportedTotal already returns for it - including the
+	// empty window (totalItems 0) this guard must stay silent on. reportedTotal is
+	// also never negative here: fetchAndAppend raises it monotonically from zero
+	// with max(), so an upstream totalItems of -1 arrives as 0. The negative
+	// sentinel is refused where it can actually appear, in CountWindow.
+	if tot.chunks != 1 || count >= tot.reportedTotal {
 		return
 	}
 	c.log.Warn("seadex change window delivered fewer entries than it reported selecting; "+
 		"this tick's freshness is incomplete and the next reconcile is the backstop",
 		"got", count, "want", tot.reportedTotal)
+}
+
+// reportedTotalFitsPages is the one catalogue-metadata guard BOTH fetch modes keep:
+// totalItems cannot exceed what the reported pages can hold, whatever the filter,
+// because it catches the upstream contradicting ITSELF rather than making a claim
+// about catalogue size. refusal names what this fetch is declining to do, so the
+// window and the full walk keep their own wording over one shared predicate.
+func reportedTotalFitsPages(tot fetchTotals, refusal string) error {
+	if tot.reportedTotal <= tot.reportedPages*perPage {
+		return nil
+	}
+	return fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); %s",
+		tot.reportedTotal, tot.reportedPages, perPage, refusal)
 }
 
 // validateFinishedFetch holds finishFetch's completeness guards, in order: an
@@ -737,9 +766,8 @@ func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
 		// shortfall arm describes anything real here. The metadata-consistency
 		// arm is kept: totalItems still cannot exceed what the reported pages
 		// can hold, whatever the filter.
-		if tot.reportedTotal > tot.reportedPages*perPage {
-			return fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
-				"refusing a window it cannot vouch for", tot.reportedTotal, tot.reportedPages, perPage)
+		if err := reportedTotalFitsPages(tot, "refusing a window it cannot vouch for"); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -751,9 +779,8 @@ func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
 		return fmt.Errorf("seadex: catalogue of %d entries completed with no reported total to vouch for "+
 			"completeness (upstream misbehaving); refusing to compare against a truncated view", count)
 	}
-	if tot.reportedTotal > tot.reportedPages*perPage {
-		return fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
-			"refusing to compare against a truncated view", tot.reportedTotal, tot.reportedPages, perPage)
+	if err := reportedTotalFitsPages(tot, "refusing to compare against a truncated view"); err != nil {
+		return err
 	}
 	if degradation.Shrunk(count, tot.reportedTotal) {
 		// The keyset cursor makes a SKIPPED record structurally impossible (see
@@ -776,22 +803,14 @@ func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
 }
 
 // logFinishedFetchWarnings emits finishFetch's degradation diagnostics for a
-// catalogue that PASSED validateFinishedFetch: the alert-stable count mismatch,
-// the aggregate unparseable-timestamp counter, and the budget-mostly-spent
-// capacity warning.
+// catalogue that PASSED validateFinishedFetch: the alert-stable count mismatch
+// and the budget-mostly-spent capacity warning.
 func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
-	// Belt to validateFinishedFetch's no-reported-total arm, which already
-	// errors when the responses never stated a count: a response carrying no
-	// totalItems (omitted decodes to zero) stated no count to disagree with, so
-	// should that arm ever be relaxed this WARN must still not fire the
-	// alert-stable mismatch with want=0 on every cycle.
 	// No reportedTotal > 0 conjunct: this runs only after validateFinishedFetch,
 	// which already fails a FULL fetch whose reported total is not positive, so
-	// the guard could never change an operator-visible result. Its own comment
-	// defended it as a belt against a future relaxation of that refusal - which
-	// is the case Go answers with the test that pins the refusal
-	// (TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal), not with an
-	// unreachable runtime branch (l-f139).
+	// the mismatch WARN can never fire with want=0. That refusal is pinned by
+	// TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal rather than by
+	// an unreachable runtime branch here (l-f139).
 	if count != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", count, "want", tot.reportedTotal)
 	}
@@ -845,7 +864,7 @@ func (c *Client) warnCatalogueShrink(count int) {
 
 // fetchAndAppend fetches one chunk at the walk's cursor, appends its entries,
 // updates the running totals (cumulative bytes and decoded elements, the API's
-// reported item total, and the unparseable-updated counter),
+// reported item and page totals, and the delivered-chunk count),
 // enforces the cumulative-byte and cumulative-element caps,
 // validates the chunk's entry identities (validatePageIdentities),
 // advances the cursor past the chunk when the walk continues, and reports
@@ -858,7 +877,7 @@ func (c *Client) warnCatalogueShrink(count int) {
 func (c *Client) fetchAndAppend(ctx context.Context, page int, all []seadex.Entry, tot *fetchTotals, cur *cursor, opts Options) (out []seadex.Entry, done bool, err error) {
 	pageBytes, pageElems, err := remainingFetchBudgets(*tot)
 	if err != nil {
-		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
+		return all, false, pageFetchError(err, page, len(all))
 	}
 	list, n, elems, err := c.fetchPage(ctx, *cur, pageBytes, pageElems, opts)
 	if err != nil {
@@ -915,9 +934,12 @@ func remainingFetchBudgets(tot fetchTotals) (pageBytes int64, pageElements int, 
 	return min(int64(maxPageBytes), bytesLeft), min(maxPageElements, elemsLeft), nil
 }
 
-// pageFetchError classifies one chunk fetch failure: a budget exhaustion keeps
-// its sentinel (so the caller's errors.Is classification survives) and gains the
-// page context, anything else becomes the ordinary per-page fetch error.
+// pageFetchError classifies one chunk's failure, whether it was raised BEFORE the
+// request (an exhausted cumulative budget, from remainingFetchBudgets) or by it: a
+// budget exhaustion keeps its sentinel (so the caller's errors.Is classification
+// survives) and gains the page context, anything else becomes the ordinary
+// per-page fetch error. It is the ONE home of that page context, so the two
+// raising paths cannot render the alert-stable sentinel messages differently.
 func pageFetchError(err error, page, fetched int) error {
 	if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
 		return fmt.Errorf("%w (page %d, %d entries fetched)", err, page, fetched)

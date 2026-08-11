@@ -1250,15 +1250,15 @@ func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 		t.Error("displayBestGroups() did not keep the first release's original case")
 	}
 
-	attr := joinBestGroupsAttr(releases)
+	attr, _ := joinBestAttrs(releases)
 	if len(attr) != maxAttrBytes+3 {
-		t.Errorf("len(joinBestGroupsAttr()) = %d, want %d (bounded output)", len(attr), maxAttrBytes+3)
+		t.Errorf("len(joinBestAttrs() groups) = %d, want %d (bounded output)", len(attr), maxAttrBytes+3)
 	}
 	if !strings.HasSuffix(attr, "...") {
-		t.Errorf("joinBestGroupsAttr() = %q..., want truncation suffix", attr[:16])
+		t.Errorf("joinBestAttrs() groups = %q..., want truncation suffix", attr[:16])
 	}
 	if strings.ContainsRune(attr, 'G') {
-		t.Error("joinBestGroupsAttr() emitted the deduped upper-case twin")
+		t.Error("joinBestAttrs() groups emitted the deduped upper-case twin")
 	}
 }
 

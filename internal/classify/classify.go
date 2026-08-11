@@ -23,23 +23,13 @@ import (
 
 // --- AB visibility gates (adapters over filter) ---
 
-// ABVisible reports whether a SeaDex torrent may surface under the operator's
-// AnimeBytes toggle. It owns the raw-URL invariant shared by compare and audit:
-// the guard inspects the RAW upstream URL (t.URL), never the published link,
-// because publishing trusts the tracker label and would rewrite or erase the
-// very host evidence the cross-check needs. Obtainability re-checks the label
-// downstream as defense in depth.
-func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
-	return filter.ABVisible(t.Tracker, t.URL, includeAnimeBytes)
-}
-
 // PublishURL returns the clickable tracker link for a SeaDex torrent, or "" when
 // the publisher refused the raw upstream value (see trackerlink.Publish). It is
 // the adapter that keeps the (tracker, rawURL) argument order in ONE place for
-// every consumer of the SeaDex model, mirroring the ABVisible/Obtainable pattern
-// - and it is why internal/seadex no longer carries this policy as a method on
-// the wire struct: the publish half of the link concern now sits beside
-// its hide half in filter, one layer below the flows.
+// every consumer of the SeaDex model, mirroring the filter.ABVisible/Obtainable
+// pattern - and it is why internal/seadex no longer carries this policy as a
+// method on the wire struct: the publish half of the link concern now sits
+// beside its hide half in filter, one layer below the flows.
 func PublishURL(t *seadex.Torrent) string {
 	return trackerlink.Publish(t.Tracker, t.URL)
 }
@@ -57,24 +47,24 @@ func PublishRefusal(t *seadex.Torrent) (string, trackerlink.Refusal) {
 
 // Obtainable reports whether a classified SeaDex release is obtainability
 // evidence under the operator's AnimeBytes toggle. It owns the argument
-// invariant shared by compare and audit (mirroring ABVisible's adapter
+// invariant shared by compare and audit (mirroring ABEvidence's adapter
 // pattern): the RAW upstream URL (t.URL) feeds the tracker cross-check while
 // the published link (PublishURL) is the grabbable one, in that order.
 func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
 	return filter.Obtainable(rel, t.URL, PublishURL(t), animeBytes)
 }
 
-// ABEvidence grades the AnimeBytes evidence in a SeaDex torrent. Like ABVisible
-// it owns the raw-URL invariant shared by compare and audit: the grading reads
-// the RAW upstream URL (t.URL), never the published link, because publishing
-// trusts the tracker label and would rewrite or erase the very host evidence the
-// grading needs.
+// ABEvidence grades the AnimeBytes evidence in a SeaDex torrent. Like
+// filter.ABVisible it reads the RAW upstream URL (t.URL), never the published
+// link, because publishing trusts the tracker label and would rewrite or erase
+// the very host evidence the grading needs; the adapter owns that invariant for
+// compare and audit alike.
 //
 // Consumers pick their own fail direction over the grade. The audit report gates
 // row VISIBILITY on ABDefinite (fail open: a definite AB row hides with the
 // toggle off, while an ambiguous public-labeled row stays listed, annotated
-// unobtainable), where ABVisible stays the fail-closed verdict-eligibility gate
-// shared with compare.
+// unobtainable), where filter.ABVisible - reached through Obtainable - stays the
+// fail-closed verdict-eligibility gate shared with compare.
 func ABEvidence(t *seadex.Torrent) tracker.ABEvidence {
 	return tracker.ClassifyAB(t.Tracker, t.URL)
 }
@@ -106,23 +96,10 @@ func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 // title synthesis is the consumer). Kept beside Torrent so every
 // release.Input built from SeaDex data has one home.
 func FileResolution(files []seadex.File) string {
-	names := payload.Names(files)
-	if len(names) == 0 {
-		return ""
-	}
-	return release.Classify(&release.Input{Names: names}).Resolution
+	return release.Classify(&release.Input{Names: payload.Names(files)}).Resolution
 }
 
 // --- Shared entry-state verdict rules ---
-
-// DivergedIncomplete reports whether a diverged comparison of
-// entry downgrades to the incomplete vocabulary (compare's
-// StatusIncomplete, audit's QualifierIncomplete) - the one
-// downgrade rule both flows must share, kept here beside
-// Fallback so they cannot silently drift.
-func DivergedIncomplete(entry *seadex.Entry) bool {
-	return entry.Incomplete
-}
 
 // EntryFallback classifies an entry that lists no recommended releases.
 // Theoretical beats incomplete - the one precedence compare's emptyResult

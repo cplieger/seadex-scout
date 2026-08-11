@@ -23,12 +23,8 @@ func TestKeepNonTracker(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			keep, reason := KeepNonTracker(&tt.rel, tt.opts)
-			if keep != tt.wantKeep {
-				t.Errorf("KeepNonTracker() keep = %v, want %v (reason %q)", keep, tt.wantKeep, reason)
-			}
-			if !keep && reason == "" {
-				t.Error("a dropped release must carry a reason")
+			if keep := KeepNonTracker(&tt.rel, tt.opts); keep != tt.wantKeep {
+				t.Errorf("KeepNonTracker() keep = %v, want %v", keep, tt.wantKeep)
 			}
 		})
 	}
@@ -44,8 +40,8 @@ func TestRequireDualAudioKeysOnStructuredFlag(t *testing.T) {
 	opts := Options{RequireDualAudio: true}
 
 	flagged := release.Classify(&release.Input{DualAudio: true, Notes: "lacks dual audio"})
-	if keep, reason := KeepNonTracker(&flagged, opts); !keep {
-		t.Errorf("structured dual-audio release dropped (%q); the flag must pass require_dual_audio", reason)
+	if !KeepNonTracker(&flagged, opts) {
+		t.Error("structured dual-audio release dropped; the flag must pass require_dual_audio")
 	}
 
 	for _, tt := range []struct {
@@ -58,7 +54,7 @@ func TestRequireDualAudioKeysOnStructuredFlag(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rel := release.Classify(&tt.in)
-			if keep, _ := KeepNonTracker(&rel, opts); keep {
+			if KeepNonTracker(&rel, opts) {
 				t.Error("text-only dual-audio mention passed require_dual_audio; the structured flag is the only evidence")
 			}
 		})
@@ -88,26 +84,6 @@ func TestObtainable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := Obtainable(&tt.rel, tt.rawURL, tt.usableURL, tt.animeBytes); got != tt.want {
 				t.Errorf("Obtainable() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestExcludeSpecial(t *testing.T) {
-	tests := map[string]struct {
-		isSpecial       bool
-		excludeSpecials bool
-		want            bool
-	}{
-		"ordinary entry remains visible when exclusion is off": {false, false, false},
-		"ordinary entry remains visible when exclusion is on":  {false, true, false},
-		"special remains visible when exclusion is off":        {true, false, false},
-		"special is excluded when exclusion is on":             {true, true, true},
-	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			if got := ExcludeSpecial(tt.isSpecial, tt.excludeSpecials); got != tt.want {
-				t.Errorf("ExcludeSpecial(%v, %v) = %v, want %v", tt.isSpecial, tt.excludeSpecials, got, tt.want)
 			}
 		})
 	}

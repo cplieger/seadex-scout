@@ -392,7 +392,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("write oversized snapshot: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after unreadable snapshot = %d items, want 1 (a bad read must not blank a live feed)", len(got))
 	}
@@ -428,7 +428,7 @@ func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 		t.Fatalf("mkdir over snapshot: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after non-regular snapshot path = %d items, want 1 (a refused path must not blank a live feed)", len(got))
 	}
@@ -466,7 +466,7 @@ func TestReloadRefusesSymlinkedSnapshotPath(t *testing.T) {
 	if err := os.Symlink(other, path); err != nil {
 		t.Fatalf("symlink snapshot: %v", err)
 	}
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after symlinked snapshot path = %d items, want 1 (the link target must never be loaded)", len(got))
 	}
@@ -500,7 +500,7 @@ func TestReloadRefusesFifoSnapshotPathWithoutBlocking(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ix.cache.refresh(context.Background())
+		ix.cache.loader.refresh(context.Background())
 	}()
 	select {
 	case <-done:

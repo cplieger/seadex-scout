@@ -22,7 +22,9 @@ import (
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
+	"github.com/cplieger/seadex-scout/internal/pathredact"
 	"github.com/cplieger/seadex-scout/internal/reportfs"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/urlform"
 )
@@ -33,8 +35,12 @@ const (
 	// emptyCell is shown for a column with no value.
 	emptyCell = "-"
 	// unknownCell marks a column whose fact was never established, as distinct
-	// from emptyCell's positive "there is nothing here".
-	unknownCell = "unknown"
+	// from emptyCell's positive "there is nothing here". The angle brackets are
+	// load-bearing rather than decorative: escapeCell entity-encodes `<` and
+	// `>`, so no upstream release group can render this cell's bytes, and the
+	// sentinel cannot be confused with an on-disk group literally named
+	// "unknown".
+	unknownCell = "<unknown>"
 )
 
 // --- Markdown + JSON rendering ---
@@ -200,12 +206,12 @@ func groupsCell(row *Row) string {
 
 // bestCell renders the SeaDex best column: the displayed best groups, plus the
 // count of BEST releases the operator's AnimeBytes toggle withheld
-// (Row.hiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes). The
+// (Row.HiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes). The
 // marker exists so a row whose only bests are AnimeBytes releases is
 // distinguishable from an entry SeaDex lists no best for - both otherwise show
-// an empty best column, no qualifier and a have_unlisted verdict - and until
-// now that distinction reached only the JSON copy and the slog line, leaving
-// the Markdown artifact (the human-facing half of the pair) unable to make it.
+// an empty best column, no qualifier and a have_unlisted verdict. The same
+// count rides the JSON key and the slog attribute under its own name, so every
+// renderer of the pair can make that distinction.
 // Counting hidden ALTS here would make the same claim for an entry SeaDex
 // genuinely lists no best for, so the projection is best-only. The count leaks
 // no AnimeBytes group, tracker, or link.
@@ -216,11 +222,15 @@ func groupsCell(row *Row) string {
 // reader can see. A Notes entry, by contrast, is positionally bound to one
 // listed group, and there is no listed group for a withheld release to bind to.
 func bestCell(row *Row) string {
-	groups := escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", ")))
-	if row.hiddenAnimeBytesBest == 0 {
+	shown := displayBestGroups(row.Releases)
+	for i := range shown {
+		shown[i] = escapeBestGroup(shown[i])
+	}
+	groups := orEmpty(strings.Join(shown, ", "))
+	if row.HiddenAnimeBytesBest == 0 {
 		return groups
 	}
-	return groups + " (" + strconv.Itoa(row.hiddenAnimeBytesBest) + " best hidden: animebytes)"
+	return groups + " (" + strconv.Itoa(row.HiddenAnimeBytesBest) + " best hidden: animebytes)"
 }
 
 // notesCell renders the Notes column: this report's annotations of the best
@@ -344,7 +354,7 @@ func links(row *Row) string {
 // clean-before-annotated precedence, calling fn once per survivor and stopping
 // early when fn returns false. It is the ONE home for the selection rule both
 // best-group renderings share - the Markdown cell (displayBestGroups) and the
-// bounded slog attribute (joinBestGroupsAttr) - so the two cannot disagree
+// bounded slog attribute pair (joinBestAttrs) - so the two cannot disagree
 // about which groups a row lists or in what order. It yields per release and
 // never builds a slice, so the bounded consumer still caps before any
 // untrusted aggregate is materialized.
@@ -448,17 +458,21 @@ func releaseNotes(rel *Release) []string {
 }
 
 // annotated reports whether a release carries display annotations - curation
-// warnings, or the daemon obtainability rule's rejection. It is the one
-// predicate behind both render sites (the grab-links cell excludes an
-// annotated best, the SeaDex-best column marks it), so a new annotation class
-// added to releaseNotes cannot start leaking into the links cell.
+// warnings, a publisher refusal, the daemon obtainability rule's rejection, or the
+// operator's tag policy. It is the one predicate behind both render sites (the
+// grab-links cell excludes an annotated best, the SeaDex-best column marks it),
+// and it READS releaseNotes rather than restating its class list: that is what
+// actually stops a new annotation class from rendering a note while still being
+// offered as a grab link. Before this it was a second copy of the same list, and
+// the two had to be edited together (the `filtered` class was added to both in one
+// commit).
 //
 // It is DISPLAY only. Whether a release counts toward the verdict's best group
 // set is audit.go's forfeitsBest, which asks the operator's configured
 // filters.exclude_tags policy instead of the warning vocabulary - so a warned
 // release is annotated here while still being counted there (the default).
 func annotated(rel *Release) bool {
-	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError || rel.UnknownTracker || rel.Filtered
+	return len(releaseNotes(rel)) > 0
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.
@@ -514,6 +528,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			return err
 		}
 		row := &r.Rows[i]
+		bestGroups, bestNotes := joinBestAttrs(row.Releases)
 		log.Info("report item",
 			"generated_at", stamp,
 			"title", capDisplayText(row.Title),
@@ -524,10 +539,11 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"scope", scopeLabel(row),
 			"approx", row.Approx,
 			"hidden_animebytes", row.HiddenAnimeBytes,
+			"hidden_animebytes_best", row.HiddenAnimeBytesBest,
 			"current_group", joinGroupsAttr(row.CurrentGroups),
 			"groups_unknown", row.GroupsUnknown,
-			"seadex_best", joinBestGroupsAttr(row.Releases),
-			"seadex_best_notes", joinBestNotesAttr(row.Releases),
+			"seadex_best", bestGroups,
+			"seadex_best_notes", bestNotes,
 			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
 			"seadex_url", capDisplayText(row.SeaDexURL),
 			"match_source", capDisplayText(row.MatchSource))
@@ -554,7 +570,7 @@ func interrupted(ctx context.Context, stage string) error {
 	if ctx.Err() == nil {
 		return nil
 	}
-	return fmt.Errorf("audit: %s interrupted: %w (cause: %w)", stage, ctx.Err(), context.Cause(ctx))
+	return shutdown.InterruptedAs(ctx, "audit: "+stage+" interrupted")
 }
 
 // --- File persistence ---
@@ -586,7 +602,7 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// redacting logger, and every returned error carries only the stage plus
 	// a redacted cause, so the expanded value never reaches Loki or main's
 	// error log. Filesystem calls keep the real path.
-	log = redactingLogger(log, dir)
+	log = pathredact.Logger(log, dir)
 	// The signal context is one report-wide budget: check it before each
 	// stage (cleanup, stem probing, rendering, the JSON write) so a shutdown
 	// stops the pipeline instead of spending its grace period on CPU-bound
@@ -660,9 +676,9 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 		reportWritten(log, "", jsonPath, len(r.Rows), false)
 		return nil
 	}
-	// The Markdown half rides a detached, briefly-bounded context: the JSON
-	// rename has committed, so from here a cancellation (a SIGTERM, or the
-	// composition root's reportWriteGrace expiring on a slow fsync) would
+	// The Markdown half rides a detached context: the JSON rename has
+	// committed, so from here a cancellation (a SIGTERM, or the composition
+	// root's cycle.detachedWriteGrace expiring on a slow fsync) would
 	// half-publish permanently - the next run probes a fresh stem
 	// (reportPairStem needs BOTH halves free), leaving the orphaned .json
 	// without its .md forever. The human-readable half is the product of a
@@ -670,8 +686,21 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// already rendered above, so the ordering guarantee must not be satisfied
 	// by losing half the artifact. atomicfile re-checks the context itself, so
 	// detaching here is what actually lets the write proceed.
-	mdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markdownWriteGrace)
-	defer cancel()
+	//
+	// The extra grace is armed ONLY once a shutdown has landed, mirroring
+	// cycle.DetachedWriteContext, which starts its own timer on parent-done
+	// rather than up front. An unconditional ceiling here would cap the SECOND
+	// half of the pair below the budget the FIRST half just had (the caller's
+	// context carries no deadline until a signal lands), so on any mount where
+	// one write+fsync can exceed markdownWriteGrace - a network-backed or
+	// loaded /config - every report would half-publish permanently, which is
+	// the exact outcome the paragraph above exists to prevent.
+	mdCtx := context.WithoutCancel(ctx)
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		mdCtx, cancel = context.WithTimeout(mdCtx, markdownWriteGrace)
+		defer cancel()
+	}
 	// A non-durable Markdown half cannot create a dangling .md (the .json is
 	// already durably committed above), so the pair is complete and the success
 	// record must still be emitted - the alert that watches for it would
@@ -691,11 +720,16 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	return nil
 }
 
-// markdownWriteGrace bounds the detached Markdown write. It is deliberately
-// short: the bytes are already rendered, so this covers one atomic
-// write+rename+fsync, and it is spent on top of whatever budget the caller
-// still had - main's reportWriteGrace plus this stays inside Docker's default
-// 10s stop grace, so the pair lands before SIGKILL.
+// markdownWriteGrace bounds the detached Markdown write AFTER A SHUTDOWN, and
+// only then: with no signal pending the caller's context carries no deadline
+// (cycle.DetachedWriteContext arms its own timer on parent-done), and the JSON
+// half is written under exactly that context - so imposing a ceiling on the
+// markdown half alone could only lose the pair, never protect it.
+//
+// It is deliberately short because it is spent ON TOP of a budget that has
+// already run out: the bytes are rendered, so it covers one atomic
+// write+rename+fsync, and cycle.detachedWriteGrace (5s) plus this stays inside
+// Docker's default 10s stop grace, so the pair lands before SIGKILL.
 const markdownWriteGrace = 2 * time.Second
 
 // reportWritten emits the report pair's success record. It is the ONE call site
@@ -755,7 +789,7 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 			} else if !errors.Is(err, os.ErrNotExist) {
 				// Basename plus redacted cause only: this error reaches
 				// main's log and dir is the secret-capable report.dir value.
-				return "", fmt.Errorf("audit: probe report path %s: %w", filepath.Base(path), redactPathErr(dir, err))
+				return "", fmt.Errorf("audit: probe report path %s: %w", filepath.Base(path), pathredact.Err(dir, err))
 			}
 		}
 		if free {
@@ -814,7 +848,7 @@ func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger
 func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, log *slog.Logger) (durable bool, err error) {
 	res, err := writeAtomic(ctx, path, data, log)
 	if err != nil {
-		return false, fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), redactPathErr(dir, err))
+		return false, fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), pathredact.Err(dir, err))
 	}
 	return res.Durable, nil
 }
@@ -896,6 +930,22 @@ var cellEscaper = strings.NewReplacer(
 	"]", "&#93;",
 )
 
+// bestGroupEscaper encodes the characters the SeaDex-best column's own
+// structure uses, on top of escapeCell's cell escapes: the comma that
+// separates the listed groups - the positional key notesCell and
+// joinBestNotesAttr bind their entries to - and the parentheses that delimit
+// the "(N best hidden: animebytes)" completeness marker. escapeCell leaves
+// all three, so without this an upstream group named "SEV, PMR" reads as two
+// listed groups (shifting every later note onto the wrong group) and one
+// named "PMR (1 best hidden: animebytes)" forges the app's own completeness
+// claim - the half of the l-f192 seam the notes split did not remove.
+var bestGroupEscaper = strings.NewReplacer(",", "&#44;", "(", "&#40;", ")", "&#41;")
+
+// escapeBestGroup renders one upstream group for the SeaDex-best column.
+func escapeBestGroup(group string) string {
+	return bestGroupEscaper.Replace(escapeCell(group))
+}
+
 // sanitizeDisplayText makes an untrusted string safe for the machine-readable
 // outputs (the JSON report file and slog attributes): the unsafe-rune set is
 // the shared runesafe policy (C0 controls except CR/LF, which both encoders
@@ -926,8 +976,7 @@ const maxAttrBytes = logattr.MaxBytes
 // A MULTI-SOURCE attribute (a joined group or link list) must never be
 // materialized and handed to capDisplayText - joining first would allocate the
 // whole untrusted aggregate before the bound applies. Those stream through a
-// logattr.Joiner instead (joinGroupsAttr / joinBestGroupsAttr /
-// joinBestNotesAttr).
+// logattr.Joiner instead (joinGroupsAttr / joinBestAttrs).
 func capDisplayText(s string) string { return logattr.Cap(s) }
 
 // joinGroupsAttr renders a row's group list as the comma-separated
@@ -946,62 +995,76 @@ func joinGroupsAttr(groups []string) string {
 	return j.String()
 }
 
-// joinBestGroupsAttr renders the seadex_best attribute through the same
-// bounded joiner. It streams selectBestGroups - the shared selection rule
-// (clean bests first, case-insensitive dedupe on the original-case group) -
-// rather than calling displayBestGroups, because that helper builds the
-// complete group slice, which is exactly the untrusted aggregate the budget
-// must bound.
+// joinBestAttrs renders the seadex_best and seadex_best_notes attributes in ONE
+// pass over selectBestGroups, under a COUPLED stop: a piece is admitted only
+// when both joiners can take it, so the two attributes always carry the same
+// number of positional slots. Two independent budgets cut at different indices -
+// a group is untrusted, possibly multi-MB upstream text while a note is one to
+// four words of this app's own vocabulary - which silently re-bound every note
+// past the group attribute's cut to a group the line did not carry, with the
+// "..." marker on the other attribute where a reader could not see it.
 //
-// The value carries ONLY upstream group text, matching the Markdown best
-// column: this app's annotations ride the separate seadex_best_notes attribute
-// (joinBestNotesAttr), so a forged group cannot masquerade as an app
-// annotation for anyone reading the row in Loki either, and the two sinks give
-// one fact one rendering. No shipped alert rule reads seadex_best or
-// seadex_best_notes (they are report-mode attributes; the daemon's finding line
-// carries neither), so the wire-shape change has no consumer to break.
-func joinBestGroupsAttr(releases []Release) string {
-	j := logattr.NewJoiner()
-	first := true
-	selectBestGroups(releases, func(rel *Release, _ bool) bool {
-		if !first && !j.WriteSep(",") {
-			return false
-		}
-		first = false
-		return j.Write(rel.Group)
-	})
-	return j.String()
-}
-
-// joinBestNotesAttr renders the seadex_best_notes attribute: the Loki twin of
-// notesCell, under the same bounded joiner (the note words are this app's
-// vocabulary, but the piece COUNT follows an untrusted entry's torrent list, so
-// the budget still has to bound it, and nothing is materialized first).
+// It streams selectBestGroups - the shared selection rule (clean bests first,
+// case-insensitive dedupe on the original-case group) - rather than calling
+// displayBestGroups, because that helper builds the complete group slice, which
+// is exactly the untrusted aggregate the budget must bound. Group text still
+// goes through writeBestGroupAttr, so a comma inside a group cannot read as the
+// seadex_best separator the notes bind to positionally.
 //
-// Association is positional exactly as in the Markdown column: one
-// `;`-separated entry per group seadex_best lists, in the same
-// selectBestGroups order, emptyCell for a group with no note. An entry with no
-// annotated best at all emits the empty string rather than a row of
-// placeholders, so a Loki query can test the attribute for emptiness.
-func joinBestNotesAttr(releases []Release) string {
-	j := logattr.NewJoiner()
+// groups carries ONLY upstream group text, matching the Markdown best column;
+// this app's annotations ride notes, positionally, so a forged group cannot
+// masquerade as an app annotation for anyone reading the row in Loki either.
+// notes is the empty string when no annotated best exists, rather than a row of
+// placeholders, so a Loki query can test it for emptiness. No shipped alert rule
+// reads seadex_best or seadex_best_notes (they are report-mode attributes; the
+// daemon's finding line carries neither).
+func joinBestAttrs(releases []Release) (groups, notes string) {
+	gj, nj := logattr.NewJoiner(), logattr.NewJoiner()
 	first := true
 	annotatedAny := false
 	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
-		if !first && !j.WriteSep(";") {
+		// Both separators are charged together, so one budget refusing a piece
+		// stops BOTH attributes and neither can gain a slot the other is missing.
+		if !first && (!gj.WriteSep(",") || !nj.WriteSep(";")) {
 			return false
 		}
 		first = false
+		if !writeBestGroupAttr(gj, rel.Group) {
+			return false
+		}
 		if !isAnnotated {
-			return j.WriteSep(emptyCell)
+			// emptyCell is a positional VALUE, not a separator: it occupies this
+			// group's slot exactly as notesCell's placeholder does.
+			return nj.Write(emptyCell)
 		}
 		annotatedAny = true
-		return writeNotesAttr(j, releaseNotes(rel))
+		return writeNotesAttr(nj, releaseNotes(rel))
 	})
 	if !annotatedAny {
-		return ""
+		return gj.String(), ""
 	}
-	return j.String()
+	return gj.String(), nj.String()
+}
+
+// writeBestGroupAttr streams one group into j with its commas encoded, so a
+// comma in upstream group text cannot read as the seadex_best separator that
+// seadex_best_notes binds to positionally. It cuts incrementally instead of
+// escaping the whole value first: strings.Cut returns substrings, so a
+// multi-MB group is never copied, and each full Write ends the loop.
+func writeBestGroupAttr(j *logattr.Joiner, group string) bool {
+	for {
+		before, after, found := strings.Cut(group, ",")
+		if !j.Write(before) {
+			return false
+		}
+		if !found {
+			return true
+		}
+		if !j.WriteSep("&#44;") {
+			return false
+		}
+		group = after
+	}
 }
 
 // writeNotesAttr appends one annotated best's note list to j, matching
@@ -1025,7 +1088,7 @@ func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
 // canonical Report is never mutated: its rows and nested slices are copied
 // before sanitizing (each helper below preserves the current nil/empty
 // shape). Verdict, Qualifier, and release Warnings are app-defined
-// vocabularies (CurationWarnings returns canonical constants, never raw
+// vocabularies (curationWarnings returns canonical constants, never raw
 // upstream tag bytes), not upstream data, and stay as-is.
 func sanitizeOutput(r *Report) *Report {
 	out := *r

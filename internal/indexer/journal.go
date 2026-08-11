@@ -3,6 +3,7 @@ package indexer
 import (
 	"cmp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,17 @@ type journalPass struct {
 	ev        curationEvidence
 	published map[string]bool
 	publish   map[string]bool
+	// prior is the ownership fact the PREVIOUS snapshot holds (feedState.owners):
+	// the only record of the votes of the owners this pass did NOT evaluate. The
+	// renderPartial arm carries them onto an item journaled for the first time,
+	// so its marker and its categories cover the same owner set the search index
+	// ORs over (projectCuration). A catalogue pass never reads it: there,
+	// absence from the input IS de-curation and a stored vote must not count.
+	prior map[string][]ownedRelease
+	// evaluated memoizes the ownerKey set this pass evaluated, so a vote the pass
+	// has already replaced is never carried on top of its own fresh evidence.
+	// Built on first use by evaluatedOwners; one pass runs on one goroutine.
+	evaluated map[string]bool
 	infoFor   EntryInfoFunc
 	js        *journalStats
 	now       time.Time
@@ -186,28 +198,6 @@ func scopeOfKey(key string) string {
 // link for - a different torrent than the persisted curation binding names.
 func journalIdentityMatches(it *journalItem) bool {
 	return it.Key != "" && trackerKeyFromURL(it.GUID) == it.Key
-}
-
-// refusesUnprovenGUID reports whether a carried item fails the journal's
-// GUID-to-Key invariant, logging and counting the refusal. ONE home for the
-// gate, applied by the one arm that has both the standing to refuse and no
-// fresh render to self-heal from: the DE-CURATED arm (carryStoredItem), which
-// only a catalogue pass can reach. It reports the refusal and nothing more, so
-// the caller keeps its own exit shape. The GUID itself is never logged: it is an
-// attacker-shapeable value from a tamperable file, and the key is the diagnostic
-// that identifies the refused record.
-//
-// A window pass deliberately does NOT apply it (see carryUnevaluatedItem): it
-// cannot re-render, so refusing there would make a repair the catalogue pass
-// would have performed permanently impossible.
-func (p *journalPass) refusesUnprovenGUID(it *journalItem) bool {
-	if journalIdentityMatches(it) {
-		return false
-	}
-	p.w.log.Debug("indexer journal item refused: stored GUID no longer proves its journal identity",
-		"key", it.Key, "cause", "guid-identity")
-	p.js.dropped++
-	return true
 }
 
 // --- Journal item rendering ---
@@ -406,6 +396,16 @@ type journalStats struct {
 	rebased            int
 	unresolvable       int
 	abSkippedNoPasskey int
+	// storedDecurated counts the items kept on their stored render because the
+	// torrent has left SeaDex's curation set - the state this app's runbook
+	// calls an expected steady state for up to feedJournalMaxAge, and the one
+	// number an operator diagnosing "the feed lists it, the site does not" needs.
+	storedDecurated int
+	// storedUnrenderable counts the items kept on their stored render while
+	// STILL curated, because every current occurrence failed to render. It is the
+	// carry-path twin of unresolvable: without it a systematic upstream data
+	// change freezes every carried render with no signal above Debug.
+	storedUnrenderable int
 }
 
 // --- Carrying the previous journal ---
@@ -419,15 +419,12 @@ type journalStats struct {
 // EVERY arm acts on evidence this pass HOLDS. The age-out reads the item's own
 // FirstSeen; the retraction reads a positive exclusion the pass evaluated; the
 // de-curated arm reads absence from the input and is therefore reachable ONLY at
-// catalogue scope (curationEvidence.decurated is always false for a window).
-// That is the structural form of the distinction the two carry paths used to
-// encode as two functions: carryStoredItem was the reconcile's arm and
-// expireCarried was the tick's, and the two DISAGREED - the tick dropped an item
-// whose stored GUID no longer proved its key while the reconcile kept it and
-// self-healed the GUID from the fresh render. Under a never-pruned publication
-// log the tick's verdict was the irreversible one, so a tick permanently
-// discarded an item the reconcile would have repaired. The scope parameter keeps
-// the distinction and removes the disagreement.
+// catalogue scope (a window's carryPolicy is always carryVerbatim - see
+// windowEvidence.carryPolicy). Routing the arms through the pass's evidence is
+// what makes that structural rather than documented; the two carry functions it
+// replaced disagreed on an item with an unproven stored GUID, and
+// carryUnevaluatedItem's doc records why the window's verdict was the
+// irreversible one.
 func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, bool) {
 	if !p.prepareCarriedItem(it) {
 		return journalItem{}, false
@@ -454,7 +451,11 @@ func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, boo
 	case carryRefreshed:
 		return p.refreshCarriedItem(it, refs)
 	case carryDeCurated:
-		return p.carryStoredItem(it)
+		kept, keptOK := p.carryStoredItem(it)
+		if keptOK {
+			p.js.storedDecurated++
+		}
+		return kept, keptOK
 	default:
 		return p.carryUnevaluatedItem(it)
 	}
@@ -478,15 +479,19 @@ func (p *journalPass) carryUnevaluatedItem(it *journalItem) (journalItem, bool) 
 	return *it, true
 }
 
-// prepareCarriedItem applies carryItem's validation, clock-correction, and
-// expiry phase, reporting whether the item is still carryable: an item with no
-// Key or FirstSeen is dropped, a future FirstSeen is rebased,
+// prepareCarriedItem applies carryItem's clock-correction and expiry phase,
+// reporting whether the item is still carryable: a future FirstSeen is rebased,
 // and an item older than feedJournalMaxAge is pruned.
+//
+// It does NOT re-test that the item carries a Key and a FirstSeen. That
+// invariant has one home, the shared decode gate both consumers cross
+// (validJournalRecord, applied by pruneJournalFeed inside decodeSnapshot), and
+// the writer reaches this path only through loadPrevious - the same
+// one-rule-one-home reasoning the InfoHash note below states. Both shapes stay
+// refused regardless: a zero FirstSeen saturates now.Sub to the maximum
+// Duration and is pruned by the age check below, and an empty Key fails
+// carryItem's scope gate.
 func (p *journalPass) prepareCarriedItem(it *journalItem) bool {
-	if it.Key == "" || it.FirstSeen.IsZero() {
-		p.js.dropped++
-		return false
-	}
 	// The persisted InfoHash this phase hands to warnedSet.retracts is already
 	// canonical: decodeSnapshot runs normalizeSnapshotItems (validInfoHash) on
 	// both feeds for BOTH consumers before loadPrevious returns them, which is
@@ -553,15 +558,24 @@ func rebaseFutureFeed(feed []journalItem, now time.Time) int {
 // while no passkey is configured (rebuildABDownloadURLs) - so carrying them
 // serves nothing prematurely and makes the switch reversible.
 func (p *journalPass) carryStoredItem(it *journalItem) (journalItem, bool) {
-	// Same GUID-identity gate as the curated arm (refreshCarriedItem): a
-	// stored GUID that no longer proves this item's journal identity (a
-	// cross-key, foreign-host, or empty GUID from a hand-edited snapshot)
-	// must not be carried - unlike a curated item there is no fresh render
-	// to self-heal from, and reload derives the SERVED download link from
-	// the GUID, so a cross-key GUID would plant a fetch target for a
-	// different torrent id on the same tracker for the item's whole journal
-	// window.
-	if p.refusesUnprovenGUID(it) {
+	// The journal's GUID-to-Key invariant, applied by the one arm that has both
+	// the standing to refuse and no fresh render to self-heal from: a stored GUID
+	// that no longer proves this item's journal identity (a cross-key,
+	// foreign-host, or empty GUID from a hand-edited snapshot) must not be
+	// carried, because reload derives the SERVED download link from that GUID, so
+	// a cross-key GUID would plant a fetch target for a different torrent id on
+	// the same tracker for the item's whole journal window. The curated arm
+	// (refreshCarriedItem) reaches this by delegating here; a WINDOW pass
+	// deliberately does not apply it at all (see carryUnevaluatedItem), since it
+	// cannot re-render and refusing there would make a repair the catalogue pass
+	// would have performed permanently impossible.
+	//
+	// The GUID itself is never logged: it is an attacker-shapeable value from a
+	// tamperable file, and the key is the diagnostic that identifies the record.
+	if !journalIdentityMatches(it) {
+		p.w.log.Debug("indexer journal item refused: stored GUID no longer proves its journal identity",
+			"key", it.Key, "cause", "guid-identity")
+		p.js.dropped++
 		return journalItem{}, false
 	}
 	return *it, true
@@ -601,7 +615,11 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 		// Torznab URL; links are stripped at rest (stripDownloadURLs) and the
 		// reader re-derives them, clearing the whole AB feed while no passkey is
 		// configured (rebuildABDownloadURLs).
-		return p.carryStoredItem(it)
+		kept, keptOK := p.carryStoredItem(it)
+		if keptOK {
+			p.js.storedUnrenderable++
+		}
+		return kept, keptOK
 	}
 	fresh.FirstSeen = it.FirstSeen
 	fresh.PubDate = it.FirstSeen
@@ -631,7 +649,8 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 //     is sound at any scope;
 //   - an item with no Key or FirstSeen, or one whose Key names the
 //     other tracker scope, is dropped - again on the item's own fields;
-//   - an item whose torrent has become curation-warned is dropped (ws.retracts:
+//   - an item whose torrent has become curation-warned is dropped
+//     (curationEvidence.retracts, which a window answers over its own evidence:
 //     its key is excluded, or its stored info hash is warned under a different
 //     tracker key). Unlike a curated-then-replaced torrent, SeaDex's curators now
 //     warn against it, so serving it would hand the arrs a Broken/Incomplete
@@ -805,19 +824,134 @@ func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope str
 // The tracker's enablement and the keyless case are decided and counted one
 // level up, in journalIfNew, which is also where the publication decision lives
 // - so this function only renders.
+//
+// It ASKS PERMISSION for the fold rather than folding whatever occurrences it
+// happens to hold: renderPolicy names what this pass's evidence authorizes, and
+// the partial arm has the unevaluated owners' stored votes carried onto the
+// rendered item (carryUnevaluatedVotes).
 func (p *journalPass) newJournalItem(key string) (journalItem, bool) {
-	refs, _ := p.ev.refs(key)
+	policy, refs := p.ev.renderPolicy(key)
 	it, ok, noPasskey := p.w.renderJournalItem(key, refs, p.infoFor)
 	if noPasskey {
 		p.js.abSkippedNoPasskey++
 	}
 	if !ok {
+		// Includes renderUnevaluated, which hands the render no occurrence at
+		// all: there is nothing to serve, so the general failure path applies
+		// and nothing is published.
 		if !noPasskey {
 			p.js.unresolvable++
 		}
 		return journalItem{}, false
 	}
+	if policy == renderPartial {
+		p.carryUnevaluatedVotes(&it)
+	}
 	return it, true
+}
+
+// carryUnevaluatedVotes completes a partially-authorized render by carrying the
+// votes of the owners this pass did NOT evaluate, read from the previous
+// snapshot's ownership fact.
+//
+// renderJournalItem folds the marker and the category union across the
+// occurrences the pass HOLDS (foldRefs). At window scope that is one subset of a
+// shared torrent's owners: ~4.4% of curated torrents are attached to several
+// AniList entries, each carrying its OWN isBest vote and its own movie/series
+// typing, and a curator edit bumps only the entry it touched into the window.
+// Folding the window alone therefore journals a release another entry votes best
+// as ALT (dvfAlt, ~100 custom-format points below a best-marked sibling), and
+// drops the Movies category of a film whose movie-typed owner stayed outside the
+// window - so Radarr's cat=2000 RSS check never sees the item at all - for up to
+// one reconcile interval, and the item's identity is recorded in the never-pruned
+// publication log meanwhile.
+//
+// The persisted ownership fact is exactly the missing evidence, and it is the
+// same set projectCuration ORs to answer a SEARCH for the same torrent: without
+// this carry the two indexer surfaces built from ONE snapshot disagree about the
+// same release's marker.
+//
+// It only ever ADDS a best marker or a category. Nothing here can drop an item
+// or a label, so it cannot filter the feed (settled feed-rss-filtering).
+func (p *journalPass) carryUnevaluatedVotes(it *journalItem) {
+	if len(p.prior) == 0 {
+		return
+	}
+	evaluated := p.evaluatedOwners()
+	carried := false
+	for owner, releases := range p.prior {
+		if evaluated[owner] {
+			// This pass replaced that owner's contribution wholesale, so its
+			// fresh evidence is already in the render.
+			continue
+		}
+		if p.carryOwnerVote(it, owner, releases) {
+			carried = true
+		}
+	}
+	if carried {
+		// The same canonical order foldRefs leaves: the union appends in map
+		// iteration order, which must not reach the persisted item.
+		slices.Sort(it.Categories)
+	}
+}
+
+// carryOwnerVote applies ONE unevaluated owner's stored votes to the item and
+// reports whether that owner owns this release at all. Both votes are additive:
+// best-wins on the marker and a category union, the same two folds foldRefs
+// applies across the occurrences the pass does hold.
+func (p *journalPass) carryOwnerVote(it *journalItem, owner string, releases []ownedRelease) bool {
+	best, owns := priorOwnerVote(releases, it.Key, it.InfoHash)
+	if !owns {
+		return false
+	}
+	if best {
+		it.DownloadVolumeFactor = dvfBest
+	}
+	alID, err := strconv.Atoi(owner)
+	if err != nil {
+		// An owner key that is not an AniList id cannot be typed, so its
+		// category vote is unknowable; its best vote still counts.
+		return true
+	}
+	for _, c := range categoriesFor(p.infoFor(alID).IsMovie) {
+		if !slices.Contains(it.Categories, c) {
+			it.Categories = append(it.Categories, c)
+		}
+	}
+	return true
+}
+
+// evaluatedOwners returns the ownerKey set this pass evaluated, memoized for the
+// pass. It is what separates a stored vote the pass has already replaced from one
+// it never saw.
+func (p *journalPass) evaluatedOwners() map[string]bool {
+	if p.evaluated != nil {
+		return p.evaluated
+	}
+	entries := p.ev.entries()
+	p.evaluated = make(map[string]bool, len(entries))
+	for i := range entries {
+		p.evaluated[ownerKey(entries[i].AniListID)] = true
+	}
+	return p.evaluated
+}
+
+// priorOwnerVote reports whether one owner's stored contribution names this
+// journal identity, and whether that owner votes it best. The identity test is
+// the snapshot's own (ownedRelease): the journal key, or the item's canonical
+// info hash.
+func priorOwnerVote(releases []ownedRelease, key, hash string) (best, owns bool) {
+	for _, r := range releases {
+		if r.Key != key && (hash == "" || r.Hash != hash) {
+			continue
+		}
+		owns = true
+		if r.IsBest {
+			best = true
+		}
+	}
+	return best, owns
 }
 
 // --- Harvested-title cache ---
@@ -831,13 +965,30 @@ func (p *journalPass) newJournalItem(key string) (journalItem, bool) {
 // title and never drops an item (both forbidden). Its one intervention is a
 // surgical rewrite of a season claim the file list proves wrong - see
 // titleAudit.served.
+//
+// The cache holds the title the app SERVES for a key, not the raw harvested
+// claim, and that is what makes the audit's verbatim arm honest at window scope.
+// The season correction is derived from a file census a pass may or may not hold:
+// a tick's census covers only its 48h window while the journal holds fourteen
+// days of items, and a de-curated key has no census entry at either scope. With
+// the raw claim cached, every such pass re-applied the uncorrected whole-season
+// title over the correction the previous pass persisted - the episode-suppression
+// failure titleAudit.served exists to prevent - and re-persisted it. Writing the
+// served title back means a pass with no evidence CARRIES what the app already
+// serves instead of recomputing it from evidence it does not have. The harvest is
+// what replaces the entry with a fresh tracker title.
 func applyTitles(items []journalItem, titles map[string]string, audit titleAudit) {
 	for i := range items {
 		t, ok := titles[items[i].Key]
 		if !ok || t == "" {
 			continue
 		}
-		items[i].Title = audit.served(items[i].Key, t)
+		served := audit.served(items[i].Key, t)
+		items[i].Title = served
+		// Re-applying an already-corrected title is a no-op: packFromTitle reads
+		// its SxxExx token as episode evidence, so served returns it verbatim and
+		// reports nothing.
+		titles[items[i].Key] = served
 	}
 }
 
@@ -886,6 +1037,11 @@ type titleAudit struct {
 func (a titleAudit) served(key, title string) string {
 	c, ok := a.census[key]
 	if !ok {
+		// This pass holds no file evidence for the key, so it is not entitled to
+		// judge the title: serve what the cache holds, which is the title the app
+		// last SERVED for it (applyTitles writes the served value back). Carrying
+		// it is why a window pass no longer undoes a correction a catalogue pass
+		// made.
 		return title
 	}
 	titlePack, known := packFromTitle(title)
@@ -928,12 +1084,15 @@ func correctedTitle(title, marker string) (string, bool) {
 }
 
 // censusPacks reads the three-valued file-list evidence (packEvidenceOf) for
-// every journal key in the current catalogue, so applyTitles can tell what a
-// harvested title claims from what the release actually ships. A key's
-// occurrences are the SAME tracker torrent attached to several entries, and the
-// fold across them takes the STRONGEST evidence (pack over single over unknown)
-// so the result cannot depend on catalogue order - the same order-independence
-// renderJournalItem's sort exists to guarantee for the item itself.
+// every journal key the PASS EVALUATED, so applyTitles can tell what a harvested
+// title claims from what the release actually ships. It is reached through
+// curationEvidence.census, whose scope decides which keys are judged at all: a
+// key the pass did not evaluate is absent here and its title is carried instead.
+// A key's occurrences are the SAME tracker torrent attached to several entries,
+// and the fold across them takes the STRONGEST evidence (pack over single over
+// unknown) so the result cannot depend on catalogue order - the same
+// order-independence renderJournalItem's sort exists to guarantee for the item
+// itself.
 func censusPacks(cur map[string][]curatedRef) map[string]packCensus {
 	packs := make(map[string]packCensus, len(cur))
 	for key, refs := range cur {

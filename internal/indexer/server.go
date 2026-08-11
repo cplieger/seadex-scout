@@ -198,11 +198,13 @@ func (ix *Indexer) rejectTorznab(w http.ResponseWriter, scope, reason string, co
 // Torznab query params) before it reaches a log line - the same emit-boundary
 // policy sanitizeUpstreamText applies to untrusted upstream text: single-line
 // rune safety (runesafe.SanitizeSingleLine), then a 256-byte cap on a rune
-// boundary (truncated output appends "...") so a caller holding the feed key
-// cannot inject near-megabyte query values (NewServer permits up to 1 MiB of
-// headers) into oversized Loki records. Structured JSON already prevents line
-// injection; this bounds volume. The apikey is never passed through this
-// helper or into any log.
+// boundary (truncated output appends "..."), so a caller holding the feed key
+// cannot turn one request into oversized Loki records. maxHeaderBytes already
+// refuses the megabyte shape at the network boundary, so this is the SECOND
+// bound, not the only one: it cuts a param that is legal at 16 KiB down to a
+// legible log field. Structured JSON already prevents line injection; this
+// bounds volume. The apikey is never passed through this helper or into any
+// log.
 func logParam(s string) string { return capLogText(s, 256) }
 
 // handler builds the HTTP mux (a single Torznab endpoint).
@@ -395,7 +397,7 @@ func (ix *Indexer) serveCaps(w http.ResponseWriter, q url.Values, scope string) 
 // README's off switch) is not nudged: it falls through to the empty feed
 // (see serveQuery), the same shape as a tracker with no data.
 func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, scope string) bool {
-	if scope != upstreamAB || !ix.enablement.enabled(upstreamAB) || !unusableABPasskey(ix.enablement.ABPasskey) || strings.TrimSpace(q.Get("q")) != "" {
+	if scope != upstreamAB || !ix.enablement.enabled(upstreamAB) || !unusableABPasskey(ix.enablement.ABPasskey) || !isFeedRequest(q) {
 		return false
 	}
 	ix.rejectTorznab(w, scope, "ab passkey not configured", errCodeIncorrectCredentials,

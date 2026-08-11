@@ -312,18 +312,43 @@ func pathShaped(rooted string) bool {
 	return segments > 1 || (segments == 1 && hasTargetParams)
 }
 
-// pathSegments counts the non-empty segments of a URL path. It is the ONE
-// reading both shape arms use, so "does this path name anything past the
-// authority" cannot mean two things: an empty path, "/" and "//" all count 0.
-// It deliberately does NOT resolve dot segments - see hostFormTargeted.
+// pathSegments counts the TARGETING segments of a URL path: the non-empty
+// segments that still name something once a client has applied RFC 3986
+// remove-dot-segments. It is the ONE reading both shape arms use, so "does this
+// path name anything past the authority" cannot mean two things: an empty path,
+// "/" and "//" all count 0, and so does a pure dot segment - "/../.." resolves
+// to the tracker root, the same front page the single-segment floor already
+// refuses, so counting it as a target published a plausible-looking dead link
+// AND hid the upstream data defect from the caller's unusable-URL accounting.
+//
+// It still does NOT RESOLVE dot segments (see hostFormTargeted): a dot segment
+// beside a real segment is published verbatim, because resolving would read
+// "%2F" as a separator where a browser keeps it inside one segment. Classifying
+// ONE segment carries no such hazard, which is why this is the narrow reading
+// and not urlform.Form.NormalizedPath.
 func pathSegments(p string) int {
 	n := 0
 	for seg := range strings.SplitSeq(p, "/") {
-		if seg != "" {
-			n++
+		if seg == "" || isDotSegment(seg) {
+			continue
 		}
+		n++
 	}
 	return n
+}
+
+// isDotSegment reports whether one path segment is a relative dot segment -
+// "." or ".." - including the percent-encoded spellings a client decodes before
+// resolving ("%2e", "%2E%2e"), which is the same DECODED reading
+// internal/indexer's pathHasDotSegments applies to the same untrusted SeaDex
+// urls. A segment whose escapes are malformed cannot decode to a dot segment,
+// so it still counts as a target.
+func isDotSegment(seg string) bool {
+	decoded, err := url.PathUnescape(seg)
+	if err != nil {
+		return false
+	}
+	return decoded == "." || decoded == ".."
 }
 
 // hostFormTargeted reports whether a host-bearing value names a target beyond

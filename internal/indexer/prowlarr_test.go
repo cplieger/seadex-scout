@@ -1354,3 +1354,62 @@ func TestUpstreamSecretsRedactionScope(t *testing.T) {
 		})
 	}
 }
+
+// TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy pins the SEARCH path's
+// half of the credential classification, which is the half whose consequence
+// escalates: every rejected search answers the arr a Torznab <error>, and an arr
+// counts those toward disabling the indexer - RSS included - so a wrong
+// indexer.prowlarr_api_key takes the whole feed down while the container stays
+// healthy. fetchRaw's permanentUpstreamCredentialError arm is what turns that
+// into the one ERROR line naming the remedy, and nothing exercised it in either
+// of its two shapes: a 401/403 status, or Prowlarr's 200 + Torznab <error>
+// document in the auth band (codes 100-199).
+//
+// The LEVEL is the assertion that matters. alerts.yaml keys SeadexScoutCycleError
+// on level=ERROR and on no message, so a re-level to WARN - or deleting the arm,
+// which drops the rejection into the generic "upstream query failed" WARN one
+// line below - leaves the dead feed un-alerted with the suite green.
+func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
+	const credentialsMsg = "upstream rejected the credentials"
+	tests := map[string]http.HandlerFunc{
+		"401 status": func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		},
+		"torznab auth error document": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/rss+xml")
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`)
+		},
+	}
+	for name, handler := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+
+			log, rec := capture.New()
+			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+			}}, log, srv.Client())
+
+			items, stats, fault := ix.query(context.Background(),
+				url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, upstreamNyaa)
+
+			if len(items) != 0 {
+				t.Errorf("got %d items from a rejected search, want 0", len(items))
+			}
+			if !stats.answered {
+				t.Errorf("stats = %+v, want an answered search", stats)
+			}
+			if fault == nil {
+				t.Error("fault = nil, want a torznabFault: an empty 200 feed reads as a clean no-match, which records a credential failure as a successful search")
+			}
+			if got := rec.CountLevel(slog.LevelError, credentialsMsg); got != 1 {
+				t.Errorf("credential rejection logged at ERROR %d times, want 1 (alerts.yaml keys on the level, not the message); log output:\n%s",
+					got, strings.Join(rec.Messages(), "\n"))
+			}
+			if rec.Contains("upstream query failed") {
+				t.Errorf("a credential rejection also logged the generic upstream WARN; the classes must stay distinct; log output:\n%s",
+					strings.Join(rec.Messages(), "\n"))
+			}
+		})
+	}
+}

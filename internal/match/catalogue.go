@@ -12,7 +12,7 @@ import (
 // pairing rule (a Radarr item is claimed by a record's routed TMDB-movie/IMDb
 // ids or by its cross-type movie ids, a Sonarr item only by its TVDB id) live
 // here beside FindByID/findMovie, and both read the same two mapping
-// accessors (RoutedIDs for the type-routed set, MovieTMDBIDs for the cross-type
+// accessors (RoutedIDs for the type-routed set, Record.TmdbMovies for the cross-type
 // movie evidence), so a change to the pairing - a new id kind, an id becoming
 // valid for the other arr - cannot drift between the forward and reverse
 // lookups.
@@ -51,7 +51,7 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 			// bridge cannot drift (l-f73). For a MOVIE record this IS the
 			// routed set (RoutedIDs' movie arm returns exactly these ids and
 			// zero tvdb), so the two arms stay one rule rather than two.
-			for _, id := range r.MovieTMDBIDs() {
+			for _, id := range r.TmdbMovies {
 				c.tmdb[id] = struct{}{}
 			}
 		}

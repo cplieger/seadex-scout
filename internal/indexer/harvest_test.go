@@ -93,8 +93,11 @@ func emptyTorznab() string { return torznabBody() }
 // harvested title claims a whole season while the release ships exactly one
 // proven episode, so the served title keeps every byte of the tracker's own name
 // except its season token, which becomes the season+episode form the file census
-// names (titleAudit.served). The CACHE keeps the harvested title verbatim - the
-// correction is a serving decision, not a rewrite of harvested evidence.
+// names (titleAudit.served). The CACHE holds that SERVED title, not the raw
+// harvested claim: the correction is derived from a file census a later pass may
+// not hold (a tick's census covers its window only), so caching the raw claim let
+// every such pass re-serve the whole-season title over the correction. Caching
+// what is served is what a pass with no census evidence carries.
 func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	mock, srv := newHarvestMock(func(int) string {
 		return torznabBody(torznabItem("[PMR] Frieren S01 [BD Remux 1080p]", "https://animebytes.tv/torrent/1167293/group"))
@@ -133,8 +136,8 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	if got, want := snap.ABFeed[0].Title, "[PMR] Frieren S01E01 [BD Remux 1080p]"; got != want {
 		t.Errorf("served title = %q, want the harvested real title with its provably-wrong season token corrected %q", got, want)
 	}
-	if snap.Titles["ab:1167293"] != "[PMR] Frieren S01 [BD Remux 1080p]" {
-		t.Errorf("title cache = %v, want the harvested title under ab:1167293", snap.Titles)
+	if snap.Titles["ab:1167293"] != "[PMR] Frieren S01E01 [BD Remux 1080p]" {
+		t.Errorf("title cache = %v, want the SERVED (season-corrected) title under ab:1167293 so a pass holding no file census carries it instead of re-serving the whole-season claim", snap.Titles)
 	}
 	if snap.ABFeed[0].GUID != "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293" {
 		t.Errorf("GUID = %q, want the tracker page URL unchanged by the title upgrade", snap.ABFeed[0].GUID)
@@ -999,7 +1002,7 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 }
 
 // TestHarvestableGuards pins harvestable's admission guards directly: only a
-// journal item that carries its bookkeeping (key + positive AniList id), has
+// journal item that carries its bookkeeping (positive AniList id), has
 // no cached real title yet, and whose show has a non-blank synthesis title
 // source is due a harvest query.
 func TestHarvestableGuards(t *testing.T) {
@@ -1013,7 +1016,6 @@ func TestHarvestableGuards(t *testing.T) {
 		want   bool
 	}{
 		{"pending journal item is harvestable", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{}, title, true},
-		{"missing journal key", journalItem{item: item{}, AniListID: 7}, map[string]string{}, title, false},
 		{"non-positive AniList id", journalItem{item: item{}, Key: "nyaa:42"}, map[string]string{}, title, false},
 		{"already-cached title", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{"nyaa:42": "Real"}, title, false},
 		{"no synthesis title source", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{}, noTitle, false},
@@ -1025,27 +1027,6 @@ func TestHarvestableGuards(t *testing.T) {
 				t.Errorf("harvestable(%+v) = %v, want %v", tc.it, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestSyntheticCountSkipsKeylessItems pins the harvest_pending stat's
-// domain: only journal-tracked items (non-empty Key) lacking a cached title
-// count as pending; a key-less item (no journal bookkeeping, e.g. a
-// search-shaped entry in a hand-edited or legacy snapshot) never counts.
-func TestSyntheticCountSkipsKeylessItems(t *testing.T) {
-	feeds := map[string][]journalItem{
-		upstreamNyaa: {
-			{item: item{Title: "synthetic"}, Key: "nyaa:1"},
-			{item: item{Title: "harvested"}, Key: "nyaa:2"},
-			{item: item{Title: "keyless search-shaped item"}},
-		},
-		upstreamAB: {
-			{item: item{Title: "synthetic"}, Key: "ab:3"},
-		},
-	}
-	titles := map[string]string{"nyaa:2": "Real Title"}
-	if got := syntheticCount(feeds, titles); got != 2 {
-		t.Errorf("syntheticCount = %d, want 2 (one keyed-untitled per feed; the key-less item never counts)", got)
 	}
 }
 
@@ -2687,5 +2668,64 @@ func TestHarvestCleanZeroMatchesNeverLatchTheScope(t *testing.T) {
 		if rec.Contains(latch) {
 			t.Errorf("scope latched on clean zero-match shows: %q", latch)
 		}
+	}
+}
+
+// TestHarvestCredentialErrorDocumentLatchesTheScopeAtError pins the harvest's
+// credential classification for the shape it actually arrives in over a healthy
+// HTTP hop: Prowlarr answers 200 with a Torznab <error> document, and codes
+// 100-199 are its auth/credential band (a wrong or revoked
+// indexer.prowlarr_api_key, a suspended account). That band is decided by
+// permanentUpstreamCredentialError's DOCUMENT arm, whose status twin (401/403)
+// TestHarvestHTTPStatusFailureScoping already pins - so the document arm could be
+// deleted, or its range typed as 200-299, and the suite would stay green while
+// the rejection fell through to the generic scope WARN.
+//
+// Two things this shape alone reaches. The LEVEL is the alert contract:
+// alerts.yaml keys SeadexScoutCycleError on level=ERROR and on no message at all,
+// so a re-level to WARN silences the one signal that says the feed is dying while
+// the container stays healthy and the compare loop keeps logging cycle complete.
+// And the scope must LATCH: a credential rejection fails every show identically,
+// so the second show must never be queried.
+func TestHarvestCredentialErrorDocumentLatchesTheScopeAtError(t *testing.T) {
+	const (
+		credentialsMsg = "indexer title harvest rejected the credentials"
+		scopeWarnMsg   = "indexer title harvest query failed; skipping this upstream's remaining shows this rebuild"
+		showLocalMsg   = "indexer title harvest request rejected; show keeps its synthesized title this rebuild"
+	)
+	mock, srv := newHarvestMock(func(int) string {
+		return `<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`
+	})
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+		},
+	}
+	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+
+	if got := rec.CountLevel(slog.LevelError, credentialsMsg); got != 1 {
+		t.Errorf("credential rejection logged at ERROR %d times, want 1 (alerts.yaml keys on the level, not the message); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	for _, other := range []string{scopeWarnMsg, showLocalMsg} {
+		if rec.Contains(other) {
+			t.Errorf("a credential error document also logged %q; the classes must stay distinct", other)
+		}
+	}
+	if stats.queries != 1 || mock.calls() != 1 {
+		t.Errorf("harvest queries = %d, upstream calls = %d, want 1 each (a credential rejection fails every show, so the scope must latch)",
+			stats.queries, mock.calls())
+	}
+	if len(titles) != 0 {
+		t.Errorf("titles = %v, want empty (no show harvested after the scope latched)", titles)
 	}
 }

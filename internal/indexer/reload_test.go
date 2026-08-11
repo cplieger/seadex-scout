@@ -39,8 +39,8 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove snapshot: %v", err)
 	}
-	ix.cache.refresh(context.Background())
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot missing"); got != 1 {
 		t.Errorf("missing-snapshot warned %d times across two reloads, want exactly 1 (warn once, then stay quiet); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
@@ -56,7 +56,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 			{item: item{Title: "second", GUID: "https://nyaa.si/view/2"}, Key: "nyaa:2"},
 		},
 	})
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot reappeared"); got != 1 {
 		t.Errorf("reappearance logged %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
@@ -124,22 +124,22 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	blockDir, restoreDir := dirFault(t, dir, sub)
 
 	blockDir()
-	ix.cache.refresh(context.Background())
-	ix.cache.refresh(context.Background())
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 1 {
 		t.Fatalf("stat-failure warned %d times across three faulted reloads, want exactly 1 (the onset ladder warns once per onset, not once per request: an unreadable /config would otherwise WARN at request rate); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	restoreDir()
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot reload recovered"); got != 1 {
 		t.Errorf("recovery logged %d times after the stat fault cleared, want exactly 1; log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	blockDir()
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 2 {
 		t.Errorf("stat-failure warned %d times across two onsets, want 2 (a cleared flag must re-arm the warning); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
@@ -182,7 +182,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	}
 	distinct := time.Now().Add(2 * time.Second)
 	setMtime(t, path, distinct)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
 		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
@@ -192,7 +192,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	blockDir, restoreDir := dirFault(t, dir, sub)
 
 	blockDir()
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 1 {
 		t.Fatalf("stat-failure warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
@@ -200,8 +200,8 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	// Recovery over the memoized bad file: repeated reloads must neither
 	// reread it (no repeated malformed WARN) nor claim a false recovery.
 	restoreDir()
-	ix.cache.refresh(context.Background())
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
 		t.Errorf("malformed snapshot warned %d times after the stat fault cleared, want still 1 (the memo must hold, no reread); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
@@ -216,7 +216,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 
 	// The cleared flag must re-arm the next onset's warning.
 	blockDir()
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 2 {
 		t.Errorf("stat-failure warned %d times across two onsets, want 2 (the recovered stat over the memoized file must re-arm the warning); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
@@ -302,18 +302,18 @@ func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 		t.Fatalf("corrupt write: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 
 	// It disappears, then the SAME file (same inode, same mtime) comes back.
 	aside := filepath.Join(dir, "feed.json.aside")
 	if err := os.Rename(path, aside); err != nil {
 		t.Fatalf("rename the snapshot away: %v", err)
 	}
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if err := os.Rename(aside, path); err != nil {
 		t.Fatalf("rename the snapshot back: %v", err)
 	}
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 
 	if !rec.Contains("indexer feed snapshot reappeared but is the same malformed file; still serving the last loaded feed") {
 		t.Errorf("reappearance of the memoized malformed file was not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -361,8 +361,8 @@ func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	})
 	distinct := time.Now().Add(2 * time.Second)
 	setMtime(t, path, distinct)
-	ix.cache.refresh(context.Background())
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot malformed"); got != 0 {
 		t.Errorf("over-limit item reported as a malformed snapshot %d times, want 0 (a per-item defect is not structural); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
@@ -413,7 +413,7 @@ func TestReloadKeepsFeedOnAnUnidentifiableSnapshot(t *testing.T) {
 		t.Fatalf("write legacy snapshot: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "live" {
 		t.Errorf("feed after an unidentifiable rewrite = %+v, want the last-good feed kept", got)
@@ -890,7 +890,7 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 				t.Fatalf("zero-snapshot write: %v", err)
 			}
 			bumpMtime(t, path)
-			ix.cache.refresh(context.Background())
+			ix.cache.loader.refresh(context.Background())
 			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 				t.Errorf("after %s rewrite feed = %d items, want 1 (a zero snapshot must not blank a live feed)", tc.name, len(got))
 			}
@@ -987,7 +987,7 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 		t.Fatalf("rename: %v", err)
 	}
 	setMtime(t, path, failedAt)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
 	}
@@ -1022,7 +1022,7 @@ func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 		t.Fatalf("rename: %v", err)
 	}
 	setMtime(t, path, loadedAt)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
 		t.Errorf("after preserved-mtime replacement feed = %d items, want 2 (a new inode at the loaded mtime must install)", len(got))
 	}
@@ -1052,7 +1052,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	setMtime(t, path, failedAt)
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	ix.cache.refresh(cancelled)
+	ix.cache.loader.refresh(cancelled)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
 		t.Fatalf("feed after the cancelled read = %d items, want 0 (nothing was loaded)", len(got))
 	}
@@ -1060,7 +1060,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	// Retry the SAME inode at the SAME mtime: a recoverable failure is not
 	// memoized, so this read must happen and install.
 	setMtime(t, path, failedAt)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("after same-inode retry feed = %d items, want 1 (a recoverable read failure must stay retryable)", len(got))
 	}
@@ -1156,7 +1156,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 
 	// Reloading against the older-mtime on-disk file must install it: the
 	// mtime differs from the loaded snapshot's, and the file is the truth.
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 1 || got[0].Title != "restored" {
@@ -1193,7 +1193,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 		t.Fatalf("write second snapshot: %v", err)
 	}
 	setMtime(t, path, when)
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("feed after unchanged-mtime rewrite = %#v, want the loaded first snapshot (equality skips)", got)
 	}
@@ -1307,8 +1307,8 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 		t.Fatalf("write oversized snapshot: %v", err)
 	}
 	setMtime(t, path, time.Now().Add(2*time.Second))
-	ix.cache.refresh(context.Background())
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot unreadable; keeping current feed"); got != 1 {
 		t.Errorf("oversized snapshot warned %d times across two reloads, want exactly 1 (an unchanged over-cap inode must memoize); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
@@ -1326,7 +1326,7 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 		},
 	})
 	setMtime(t, path, time.Now().Add(4*time.Second))
-	ix.cache.refresh(context.Background())
+	ix.cache.loader.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "repaired" {
 		t.Errorf("feed after the repaired write = %+v, want the replacement inode loaded", got)
 	}
@@ -1364,7 +1364,7 @@ func TestReloadReBaselinesAnUnsupportedSchemaVersion(t *testing.T) {
 		ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 			NyaaTorznabURL: "http://prowlarr/1/api",
 		}}, log, nil)
-		ix.cache.refresh(context.Background())
+		ix.cache.loader.refresh(context.Background())
 		return ix, rec
 	}
 
@@ -1578,7 +1578,7 @@ func TestStalledLaterLoadWarnsOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); c.watch(ctx, 5*time.Millisecond) }()
+	go func() { defer close(done); c.loader.watch(ctx, 5*time.Millisecond) }()
 
 	<-c.firstLoad
 	<-stalled
@@ -1628,7 +1628,7 @@ func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 
 	entered, release := heldLoad(t)
 	loaded := make(chan struct{})
-	go func() { defer close(loaded); ix.cache.refresh(context.Background()) }()
+	go func() { defer close(loaded); ix.cache.loader.refresh(context.Background()) }()
 	<-entered
 
 	// The compare cycle finishes while that read is in flight and publishes the
@@ -1644,5 +1644,40 @@ func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 	}
 	if ix.cache.unavailable() {
 		t.Error("unavailable() = true after the publish, want false")
+	}
+}
+
+// TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves pins the fresh-install
+// arm of the readiness state machine, with the reload clock actually STARTED -
+// the one configuration in which a resolved first load is observable at all.
+// An absent snapshot is the intentional fresh-install state (a first boot, or a
+// resident-idle daemon before its first `poll`), so once the loader's first pass
+// has resolved, requests must serve the empty feed rather than the
+// snapshot-unavailable Torznab error.
+//
+// Every other test in the suite either warms the cache synchronously (leaving
+// the clock unstarted, so readiness short-circuits before it consults the
+// loader) or holds the first load unresolved to assert the fault. So the
+// resolved-and-nothing-installed arm carries no assertion today: inverting it
+// answers a Torznab error to every search and RSS check on a fresh install,
+// failing the operator's Prowlarr save-test on a working deployment, with the
+// whole suite still green.
+func TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves(t *testing.T) {
+	ctx := t.Context()
+	ix := New(&Config{
+		SnapshotPath:   filepath.Join(t.TempDir(), "feed.json"),
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"},
+	}, nil, nil)
+	ix.cache.start(ctx)
+
+	if ix.cache.unavailable() {
+		t.Fatal("unavailable() = true after the first load resolved on an absent snapshot, want false: a missing file is the intentional fresh-install state, not a fault")
+	}
+	items, stats, fault := ix.query(ctx, url.Values{}, upstreamNyaa)
+	if fault != nil {
+		t.Fatalf("fresh-install RSS fault = %+v, want none", fault)
+	}
+	if len(items) != 0 || !stats.answered || !stats.feed {
+		t.Errorf("fresh-install RSS = %d items, stats %+v, want an answered empty feed", len(items), stats)
 	}
 }

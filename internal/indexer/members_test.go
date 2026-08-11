@@ -96,9 +96,6 @@ func TestPublicationLogIsNeverDeletable(t *testing.T) {
 	if snapshotRules[memberPublished].rule != ruleAppendOnly {
 		t.Error("publication log is not append-only")
 	}
-	if snapshotRules[memberPublished].reversibility != permanent {
-		t.Error("publication log is not recorded as permanent; the risk model must not be unified with the search index's")
-	}
 }
 
 // TestPublicationLogCapRefusesTheWriteAndKeepsThePast pins the append-only rule
@@ -140,25 +137,6 @@ func TestPublicationLogCapRefusesTheWriteAndKeepsThePast(t *testing.T) {
 				t.Errorf("publication log mutated by the cap check: %d entries, want the %d it was handed", len(snap.Published), len(published))
 			}
 		})
-	}
-}
-
-// TestSearchAndJournalKeepSeparateRiskModels pins the asymmetry the note
-// requires: one append mechanism may serve both members, but a wrong search key
-// self-heals within one reconcile while a wrong journal item costs fourteen days
-// of a served release plus a permanent publication record. An engine that
-// treated them as equally safe is the defect the reversibility column prevents.
-func TestSearchAndJournalKeepSeparateRiskModels(t *testing.T) {
-	if got := snapshotRules[memberOwners].reversibility; got != selfHealingWithinOneReconcile {
-		t.Errorf("curation ownership reversibility = %d, want self-healing within one reconcile", got)
-	}
-	for _, member := range []snapshotMember{memberNyaaFeed, memberABFeed} {
-		if got := snapshotRules[member].reversibility; got != boundedByJournalWindow {
-			t.Errorf("%q reversibility = %d, want bounded by the journal window", member, got)
-		}
-	}
-	if snapshotRules[memberOwners].reversibility == snapshotRules[memberNyaaFeed].reversibility {
-		t.Error("the search index and the RSS journal share one risk model; they must not")
 	}
 }
 
@@ -320,7 +298,7 @@ func TestSnapshotRoundTripsThroughTheBoundedDecoder(t *testing.T) {
 	if !maps.Equal(got.Published, in.Published) {
 		t.Errorf("publication log round-trip = %v, want %v", got.Published, in.Published)
 	}
-	if !slices.Contains([]string{`"owners"`}, `"owners"`) || !strings.Contains(string(data), `"owners"`) {
+	if !strings.Contains(string(data), `"owners"`) {
 		t.Error("the persisted document does not name the owners member")
 	}
 	if !strings.Contains(string(data), `"published"`) || !strings.Contains(string(data), `"version"`) {

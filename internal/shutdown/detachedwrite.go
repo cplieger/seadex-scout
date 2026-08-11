@@ -1,9 +1,8 @@
-package cycle
+package shutdown
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -36,7 +35,7 @@ const detachedWriteGrace = 5 * time.Second
 // that outlives the grace is cut off exactly as before, so a shutdown never
 // spends more than detachedWriteGrace on the write, and WriteFiles' own
 // per-stage context gates stay exactly as documented - this decision is made
-// HERE, beside the shutdown-interruption vocabulary the whole app classifies
+// HERE, in the shutdown-interruption vocabulary the whole app classifies
 // against, rather than by weakening that contract inside audit.
 func DetachedWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return detachedWriteContextGrace(ctx, detachedWriteGrace)
@@ -87,6 +86,5 @@ func DetachedWriteError(ctx context.Context, err error) error {
 	if ctx.Err() == nil || !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return fmt.Errorf("report write cut short by shutdown: %w (cause: %w): %w",
-		ctx.Err(), context.Cause(ctx), err)
+	return WrapAs(ctx, "report write cut short by shutdown", err)
 }
