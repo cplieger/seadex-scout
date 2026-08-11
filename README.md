@@ -178,7 +178,7 @@ its `.md`, but never a Markdown file without its machine-readable pair.
 ## Indexer (Torznab feed)
 
 When a Prowlarr Torznab URL is configured, the daemon serves a
-[Torznab](https://torznab.github.io/) feed of SeaDex releases for Sonarr/Radarr,
+[Torznab](https://torznab.github.io/spec-1.3-draft/) feed of SeaDex releases for Sonarr/Radarr,
 alongside the compare loop in the same process. It is the opt-in automation path:
 unlike the report-only findings, it lets the arrs grab. Point your arrs at it
 (directly or through Prowlarr) and they parse, match, and grab through their own
