@@ -556,5 +556,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0. Linking [`arrapi`](https://github.com/cplieger/arrapi) (GPL-3.0) makes
-seadex-scout GPL-3.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+GPL-3.0-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
