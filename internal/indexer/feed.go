@@ -25,29 +25,15 @@ import (
 // cannot drift from it.
 const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 
-// --- Per-show metadata and categories ---
-
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
 // (or the AniList canonical title as fallback; empty when neither is known),
 // its release year, the season the entry maps to, and whether it is a movie.
-// The cycle builds it from persisted state only (the mapping index, the last
-// library snapshot, the AniList memo), so the feed rebuild stays
-// arr-independent. The zero value is valid: synthesis then falls back to
-// file-name derivation and the anime category.
 type EntryInfo struct {
 	Title string
 	Year  int
-	// Season is the season number this entry's releases belong to, and
-	// SeasonKnown reports whether one was resolved at all. The pair arrives
-	// ALREADY RESOLVED from the producer (scout.feedEntryInfo): interpreting
-	// Fribb's raw season/typing fields is the mapping layer's semantics, and
-	// this package deliberately imports neither align nor mapping, so it must
-	// not re-derive that rule from raw fields. An entry with no
-	// resolvable season - an absolute-numbered run, a title-only match, or an
-	// unmapped entry - has SeasonKnown false and Season 0, and a resolved
-	// season is authoritative over any season the file names carry (fansub
-	// episode naming is cour-local).
+	// Season is the season number this entry's releases belong to, and SeasonKnown
+	// reports whether one was resolved at all.
 	Season      int
 	SeasonKnown bool
 	IsMovie     bool
@@ -84,18 +70,7 @@ func categoriesFor(isMovie bool) []int {
 	return []int{catAnime}
 }
 
-// --- Assembled title synthesis (known show title) ---
-
 // synthesizeTitle builds the served release title for one curated torrent.
-//
-// With a known show title (meta.Title, the arr's own title or the AniList
-// canonical title) the title is assembled, not derived: the show title, a
-// season/episode marker computed from the Fribb season and the full file-list
-// span (see episodeMarker), and the real release flags this app actually holds
-// (see releaseFlags) - so the arr parses back a title built from its own
-// vocabulary. A movie is "{Title} ({Year})" instead of a marker. Without a
-// show title the file-name derivation (derivedTitle) is the permanent last
-// resort.
 func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 	title := strings.TrimSpace(meta.Title)
 	if title == "" {
@@ -115,31 +90,16 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 	return strings.Join(append(parts, releaseFlags(t)...), " ")
 }
 
-// episodeMarker derives the season/episode token for a synthesized series
-// title from the entry's resolved season AND the full file-list span:
-//
-//   - A pack labels by season: the entry's resolved season when it has one
-//     (meta.SeasonKnown - the arr's own season numbering, or the season-0
-//     specials bucket), else the dominant/lowest REAL season across the file
-//     list (so a pack bundling S00 specials with S01 episodes labels S01,
-//     never the specials bucket its first file happens to sit in), else no
-//     marker (an absolute-numbered pack with no season evidence stays a bare
-//     title).
-//   - A single release keeps its own file marker (SxxExx, or the fansub
-//     "- NN" absolute form) with its SEASON half relabeled to the resolved
-//     season when the entry has one - fansub episode naming is cour-local, so
-//     the file's own season half routinely disagrees with the season the arr
-//     tracks the entry under - and a marker-less single file (a movie-shaped
-//     OVA) gets none. The one exception is the specials bucket, where an
-//     absolute marker is rewritten into a season-0 token
-//     (specialsEpisodeMarker).
+// episodeMarker derives the season/episode token for a synthesized series title from
+// the entry's resolved season AND the full file-list span: - A pack labels by season:
+// the entry's resolved season when it has one (meta.SeasonKnown - the arr's own season
+// numbering, or the season-0 specials bucket), else the dominant/lowest REAL season
+// across the file list (so a pack bundling S00 specials with S01 episodes labels S01,
+// never the specials bucket its first file happens to sit in), else no marker (an
+// absolute-numbered pack with no season evidence stays a bare title).
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
-	// The synthesized path has no title to judge: it is BUILDING one, so the
-	// file census is the only evidence there is. The harvested-title
-	// cross-check is a SEPARATE policy over richer inputs (journal.go's
-	// titleAudit.served, which reads packFromTitle's three-way answer beside
-	// the three-valued packEvidenceOf), so it cannot collapse into a shared
-	// boolean with this path.
+	// The synthesized path has no title to judge: it is BUILDING one, so the file
+	// census is the only evidence there is.
 	if !isPack(t) {
 		marker := singleEpisodeMarker(t.Files)
 		if special := specialsEpisodeMarker(marker, meta); special != "" {
@@ -160,22 +120,6 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 // or returns "" when the rule does not apply (no resolved season, a positive
 // season, or a marker that is not the absolute form - all of which the caller
 // handles unchanged).
-//
-// Season 0 is the one resolved season absolute numbering can never address:
-// for a POSITIVE season an absolute "- NN" already names the right episode of
-// the run (inventing "S02E14" would be wrong), which is why the general rule
-// leaves it alone. For a Fribb-typed special the assembled title is
-// {parent series title} + {marker}, so a bare "- 07" is byte-identical to what
-// a REGULAR absolute episode 7 of the parent series synthesizes - the file's
-// own "OVA"/"SP" text is not part of the assembled path - and an arr matching
-// it grabs the wrong content into the monitored run. Emitting the specials
-// token keeps the item visible and routes it at the season-0 bucket instead.
-//
-// The runner-up was suppressing the marker entirely (an unparseable title, so
-// the item is invisible rather than mismatched); it was rejected because
-// dropping a curated release off RSS is a worse outcome than landing it in the
-// bucket the entry is typed into. A version suffix ("- 07v2") is dropped, as
-// the episode census already does, so the emitted token stays parseable.
 func specialsEpisodeMarker(marker string, meta EntryInfo) string {
 	if !meta.SeasonKnown || meta.Season != 0 {
 		return ""
@@ -254,11 +198,9 @@ func singleEpisodeMarker(files []seadex.File) string {
 	if name == "" {
 		return ""
 	}
-	// Read the episode identity from the same base-then-full-path rule the
-	// census uses (episodeKeyBase), so a token that lives only in a
-	// directory component still names the episode instead of being lost:
-	// coveredEpisodes already keys on it, so dropping it here made the
-	// marker disagree with the pack/single decision that produced it.
+	// Read the episode identity from the same base-then-full-path rule the census
+	// uses (episodeKeyBase), so a token that lives only in a directory component
+	// still names the episode instead of being lost.
 	base := episodeKeyBase(name)
 	if l := lastSubmatchIndex(episodeToken, base); l != nil {
 		return strings.ToUpper(base[l[2]:l[3]])
@@ -278,11 +220,10 @@ func singleEpisodeMarker(files []seadex.File) string {
 // ones.
 func releaseFlags(t *seadex.Torrent) []string {
 	var flags []string
-	// The resolution flag comes from the shared classify.FileResolution (the ONE
-	// place a release.Input is built from SeaDex data, over the shared
-	// payload.Names eligibility rule), so the RSS title's resolution and the
-	// daemon finding's classification can never disagree about which files
-	// vote.
+	// The resolution flag comes from the shared classify.FileResolution (the ONE place
+	// a release.Input is built from SeaDex data, over the shared payload.Names
+	// eligibility rule), so the RSS title's resolution and the daemon finding's
+	// classification can never disagree about which files vote.
 	if res := classify.FileResolution(t.Files); res != "" {
 		flags = append(flags, res)
 	}
@@ -295,32 +236,8 @@ func releaseFlags(t *seadex.Torrent) []string {
 	return flags
 }
 
-// --- Episode/pack heuristics: token regexes, derivedTitle, packSeason ---
-
-// episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13,
-// S01E15v2), captured in group 1 with its season half in group 2. Collapsing
-// its episode half to just the season turns a season pack's per-episode file
-// name into a whole-season release title, so the arr grabs the pack rather
-// than treating it as a single episode. The token must end at a token
-// boundary (nametoken.NonWordEdge, underscore included - underscore-delimited
-// names use "_" everywhere a space would sit) or the end of the string:
-// without it, the E-less range arm swallowed a dash-joined resolution
-// ("S01E07-1080p" tokenized as the bogus range "S01E07-1080", corrupting
-// both the single-episode marker and the pack collapse, which left a stray
-// "p" in the title). Consumers read the SUBMATCH (group 1), never the full
-// match, which may include the terminator character.
-//
-// The letters and the boundary come from internal/nametoken, the one home of
-// this app's release-name lexical rules, instead of a global (?i) beside a
-// [^0-9a-z] class. That pairing was case folding by unicode.SimpleFold, which
-// disagrees with the strings.ToLower reading internal/release classifies by, so
-// the same name tokenized two ways in one binary: (?i)S also accepted U+017F
-// (ſ), inventing a season token in "ſ01E01" where the classifier sees no
-// marker, and the folded class read U+0130 (İ) as a delimiter that could END a
-// token while the classifier reads it as a word rune (strings.ToLower folds it
-// onto the letter i). Those two runes are the whole behaviour change; every
-// ASCII spelling matches exactly as before (see TestEpisodeTokenBoundary and
-// the convergence test beside it).
+// episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13, S01E15v2),
+// captured in group 1 with its season half in group 2.
 var episodeToken = regexp.MustCompile(
 	`((` + nametoken.Literal("S") + `\d{1,2})` + nametoken.Literal("E") + `\d{1,4}` +
 		`(?:-` + nametoken.Literal("E") + `?\d{1,4})?(?:` + nametoken.Literal("v") + `\d+)?)` +
@@ -333,14 +250,6 @@ var episodeToken = regexp.MustCompile(
 // space-dash form made such packs read as a single episode. Used to keep a
 // multi-file pack from reading as episode 7 when there is no SxxExx token to
 // collapse, and to extract a single absolute episode's number for synthesis.
-//
-// [\s_] is deliberately NARROWER than the shared token boundary
-// (nametoken.NonWordEdge) and is this pattern's own policy, not a second
-// vocabulary: dot and hyphen are token boundaries everywhere in this app, but
-// they may not stand in for the delimiters of THIS form, where the dash is the
-// marker itself. Widening the trailing delimiter would newly match a
-// dot-abutting number ("Show - 07.1080p", "Show - 07.mkv"), which is why
-// representativeFile runs this pattern on stripExt'd names instead.
 var absoluteEpisode = regexp.MustCompile(`[\s_]-[\s_](\d{1,4}(?:v\d+)?)(?:[\s_]|$)`)
 
 // episodeVersion strips a trailing vN revision from an episode token so a v2
@@ -353,23 +262,8 @@ var episodeVersion = regexp.MustCompile(nametoken.Literal("v") + `\d+$`)
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
 
-// lastSubmatchIndex returns the submatch index pairs of the LAST
-// non-overlapping match of re in s, or nil when there is none. It replays
-// FindAllStringSubmatchIndex(s, -1)'s progression but retains only the
-// current match, so - for a pattern that cannot match the empty string,
-// which every pattern in this file is - it is equivalent to taking that
-// call's last element while allocating O(1) instead of O(matches). An
-// empty-matching pattern is OUT OF CONTRACT: the guard below only keeps the
-// scan terminating, and deliberately does not reproduce FindAll's
-// rune-width advance or its rejection of an empty match sitting at the
-// previous match's end. SeaDex bounds a page at
-// 48 MiB but caps no individual string, and match slices cost ~108 bytes
-// per match: 4 MiB of repeated "S1E1 " retains ~86 MiB, so one hostile
-// file name can OOM the 256 MiB container during a feed rebuild (CWE-400/
-// CWE-789), well inside the working-set budget internal/seadex sizes its
-// byte caps against. Neither episodeToken nor absoluteEpisode is anchored
-// with ^, so scanning the s[off:] suffix is equivalent, and their trailing
-// (?:...|$) alternatives still see the real end of s.
+// lastSubmatchIndex returns the submatch index pairs of the LAST non-overlapping match
+// of re in s, or nil when there is none.
 func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
 	var last []int
 	for off := 0; off <= len(s); {
@@ -420,15 +314,9 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		return strings.TrimSpace(relabelEpisodeSeason(base, meta))
 	}
 	if l := lastSubmatchIndex(episodeToken, base); l != nil {
-		// Collapse only the LAST episode token: scene naming puts the marker
-		// after the title, so a title that itself contains an SxxExx-shaped
-		// substring is preserved verbatim. The season label comes from the
-		// whole pack (packSeason), not this one file, so a representative
-		// file from the S00 specials bucket cannot mislabel the pack. The
-		// replacement spans the TOKEN group (l[2]:l[3]), never the full
-		// match, whose trailing terminator character must survive the
-		// collapse.
-		// No resolved and no file-list season: keep the file's own season half.
+		// Collapse only the LAST episode token: scene naming puts the marker after the
+		// title, so a title that itself contains an SxxExx-shaped substring is
+		// preserved verbatim.
 		label := base[l[4]:l[5]]
 		if resolved, ok := packSeasonLabel(t, meta); ok {
 			label = resolved
@@ -438,15 +326,6 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 	if last := lastSubmatchIndex(absoluteEpisode, base); last != nil {
 		// Collapse only the LAST absolute episode token (mirroring the SxxExx
 		// arm above): a title segment that is itself " - NN"-shaped (e.g.
-		// "Show - 07 (WEB) - 01") must be preserved, not stripped with the
-		// real episode token. The collapsed token is replaced by the pack's
-		// season label under the SAME precedence the SxxExx arm uses
-		// (packSeasonLabel): collapsing the episode already claims the whole
-		// season, so a pack that has a resolved (or file-list) season must say
-		// which one - a title carrying neither a season nor an episode is the
-		// one shape the pack collapse exists to avoid. With no season from
-		// either source (a plain absolute-numbered pack) the token drops and
-		// the title stays a bare name, as before.
 		label := " "
 		if resolved, ok := packSeasonLabel(t, meta); ok {
 			label = " " + resolved + " "
@@ -537,35 +416,13 @@ func hasEpisodeEvidence(s string) bool {
 // own base name, or the nearest ancestor directory component when the base
 // carries no episode evidence and that directory carries both episode evidence
 // AND text of its own.
-//
-// The base name is the primary source because it is normally the release name.
-// But a pack (or a single release) whose episode evidence lives only in a
-// directory component - the top-level directory IS the release name, the files
-// under it are bare "01.mkv"/"video.mkv" - would otherwise headline as "01" or
-// "video": a title no arr can parse into a series, so the curated release is
-// invisible on RSS with no diagnostic, while the parseable name sits one
-// component up. Reading the same base-then-full-path evidence rule the episode
-// census uses (episodeKeyBase) keeps the two from disagreeing about which
-// fragment names the episode.
-//
-// The own-text requirement is what keeps a token-ONLY directory ("S01E01/Movie
-// Cut A.mkv") on the base name: promoting it would headline a bare "S01" with
-// no show name at all, strictly worse than the basename it replaced.
 func titleBase(name string) string {
 	base := stripExt(path.Base(name))
 	if hasEpisodeEvidence(base) {
 		return base
 	}
-	// Walk the ancestors nearest-first over ONE cleaned prefix instead of
-	// re-deriving it on every step. path.Dir Cleans its whole argument, so a
-	// repeated-Dir walk costs O(len) per component and is QUADRATIC in the
-	// name's length - and SeaDex caps a page at 48 MiB but no individual file
-	// name (the same uncapped producer lastSubmatchIndex above is written
-	// against). Measured: a 512 KiB name of slash-separated components took
-	// 87s, 4x per doubling, so a multi-MiB name wedges the feed rebuild for
-	// hours (CWE-407) - and renderJournalItem's sort comparator pays it once
-	// per comparison. Splitting the already-cleaned prefix visits exactly the
-	// same components in the same order, in O(len) total.
+	// Walk the ancestors nearest-first over ONE cleaned prefix instead of re-deriving
+	// it on every step.
 	rest := path.Dir(name)
 	for rest != "" {
 		component := rest
@@ -639,22 +496,12 @@ func packEvidenceOf(t *seadex.Torrent) packEvidence {
 // never packed as one torrent per episode - each a single-file release - so the
 // file count is what separates a pack from a lone episode. The file list ships
 // in the SeaDex record, so this needs no torrent fetch.
-//
-// It is exactly the pack arm of packEvidenceOf, so the boolean and the
-// three-valued reading have one source of truth (pinned by a test).
 func isPack(t *seadex.Torrent) bool {
 	return packEvidenceOf(t) == packEvidencePack
 }
 
 // contentPopulation narrows a file list to the population the episode census
 // counts over: the episode pool, then content media files only.
-//
-// Census files only, so an unmarked bonus video far below the real episodes
-// cannot inflate a lone episode into a "pack" - and a MARKED sample never
-// reaches the count at all, because payload's type gate drops it by name. The
-// floor is anchored on the pool's median, not its maximum: a pack whose
-// premiere runs double length (or that bundles the franchise movie) would
-// otherwise lose every regular episode and read as a single episode.
 func contentPopulation(files []seadex.File) []seadex.File {
 	files = payload.Population(files)
 	kept := make([]seadex.File, 0, len(files))
@@ -671,9 +518,6 @@ func contentPopulation(files []seadex.File) []seadex.File {
 // or underscore-delimited) as a fallback. Creditless extras (NCED/NCOP) and
 // other sidecars carry neither token and are not counted, so an episode bundled
 // with its creditless files still reads as a single episode.
-//
-// It takes the POPULATION rather than a raw file list so packEvidenceOf can read
-// the count and the population it came from without counting twice.
 func distinctEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	for i := range files {
@@ -697,14 +541,6 @@ func distinctEpisodes(files []seadex.File) int {
 
 // sharedTokenQualifier returns the per-file suffix an episode key needs when
 // the token episodeKeyBase found does NOT come from the file's own base name.
-// A token that lives only in a PATH component names the whole RELEASE rather
-// than this file, so keying on it alone merges every file under that
-// component: a batch directory ("[Grp] Show S01E01-E12 [1080p]/01.mkv") gave a
-// whole twelve-episode season ONE key, which packEvidenceOf then graded as
-// POSITIVE single-episode evidence - the grade packEvidenceUnknown exists to
-// keep separate. Qualifying with the file's own (version-stripped) base name
-// keeps the count honest for that shape while leaving a per-file token keyed
-// exactly as before, so a v2 re-release of one episode still counts once.
 func sharedTokenQualifier(name string) string {
 	own := stripExt(path.Base(name))
 	if hasEpisodeEvidence(own) {
@@ -713,33 +549,11 @@ func sharedTokenQualifier(name string) string {
 	return "|" + episodeVersion.ReplaceAllString(own, "")
 }
 
-// --- Season-pack verdict: title first, file census as the fallback ---
-
 // seasonOnlyTitle matches what Sonarr calls a "season only release"
-// (Sonarr/src/NzbDrone.Core/Parser/Parser.cs:325), with the anime bracketed
-// variant (Parser.cs:113) folded in as the optional "[" or "(" before the
-// season word: a title, a separator, a season word (Season / Saison / Series /
-// Stagione / S), and the season number. Group 1 spans the whole season token
-// (the season word AND its number - the span a correction rewrites), group 2
-// just the number; both END at the same offset, so a reader of the number's end
-// can use either. Sonarr sets result.FullSeason exactly when such a match
-// succeeds, and FullSeason is what ranks a pack above loose episodes in its own
-// grab decision - so this is the parser that ultimately reads whichever title
-// this app serves, which is why the rule is taken from it rather than invented
-// here.
-//
-// Sonarr's trailing negative lookahead (?![-_. ]?\d+) - the part that makes the
-// match season-ONLY, refusing "Show S01 05" - has no RE2 equivalent, so
-// packFromTitle applies it against the text that FOLLOWS the season number
-// instead (seasonNumberEnds). The season word alternation is ordered
-// longest-first so the bare "S" arm cannot shadow "Season".
-//
-// This pattern and seasonPackDisqualifier deliberately keep the global (?i) and
-// their own delimiter/boundary classes rather than reading internal/nametoken:
-// the vocabulary being mirrored is .NET's, not this app's. Their job is to
-// answer what SONARR'S parser will make of a title, so a divergence from
-// Sonarr's own casing and boundary reading is the defect here - the opposite of
-// the episode tokens above, which state what THIS app believes a name says.
+// (Sonarr/src/NzbDrone.Core/Parser/Parser.cs:325), with the anime bracketed variant
+// (Parser.cs:113) folded in as the optional "[" or "(" before the season word: a title,
+// a separator, a season word (Season / Saison / Series / Stagione / S), and the season
+// number.
 var seasonOnlyTitle = regexp.MustCompile(`(?i)^.+?[-_. ]+[\[(]?((?:Season|Saison|Series|Stagione|S)[-_. ]?(\d{1,2}))`)
 
 // seasonPackDisqualifier matches the tokens that cancel a season-pack reading
@@ -759,16 +573,6 @@ var seasonPackDisqualifier = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])(?:EXTRA
 // seasonPackDisqualifier for the same reason they keep their own (?i) and delimiter
 // classes - the vocabulary being mirrored is .NET's, and the job is to answer what
 // SONARR will make of a title, not what this app believes a name says.
-//
-// Without it the season-only reading judged a string Sonarr never parses. Sonarr's
-// trailing (?![-_. ]?\d+) lookahead is what makes a match season-ONLY, and on a raw
-// title the digits it sees are the RESOLUTION's ("Show S01 1080p"), so this app read
-// known=false - no correction, no diagnostic - while Sonarr, reading the cleaned
-// "Show S01", set FullSeason and grabbed the release as a whole season. That is the
-// episode-suppression case titleAudit.served exists to correct, and a resolution token
-// sits in essentially every real tracker title. The two shapes that happened to work
-// are the ones where a bracket separates the season number from the resolution
-// ("[Grp] Show (S01) (1080p)").
 var sonarrSimpleNoise = regexp.MustCompile(
 	`(?i)(?:(?:480|540|576|720|1080|2160)[ip]|[xh][\W_]?26[45]|DD\W?5\W1` +
 		`|848x480|1280x720|1920x1080|3840x2160|4096x2160|10-bit)\s*`)
@@ -777,13 +581,6 @@ var sonarrSimpleNoise = regexp.MustCompile(
 // whether the title answered at all. It is the title half of the harvest's
 // title-vs-census cross-check (journal.go's titleAudit.served); the file
 // census (isPack) is the other half and the fallback.
-//
-// known is false for an empty title, for a title carrying a disqualifying
-// marker (seasonPackDisqualifier), and for any title whose shape the parser
-// cannot read - a title is allowed to say nothing, and saying nothing must cost
-// the caller nothing. Episode evidence answers before the season shape does: a
-// title carrying an SxxExx or absolute "- NN" token names one episode, which is
-// exactly what the season-only lookahead refuses to call a pack.
 func packFromTitle(title string) (pack, known bool) {
 	s := strings.TrimSpace(title)
 	if s == "" {
@@ -835,22 +632,6 @@ func seasonNumberEnds(rest string) bool {
 // correctSeasonOnlyTitle rewrites the season-only token inside a harvested
 // tracker title into the season+episode form the file census's own marker names,
 // returning the corrected title and whether the rewrite applied.
-//
-// ONLY the season token is touched: every other byte of the tracker's own
-// release name survives, including the group, resolution and codec text Sonarr
-// reads for its quality and custom-format decisions. Replacing the whole title
-// with the synthesized one would fix the pack claim and throw that text away -
-// strictly worse for matching, which is the stated objective - and dropping the
-// item is forbidden outright. The GUID is untouched, so the item still points at
-// the real torrent page.
-//
-// marker is the census's single-episode token (singleEpisodeMarker): an SxxExx
-// token whose EPISODE half is transplanted onto the season the TITLE claims (the
-// title's season is the tracker's claim about WHICH season; the census names the
-// episode), or the absolute "- NN" form rendered as S<title season>ENN. Reusing
-// seasonLabel keeps the SNN wire format single-homed. ok is false when the title
-// carries no readable season-only token or the marker is neither form; the
-// caller must then serve the title unchanged.
 func correctSeasonOnlyTitle(title, marker string) (string, bool) {
 	m := seasonOnlyTitle.FindStringSubmatchIndex(title)
 	if m == nil {
@@ -890,8 +671,6 @@ func episodeSuffix(marker string) (string, bool) {
 	return episodeLabel(n), true
 }
 
-// --- Media-file classification helpers ---
-
 // representativeFile picks the file name a title is derived from: the first file
 // carrying a season+episode token (so extras like NCED/NCOP/creditless files,
 // which lack one, are skipped in favour of a real episode), or the first file
@@ -901,22 +680,13 @@ func representativeFile(files []seadex.File) string {
 	// featurette can never headline the synthesized title while a legitimately
 	// shorter first episode still can (a marked sample is dropped by name in
 	// payload's type gate, an unmarked bonus video by the census floor).
-	// payload.Population keeps the primary-payload rule's totality fallbacks
-	// (type-gate-only when no lengths, size-only when no type survivor), so a
-	// sidecar-only or container-only list still yields a candidate; an
-	// all-unnamed list yields none.
 	files = payload.Population(files)
 	if len(files) == 0 {
 		return ""
 	}
-	// Prefer a real episode file (skipping creditless extras/sidecars): first an
-	// SxxExx token, then an absolute-numbered episode, so the title derives from a
-	// real episode rather than an extra. The two predicates are deliberately
-	// asymmetric: episodeToken matches the RAW name (its E-digit body has no trailing
-	// anchor, so it matches with the extension still present), but absoluteEpisode ends
-	// in (?:[\s_]|$) and an absolute number can abut the extension ("Show - 07.mkv"), so it
-	// must run on stripExt(n) to match. Do not unify them onto one input - dropping
-	// stripExt here breaks absolute-episode detection.
+	// Prefer a real episode file (skipping creditless extras/sidecars): first an SxxExx
+	// token, then an absolute-numbered episode, so the title derives from a real
+	// episode rather than an extra.
 	if name := firstEpisodeFile(files, episodeToken.MatchString); name != "" {
 		return name
 	}
@@ -965,8 +735,6 @@ func stripExt(name string) string {
 	return name[:len(name)-len(path.Ext(name))]
 }
 
-// --- Feed assembly utilities ---
-
 // totalSize sums the byte lengths of a torrent's files (the pack size). The
 // lengths come from the untrusted SeaDex record, so the arithmetic is
 // validated: a negative length, or a sum that would overflow int64 into a
@@ -1000,8 +768,6 @@ func entryURL(alID int) string {
 // else "". SeaDex publishes the literal string "<redacted>" for AnimeBytes info
 // hashes (private tracker), so this keeps a bogus value out of the feed's
 // infohash attr; AB items are grabbed via their id-based download URL regardless.
-// The redaction/validity knowledge is the upstream releases.moe contract and
-// lives in internal/seadex (seadex.ValidInfoHash); this is a thin delegate.
 func validInfoHash(h string) string {
 	return seadex.ValidInfoHash(h)
 }

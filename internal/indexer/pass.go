@@ -9,26 +9,10 @@ import (
 )
 
 // This file is THE pass. The reconcile and the tick are ONE code path
-// parameterized by SCOPE, which is the whole payoff of the rule table in
-// members.go: they used to be two code paths, and that is WHY the tick got five
-// persisted members wrong by omission - it was a different path rather than the
-// same path with a smaller input.
-//
-// The collapse is honest but PARTIAL, and the remainder is named rather than
-// hidden. Three computations are genuinely catalogue-scoped and stay
-// reconcile-only, each because its criterion is absence from the input:
-//
-//   - the catalogue-wide warned-identity graph (collectWarnedIdentities closes
-//     over shared info hashes, so a window computes a NARROWER graph),
-//   - the Prowlarr title harvest (rate-paced, rotating over the whole journal),
-//   - retainTitles (pruning the harvest cache to the keys still journaled).
-//
-// Everything else runs at both scopes under the same member rules.
+// parameterized by SCOPE, which is the payoff of the rule table in members.go.
 
 // carryPolicy names which arm carryItem may take for one carried journal item.
-// It is a property of the pass's EVIDENCE, not a choice at the call site, and it
-// is where the difference between the reconcile's carry and the tick's carry
-// lives now that there is one carry function.
+// It is a property of the pass's EVIDENCE, not a choice at the call site.
 type carryPolicy int
 
 const (
@@ -42,12 +26,11 @@ const (
 	carryDeCurated
 )
 
-// renderPolicy names which render arm the pass's evidence AUTHORIZES for a key
-// it is journaling for the FIRST time. It is carryPolicy's twin on the GROWTH
-// side, and it exists for the same reason: renderJournalItem folds the
-// download-volume-factor marker and the category union across the occurrences it
-// is handed (foldRefs), so whether that fold is the whole answer is a property
-// of the pass's EVIDENCE rather than a choice at the call site.
+// renderPolicy names which render arm the pass's evidence AUTHORIZES for a key it
+// is journaling for the FIRST time - carryPolicy's twin on the GROWTH side:
+// renderJournalItem folds the download-volume-factor marker and the category union
+// across the occurrences it is handed, so whether that fold is the whole answer is
+// a property of the pass's evidence.
 type renderPolicy int
 
 const (
@@ -57,59 +40,37 @@ const (
 	// renderComplete: the pass holds EVERY occurrence of the key, so the fold
 	// over its own evidence is the value the feed may serve.
 	renderComplete
-	// renderPartial: the pass holds SOME occurrences of the key and cannot know
-	// whether there are others - a window's ordinary case, since ~4.4% of
-	// curated torrents are attached to several AniList entries and a curator
-	// edit bumps only the entry it touched into the window. The pass may render
-	// from what it holds, but the votes of the owners it did NOT evaluate must
-	// be CARRIED from the persisted ownership fact rather than read as absent
-	// (journalPass.carryUnevaluatedVotes).
+	// renderPartial: the pass holds SOME occurrences of the key and cannot know whether
+	// there are others - a window's ordinary case, since ~4.4% of curated torrents are
+	// attached to several entries.
 	renderPartial
 )
 
-// curationEvidence is what ONE pass HOLDS about curation. It is an interface
-// with exactly two implementations because the difference between them is not a
-// parameter to be read at a call site - it is which QUESTIONS the pass is
-// entitled to answer. A window physically cannot hold a catalogue-wide warned
-// set, so it cannot be handed one by mistake, and its carryPolicy cannot reach
-// the de-curated arm at all.
-//
-// EVERY accessor that feeds a value the FEED SERVES returns a JUDGEMENT rather
-// than raw evidence, and that is the law this interface exists to enforce: a
-// value the feed serves is computed by the pass holding complete evidence for it
-// and CARRIED VERBATIM by a pass that does not. carryPolicy authorizes a carried
-// item's re-render, renderPolicy authorizes a new item's fold, census authorizes
-// a title judgement, and ownership returns nil when the pass cannot vouch. The
-// two accessors that used to return raw evidence with the judgement left to the
-// caller (an occurrence list plus a discarded completeness bit, and the whole
-// evaluated key set) are gone: each was read by exactly one consumer, and each
-// consumer silently folded a window's subset as if it were the whole.
+// curationEvidence is what ONE pass HOLDS about curation. It is an interface with
+// exactly two implementations because the difference is not a parameter to read at
+// a call site - it is which QUESTIONS the pass is entitled to answer. A window
+// physically cannot hold a catalogue-wide warned set, so it cannot be handed one
+// by mistake.
 type curationEvidence interface {
 	// scope names the input this evidence was built from.
 	scope() passScope
 	// entries returns the evaluated entries, tag-filtered.
 	entries() []seadex.Entry
 	// carryPolicy names which carry arm this pass's evidence AUTHORIZES for a
-	// carried journal key, plus the occurrences the refresh arm needs. A window
-	// has exactly one arm and cannot reach the other two.
+	// carried journal key, plus the occurrences the refresh arm needs.
 	carryPolicy(key string) (carryPolicy, []curatedRef)
-	// renderPolicy names which render arm this pass's evidence AUTHORIZES for a
-	// key it is journaling for the FIRST time, plus the occurrences that arm
-	// folds. A window can never authorize the complete arm.
+	// renderPolicy names which render arm this pass's evidence AUTHORIZES for a key
+	// it is journaling for the FIRST time, plus the occurrences that arm folds.
 	renderPolicy(key string) (renderPolicy, []curatedRef)
-	// census is the file-census verdict for the keys this pass EVALUATED - the
-	// evidence titleAudit judges a harvested title against. A key the pass did
-	// not evaluate is ABSENT from it rather than present-and-empty, and that
-	// absence IS the authorization: with no census entry this pass may not judge
-	// that key's title and serves the carried one instead (applyTitles).
+	// census is the file-census verdict for the keys this pass EVALUATED. A key it
+	// did not evaluate is ABSENT rather than present-and-empty, and that absence IS
+	// the authorization: this pass may not judge that key's title (applyTitles).
 	census() map[string]packCensus
-	// retracts reports whether a carried item shares a warned identity. This is
-	// sound at BOTH scopes because retraction acts on positive evidence (a
-	// torrent the pass evaluated carries an excluded tag), never on absence.
+	// retracts reports whether a carried item shares a warned identity. Sound at
+	// BOTH scopes, because retraction acts on positive evidence, never on absence.
 	retracts(it *journalItem) bool
-	// ownership is the per-entry curation contribution this pass may write, or
-	// nil when the pass cannot vouch for its own evidence (see
-	// windowEvidence.ownership).
+	// ownership is the per-entry curation contribution this pass may write, or nil
+	// when the pass cannot vouch for its own evidence.
 	ownership() map[string][]ownedRelease
 	// warnedKeys is how many journal keys the tag policy excluded, for the log
 	// line.
@@ -124,33 +85,26 @@ type catalogueEvidence struct {
 	kept   []seadex.Entry
 }
 
-// windowEvidence is the tick's evidence: the recently-changed entries only, and
-// a warned closure computed over just those. It deliberately holds no
-// catalogue-wide anything - there is no field it could be put in.
+// windowEvidence is the tick's evidence: the recently-changed entries only, and a
+// warned closure over just those. It holds no catalogue-wide anything.
 type windowEvidence struct {
 	cur    map[string][]curatedRef
 	warned warnedSet
 	kept   []seadex.Entry
-	// tagPolicySet records whether the operator has ANY tag exclusion
-	// configured. It is what decides whether this window's warned closure is
-	// complete enough to admit keys into the search index - see ownership.
+	// tagPolicySet records whether the operator has ANY tag exclusion configured,
+	// which decides whether this window's warned closure is complete enough to
+	// admit keys into the search index - see ownership.
 	tagPolicySet bool
 }
 
 // newEvidence builds the evidence for one pass over entries at scope. The tag
-// filtering and the warned closure are the SAME computation at both scopes
-// (splitCurationWarned over whatever the input is); what differs is what the
-// result is allowed to conclude.
-//
-// The closure matters even at window scope, and this is why the window computes
-// one at all rather than running unfiltered: warning identity is transitive
-// across occurrences, and SeaDex routinely lists one release on two trackers
-// with a shared info hash and the `broken` tag on one occurrence only.
-// Filtering each torrent in isolation would admit the untagged twin, journal it,
-// and record its identity in the never-pruned publication log - after which the
-// next catalogue pass retracts it from the feed but can never re-admit it. What
-// stays out of reach here is only the exclusion reachable through an entry the
-// window did not carry; that one is the catalogue pass's.
+// filtering and the warned closure are the SAME computation at both scopes; what
+// differs is what the result may conclude. The closure matters even at window
+// scope because warning identity is transitive across occurrences, and SeaDex
+// routinely lists one release on two trackers with a shared info hash and the
+// `broken` tag on one occurrence only: filtering each torrent in isolation would
+// journal the untagged twin and record its identity in the never-pruned
+// publication log, after which it can never be re-admitted.
 func newEvidence(entries []seadex.Entry, tags tagfilter.Filter, scope passScope) curationEvidence {
 	kept, warned := splitCurationWarned(entries, tags)
 	cur := indexCurated(kept)
@@ -165,9 +119,8 @@ func (e *catalogueEvidence) entries() []seadex.Entry { return e.kept }
 func (e *catalogueEvidence) warnedKeys() int         { return len(e.warned.keys) }
 
 // renderPolicy: a catalogue pass holds every occurrence of every key it
-// evaluated, so a fold over its own occurrences is the whole answer and nothing
-// has to be carried. A key absent from the catalogue has no occurrence to render
-// from at all.
+// evaluated, so a fold over its own occurrences is the whole answer. A key absent
+// from the catalogue has no occurrence to render from.
 func (e *catalogueEvidence) renderPolicy(key string) (renderPolicy, []curatedRef) {
 	if refs, evaluated := e.cur[key]; evaluated {
 		return renderComplete, refs
@@ -180,8 +133,8 @@ func (e *catalogueEvidence) renderPolicy(key string) (renderPolicy, []curatedRef
 func (e *catalogueEvidence) census() map[string]packCensus { return censusPacks(e.cur) }
 
 // carryPolicy: a catalogue pass holds every occurrence of every key, so it may
-// re-render what it evaluated - and, because its input IS the catalogue, a key
-// absent from it is genuinely absent from SeaDex, so it may conclude de-curation.
+// re-render what it evaluated - and because its input IS the catalogue, a key
+// absent from it is absent from SeaDex, so it may conclude de-curation.
 func (e *catalogueEvidence) carryPolicy(key string) (carryPolicy, []curatedRef) {
 	if refs, evaluated := e.cur[key]; evaluated {
 		return carryRefreshed, refs
@@ -206,45 +159,21 @@ func (e *windowEvidence) renderPolicy(key string) (renderPolicy, []curatedRef) {
 	if !evaluated {
 		return renderUnevaluated, nil
 	}
-	// A window holds the occurrences carried by the entries a curator happened
-	// to touch, never the key's whole owner set - and it cannot tell the two
-	// apart, since absence from its own input proves nothing. So the render is
-	// authorized only as PARTIAL: sound for what this pass evaluated, and
-	// completed by carrying the unevaluated owners' stored votes.
+	// A window holds the occurrences carried by the entries a curator happened to
+	// touch, never the key's whole owner set, and cannot tell the two apart. So the
+	// render is authorized only as PARTIAL, completed by carrying the unevaluated
+	// owners' stored votes.
 	return renderPartial, refs
 }
 
 // census covers only the WINDOW's keys, which is what makes the CARRIED title
-// load-bearing: every journal key outside the window is unjudged here (the
-// journal holds feedJournalMaxAge of items against a 48h window), so applyTitles
-// must have a served value to carry for such a key rather than a raw harvested
-// claim to re-judge without the evidence to judge it.
+// load-bearing: every journal key outside the window is unjudged here (the journal
+// holds feedJournalMaxAge of items against a 48h window), so applyTitles must have
+// a served value to carry rather than a raw harvested claim to re-judge blind.
 func (e *windowEvidence) census() map[string]packCensus { return censusPacks(e.cur) }
 
-// carryPolicy is ALWAYS carryVerbatim for a window, and this is the second most
-// important method on this type.
-//
-// It cannot conclude de-curation: an empty window is legitimate, so absence from
-// it proves nothing and the item may not be treated as having left SeaDex. But it
-// also
-// may not RE-RENDER an item it did evaluate, which is less obvious and just as
-// binding: renderJournalItem folds the download-volume-factor marker and the
-// category union across every occurrence of the key (foldRefs), so a fold over
-// the window's occurrences alone would silently drop the vote of a parent entry
-// that was not bumped into this window - downgrading a best marker to alt, or
-// dropping the category that routes the release to the other arr. 4.4% of
-// torrents are attached to several entries, so that is a real population. A
-// re-render is therefore acting on absence from the pass's own input, exactly
-// what the law forbids, and it stays the catalogue pass's job.
-//
-// The GROWTH side of the same fold is renderPolicy's renderPartial arm: a key
-// journaled for the first time has no stored render to carry, so instead of
-// deferring the whole item the pass renders what it holds and carries the
-// unevaluated owners' stored VOTES onto it. Same law, different carrier.
-//
-// The ownership fact is windowable for precisely the reason the render is not:
-// it stores each owner's vote SEPARATELY, so replacing one owner's contribution
-// leaves the others' intact and the projection's OR recomputes exactly.
+// carryPolicy is ALWAYS carryVerbatim for a window. It cannot conclude de-curation,
+// because an empty window is legitimate.
 func (e *windowEvidence) carryPolicy(string) (carryPolicy, []curatedRef) {
 	return carryVerbatim, nil
 }
@@ -252,22 +181,9 @@ func (e *windowEvidence) carryPolicy(string) (carryPolicy, []curatedRef) {
 func (e *windowEvidence) retracts(it *journalItem) bool { return e.warned.retracts(it) }
 
 // ownership admits this window's entries into the search index only when the
-// window's own warned closure is COMPLETE, and it is complete exactly when the
-// operator has configured no tag exclusions at all: with an empty policy
-// nothing is warned anywhere in the catalogue, so there is no
-// reachable-only-from-outside exclusion for the window to miss.
-//
-// This is the one genuine regression risk in windowing the search index, and it
-// is closed here rather than mitigated. The catalogue pass filters
-// catalogue-wide (splitCurationWarned over every entry, closing over shared
-// info hashes) BEFORE building the index; a window closes only over itself, so
-// admitting its keys on window evidence alone would mark a warned identity
-// curated for up to one reconcile interval - a release the operator explicitly
-// excluded, offered to the arrs. With a tag policy configured the tick
-// therefore writes no ownership at all and the reconcile remains the only
-// writer of it, which is exactly today's behaviour; with the default empty
-// policy (the overwhelmingly common case, and the one h-f8 is about) the tick
-// admits freely.
+// window's own warned closure is COMPLETE, which is exactly when the operator has
+// configured no tag exclusions at all: with an empty policy nothing is warned
+// anywhere, so there is no reachable-only-from-outside exclusion to miss.
 func (e *windowEvidence) ownership() map[string][]ownedRelease {
 	if e.tagPolicySet {
 		return nil
@@ -278,25 +194,7 @@ func (e *windowEvidence) ownership() map[string][]ownedRelease {
 // ownershipOf reads the PRESENT fact off the entries a pass evaluated: for each
 // entry, the set of releases it contributes, with that entry's OWN isBest vote.
 // Two entries listing the same torrent produce two owner records, which is what
-// makes the cross-owner isBest fold recomputable (projectCuration ORs them) and
-// a demotion representable.
-//
-// Occurrences under one AniList id are UNIONED rather than overwriting each
-// other, and the reachable reason is a duplicated `trs` relation row on ONE
-// record (upstream data the app does not control), not two catalogue records
-// sharing an alID. That second shape CANNOT arrive through the real client:
-// seadexapi.validatePageIdentities enforces one-positive-unique-alID across the
-// whole walk and fails the entire fetch on a repeat, at window scope exactly as
-// at catalogue scope. So one alID is one record, which is what makes replacing
-// an evaluated owner's contribution wholesale both PRECISE (it is one entry, not
-// a tree of them) and COMPLETE (a window delivers that record with its whole
-// expanded torrent list, so the replacement is fresh from the source).
-//
-// The union is kept anyway, because it is the safe fail direction for the one
-// caller the invariant does not cover: Advance is exported and takes entries
-// directly, so a hand-fed caller (a fake, a future in-process producer) can
-// present duplicates the client would have refused. Unioning them loses nothing;
-// overwriting would lose a contribution.
+// makes the cross-owner fold recomputable and a demotion representable.
 func ownershipOf(entries []seadex.Entry) map[string][]ownedRelease {
 	out := make(map[string][]ownedRelease, len(entries))
 	for i := range entries {
@@ -316,20 +214,16 @@ func ownershipOf(entries []seadex.Entry) map[string][]ownedRelease {
 			out[id] = append(out[id], r)
 		}
 		if _, present := out[id]; !present {
-			// An entry evaluated down to nothing still has to APPEAR in the
-			// evaluated set, so upsertOwners can clear a stored contribution
-			// that is no longer curated. A nil slice is that statement.
+			// An entry evaluated down to nothing still has to APPEAR in the evaluated
+			// set, so upsertOwners can clear a contribution that is no longer curated.
 			out[id] = nil
 		}
 	}
 	return out
 }
 
-// --- The pass ---
-
 // run is the one pass, at one scope. Every difference between the reconcile and
-// the tick is either the scope value or one of the three named catalogue-only
-// steps; there is no third behaviour.
+// the tick is either the scope value or one of the three catalogue-only steps.
 func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc, scope passScope) error {
 	infoFor := entryInfoFunc(info)
 	prev, err := w.loadPrevious(ctx)
@@ -337,9 +231,9 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 		return err
 	}
 	if prev.baseline && scope == scopeWindow {
-		// Recovery is the catalogue pass's job. Baselining from a window would
-		// record the window's identities as published - permanently, since the
-		// log is never pruned - and silently discard the journal.
+		// Recovery is the catalogue pass's job. Baselining from a window would record
+		// the window's identities as published - permanently, since the log is never
+		// pruned - and silently discard the journal.
 		w.log.Warn("indexer feed snapshot unusable; deferring to the next full rebuild",
 			"reason", prev.reason)
 		return nil
@@ -357,10 +251,9 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 	}
 
 	if prev.baseline {
-		// Only reachable at catalogue scope (the window returned above). The
-		// whole current curation set is FORFEITED into the publication log and
-		// the journal starts empty, growing only from genuinely new curation:
-		// backfill is search's job.
+		// Only reachable at catalogue scope. The whole current curation set is
+		// FORFEITED into the publication log and the journal starts empty, growing
+		// only from genuinely new curation: backfill is search's job.
 		writes.published = baselinePublications(ev.entries())
 		writes.titles = map[string]string{}
 		w.log.Info("indexer feed journal baselined; RSS feed starts empty and grows from newly curated releases",
@@ -368,39 +261,22 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 	} else {
 		pass := &journalPass{
 			w: w, ev: ev, published: prev.published, publish: writes.published,
-			// prior is the ownership fact the PREVIOUS snapshot holds: the only
-			// record of the votes of owners this pass did not evaluate, and what
-			// the renderPartial arm carries onto a newly journaled item.
+			// prior is the ownership fact the PREVIOUS snapshot holds: the only record
+			// of the votes of owners this pass did not evaluate.
 			prior:   prev.owners,
 			infoFor: infoFor, js: &js, now: now,
 		}
-		// The file-census pack verdict per journal key, judged by the evidence
-		// this pass holds, so applyTitles can tell when a harvested title
-		// contradicts the payload it names (titleAudit). A key this pass did not
-		// evaluate has no census entry and keeps the title the app already
-		// SERVES for it - which is what the cache holds (applyTitles writes back
-		// the served title), so carrying is honest at window scope instead of
-		// re-serving the raw harvested claim over a correction a pass with more
-		// evidence made.
+		// The file-census pack verdict per journal key, judged by the evidence this
+		// pass holds, so applyTitles can tell when a harvested title contradicts the
+		// payload it names. A key this pass did not evaluate has no census entry and
+		// keeps the title the app already SERVES for it.
 		census := ev.census()
-		// Carry BOTH journals regardless of configuration: a tracker's off
-		// switch must be reversible. Blanking a Torznab URL used to skip the
-		// carry, so a single rebuild dropped every journaled item for that
-		// scope - while the never-pruned publication log kept their identities,
-		// so the novelty test reported isNew=false forever and those releases
-		// could never reach RSS again (l-f161). Carrying costs nothing at rest
-		// (both feeds are stored GUID-only, see stripDownloadURLs) and nothing
-		// on the wire (feedFor serves an unconfigured scope nothing).
-		//
-		// Carried items keep AGING OUT on the normal feedJournalMaxAge window
-		// rather than freezing (prepareCarriedItem prunes them), and the
-		// age-out is sound at ANY scope because its criterion is the item's own
-		// FirstSeen rather than membership of this pass's input.
+		// Carry BOTH journals regardless of configuration: a tracker's off switch must
+		// be reversible.
 		carriedNyaa := pass.carryJournal(prev.nyaaFeed, upstreamNyaa)
 		carriedAB := pass.carryJournal(prev.abFeed, upstreamAB)
 		// Growth stays gated per scope: newJournalItem returns early for an
-		// unconfigured tracker, so an off tracker's journal shrinks but never
-		// grows.
+		// unconfigured tracker, so an off tracker's journal shrinks but never grows.
 		newNyaa, newAB := pass.growJournal(ev.entries())
 		carriedNyaa = append(carriedNyaa, newNyaa...)
 		carriedAB = append(carriedAB, newAB...)
@@ -408,24 +284,13 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 
 		feeds := map[string][]journalItem{upstreamNyaa: writes.nyaa, upstreamAB: writes.ab}
 		if scope == scopeCatalogue {
-			// CATALOGUE-ONLY STEP: the Prowlarr title harvest. It is rate-paced
-			// and rotates over the whole journal, so a window cannot own its
-			// cursor without starving the rotation.
+			// CATALOGUE-ONLY STEP: the Prowlarr title harvest. It is rate-paced and
+			// rotates over the whole journal, so a window cannot own its cursor.
 			hs, cursor := w.harvest.harvestTitles(ctx, feeds, writes.titles, infoFor, prev.cursor)
 			writes.cursor = cursor
 			js.harvest = hs
 		} else {
-			// The other three harvest counters are ACTIONS, so a tick's zeros
-			// are true. harvest_pending is a STATE - journal items still serving
-			// a synthesized title - and a tick can only raise it (growJournal
-			// adds untitled items; nothing here titles one), so reporting 0
-			// would claim an empty backlog on 95 of every 96 completion lines at
-			// the default cadence. The pass holds the whole journal and the
-			// whole title cache, so it can compute the state it publishes rather
-			// than emitting a value it never derived. Same reading
-			// harvestTitles produces: syntheticCount is order-independent and
-			// applyTitles adds nothing to the cache, so its position relative to
-			// applyTitles and sortFeed does not matter.
+			// The other three harvest counters are ACTIONS, so a tick's zeros are true.
 			js.harvest.pending = syntheticCount(feeds, writes.titles)
 		}
 		// ONE audit value across both feeds, so its onset latch is per PASS.
@@ -436,14 +301,13 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 
 	// sortFeed is NOT optional at either scope. The reader serves the persisted
 	// order with no sort of its own, and an arr walking an RSS feed stops at the
-	// first item older than its last sync - so a new item appended at the tail
-	// is unreachable.
+	// first item older than its last sync - so a new item appended at the tail is
+	// unreachable.
 	writes.nyaa, writes.ab = sortFeed(writes.nyaa), sortFeed(writes.ab)
 	if scope == scopeCatalogue {
-		// CATALOGUE-ONLY STEP: retainTitles. It prunes the harvest cache to the
-		// keys still journaled, which reads the whole journal against the whole
-		// catalogue - so a window would drop the titles of every key it did not
-		// evaluate.
+		// CATALOGUE-ONLY STEP: retainTitles. It prunes the harvest cache to the keys
+		// still journaled, reading the whole journal against the whole catalogue, so a
+		// window would drop the titles of every key it did not evaluate.
 		writes.titles = retainTitles(writes.titles, writes.nyaa, writes.ab)
 	}
 
@@ -462,23 +326,9 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 }
 
 // publicationLogPersistable applies the publication log's caps to the snapshot
-// this pass built, and reports an error when it may NOT be written. Growth is
-// the only way the log can cross either cap (the decode refuses an over-cap one
-// before loadPrevious returns), and the answer is the same at BOTH scopes: keep
+// this pass built, and reports an error when it may NOT be written. Growth is the
+// only way to cross either cap, and the answer is the same at BOTH scopes: keep
 // the last-good feed.json and fail the pass so the cycle reports degradation.
-//
-// It deliberately does NOT re-derive the log from the current catalogue. The log
-// is a fact about the PAST - what this app actually served - so it is append-only
-// and never rewritten: replacing it with the live catalogue's identities deletes
-// every publication whose release has since left SeaDex, and a release that
-// later returns then reads as new and is broadcast to the arrs a second time,
-// which is the re-grab the log exists to prevent. Recovery from an over-cap log
-// is an explicit operator re-baseline (remove feed.json, whose loss is one empty
-// RSS window), never an automatic rewrite of history.
-//
-// Both caps are checked because neither implies the other: a short tracker-key
-// entry serializes in ~20 bytes, so the byte budget admits ~419k entries
-// against the decode's 250k cardinality cap.
 func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) error {
 	if publicationLogWithinLimits(snap.Published) && len(snap.Published) <= maxSnapshotMapEntries {
 		return nil
@@ -489,10 +339,9 @@ func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) 
 		len(snap.Published), maxSnapshotMapEntries)
 }
 
-// logPass emits the one completion line both scopes share. The scope attribute
-// is what an operator reads to tell a reconcile from a tick, and the counters
-// are the same set for both - the tick used to drop several of them, which is
-// how a counter it computed became unrecoverable.
+// logPass emits the one completion line both scopes share. The scope attribute is
+// what an operator reads to tell a reconcile from a tick, and the counters are the
+// same set for both - the tick used to drop several of them.
 func (w *FeedWriter) logPass(snap *snapshot, ev curationEvidence, js *journalStats, windowEntries int, scope passScope) {
 	w.log.Info("indexer feed snapshot written",
 		"scope", scope.String(),
@@ -511,12 +360,10 @@ func (w *FeedWriter) logPass(snap *snapshot, ev curationEvidence, js *journalSta
 		"harvest_queries", js.harvest.queries, "harvest_matched", js.harvest.matched,
 		"harvest_rejected", js.harvest.rejected, "harvest_pending", js.harvest.pending)
 	if js.abSkippedNoPasskey > 0 && w.enablement.enabled(upstreamAB) {
-		// The nudge fires on BOTH paths so the operator learns why the AB feed
-		// is empty from the pass that actually met the releases, rather than up
-		// to a reconcile interval later. Nothing is published for a release the
-		// app could not hand an arr, so the count is recoverable: the next pass
-		// over the same window counts it again, and the releases journal as new
-		// once the passkey arrives.
+		// The nudge fires on BOTH paths so the operator learns why the AB feed is
+		// empty from the pass that met the releases. Nothing is published for a
+		// release the app could not hand an arr, so the count is recoverable: the
+		// releases journal as new once the passkey arrives.
 		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
 			"ab_releases_skipped", js.abSkippedNoPasskey)
 	}

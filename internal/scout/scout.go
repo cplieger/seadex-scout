@@ -3,12 +3,9 @@
 // report findings, then persist the caches.
 //
 // Cycle health follows the library ingest: a failed arr walk is unhealthy (a
-// restart or config fix could recover it), while a SeaDex, mapping, or AniList
-// failure is degraded but healthy (a restart cannot fix an upstream outage) and
-// preserves prior findings rather than falsely resolving them - scoped to the
-// affected entries where the failure is scoped (a transient AniList lookup
-// failure degrades only the entries it left unresolved; the rest of the cycle
-// compares and reports normally).
+// restart or config fix could recover it), while a SeaDex, mapping or AniList
+// failure is degraded but healthy and preserves prior findings rather than
+// falsely resolving them - scoped to the affected entries where it is scoped.
 package scout
 
 import (
@@ -38,30 +35,22 @@ import (
 	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
-// --- dependency seams + assembly ---
-
 // FeedWriter rebuilds and persists the indexer's Torznab feed from the cycle's
-// shared SeaDex snapshot, so the findings and the RSS feed the arrs grab from
-// are produced by one data engine from a single fetch. The indexer's feed writer
-// implements it; Deps.Feed is nil when no Torznab feed is configured and the
-// cycle then does no feed work. Because Rebuild persists the feed, a cycle run
-// by the `poll` subcommand refreshes a resident daemon's feed too. info supplies
-// the per-show metadata the writer synthesizes RSS titles from (see
-// feedEntryInfo); it is built over persisted state only, keeping the rebuild
+// shared SeaDex snapshot, so the findings and the RSS feed the arrs grab from are
+// produced by one data engine. Deps.Feed is nil when no Torznab feed is
+// configured. info supplies the per-show metadata the writer synthesizes RSS
+// titles from, built over persisted state only, keeping the rebuild
 // arr-independent.
 type FeedWriter interface {
 	Rebuild(ctx context.Context, entries []seadex.Entry, info indexer.EntryInfoFunc) error
 	// Advance folds a bounded window of recently-changed entries into the
-	// persisted feed without re-deriving what a window cannot speak for. See
-	// indexer.FeedWriter.Advance for why it is not Rebuild with a flag.
+	// persisted feed without re-deriving what a window cannot speak for.
 	Advance(ctx context.Context, window []seadex.Entry, info indexer.EntryInfoFunc) error
 }
 
-// SeaDexSource supplies the SeaDex entries snapshot a cycle compares and
-// rebuilds the feed from. It is the consumer-side seam over the concrete
-// *seadexapi.Client (which implements it; build.go injects it), so orchestration
-// tests can drive cycle outcomes with a fake instead of standing up the
-// PocketBase adapter over an httptest server.
+// SeaDexSource supplies the SeaDex entries snapshot a cycle compares and rebuilds
+// the feed from. It is the consumer-side seam over *seadexapi.Client, so
+// orchestration tests can drive cycle outcomes with a fake.
 type SeaDexSource interface {
 	FetchEntries(ctx context.Context, opts seadexapi.Options) ([]seadex.Entry, error)
 	// CountWindow reports how many records changed since t without downloading
@@ -73,10 +62,8 @@ type SeaDexSource interface {
 var _ SeaDexSource = (*seadexapi.Client)(nil)
 
 // StateStore loads and saves the persisted cross-cycle state a cycle reads and
-// writes. It is the consumer-side seam over the concrete *state.Store (which
-// implements it; build.go injects it), so orchestration tests can drive state
-// transitions with an in-memory fake instead of performing atomic disk I/O
-// (the state package's own suite covers the file adapter round-trip).
+// writes. It is the consumer-side seam over *state.Store, so orchestration tests
+// can drive state transitions with an in-memory fake.
 type StateStore interface {
 	Load(ctx context.Context) (state.State, error)
 	Save(ctx context.Context, st *state.State) error
@@ -85,13 +72,9 @@ type StateStore interface {
 // The concrete file-backed store must keep satisfying the cycle's seam.
 var _ StateStore = (*state.Store)(nil)
 
-// MappingSource supplies the Fribb mapping cache and index a cycle (or a
-// one-shot report) loads from the persisted cache. It is the consumer-side
-// seam over the concrete *mapping.Loader (which implements it; build.go
-// injects it), so orchestration tests can supply mapping outcomes with a fake
-// instead of constructing the loader's HTTP client, source URL, and override
-// path (the mapping package's own suite covers the real loader's fetch and
-// degradation behavior).
+// MappingSource supplies the Fribb mapping cache and index a cycle (or a one-shot
+// report) loads from the persisted cache. It is the consumer-side seam over
+// *mapping.Loader, so orchestration tests can supply mapping outcomes with a fake.
 type MappingSource interface {
 	Load(ctx context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error)
 }
@@ -101,17 +84,10 @@ var _ MappingSource = (*mapping.Loader)(nil)
 
 // Deps are the assembled components a Scout runs a compare CYCLE with. Every
 // field is one the cycle reaches: it compares, notifies, and rebuilds the feed.
-// The read-only one-shot report has its own role struct (ReportDeps, built by
-// NewReporter) because the two entry points need DISJOINT sets - Cycle never
-// audits, and Report never compares, notifies or writes the feed - so the
-// composition root builds only the components the flow it is starting can
-// actually call, instead of one bag whose unused half was prose (l-f149).
-//
-// The RUNNER side follows the same split: Deps builds a *Scout and ReportDeps a
-// *Reporter (report.go), each carrying only its own role's components over the
-// shared core below. That is what makes the disjointness structural rather than
-// a nil field plus a paragraph: a mis-wired flow does not compile, where it used
-// to be a nil-pointer panic at the first component the role never carried.
+// The read-only one-shot report has its own role struct (ReportDeps) because the
+// two entry points need DISJOINT sets, so the composition root builds only the
+// components the flow it is starting can call - and a mis-wired flow does not
+// compile, where it used to be a nil-pointer panic.
 type Deps struct {
 	Logger   *slog.Logger
 	Store    StateStore
@@ -121,32 +97,24 @@ type Deps struct {
 	Matcher  *match.Matcher
 	Comparer *compare.Comparer
 	Notifier *notify.Notifier
-	// AniListStats reports the AniList client's cumulative request counters
-	// (calls, rate-limit waits) for the cycle completion logs. The scout only
-	// needs these two counters, so it takes a narrow callback instead of the
-	// concrete client (build.go injects a closure over the client's Stats);
-	// nil when no AniList client is wired (the early-return degradation paths
-	// and unit tests) - the daemon always wires it.
+	// AniListStats reports the AniList client's cumulative request counters for
+	// the cycle completion logs. A narrow callback rather than the concrete
+	// client; nil when no AniList client is wired (the daemon always wires it).
 	AniListStats func() AniListStats
-	// Feed rebuilds and persists the indexer's Torznab feed from each cycle's
-	// SeaDex snapshot. Nil when no Torznab feed is configured (the cycle then
-	// skips all feed work).
+	// Feed rebuilds and persists the indexer's Torznab feed. Nil when no Torznab
+	// feed is configured (the cycle then skips all feed work).
 	Feed FeedWriter
 	// PollInterval is the loop's own interval, which decides how many ticks
-	// separate two reconciles (see reconcileEvery). Zero or negative means
-	// every iteration reconciles - the conservative reading, and what an
-	// unwired test gets.
+	// separate two reconciles (see reconcileEvery). Zero or negative means every
+	// iteration reconciles - the conservative reading.
 	PollInterval time.Duration
 }
 
 // ReportDeps are the assembled components a Reporter runs the read-only one-shot
 // report with: it walks the library, loads the mapping cache and AniList memo,
 // fetches SeaDex, matches, and audits. There is deliberately no Comparer,
-// Notifier or Feed field - the report emits no finding, sends no notification
-// and never rewrites the indexer snapshot - so the root's report path builds
-// neither them nor the Prowlarr HTTP client the feed writer carries. Store is
-// still needed (the report READS persisted state; build.go injects the read-only
-// store so the flow cannot write or quarantine state.json).
+// Notifier or Feed field. Store is still needed - the report READS persisted
+// state, and the root injects the read-only store so it cannot write state.json.
 type ReportDeps struct {
 	Logger  *slog.Logger
 	Store   StateStore
@@ -159,9 +127,7 @@ type ReportDeps struct {
 
 // core is what BOTH flows need, and nothing else: every field here is one each
 // role genuinely reaches, so a nil value in it is a wiring bug in every role
-// rather than a documented no-op for one of them. The role-specific components
-// live on the role types (Scout below, Reporter in report.go), which is what
-// makes "this flow cannot reach it" a compile error instead of prose.
+// rather than a documented no-op for one of them.
 type core struct {
 	log     *slog.Logger
 	store   StateStore
@@ -181,42 +147,20 @@ func newCore(log *slog.Logger, store StateStore, lib *arrwalk.Walker, mapSrc Map
 }
 
 // Every persisted degradation streak escalates its single log site from WARN to
-// ERROR (firing the existing SeadexScoutCycleError Loki rule) at the shared
-// fleet-wide threshold, whose policy lives in degradation.TickEscalationThreshold:
-// tolerate 8 consecutive degraded cycles - long enough to ride out a transient
-// blip, short enough that a condition which never self-heals alerts instead of
-// WARNing forever. Each owning site documents when its streak advances or
-// resets and what the remedy is: mergeShrunkSides (shrunk walk, per arr),
-// recordSeaDexFetch (fetch failures), recordAniListDegradation,
-// recordPartialWalk, and loadMapping (refresh rejections, a streak the mapping
-// loader owns and persists - only the log-level policy lives here).
-//
-// The THRESHOLDS themselves are not here. They live in internal/degradation
-// beside each other, named for their cadence
-// (degradation.TickEscalationThreshold, ReconcileEscalationThreshold,
-// ShrunkWalkAcceptThreshold), because the count is CADENCE-RELATIVE and the
-// mistake worth preventing is an author reaching for whichever number the file
-// they opened contained: the same integer means ~2h on the tick and 8 days on
-// the reconcile. This file holds only which streak advances WHERE and what its
-// log line says (h-f23).
+// ERROR at the shared threshold in internal/degradation, where the count lives
+// because it is CADENCE-RELATIVE: ~2h on the tick, 8 days on the reconcile.
 
-// Scout runs compare cycles from its assembled dependencies. It carries the
-// compare-cycle components only: the one-shot audit is *Reporter's (report.go),
-// so this type has no Auditor field and no reachable-but-unwired Report method.
-//
-// The three counters below are per-PROCESS and deliberately not persisted.
-// They exist to shape one loop's behaviour, and a restart runs a reconcile
-// (iterations counts zero, so the first iteration reconciles), which is exactly
-// the state a fresh count wants. Persisting them would make a losable value
-// load-bearing for correctness, which is the mistake three earlier revisions of
-// this design made.
+// Scout runs compare cycles from its assembled dependencies, carrying the
+// compare-cycle components only: the one-shot audit is *Reporter's. The three
+// counters below are per-PROCESS and deliberately not persisted - a restart runs
+// a reconcile, which is exactly the state a fresh count wants, and persisting
+// them would make a losable value load-bearing for correctness.
 type Scout struct {
 	core
 	comparer *compare.Comparer
 	notifier *notify.Notifier
-	// aniListStats reports the AniList client's cumulative request counters
-	// for the cycle completion logs; nil when no AniList client is wired (see
-	// Deps.AniListStats).
+	// aniListStats reports the AniList client's cumulative request counters; nil
+	// when no AniList client is wired (see Deps.AniListStats).
 	aniListStats func() AniListStats
 	// feed rebuilds and persists the indexer's Torznab feed. Nil when no
 	// Torznab feed is configured (the cycle then skips all feed work).
@@ -225,63 +169,41 @@ type Scout struct {
 	// separate two reconciles (see reconcileEvery).
 	pollInterval time.Duration
 	// iterations counts the loop iterations that actually RAN a cycle, so every
-	// reconcileEvery-th one reconciles. It lives HERE and not in cycle.RunLoop's
-	// outer tick closure, because that closure runs on EVERY timer tick -
-	// including one the cross-process lock skipped - so a counter there would
-	// consume a reconcile slot on a tick that ran nothing and silently lose that
-	// reconcile for a whole reconcileInterval. Held on the Scout it advances only
-	// when Cycle is actually invoked (ex.RunOrSkip calls the inner job body only
-	// after acquiring the lock), so a skipped tick DEFERS the reconcile by one
-	// iteration instead of dropping it. Keeping it here also makes an exec'd
-	// `poll` participate without a flag of its own: a fresh process starts at
-	// zero, so every poll is a full reconcile.
+	// reconcileEvery-th one reconciles. Held here rather than in the loop's timer
+	// closure, which also runs on a tick the cross-process lock skipped.
 	iterations int
-	// emptyRun counts consecutive ticks whose window held nothing,
-	// oversizeRun counts consecutive ticks whose window was too large to fetch,
-	// and unreachableRun counts consecutive ticks that could not read the
-	// upstream at all. All three are diagnostics for a wedged fast path (see
-	// tick); a productive tick resets all three.
+	// emptyRun, oversizeRun and unreachableRun count consecutive ticks that held
+	// nothing, were too large to fetch, or could not read the upstream at all -
+	// diagnostics for a wedged fast path; a productive tick resets all three.
 	emptyRun       int
 	oversizeRun    int
 	unreachableRun int
 	// reconcileRetries bounds how hard the loop tries to establish the finding
 	// set (see reconcileRetryLatch and ready).
 	reconcileRetries int
-	// ready reports whether a reconcile has completed and reported a full
-	// finding set since this process started. Until it has, the in-memory set
-	// is empty or partial, so a tick must not publish it as the app's state:
-	// emitting 2 rows where the truth is 190 resolves 188 conditions that are
-	// still true, and an operator cannot tell that set from a genuinely quiet
-	// library. reconcileRetries bounds how hard the loop tries to get there
-	// (see reconcileRetryLatch).
+	// ready reports whether a reconcile has reported a full finding set since this
+	// process started. Until it has, a tick must not publish the partial set:
+	// emitting 2 rows where the truth is 190 resolves 188 live conditions.
 	ready bool
 }
 
 // reconcileRetryLatch bounds the immediate retry of a reconcile that did not
 // establish a finding set. A failed or gated startup reconcile leaves the
-// notifier empty, so waiting a full reconcileInterval for the next one means up
-// to 24h in which the app knows nothing and says nothing - the dark window.
-// Retrying on the very next iteration makes that window minutes instead.
-//
-// It is BOUNDED because the retry is a full catalogue fetch plus a full arr
-// walk. Retrying forever against a condition that will not clear (a library
-// whose shrink guard keeps gating, an upstream that stays down) would run a
-// full pass every 15 minutes - 1.67 GiB/day against a community-run upstream,
-// which is the traffic this whole design exists to avoid. 4 attempts is ~1h at
-// the default interval; past that the normal cadence resumes and the failure
-// streaks plus the two deadmen own the escalation.
+// notifier empty, so waiting a full reconcileInterval means up to 24h in which
+// the app knows nothing and says nothing. It is BOUNDED because the retry is a
+// full catalogue fetch plus a full arr walk: retrying forever against a
+// condition that will not clear is 1.67 GiB/day against a community-run
+// upstream. 4 attempts is ~1h at the default interval.
 const reconcileRetryLatch = 4
 
-// reconcileInterval is how often a full pass runs. It is a CONSTANT, not a
-// config key: the tick interval is an operator tradeoff (how fresh, how much
-// upstream load), while this is the backstop's own cadence with no reason to
-// tune - and a tunable one admits a 15m full pass, which is 1.67 GiB/day
-// against a community-run upstream.
+// reconcileInterval is how often a full pass runs. It is a CONSTANT, not a config
+// key: the tick interval is the operator's tradeoff, while the backstop's own
+// cadence has no reason to tune - and a tunable one admits a 15m full pass, which
+// is 1.67 GiB/day against a community-run upstream.
 const reconcileInterval = 24 * time.Hour
 
-// reconcileEvery reports how many loop iterations separate two reconciles. A
-// zero or negative interval (an unwired test) reconciles every iteration, the
-// conservative reading.
+// reconcileEvery reports how many loop iterations separate two reconciles. A zero
+// or negative interval reconciles every iteration, the conservative reading.
 func (s *Scout) reconcileEvery() int {
 	if s.pollInterval <= 0 {
 		return 1
@@ -291,14 +213,10 @@ func (s *Scout) reconcileEvery() int {
 
 // reconcileCadenceAttr is the value the reconcile's start/complete lines carry
 // for `interval`: how often a full pass ACTUALLY runs. reconcileInterval is the
-// TARGET and reconcileEvery quantizes it to whole loop iterations, so the two
-// agree only when poll_interval divides 24h - at a 5h interval the real cadence
-// is 20h, and past 12h every iteration reconciles, making it poll_interval (up
-// to the 30-day maximum config.maxPollInterval allows). An operator sizes
-// SeadexScoutReconcileStalled's absence window off this attribute, so it must
-// name the cadence they will actually see. In external mode the cadence belongs
-// to their scheduler, reported as "external" exactly as main.go's startup
-// configuration line reports poll_interval.
+// TARGET and reconcileEvery quantizes it to whole loop iterations, so at a 5h
+// interval the real cadence is 20h. An operator sizes the reconcile deadman's
+// absence window off this attribute, so it must name the cadence they will
+// actually see; external mode reports "external".
 func (s *Scout) reconcileCadenceAttr() string {
 	if s.pollInterval <= 0 {
 		return "external"
@@ -306,25 +224,14 @@ func (s *Scout) reconcileCadenceAttr() string {
 	return (time.Duration(s.reconcileEvery()) * s.pollInterval).String()
 }
 
-// Cycle runs ONE loop iteration and reports whether it was healthy. It is the
-// dispatcher over the two kinds of pass:
-//
-//   - a RECONCILE (the full pass: whole catalogue, whole arr walk, whole
-//     compare, whole feed and curation-index rebuild) runs on the FIRST
-//     iteration and every reconcileEvery-th one after it. It is the backstop
-//     for everything a window structurally cannot see - a deletion, an
-//     in-place torrent edit, a shared torrent's other parents, an outage
-//     longer than the window, a clock wrong by more than it - and it is what
-//     refills the notifier's in-memory finding set.
-//   - a TICK (a bounded recent-changes window) runs on every other iteration.
-//     It is what makes the RSS feed and the alerts fresh in minutes rather
-//     than hours, at a fraction of the bytes.
-//
-// The first iteration reconciles because everything downstream assumes a
-// complete pass has happened: the notifier's set is empty until one runs, and
-// the tick compares against a cached library only a walk can populate. A
-// reconcile that did NOT establish that set is retried on the next iteration
-// rather than in a day (see reconcileRetryLatch).
+// Cycle runs ONE loop iteration and reports whether it was healthy. It dispatches
+// between the two kinds of pass: a RECONCILE (the full pass - whole catalogue,
+// whole arr walk, whole compare, whole feed and curation-index rebuild) on the
+// FIRST iteration and every reconcileEvery-th one after it, and a TICK (a bounded
+// recent-changes window) on every other. The first iteration reconciles because
+// everything downstream assumes a complete pass has happened: the notifier's set
+// is empty until one runs, and the tick compares against a cached library only a
+// walk can populate. A reconcile that established no set is retried next pass.
 func (s *Scout) Cycle(ctx context.Context) bool {
 	due := s.iterations%s.reconcileEvery() == 0 || s.reconcileRetryDue()
 	s.iterations++
@@ -340,46 +247,29 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	return healthy
 }
 
-// reconcileRetryDue reports whether a reconcile should run out of cadence
-// because no complete pass has succeeded yet in this process. It is the bounded
-// retry the in-memory finding set depends on: see reconcileRetryLatch for why
-// it is bounded, and Scout.ready for what it is waiting for.
+// reconcileRetryDue reports whether a reconcile should run out of cadence because
+// no complete pass has succeeded yet in this process. See reconcileRetryLatch.
 func (s *Scout) reconcileRetryDue() bool {
 	return !s.ready && s.reconcileRetries < reconcileRetryLatch
 }
 
-// cycleDegraded emits the degraded-cycle completion line. Every cycle that
-// ran to its end without full success closes with this single WARN: the
-// degraded-but-healthy early returns (unusable map, failed or empty SeaDex
-// fetch, the library shrink guard), the degraded completed-compare paths (a
-// partial walk, a transient AniList degradation, a stale-but-usable map), and
-// the unhealthy failed-walk arm (whose fault keeps its own ERROR line). The
-// cycle-deadman alert counts completion lines, so it stays satisfied during a
-// long arr or upstream outage instead of firing as if the daemon died - its
-// absence then means only "loop wedged", matching its restart runbook. reason
-// distinguishes the gate; the healthy path keeps "cycle complete" as-is, and
-// a shutdown-interrupted cycle emits neither (it did not complete).
+// cycleDegraded emits the degraded-cycle completion line. Every cycle that ran to
+// its end without full success closes with this single WARN. The cycle deadman
+// counts completion lines, so it stays satisfied during a long arr or upstream
+// outage instead of firing as if the daemon died - its absence then means only
+// "loop wedged", matching its restart runbook. reason distinguishes the gate; a
+// shutdown-interrupted cycle emits neither, because it did not complete.
 func (s *Scout) cycleDegraded(reason string, attrs ...any) {
 	s.log.Warn("cycle degraded", append([]any{"reason", reason}, attrs...)...)
 }
 
 // cycleGateDegraded closes a reconcile that was GATED before the compare: it
-// re-states the finding set and then emits the degraded completion line. It is
-// closeDegradedTick's reconcile twin, and it exists because the alerting contract
-// has TWO halves, not one. A pass that compared nothing learned nothing that
-// could resolve a standing finding, so staying silent through it lets the rules'
-// lookback expire every open row and then re-fire the whole set as new (see
-// notify.Reemit, and alerts.yaml's SeadexScoutBetterReleaseFound, whose [12h]
-// window is documented against "every iteration re-emits the whole open set").
-// Only the pre-compare exits use it: the completed-compare paths reached
-// Notifier.Report already, so re-stating there would double-emit the set.
-//
-// The re-statement is gated on readiness, exactly as the tick's not-ready arm is
-// (see tick): before a reconcile has reported the whole catalogue the set is
-// provably empty and NOT authoritative, and Reemit always writes a "findings
-// reported" summary - an empty one reads as "no findings", a claim a gated
-// startup pass cannot make. The degraded completion line still fires on every
-// gate, at every stage of startup, because that is what feeds the deadman.
+// re-states the finding set and then emits the degraded completion line. A pass
+// that compared nothing learned nothing that could resolve a standing finding, so
+// staying silent lets the rules' lookback expire every open row and then re-fire
+// the whole set as new. Only the pre-compare exits use it: the completed-compare
+// paths reached Notifier.Report already. The re-statement is gated on readiness,
+// because an empty "findings reported" summary reads as "no findings".
 func (s *Scout) cycleGateDegraded(reason string, attrs ...any) {
 	if s.ready {
 		s.notifier.Reemit()
@@ -400,38 +290,23 @@ func New(deps *Deps) *Scout {
 	}
 }
 
-// --- cycle orchestration: the RECONCILE (the tick is in tick.go) ---
-
 // reconcile runs one FULL compare pass and reports whether the run was healthy
 // (the library ingest succeeded). It never returns an error: a failed ingest
-// returns false, and an upstream (SeaDex/mapping/AniList) failure returns true
-// but degraded. See Cycle for when it runs rather than a tick.
+// returns false, and an upstream failure returns true but degraded.
 func (s *Scout) reconcile(ctx context.Context) bool {
 	start := time.Now()
 	// The one line a pass emits BEFORE doing any work, and the reason the scan
-	// deadman can be tight. Every other line that deadman counts is a COMPLETION
-	// line, so between a container start and the first finished pass there is
-	// nothing for it to see - and an absence rule reads that as a wedge. A cold
-	// reconcile (no state.json, so the AniList memo is built from scratch) has
-	// been measured at ~25 minutes and historically ran to ~2h, which is exactly
-	// why the health lease is floored at coldReconcileAllowance; without this
-	// line the deadman would page 15 minutes into every restart while the app
-	// worked normally. A pass that emits this and then never completes IS a
-	// wedge, which is what the deadman should say.
+	// deadman can be tight: every other line it counts is a COMPLETION line, and a
+	// cold reconcile takes ~25 minutes.
 	s.log.Info("reconcile started", "interval", s.reconcileCadenceAttr())
 	startStats := s.aniStats()
 	st := s.loadState(ctx)
 
 	snap, walkErr := s.library.Walk(ctx)
 	if walkErr != nil && ctx.Err() != nil {
-		// A shutdown/redeploy cancelled the cycle mid-walk: not an arr fault,
-		// so neither the "library walk failed" ERROR (it would trip the
-		// SeadexScoutCycleError alert on every redeploy landing mid-cycle)
-		// nor an unhealthy verdict - the same "a redeploy is not an ingest
-		// fault" rule every LATER interruption arm already applies
-		// (finishInterruptedMatch, handleUpstreamGate's ctx arm). A `poll`
-		// SIGTERMed mid-walk now exits 0 like one SIGTERMed mid-match, and
-		// the daemon's health marker is not flipped by a routine stop.
+		// A shutdown cancelled the cycle mid-walk: not an arr fault, so neither the
+		// walk-failed ERROR (it would trip the cycle-error alert on every redeploy)
+		// nor an unhealthy verdict - the rule every later interruption arm applies.
 		s.log.Warn("cycle interrupted by shutdown during library walk", "cause", context.Cause(ctx))
 		return true
 	}
@@ -439,82 +314,45 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		return false
 	}
 
-	// The shared SeaDex + Fribb snapshot feeds BOTH halves: the Torznab feed
-	// (arr-independent) and the compare pass below. Fetching once here is what
-	// keeps a notification and what the arrs see in the feed on the same data.
+	// The shared SeaDex + Fribb snapshot feeds BOTH halves: the Torznab feed and
+	// the compare pass, so a notification and what the arrs see stay on one fetch.
 	mapCache, idx, mapErr := s.loadMapping(ctx, &st)
 	entries, seaErr := s.seadex.FetchEntries(ctx, seadexapi.Options{Mode: seadexapi.FetchFull})
 	s.warnCatalogueLinkQuality(entries)
 
-	// Rebuild the Torznab feed from the shared snapshot, independent of the arr
-	// walk (see rebuildFeed): a notification and what the arrs see in the feed
-	// come from this one fetch. The persisted state (library titles + AniList
-	// memo) feeds only the title synthesis, never a fresh arr walk.
 	errs := cycleOutcomes{walk: walkErr, mapping: mapErr, seadex: seaErr}
 	s.rebuildFeed(ctx, entries, idx, &st, errs)
 
-	// From here the compare pass is gated on the arr walk (the health signal): a
-	// failed walk is unhealthy and leaves findings untouched (only the refreshed
-	// mapping cache is persisted), while the feed above was still refreshed. The
-	// pre-compare degradation gate (failed walk, unusable map, failed/empty
-	// SeaDex fetch) is factored into a helper so Cycle reads as the top-down
-	// happy path. It also applies the per-arr library shrink guard, which MERGES
-	// a suspect arr's prior items into snap rather than skipping the comparison
-	// (see mergeShrunkSides) and names the sides left suspect - the completion
-	// line reports the cycle degraded for exactly those.
+	// From here the compare pass is gated on the arr walk (the health signal), and
+	// the gate also applies the per-arr shrink guard, which MERGES a suspect arr's
+	// prior items into snap rather than skipping the compare.
 	handled, healthy, shrunkArrs := s.handlePreCompareGate(ctx, &st, &snap, &mapCache, entries, errs)
 	if handled {
 		return healthy
 	}
 
 	result := s.matcher.Match(ctx, entries, &snap, idx, st.Memo)
-	// The reconcile is the ONE pass holding a whole catalogue, so it is the one
-	// that may garbage-collect the memo. Match no longer does this itself (see
-	// PruneMemo): it is also called with a bounded window by the tick, whose 48
-	// hours would delete nearly every expired entry - including the ones the
-	// feed's stale-title tier still reads. Safe before the cancellation check,
-	// because PruneMemo declines on a degraded result and a cancelled match is
-	// one.
+	// The reconcile is the ONE pass holding a whole catalogue, so it is the one that
+	// may garbage-collect the memo: the tick's 48 hours would delete nearly every
+	// expired entry, including the ones the feed's stale-title tier reads.
 	s.matcher.PruneMemo(&result, entries)
 	if ctx.Err() != nil {
-		// A shutdown arrived during or right after matching. The match set may
-		// be truncated (entries after the cancellation were never attempted),
-		// so comparing it would falsely resolve their findings. Keep the
-		// whole-cycle skip for this one case; a transient AniList degradation
-		// instead carries Result.IncompleteIDs and flows into the compare
-		// below with exactly the affected entries' rows carried forward.
+		// A shutdown arrived during or right after matching. The match set may be
+		// truncated, so comparing it would falsely resolve those entries' findings.
+		// A transient AniList degradation instead flows into the compare below.
 		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, &result)
 	}
 	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, &result, mapErr, shrunkArrs)
 }
 
-// warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics
-// for one fetched SeaDex snapshot: how many torrents carry a URL the publisher
-// refuses (omitted/empty, a foreign host under a trusted label, an unknown
-// tracker, a malformed value) as ONE aggregate WARN, so a tracker host
-// migration or schema drift that strips every release link is alertable from
-// Loki instead of silently emptying every finding's release_url; plus a SECOND
-// line for the one cause whose remedy is OURS rather than the record's - a
-// tracker this build's table does not know, where "add the tracker and ship a
-// release" is not something the operator can fix upstream (l-f127). The second
-// line sits BESIDE the aggregate rather than carving a subset out of it, so the
-// aggregate's count and meaning stay exactly as deployed alert rules read them.
-//
-// It lives here, not in internal/seadex where it used to (l-f156): the
-// judgment needs the PUBLISH policy (internal/trackerlink, reached through the
-// classify adapter that keeps the (tracker, rawURL) pairing in one place), and
-// that policy sits a layer above the wire client - which cannot reach the
-// adapter at all, since classify imports seadex. The orchestrator holds the
-// whole catalogue the moment either fetch path returns, so it has the same
-// one-pass view the client had, and both paths (Cycle here, Report below) call
-// it with the same logger the client used, keeping message, level and attrs
-// unchanged. A failed fetch returns no entries, so the counters stay zero and
-// nothing is logged - the client's own success-only gate, preserved.
-//
-// Definition matters as much as placement: the aggregate is deliberately the
-// publisher's own refusal (classify.PublishRefusal), not a weaker
-// is-the-url-field-blank test that would miss a wholesale host drift, and it is
-// the same rule filter.Obtainable acts on downstream.
+// warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics for
+// one fetched SeaDex snapshot: how many torrents carry a URL the publisher
+// refuses, as ONE aggregate WARN, so a tracker host migration that strips every
+// release link is alertable instead of silently emptying every release_url; plus
+// a SECOND line for the one cause whose remedy is OURS - a tracker this build's
+// table does not know. The aggregate is deliberately the publisher's own refusal
+// (classify.PublishRefusal), not a weaker is-the-url-blank test that would miss
+// a wholesale host drift. A failed fetch logs nothing: its counters stay zero.
 func (c *core) warnCatalogueLinkQuality(entries []seadex.Entry) {
 	var unusable, unknownTracker int
 	for i := range entries {
@@ -540,29 +378,20 @@ func (c *core) warnCatalogueLinkQuality(entries []seadex.Entry) {
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
 // should stop immediately. A genuine walk failure is unhealthy (a
-// shutdown-cancelled walk never reaches this - Cycle attributes it to the
-// shutdown and stays healthy); an alert-only deployment (no Torznab feed)
-// stops right away since nothing else remains to do - emitting the "cycle
-// degraded" completion line beside the ERROR - while a configured feed falls
-// through so the arr-independent feed rebuild still runs (the pre-compare
-// gate then returns unhealthy and emits the completion line).
+// shutdown-cancelled walk never reaches here); an alert-only deployment stops
+// right away, while a configured feed falls through so the arr-independent feed
+// rebuild still runs.
 func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 	if walkErr == nil {
 		return false
 	}
-	// The arr URL may carry userinfo (config.Validate only warns on that
-	// shape), so the error must be reduced before it crosses any log
-	// boundary; walkFailureAttrs adds the failed side's identity beside the
-	// reduced error.
+	// The arr URL may carry userinfo, so the error must be reduced before it
+	// crosses a log boundary; walkFailureAttrs adds the failed side's identity.
 	attrs := walkFailureAttrs(walkErr)
 	s.log.Error("library walk failed; cycle unhealthy", attrs...)
-	// Alert-only (no Torznab feed): a failed walk is unhealthy and there is
-	// nothing else to do, so skip the SeaDex/Fribb fetch (the pre-fold
-	// behaviour) - the cycle ends here, so emit its completion line now (the
-	// ERROR above carries the fault; this keeps the cycle deadman fed during
-	// an arr outage). With a feed configured, fall through to refresh it - it
-	// needs only SeaDex + Fribb, not the arrs - before returning unhealthy
-	// (the library gate then emits the completion line).
+	// Alert-only (no Torznab feed): a failed walk is unhealthy and nothing else
+	// remains, so emit the completion line here - the ERROR above carries the
+	// fault. With a feed configured, fall through to refresh it from SeaDex + Fribb.
 	if s.feed == nil {
 		s.cycleGateDegraded("walk-failed", attrs...)
 		return true
@@ -571,22 +400,15 @@ func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 }
 
 // attrError is the slog attribute key for an error value, named because the
-// attr-slice builders (walkFailureAttrs, mappingDegradedAttrs, the SeaDex
-// failure arm) share it as a slice-literal element (goconst); direct log-call
-// sites keep the literal "error".
+// attr-slice builders share it as a slice-literal element (goconst); direct log
+// sites keep the literal.
 const attrError = "error"
 
 // walkFailureAttrs builds the attribute set shared by the walk-failure log
-// boundaries (the ERROR and both walk-failed "cycle degraded" completion
-// lines): the LogSafeError-reduced error - a transport failure wraps a
-// *url.Error embedding the full request URL, which may carry configured
-// userinfo credentials, so it must not reach Loki unreduced - plus a bounded
-// `arr` attribute naming the failed side when the walk error carries one
-// (arrwalk.WalkErrArr). The side must come from the ORIGINAL error: the
-// reduction collapses the chain to the *url.Error's underlying cause,
-// discarding arrwalk.Walk's textual "walking sonarr/radarr" wrapper, so with
-// both arrs enabled the reduced error alone would not say which dependency
-// failed.
+// boundaries: the LogSafeError-reduced error - a transport failure wraps a
+// *url.Error embedding the request URL, which may carry configured userinfo
+// credentials - plus a bounded `arr` attribute naming the failed side. The side
+// must come from the ORIGINAL error: the reduction discards arrwalk's wrapper.
 func walkFailureAttrs(walkErr error) []any {
 	attrs := []any{attrError, httpx.LogSafeError(walkErr)}
 	if arr := arrwalk.WalkErrArr(walkErr); arr != "" {
@@ -595,24 +417,16 @@ func walkFailureAttrs(walkErr error) []any {
 	return attrs
 }
 
-// maxLoggedErrorBytes bounds an upstream error's rendered text before it
-// becomes a slog attribute value. It mirrors internal/mapping's constant of
-// the same name: the mapping loader already reduces every error it hands back
-// at its own boundary, and the SeaDex client does not, so the reduction is
-// applied here at the cycle's single SeaDex log site.
+// maxLoggedErrorBytes bounds an upstream error's rendered text before it becomes
+// a slog attribute value. The mapping loader already reduces every error it hands
+// back and the SeaDex client does not, so the reduction is applied at this site.
 const maxLoggedErrorBytes = 8 << 10
 
 // logSafeUpstreamError renders an upstream error as a bounded, single-line,
 // rune-sanitized error value. It is the cycle's LOG-BOUNDARY reduction for a
-// SeaDex error, applied without asking which of the client's arms produced it:
-// a fetch failure can embed raw upstream bytes (a rejected keyset cursor, a
-// structural mismatch quoting the offending JSON token, a status error echoing
-// a URL), and this site cannot tell those apart from the error value alone.
-// The known arms do self-bound today - the keyset-cursor arms at
-// seadex.maxLoggedCursorBytes, the page decode at maxLoggedDecodeBytes - so
-// this is the outer bound that keeps the guarantee independent of which arm the
-// error came from, the same reduction internal/mapping applies to its own
-// errors. An honest error passes through byte-identical.
+// SeaDex error, applied without asking which client arm produced it: a fetch
+// failure can embed raw upstream bytes, and this site cannot tell those apart
+// from the error value alone. An honest error passes through byte-identical.
 func logSafeUpstreamError(err error) error {
 	if err == nil {
 		return nil
@@ -621,27 +435,18 @@ func logSafeUpstreamError(err error) error {
 }
 
 // loadMapping refreshes the Fribb map from the persisted cache, logging a
-// degraded load once. A cancelled load is the shutdown, not a Fribb fault; the
-// pre-compare gate logs the interruption instead (same rule as the
-// walk/matching paths). The degraded log is WARN, escalating to ERROR (which
-// fires the existing SeadexScoutCycleError Loki rule) once the loader's
-// acceptance guards have rejected degradation.TickEscalationThreshold
-// consecutive refreshes: that state re-downloads the ~5.9MB body every cycle
-// against an aging cache and never self-heals without the operator, so it
-// must alert rather than WARN forever. The rejection streak is read off the
-// returned Cache (RejectedRefreshes) so this stays the single log site -
-// no second log line in the mapping package, no double-logging; a returned
-// *StaleMapError contributes the same streak as an attribute via LogAttrs.
+// degraded load once. A cancelled load is the shutdown, not a Fribb fault. The
+// degraded log is WARN, escalating to ERROR once the loader's acceptance guards
+// have rejected degradation.TickEscalationThreshold consecutive refreshes: that
+// state re-downloads the ~5.9MB body every cycle and never self-heals. The streak
+// is read off the returned Cache, so this stays the single log site.
 func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache, *mapping.Index, error) {
 	mapCache, idx, mapErr := s.mapping.Load(ctx, &st.Mapping)
 	if mapErr != nil && ctx.Err() == nil {
 		attrs := mappingDegradedAttrs(mapErr, idx.Len(), mapCache.RejectedRefreshes)
-		// Escalate on the PERSISTED streak, not on the error type: a guard that
-		// keeps refusing a fresh body when there is no usable stale cache to
-		// return (a first boot against a poisoned or restructured upstream)
-		// degrades with a plain error rather than a *StaleMapError, and that
-		// condition never self-heals either - reading the streak off the cache
-		// covers both shapes with one rule.
+		// Escalate on the PERSISTED streak, not on the error type: a guard that keeps
+		// refusing a fresh body with no usable stale cache to return degrades with a
+		// plain error rather than a *StaleMapError, and never self-heals either.
 		if mapCache.RejectedRefreshes >= degradation.TickEscalationThreshold {
 			// The attrs carry the streak (stale_consecutive_rejections) and,
 			// when a stale map was returned, the rejecting guard (stale_reason).
@@ -654,18 +459,11 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 }
 
 // mappingDegradedAttrs builds the attribute set shared by the cycle and report
-// mapping-degraded log sites: the existing error and usable_records attributes,
-// plus StaleMapError's structured degradation fields (stale_reason,
-// stale_age_seconds, stale_records) when the error carries them, so Loki can
-// query the rejection class and stale age without parsing the message text.
-//
-// rejections is the persisted streak off the returned Cache and is appended
-// UNCONDITIONALLY, because that is the value escalation reads two lines up. It
-// used to come from the error when one was available, and a transient fetch or
-// parse failure produces a *StaleMapError carrying no streak - so the line that
-// escalated on a nonzero persisted streak could print
-// stale_consecutive_rejections=0, the diagnostic contradicting the decision it
-// exists to explain. mapping.Cache.RejectedRefreshes is now the one carrier.
+// mapping-degraded log sites: the error and usable_records attributes, plus
+// StaleMapError's structured fields when the error carries them, so Loki can
+// query the rejection class without parsing the message text. rejections is the
+// persisted streak off the returned Cache and is appended UNCONDITIONALLY,
+// because that is the value escalation reads two lines up.
 func mappingDegradedAttrs(mapErr error, usableRecords, rejections int) []any {
 	attrs := []any{attrError, mapErr, "usable_records", usableRecords}
 	if stale, ok := errors.AsType[*mapping.StaleMapError](mapErr); ok {
@@ -677,10 +475,9 @@ func mappingDegradedAttrs(mapErr error, usableRecords, rejections int) []any {
 	return attrs
 }
 
-// AniListStats are the AniList request counters the cycle completion line
-// logs cumulatively and per cycle. It is the seam's own named type
-// (Deps.AniListStats returns it), so the boundary carries the field names
-// rather than an anonymous same-typed pair a caller can transpose.
+// AniListStats are the AniList request counters the cycle completion line logs
+// cumulatively and per cycle. It is the seam's own named type, so the boundary
+// carries field names rather than a transposable same-typed pair.
 type AniListStats struct {
 	Calls          int64
 	RateLimitWaits int64
@@ -698,18 +495,12 @@ func (s *Scout) aniListCycleAttrs(startStats AniListStats) []any {
 	}
 }
 
-// --- cycle completion paths ---
-
 // finishInterruptedMatch closes a cycle whose matching was cut short by a
-// shutdown/redeploy: the match set is truncated, so comparing it would treat
-// the never-attempted entries' absent findings as resolved. Save the refreshed
-// library/mapping/memo (the memo keeps the lookups that did succeed) but leave
-// the finding dedupe table untouched, log the interruption as the shutdown
-// (matching the library-walk path) rather than an AniList fault, and emit no
-// completion line (an interrupted cycle did not complete). Always healthy: a
-// redeploy is not an ingest fault. A transient AniList degradation never lands
-// here - the completed match carries Result.IncompleteIDs and
-// finishCompletedCycle preserves exactly the affected entries' findings.
+// shutdown: the match set is truncated, so comparing it would treat the
+// never-attempted entries' absent findings as resolved. Save the refreshed
+// library/mapping/memo but leave the finding table untouched, log the
+// interruption as the shutdown rather than an AniList fault, and emit no
+// completion line. Always healthy: a redeploy is not an ingest fault.
 func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result *match.Result) bool {
 	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
 	s.save(ctx, st)
@@ -720,42 +511,24 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 	return true
 }
 
-// finishCompletedCycle runs the compare over the completed match result,
-// reports the findings, logs the completion line
-// ("cycle complete", or "cycle degraded" for a shrink-guarded arr, a partial
-// walk, a transient AniList degradation, or a stale-but-usable map), and
-// persists the full refreshed state. On a partial walk the compare runs on the
-// items that walked cleanly only: matches linked to Failed items are excluded
-// (their file state is missing, not empty). Finding resolution is scoped so that
-// degraded items' prior findings are preserved rather than falsely resolved -
-// both the Failed-walk items and the entries whose needed AniList lookup failed
-// transiently (match.Result.IncompleteIDs; their entries sit unmapped in the
-// match set, so the compare yields no finding for them and only the
-// preservation set keeps their prior findings from resolving).
-//
-// shrunkArrs are the arrs the shrink guard left suspect, whose PRIOR items snap
-// already carries (mergeShrunkSides). It needs no preservation scoping and no
-// authority narrowing: the snapshot is a complete library model, so those
-// entries' findings are recomputed from the carried items and re-reported by the
-// same full-authority Report call every clean cycle uses. It only decides the
-// completion line's severity. Always healthy.
+// finishCompletedCycle runs the compare over the completed match result, reports
+// the findings, logs the completion line ("cycle complete", or "cycle degraded"
+// for a shrink-guarded arr, a partial walk, an AniList degradation or a
+// stale-but-usable map), and persists the refreshed state. On a partial walk the
+// compare runs on the items that walked cleanly only, and finding resolution is
+// scoped so degraded items' prior findings are preserved rather than resolved.
+// shrunkArrs are the arrs whose PRIOR items snap already carries; that needs no
+// authority narrowing and only decides the completion line's severity.
 func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result *match.Result, mapErr error, shrunkArrs []string) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.comparer.Compare(cleanMatches)
-	// Findings are reported as STATE: notify re-emits the whole current set and
-	// a condition that stops being reported resolves when the alert rule's
-	// lookback expires. There is no cold-start baseline and no persisted dedupe
-	// table - see notify.Notifier. The preserve set scopes what replacement may
-	// DELETE: an entry whose walk failed, or whose needed AniList lookup failed
-	// transiently, has incomplete evidence, so its absence from findings is
-	// missing data and its prior rows are carried forward. A single permanently
-	// failing series holds Snapshot.Partial forever, which is what makes that
-	// scoping necessary rather than decorative.
+	// Findings are reported as STATE: the whole set is re-emitted and a condition
+	// resolves by absence. The preserve set scopes what replacement may DELETE, so
+	// an entry with incomplete evidence keeps its prior rows.
 	s.notifier.Report(findings, unionIDs(failedItems, result.IncompleteIDs))
-	// The in-memory set is now authoritative for the whole catalogue, so ticks
-	// may publish it (see Scout.ready). This is the ONLY site that sets it:
-	// every other reconcile exit either gated before the compare or was
-	// interrupted, and neither establishes a set a tick may speak for.
+	// The in-memory set is now authoritative for the whole catalogue, so ticks may
+	// publish it (see Scout.ready). This is the ONLY site that sets it: every other
+	// reconcile exit gated before the compare or was interrupted.
 	s.ready = true
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
@@ -774,20 +547,9 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	s.recordAniListDegradation(st, result)
 	s.recordPartialWalk(st, &snap)
 	s.logCompletedCycle(&snap, result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
-	// A SECOND line, deliberately, carrying nothing but the fact that a full
-	// pass finished. The scan deadman counts cycle/tick completion lines, and
-	// once most iterations are ticks it can no longer tell "the loop is alive"
-	// from "the backstop still runs". Since the reconcile IS the backstop for
-	// everything a window structurally cannot see, a reconcile that silently
-	// stopped forever would make every one of those gaps permanent. This line
-	// is what a deadman at 3x reconcileInterval watches.
-	//
-	// It is emitted for EVERY reconcile that ran end to end, degraded or not.
-	// The question that deadman asks is "did the backstop run", and a degraded
-	// reconcile still did the whole catalogue fetch, the whole walk and the
-	// whole rebuild; the "cycle degraded" line beside it carries the quality
-	// signal. Emitting it only on the clean path would page after three
-	// degraded days for a backstop that ran every one of them.
+	// A SECOND line, carrying nothing but the fact that a full pass finished: once
+	// most iterations are ticks, the deadman cannot tell "the loop is alive" from
+	// "the backstop still runs". Emitted for every reconcile that ran end to end.
 	s.log.Info("reconcile complete", "interval", s.reconcileCadenceAttr())
 
 	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
@@ -797,19 +559,11 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 
 // escalate emits a latched degradation at the level its streak has earned: ERROR
 // once the streak has reached threshold, WARN before that, with the SAME attrs
-// either way so a Loki query does not have to know which level it landed at.
-//
-// Four conditions across both kinds of pass share this shape - a failed SeaDex
-// fetch and a shrunken walk on the reconcile, an unreadable upstream and an
-// oversized window on the tick - and the rule they share is the app's alert
-// contract, not a coincidence: WARN is a transient failure or a designed outcome,
-// ERROR is reserved for a condition that will not clear without an operator, and
-// the streak is what tells those two apart. Spelling it four times is four places
-// for the level policy to drift from the one documented above.
-//
-// Both messages are passed in rather than derived: the WARN and the ERROR say
-// different things to the operator (what happened, versus what to go fix), and
-// both are pinned by alerts.yaml and by tests.
+// either way so a Loki query need not know which level it landed at. Four
+// conditions across both kinds of pass share the app's alert contract: WARN is a
+// transient failure or a designed outcome, ERROR is reserved for a condition that
+// will not clear without an operator, and the streak tells those apart. Both
+// messages are passed in, because the WARN and the ERROR say different things.
 func (s *Scout) escalate(streak, threshold int, warnMsg, errMsg string, attrs ...any) {
 	if streak >= threshold {
 		s.log.Error(errMsg, attrs...)
@@ -818,15 +572,12 @@ func (s *Scout) escalate(streak, threshold int, warnMsg, errMsg string, attrs ..
 	s.log.Warn(warnMsg, attrs...)
 }
 
-// recordAniListDegradation advances or resets the persisted AniList
-// degradation streak and escalates a sustained outage (see advanceStreak for the
-// advance/reset rule this shares with recordPartialWalk). It runs before the
-// completion line so the WARN and the escalated ERROR both carry the up-to-date
-// streak, and the persisted value rides the caller's save. The escalation fires
-// on EVERY completed AniList-degraded cycle at the threshold, including one
-// whose completion line the partial-walk switch arm wins - otherwise a
-// sustained AniList outage that coexists with a persistent partial walk
-// advances the streak forever without ever alerting.
+// recordAniListDegradation advances or resets the persisted AniList degradation
+// streak and escalates a sustained outage (degradation.Advance is the rule it
+// shares with recordPartialWalk). It runs before the completion line so both
+// levels carry the up-to-date streak, and the escalation fires on EVERY completed
+// AniList-degraded cycle at the threshold - including one whose completion line
+// the partial-walk arm wins.
 func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) {
 	if degradation.Advance(&st.AniListDegraded, result.Degraded, degradation.ReconcileEscalationThreshold) {
 		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
@@ -836,16 +587,11 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 }
 
 // recordPartialWalk advances or resets the persisted partial-walk streak and
-// escalates a sustained partial ingest. It mirrors recordAniListDegradation, and
-// they now share the advance/reset rule itself (advanceStreak): it runs before
-// the completion line so the escalated ERROR precedes the degraded-cycle line it
-// explains, and the persisted value rides the caller's save. Unlike the AniList
-// arm the streak is NOT threaded into logCompletedCycle, so
+// escalates a sustained partial ingest, sharing degradation.Advance with
+// recordAniListDegradation. The streak is NOT threaded into logCompletedCycle, so
 // consecutive_partial_walks appears on the escalated ERROR only. Without it a
-// single permanently failing series is signalled only by the per-cycle
-// "reason=partial-walk" WARN forever - and since those items' findings are
-// carried forward on evidence that never refreshes, nothing would ever escalate
-// the silence.
+// single permanently failing series would only ever WARN, while its items'
+// findings are carried forward on evidence that never refreshes.
 func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 	if degradation.Advance(&st.PartialWalks, snap.Partial, degradation.ReconcileEscalationThreshold) {
 		s.log.Error("library walk partial repeatedly; the failing series never compare and the one-shot report refuses a partial snapshot, so those items' findings are carried forward on evidence that never refreshes - inspect the arrs' episode endpoints for the skipped series",
@@ -860,32 +606,19 @@ func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems map[int]struct{}, aniListStreak int, shrunkArrs []string, attrs []any) {
 	switch {
 	case len(shrunkArrs) > 0:
-		// An arr's walk shrank suspiciously, so the compare ran against that
-		// side's PRIOR items (mergeShrunkSides): the pass did its whole job and
-		// reported at full authority, but part of the library model is one
-		// reconcile stale, so it must not read as fully successful. The reason
-		// keeps its deployed spelling, and the arrs attr says which sides are
-		// withheld - the escalating shrink diagnostic beside it carries the
-		// counts, the streak, and the remedy. This is the MOST severe reason:
-		// a whole arr side's evidence is stale, where every reason below
-		// degrades a subset of entries.
+		// An arr's walk shrank suspiciously, so the compare ran against that side's
+		// PRIOR items: part of the library model is one reconcile stale. The MOST
+		// severe reason - every reason below degrades a subset of entries.
 		s.cycleDegraded("library-shrunk",
 			append([]any{"shrunk_arrs", strings.Join(shrunkArrs, ",")}, attrs...)...)
 	case snap.Partial:
-		// A partial walk compared only the clean items, so the cycle closed
-		// degraded: report the degraded coverage on the completion line the
-		// deadman alert counts alongside "cycle complete".
+		// A partial walk compared only the clean items, so report the degraded
+		// coverage on the completion line the deadman counts.
 		s.cycleDegraded("partial-walk", append([]any{"failed_items", len(failedItems)}, attrs...)...)
 	case result.Degraded:
-		// A transient AniList failure left some entries' needed lookups
-		// incomplete: the compare ran on the unaffected majority with the
-		// affected entries' rows carried forward, but the cycle must not
-		// read as fully successful. Same reason attr as before the scoped
-		// handling, so the deadman and any reason-keyed queries stay stable.
-		// The persisted streak's SUSTAINED-degradation ERROR escalation (the
-		// SeadexScoutCycleError rule) lives in recordAniListDegradation,
-		// beside the streak update, so it fires even when the partial-walk
-		// arm wins this completion line.
+		// A transient AniList failure left some entries' lookups incomplete: the
+		// compare ran on the unaffected majority with those rows carried forward.
+		// The sustained-degradation ERROR lives in recordAniListDegradation.
 		s.cycleDegraded("anilist-degraded",
 			append([]any{
 				"incomplete_lookups", len(result.IncompleteIDs),
@@ -893,39 +626,23 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 			}, attrs...)...)
 	case mapErr != nil:
 		// Only a stale-but-usable mapping error reaches this point; unusable and
-		// cancelled loads returned at the pre-compare gate. The compare ran on
-		// the cached map, but the cycle is still upstream-degraded, so it must
-		// not read as fully successful.
+		// cancelled loads returned at the pre-compare gate.
 		s.cycleDegraded("mapping-stale", attrs...)
 	case snap.FilteredEmpty:
-		// arr_tags filtering kept nothing out of a non-empty arr list on at
-		// least one enabled side, so the cycle watched a library the operator
-		// did not intend: a dead include set (every label renamed, mistyped, or
-		// expanded from an unset ${VAR}) admits nothing, and every prior
-		// finding on that side resolves. The walk itself succeeded, so this
-		// stays the LEAST severe reason and never fails the cycle - the
-		// remedy is a config or arr-side fix, and the walker's WARN names
-		// which side and how many items it listed. This arm still matters
-		// even though the shrink guard now holds a side for
-		// degradation.ShrunkWalkAcceptThreshold reconciles: once the guard ACCEPTS the
-		// smaller library the shrink reason stops firing, and on a first-ever
-		// boot there is no prior count for it to fire against at all - so
-		// without this arm the steady state would read "cycle complete"
-		// forever while the app watched nothing.
+		// arr_tags filtering kept nothing out of a non-empty arr list on an enabled
+		// side, so the cycle watched a library the operator did not intend. The walk
+		// succeeded, so this is the LEAST severe reason.
 		s.cycleDegraded("tags-emptied-side", attrs...)
 	default:
 		s.log.Info("cycle complete", attrs...)
 	}
 }
 
-// splitFailedMatches partitions the match set around the model's placeholder
-// rule (library.Item.Comparable): a match linked to an item whose file data the
-// walk could not establish - a series whose episode fetch failed, a movie
-// Radarr reports a file for without sending its payload - is excluded from the
-// compare (its file state is missing, not empty, so comparing would misread
-// every recommendation as unmet), and those items' AniList IDs are returned so
-// finding resolution can preserve their prior findings. A walk with no
-// placeholders returns the matches untouched and a nil set.
+// splitFailedMatches partitions the match set around the model's placeholder rule
+// (library.Item.Comparable): a match linked to an item whose file data the walk
+// could not establish is excluded from the compare (its file state is missing,
+// not empty, so comparing would misread every recommendation as unmet), and those
+// items' AniList IDs are returned so resolution can preserve their prior findings.
 func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems map[int]struct{}) {
 	clean = make([]match.Match, 0, len(matches))
 	for i := range matches {
@@ -971,20 +688,12 @@ func mapUsable(mapErr error) bool {
 	return stale
 }
 
-// --- feed rebuild ---
-
-// rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared
-// SeaDex snapshot, independent of the arr walk (the feed needs only SeaDex +
-// Fribb + persisted state, so an arr outage must not freeze it). It is a no-op
-// when no feed is configured, the SeaDex fetch failed, or the map is unusable
-// (a load error that is NOT a mapping.StaleMapError) - the last-good feed is
-// then kept: rebuilding against an unusable map would categorize every entry as
-// anime and silently drop all SeaDex movies from Radarr's RSS view. A
-// stale-but-usable map (errs.mapping matches mapping.StaleMapError, which carries a
-// usable cached index) still rebuilds, exactly like the pre-compare gate's
-// discrimination. The per-show metadata closure is built over PERSISTED state
-// (st's library snapshot and AniList memo, loaded at cycle start) - never this
-// cycle's walk - so the title synthesis inherits the same arr-independence.
+// rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared SeaDex
+// snapshot, independent of the arr walk (the feed needs only SeaDex + Fribb +
+// persisted state, so an arr outage must not freeze it). It is a no-op when no
+// feed is configured, the SeaDex fetch failed, or the map is unusable - the
+// last-good feed is then kept, because rebuilding against an unusable map would
+// categorize every entry as anime and drop all SeaDex movies from Radarr's view.
 func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, st *state.State, errs cycleOutcomes) {
 	if s.feed == nil || errs.seadex != nil || len(entries) == 0 || !mapUsable(errs.mapping) {
 		return
@@ -998,10 +707,9 @@ func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *ma
 }
 
 // advanceFeed is the tick's half of rebuildFeed: it folds the window into the
-// persisted journal instead of rebuilding it. The gates are the same shape -
-// no feed configured or nothing to fold means no work; the caller owns the
-// mapping-usability gate (mapUsable), which it applies before calling - and
-// a failure keeps the last-good feed rather than degrading the tick.
+// persisted journal instead of rebuilding it. No feed or nothing to fold means no
+// work, the caller owns the mapping-usability gate, and a failure keeps the
+// last-good feed rather than degrading the tick.
 func (s *Scout) advanceFeed(ctx context.Context, window []seadex.Entry, idx *mapping.Index, st *state.State) {
 	if s.feed == nil || len(window) == 0 {
 		return
@@ -1012,12 +720,9 @@ func (s *Scout) advanceFeed(ctx context.Context, window []seadex.Entry, idx *map
 	}
 }
 
-// --- pre-compare gates ---
-
 // cycleOutcomes carries one cycle's three independent ingest/upstream results so
 // the gate helpers read them by NAME: three same-typed positional error
-// parameters compile in any order, and a transposition silently swaps which gate
-// fires.
+// parameters compile in any order, and a transposition swaps which gate fires.
 type cycleOutcomes struct {
 	walk    error
 	mapping error
@@ -1025,34 +730,23 @@ type cycleOutcomes struct {
 }
 
 // handlePreCompareGate applies the pre-compare degradation gate: it reports
-// whether the cycle should stop before the compare pass (handled), the health
-// outcome to return when it should, and the arrs the per-arr shrink guard left
-// SUSPECT (whose prior items the snapshot now carries - see mergeShrunkSides),
-// which is what makes the completion line read degraded. The library gate (a
-// failed walk) runs first, then the shrink guard, then the upstream gate
-// (shutdown cancellation, unusable map, failed/empty SeaDex fetch); see each
-// helper for the per-branch policy. A stale-but-usable map (errs.mapping matches
-// mapping.StaleMapError) is degraded-but-comparable and flows into the normal
-// compare path (handled=false).
-//
-// snap is taken by POINTER because the shrink guard MERGES into it: a suspect
-// side's prior items replace its fresh ones, so every later reader of this
-// cycle's snapshot - the compare, the diff, the closing save, and a degraded
-// save on the way out of the upstream gate - sees the same complete library.
+// whether the cycle should stop before the compare pass, the health outcome to
+// return when it should, and the arrs the per-arr shrink guard left SUSPECT
+// (whose prior items the snapshot now carries), which is what makes the
+// completion line read degraded. The library gate runs first, then the shrink
+// guard, then the upstream gate. snap is taken by POINTER because the shrink
+// guard MERGES into it, so every later reader sees one complete library.
 func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool, shrunkArrs []string) {
-	// Record the SeaDex fetch outcome (and log a failure) exactly once, before
-	// the mutually exclusive gates below pick a winner: gate precedence must
-	// not decide whether an observed SeaDex outage exists in persisted state.
+	// Record the SeaDex fetch outcome exactly once, before the mutually exclusive
+	// gates below pick a winner: gate precedence must not decide whether an
+	// observed SeaDex outage exists in persisted state.
 	s.recordSeaDexFetch(ctx, st, errs.seadex)
 	if walkHandled, walkHealthy := s.handleLibraryGate(ctx, st, mapCache, errs); walkHandled {
 		return true, walkHealthy, nil
 	}
 	// The shrink guard runs BEFORE the upstream gate, and that order is
-	// load-bearing: the upstream arms persist this snapshot (degradedSave), so
-	// running the merge afterwards would let an unusable map or a failed fetch
-	// write a shrunken side through as the new baseline - the one-cycle ratchet,
-	// which then mass-resolves that side's findings on the next pass however
-	// long the guard holds.
+	// load-bearing: the upstream arms persist this snapshot, so merging afterwards
+	// would write a shrunken side through as the new baseline.
 	shrunkArrs = s.mergeShrunkSides(st, snap)
 	// Every upstream arm is degraded but HEALTHY (a restart cannot fix an
 	// upstream outage), so only the library gate above can report unhealthy.
@@ -1061,19 +755,11 @@ func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap 
 
 // recordSeaDexFetch records the cycle's SeaDex fetch outcome in the persisted
 // state and, on a failure, emits its single log line - before the mutually
-// exclusive pre-compare gates run, the same way recordAniListDegradation is
-// applied ahead of the completion-line precedence. Centralizing it here is
-// what makes the streak (state.State.SeadexFailures) independent of which gate
-// closes the cycle: every exit from here saves state - the failed-walk arm, the
-// upstream arms' degradedSave, and the completion paths - so a double outage
-// still advances the streak and still escalates to ERROR at
-// degradation.ReconcileEscalationThreshold instead of WARNing forever behind a
-// higher-precedence gate. A successful fetch resets the streak (the
-// documented "resets to 0 on any successful fetch" contract); a cancelled fetch
-// (a shutdown) is evidence of neither an outage nor a recovery, so it leaves the
-// streak untouched and stays silent - the gate that owns the interruption logs
-// it. feed_kept records whether a configured Torznab feed kept its previous
-// snapshot through this outage.
+// exclusive pre-compare gates run. Centralizing it here is what makes the streak
+// independent of which gate closes the cycle, so a double outage still escalates
+// instead of WARNing forever behind a higher-precedence gate. A successful fetch
+// resets the streak; a cancelled fetch is evidence of neither an outage nor a
+// recovery, so it leaves the streak untouched and stays silent.
 func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr error) {
 	if seaErr == nil {
 		st.SeadexFailures = 0
@@ -1082,11 +768,9 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	if ctx.Err() != nil {
 		return
 	}
-	// The persisted streak escalates this single log site to ERROR (the
-	// SeadexScoutCycleError rule) once the outage has spanned
-	// degradation.ReconcileEscalationThreshold consecutive cycles; below it the WARN
-	// keeps an upstream blip off the alert. Both levels carry the streak so
-	// Loki can see how long the outage has run.
+	// The persisted streak escalates this single log site to ERROR once the outage
+	// has spanned degradation.ReconcileEscalationThreshold consecutive cycles;
+	// below it the WARN keeps a blip off the alert. Both levels carry the streak.
 	st.SeadexFailures++
 	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.feed != nil}
 	s.escalate(st.SeadexFailures, degradation.ReconcileEscalationThreshold,
@@ -1096,35 +780,23 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 }
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
-// walk is unhealthy and persists only the refreshed mapping cache (findings,
-// memo, and the prior library snapshot ride along untouched). It is the ONLY
-// arm that stops the cycle here: a walk that succeeded but shrank suspiciously
-// no longer skips the comparison - mergeShrunkSides carries the suspect side's
-// prior items into the snapshot instead, so the compare runs on a complete
-// library model. A partial snapshot (per-series episode-fetch failures) is NOT
-// gated here either: the compare proceeds on the items that walked cleanly,
-// with the Failed items' rows carried forward by replacement scoping (see
-// finishCompletedCycle).
+// walk is unhealthy and persists only the refreshed mapping cache. It is the ONLY
+// arm that stops the cycle here: a walk that shrank suspiciously no longer skips
+// the comparison (mergeShrunkSides carries that side's prior items instead), and
+// a partial snapshot is not gated either - the compare proceeds on the clean
+// items with the Failed items' rows carried forward.
 func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, mapCache *mapping.Cache, errs cycleOutcomes) (handled, healthy bool) {
 	if errs.walk != nil {
-		// Persist only the refreshed mapping cache: discarding it re-downloads
-		// an updated Fribb body next cycle. Findings, memo, and the prior
-		// library snapshot ride along untouched (an unusable-map load returns
-		// the prior cache, making this persist a no-op then).
+		// Persist only the refreshed mapping cache: discarding it re-downloads an
+		// updated Fribb body next cycle. Findings, memo and the prior snapshot stay.
 		st.Mapping = *mapCache
 		s.save(ctx, st)
-		// The cycle ran to its degraded end (the feed refresh above was the
-		// remaining work), so emit the completion line the cycle deadman
-		// counts; the walk's ERROR already carries the fault, so the deadman
-		// stays quiet during an arr outage and fires only on a wedged loop.
-		// A shutdown that landed after the walk failure (cancelling the
-		// SeaDex fetch or mapping load) keeps the no-completion-line rule:
-		// an interrupted cycle did not complete, degraded or not.
+		// The cycle ran to its degraded end, so emit the completion line the deadman
+		// counts; the walk's ERROR already carries the fault. A shutdown that landed
+		// after the walk failure keeps the no-completion-line rule.
 		if ctx.Err() == nil {
-			// Same reduction + failed-side attribution as
-			// stopAfterWalkFailure's log sites: the walk error may embed a
-			// credential-bearing request URL, and the reduced error alone
-			// does not name the failed arr.
+			// Same reduction and failed-side attribution as stopAfterWalkFailure: the
+			// walk error may embed a credential-bearing request URL.
 			s.cycleGateDegraded("walk-failed", walkFailureAttrs(errs.walk)...)
 		}
 		return true, false
@@ -1133,9 +805,8 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, mapCache
 }
 
 // countItemsByArr tallies a snapshot's items per arr. The per-arr counts the
-// shrink guard compares need no new persisted field: library.Item already
-// carries the arr that produced it, so both sides of the comparison are
-// derivable from the snapshots themselves.
+// shrink guard compares need no new persisted field: library.Item already carries
+// the arr that produced it.
 func countItemsByArr(items []library.Item) map[string]int {
 	counts := make(map[string]int, 2)
 	for i := range items {
@@ -1144,70 +815,30 @@ func countItemsByArr(items []library.Item) map[string]int {
 	return counts
 }
 
-// mergeShrunkSides applies the library shrink guard PER ARR and returns the
-// arrs it left suspect. For every arr the deployment has ENABLED whose fresh
-// item count is a suspicious truncation of its OWN prior count
-// (degradation.Shrunk, the shared below-half policy home; zero items is the
-// extreme case), it substitutes that side's PRIOR items for its fresh ones in
-// snap, advances that side's persisted streak, and emits the escalating
-// diagnostic. Every other side's fresh items pass through untouched.
-//
-// Per-arr detection REPLACES the former aggregate item-count test, which was
-// blind to the deployment that motivated this guard: in a two-arr deployment
-// one arr can successfully return ZERO items (a database restored empty, a
-// container recreated without its volume, a url repointed at a fresh instance)
-// while the other keeps the total above half - so the aggregate guard never
-// fired, the compare ran against a library missing that whole side, and every
-// finding for it silently resolved. It is strictly more sensitive, which is the
-// point: Sonarr halving while Radarr doubles fires even though the total grew.
-//
-// MERGING is what replaced the former skip-the-comparison arm. Because the
-// merged snapshot is a COMPLETE library model, the compare runs as usual on
-// full authority (nothing about notify.Report changes): the suspect side's
-// findings are recomputed from its carried prior items, which IS carrying them
-// forward, while the healthy side updates normally. And because the persisted
-// snapshot keeps the suspect side's PRIOR count, the shrink test still fires
-// next cycle - there is no one-cycle ratchet, which is the reason the former
-// arm refused to persist anything at all.
-//
-// A side whose streak REACHES degradation.ShrunkWalkAcceptThreshold is ACCEPTED instead:
-// its fresh items stand, its streak resets, the compare resolves its stale
-// findings normally, and one loud WARN says so. A side that PASSES the test
-// resets its own streak and nothing else, so one arr recovering never clears
-// the other's evidence. A side whose prior count is ZERO is never suspect - a
-// legitimately empty new library must not be gated - and neither is a side the
-// deployment does not have enabled (see arrwalk.Walker.EnabledArrs).
-//
-// It does not save: the streak rides whichever save closes this cycle, the
-// same way recordAniListDegradation and recordPartialWalk do.
-//
-// One honest limitation of merging: the merged snapshot keeps the FRESH walk's
-// Snapshot.TakenAt, so state.Load's library_age diagnostic understates the age
-// of a withheld side's items. That attribute is a breadcrumb for a stale
-// synthesized feed title, and the escalating line below names the withheld arr
-// and its streak precisely - so paying one diagnostic's precision for a
-// complete library model is the right trade, but it is a trade.
+// mergeShrunkSides applies the library shrink guard PER ARR and returns the arrs
+// it left suspect: for every ENABLED arr whose fresh item count is a suspicious
+// truncation of its OWN prior count (degradation.Shrunk), it substitutes that
+// side's PRIOR items in snap, advances that side's streak, and emits the
+// escalating diagnostic. Merging keeps snap a COMPLETE library model, so the
+// compare runs at full authority and the shrink test still fires next cycle; a
+// streak at the accept threshold takes the smaller library, loudly. A side whose
+// prior count is ZERO is never suspect.
 func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []string {
 	prior, current := countItemsByArr(st.Library.Items), countItemsByArr(snap.Items)
 	var suspect []string
 	for _, arr := range s.library.EnabledArrs() {
 		if prior[arr] == 0 || !degradation.Shrunk(current[arr], prior[arr]) {
-			// A recovered (or never-tripped) side ends its OWN streak; deleting
-			// rather than zeroing keeps the persisted map to the sides that
-			// actually have evidence against them.
+			// A recovered (or never-tripped) side ends its OWN streak; deleting rather
+			// than zeroing keeps the map to the sides with evidence against them.
 			delete(st.ShrunkWalksByArr, arr)
 			continue
 		}
 		streak := st.ShrunkWalksByArr[arr] + 1
 		attrs := shrunkWalkAttrs(arr, current[arr], prior[arr], streak)
 		if streak >= degradation.ShrunkWalkAcceptThreshold {
-			// The guard has withheld this side for its whole tolerance, so it
-			// accepts. WARN, not ERROR: the app's self-heal-vs-operator rule
-			// reserves ERROR for a condition that will not clear without an
-			// operator, and this is a DESIGNED outcome. But it can never be
-			// SILENT - a mass-resolve nobody was told about is the very thing
-			// the guard exists to prevent; what makes it acceptable is that it
-			// is deliberate, logged, and time-bounded.
+			// The guard has withheld this side for its whole tolerance, so it accepts.
+			// WARN, not ERROR: this is a DESIGNED outcome. But it can never be SILENT
+			// - a mass-resolve nobody was told about is what the guard prevents.
 			delete(st.ShrunkWalksByArr, arr)
 			s.log.Warn("library walk stayed shrunken for the whole tolerated streak; accepting the smaller library for this arr as the new shape, so its stale findings resolve this cycle - if that is not intended, fix that arr and arr_tags and the next walk re-establishes the larger library", attrs...)
 			continue
@@ -1218,11 +849,8 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 		st.ShrunkWalksByArr[arr] = streak
 		suspect = append(suspect, arr)
 		// One log site, escalating: a shrink that persists for a day is a
-		// misconfiguration rather than a blip and must alert instead of WARNing
-		// forever. Both arms name the arr, both counts, the streak, how many
-		// consecutive daily passes remain before acceptance, and the remedy -
-		// including that removing state.json accepts the smaller library
-		// immediately, which the WARN used to leave unsaid.
+		// misconfiguration rather than a blip. Both arms name the arr, both counts,
+		// the streak, the passes left before acceptance, and the remedy.
 		s.escalate(streak, degradation.ReconcileEscalationThreshold,
 			"library walk shrank below half this arr's prior snapshot; carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
 			"library walk shrank repeatedly for this arr; still carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
@@ -1234,12 +862,10 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 	return suspect
 }
 
-// shrunkWalkAttrs is the attribute set every shrink-guard log site carries, so
-// a Loki query reads the same fields whichever arm it landed on: the arr, both
-// counts, the streak, and how many further consecutive shrunken reconciles
-// remain before the guard accepts the smaller library (zero on the arm that
-// just accepted it). Field names only, and no URL or credential - the shrink is
-// described entirely by counts the app produced itself.
+// shrunkWalkAttrs is the attribute set every shrink-guard log site carries, so a
+// Loki query reads the same fields whichever arm it landed on: the arr, both
+// counts, the streak, and how many further shrunken reconciles remain before the
+// guard accepts the smaller library.
 func shrunkWalkAttrs(arr string, items, priorItems, streak int) []any {
 	return []any{
 		"arr", arr,
@@ -1251,9 +877,8 @@ func shrunkWalkAttrs(arr string, items, priorItems, streak int) []any {
 }
 
 // carryPriorItems merges one walk's items with the prior snapshot's: every
-// healthy side's FRESH items, then every suspect side's PRIOR ones. The result
-// is a complete library model, which is what lets the compare run at full
-// authority while a suspect side is withheld (see mergeShrunkSides).
+// healthy side's FRESH items, then every suspect side's PRIOR ones. The result is
+// a complete library model, which is what lets the compare run at full authority.
 func carryPriorItems(fresh, prior []library.Item, suspect []string) []library.Item {
 	merged := make([]library.Item, 0, len(fresh)+len(prior))
 	for i := range fresh {
@@ -1269,34 +894,18 @@ func carryPriorItems(fresh, prior []library.Item, suspect []string) []library.It
 	return merged
 }
 
-// handleUpstreamGate gates the compare pass on the map's usability and the
-// SeaDex fetch, and reports whether the cycle stopped here. An unusable map (no
-// stale cache either - a load error that is
-// NOT a mapping.StaleMapError; the loader owns that discrimination, so a
-// handful of operator overrides overlaid on an empty index cannot defeat the
-// gate and let the compare pass falsely resolve findings against an
-// overrides-only map), a failed SeaDex fetch, or a successful-but-empty fetch
-// are each degraded but healthy - which is why the health verdict is the
-// CALLER's constant rather than a result here: no arm below can report
-// unhealthy. They preserve prior findings and save only
-// the refreshed library snapshot/map (degradedSave, over the snapshot the
-// shrink guard already merged) so a transient upstream
-// outage does not falsely resolve live findings. The failed-fetch arm's
-// persisted consecutive-failure streak (state.State.SeadexFailures) and its
-// single WARN/ERROR log site live in recordSeaDexFetch, applied ahead of gate
-// selection so a higher-precedence gate cannot hide the outage from the streak;
-// this arm only saves, emits the completion line, and returns. A shutdown
-// cancellation during the load or fetch is attributed to the shutdown, not
-// the upstream.
+// handleUpstreamGate gates the compare pass on the map's usability and the SeaDex
+// fetch, and reports whether the cycle stopped here. An unusable map (the loader
+// owns that discrimination, so a handful of operator overrides on an empty index
+// cannot defeat the gate), a failed fetch, or a successful-but-empty fetch are
+// each degraded but healthy - which is why the health verdict is the CALLER's
+// constant. They preserve prior findings and save only the refreshed snapshot and
+// map (degradedSave). A shutdown during the load or fetch is the shutdown's.
 func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled bool) {
 	if ctx.Err() != nil && (errs.mapping != nil || errs.seadex != nil) {
-		// A shutdown/redeploy cancelled the cycle during the mapping load or
-		// SeaDex fetch: the errors are the cancellation, not an upstream fault.
-		// Preserve findings exactly like an upstream outage (degradedSave) but
-		// attribute the interruption to the shutdown instead of blaming Fribb
-		// or SeaDex (matching the library-walk and matching paths). The
-		// SeaDex-failure streak is untouched: a cancelled fetch is evidence of
-		// neither an outage nor a recovery.
+		// A shutdown cancelled the cycle during the mapping load or SeaDex fetch: the
+		// errors are the cancellation, not an upstream fault. Preserve findings like
+		// an outage but attribute the interruption to the shutdown; no streak moves.
 		s.degradedSave(ctx, st, snap, mapCache)
 		s.log.Warn("cycle interrupted by shutdown before comparison; findings not re-reported this cycle",
 			"cause", context.Cause(ctx))
@@ -1304,35 +913,28 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap *l
 	}
 	if !mapUsable(errs.mapping) {
 		s.degradedSave(ctx, st, snap, mapCache)
-		// Same feed_kept signal recordSeaDexFetch and the zero-entries arm
-		// attach: an unusable map skips the feed rebuild too (see rebuildFeed,
-		// which will not categorize every entry as anime), so a configured feed
-		// is serving its previous snapshot. This was the one rebuild-skip cause
-		// with no feed-attributed signal anywhere in the cycle's output.
+		// Same feed_kept signal the other arms attach: an unusable map skips the feed
+		// rebuild too, so a configured feed is serving its previous snapshot.
 		s.log.Warn("mapping unusable; skipping comparison, findings re-stated unchanged this cycle",
 			"error", errs.mapping, "feed_kept", s.feed != nil)
 		s.cycleGateDegraded("mapping-unusable", "error", errs.mapping)
 		return true
 	}
 	if errs.seadex != nil {
-		// The failure was already recorded and logged once by
-		// recordSeaDexFetch (ahead of gate selection), so this arm only owns
-		// the degraded save, the completion line, and the verdict.
+		// The failure was already recorded and logged once by recordSeaDexFetch, so
+		// this arm only owns the degraded save, the completion line and the verdict.
 		s.degradedSave(ctx, st, snap, mapCache)
 		s.cycleGateDegraded("seadex-fetch-failed", "error", logSafeUpstreamError(errs.seadex))
 		return true
 	}
 	if len(entries) == 0 {
 		s.degradedSave(ctx, st, snap, mapCache)
-		// Same feed_kept signal recordSeaDexFetch attaches to a failed fetch: a
-		// zero-entries response skips the rebuild too (see rebuildFeed), so a
+		// Same feed_kept signal: a zero-entries response skips the rebuild too, so a
 		// configured feed is serving its previous snapshot.
 		s.log.Warn("seadex returned zero entries; skipping comparison, findings re-stated unchanged this cycle",
 			"feed_kept", s.feed != nil)
 		// A shutdown that landed after a nil-error zero-entry fetch keeps the
-		// no-completion-line rule, mirroring the two library-gate arms: the
-		// ctx arm above pre-empts only an ERRORED load/fetch, so a cancelled
-		// cycle can still reach this defensive arm.
+		// no-completion-line rule; the ctx arm above pre-empts only an errored fetch.
 		if ctx.Err() == nil {
 			s.cycleGateDegraded("seadex-zero-entries")
 		}
@@ -1341,11 +943,8 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap *l
 	return false
 }
 
-// --- state + stats helpers ---
-
 // aniStats returns the AniList client's cumulative stats via the injected
-// callback, or zero stats when none is wired (the early-return degradation
-// paths and unit tests build Deps without one; the daemon always wires it).
+// callback, or zero stats when none is wired (the daemon always wires it).
 func (s *Scout) aniStats() AniListStats {
 	if s.aniListStats == nil {
 		return AniListStats{}
@@ -1353,11 +952,9 @@ func (s *Scout) aniStats() AniListStats {
 	return s.aniListStats()
 }
 
-// loadState loads persisted state, falling back to an empty state on error.
-// A load cut short by shutdown/redeploy cancellation is not a state fault:
-// it returns empty silently (no ERROR, which would trip the cycle-error alert
-// on a routine redeploy) and the immediately following context-aware cycle
-// stage reports the shutdown once at WARN.
+// loadState loads persisted state, falling back to an empty state on error. A
+// load cut short by shutdown cancellation is not a state fault: it returns empty
+// silently, and the next context-aware stage reports the shutdown once at WARN.
 func (c *core) loadState(ctx context.Context) state.State {
 	st, err := c.store.Load(ctx)
 	if err != nil {
@@ -1370,10 +967,9 @@ func (c *core) loadState(ctx context.Context) state.State {
 	return st
 }
 
-// degradedSave persists the caches refreshed before the compare pass was
-// skipped (library snapshot and map), leaving the AniList memo and finding
-// dedupe untouched so a degraded upstream (unusable map, failed or empty
-// SeaDex fetch) or a shutdown mid-cycle cannot falsely resolve live findings.
+// degradedSave persists the caches refreshed before the compare pass was skipped
+// (library snapshot and map), leaving the AniList memo and finding table
+// untouched, so a degraded upstream or a shutdown cannot falsely resolve findings.
 func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache) {
 	st.Library = *snap
 	st.Mapping = *mapCache
@@ -1381,50 +977,33 @@ func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap *library
 }
 
 // saveGrace bounds the detached shutdown retry, measured from the cancellation
-// that triggered it — the SIGTERM at which the container stop grace itself
-// starts. It stays inside Docker's default 10s stop grace (the public compose
-// example sets no stop_grace_period), so the write completes before SIGKILL.
-// atomicfile's temp+rename means a SIGKILL mid-write cannot corrupt state - the
-// only cost of a missed save is losing the AniList memo, which self-heals over
-// one cold cycle.
+// that triggered it - the SIGTERM at which the container stop grace itself
+// starts. It stays inside Docker's default 10s stop grace. atomicfile's
+// temp+rename means a SIGKILL mid-write cannot corrupt state; the only cost of a
+// missed save is the AniList memo, which self-heals over one cold cycle.
 const saveGrace = 5 * time.Second
 
 // save persists state, tolerating a shutdown mid-cycle. When the run context is
-// cancelled (SIGTERM during a redeploy), the atomic write fails with
-// context.Canceled and the caches are lost — so a cancellation is retried once
-// with a detached, briefly-bounded context (context.WithoutCancel keeps the
-// values, drops the cancellation), letting the write finish so the expensive
-// AniList memo survives the restart. The retry always runs and gets a full
-// saveGrace measured from the CANCELLATION rather than from entry into save,
-// because the first attempt never spends the container stop grace either way:
-// on the paths that reach save already cancelled, the store refuses at its
-// context check before encoding anything (state.prepareSave), and when the
-// cancellation instead lands mid-write, the elapsed encode (library snapshot,
-// the ~5.9 MB mapping cache, the memo) began before the SIGTERM. Subtracting
-// it would starve the retry to zero in exactly the slow-volume case the retry
-// exists for. A cancellation is not a fault (a redeploy is routine), so only a
-// genuine write failure is logged at ERROR — which keeps it off the cycle-error
-// alert. A deliberate preservation refusal (state.ErrSavePreserved) is likewise
-// not a fault and logs at WARN: the redeploy SIGTERM that cancels the cycle can
-// land in Load's read window, which blocks the save by design, and alerting on
-// that would page the operator on every redeploy.
+// cancelled (SIGTERM during a redeploy) the atomic write fails with
+// context.Canceled and the caches are lost, so a cancellation is retried once
+// with a detached, briefly-bounded context, letting the expensive AniList memo
+// survive the restart. The retry gets a full saveGrace measured from the
+// CANCELLATION, because the first attempt never spends the stop grace either way.
+// A cancellation is not a fault, so only a genuine write failure logs at ERROR;
+// a deliberate preservation refusal (state.ErrSavePreserved) logs at WARN.
 func (s *Scout) save(ctx context.Context, st *state.State) {
 	err := s.store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-		// The container stop grace starts at the SIGTERM that cancelled ctx, so
-		// the retry budget is anchored HERE rather than shortened by the first
-		// attempt (the doc above says why); saveGrace < Docker's 10s default
-		// keeps the post-SIGTERM total inside the grace.
+		// The container stop grace starts at the SIGTERM that cancelled ctx, so the
+		// retry budget is anchored HERE rather than shortened by the first attempt.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveGrace)
 		err = s.store.Save(dctx, st)
 		cancel()
 	}
 	if err != nil {
-		// A deliberate preservation refusal is not a write fault: nothing is
-		// broken and nothing was lost, the store is protecting bytes it could
-		// not classify. Reporting it at ERROR fires the cycle-error alert on a
-		// routine redeploy, because a SIGTERM landing in Load's read window is
-		// exactly what sets that block. Report it as the degradation it is.
+		// A deliberate preservation refusal is not a write fault: nothing is broken
+		// and nothing was lost. Reporting it at ERROR would fire the cycle-error
+		// alert on a routine redeploy, since a SIGTERM in Load's read window sets it.
 		if errors.Is(err, state.ErrSavePreserved) {
 			s.log.Warn("state save skipped; on-disk state preserved", "error", err)
 			return

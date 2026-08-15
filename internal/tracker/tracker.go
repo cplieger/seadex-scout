@@ -5,18 +5,7 @@
 // composed rules over them, tracker.CanonicalName (the label to render a link
 // with) and tracker.ClassifyAB (how strongly an untrusted (label, URL) pair
 // identifies AnimeBytes; the operator's toggle POLICY over that grade stays in
-// internal/filter). A tracker addition lands here and nowhere else, so it cannot
-// reach one consumer's map and silently miss the others.
-//
-// It is a leaf over urlform: it knows tracker identity and the URL SHAPES that
-// carry it, and nothing about release names, findings, or links. Its consumers
-// split cleanly along that line — internal/release reads only the obtainability
-// class for a Release fingerprint, internal/trackerlink applies the publish
-// policy over the table's base URLs, and internal/filter, internal/notify,
-// internal/compare and internal/indexer read the identity gates. Keeping the
-// vocabulary out of internal/release is what lets the pure classifier stay free
-// of URL parsing and lets trackerlink reach the table without importing the
-// whole classification engine.
+// internal/filter).
 package tracker
 
 import (
@@ -100,9 +89,7 @@ func Lookup(name string) (Tracker, bool) {
 	// The fold is urlform.EqualASCIIFold, not strings.ToLower: full Unicode simple folding has
 	// ASCII-PRODUCING mappings (U+0130 -> 'i', U+212A -> 'k'), so a pre-lookup ToLower launders a
 	// homograph label into a canonical alias key - the same class LookupByHost's ASCII gate exists
-	// to stop, on the axis that reads the same untrusted record. Every key is distinct lowercase
-	// ASCII and the fold is byte-length-preserving, so at most one key can match and the map's
-	// randomized iteration order cannot change the answer.
+	// to stop, on the axis that reads the same untrusted record.
 	trimmed := strings.TrimSpace(name)
 	for key, t := range byAlias {
 		if urlform.EqualASCIIFold(trimmed, key) {
@@ -114,17 +101,7 @@ func Lookup(name string) (Tracker, bool) {
 
 // CanonicalName resolves the name to LABEL a link with, for a human-facing
 // surface that renders a tracker page URL (the daemon's alert attributes, the
-// season report's links cell). It is the composed rule over the two identity
-// gates this package already owns, and it lives here for the same reason they
-// do: a table edit (an added alias, a rename, a fifth tracker) must reach
-// every renderer at once.
-//
-// The URL host is the primary evidence because it is what the reader will
-// actually navigate to; the untrusted SeaDex tracker label (an alias, oddly
-// cased, or empty) is the fallback for a host-less or unrecognized-host link,
-// and the bare host labels a link no table entry claims. Only a link with
-// neither a known host, a known label, nor any host at all yields "" - a
-// caller that must always print something supplies its own last-resort word.
+// season report's links cell).
 func CanonicalName(label, rawURL string) string {
 	host := urlform.Classify(rawURL).Host
 	if t, known := LookupByHost(host); known {
@@ -140,29 +117,7 @@ func CanonicalName(label, rawURL string) string {
 // URL's own components out of - the torrent-page route and the numeric id in
 // it - for a form the caller has ALREADY vouched as the tracker's own.
 //
-// SeaDex spells the same tracker page two ways. The absolute
-// "https://animebytes.tv/torrents.php?id=1&torrentid=456" is already the value
-// to parse; the scheme-free "animebytes.tv/torrents.php?id=1&torrentid=456" is
-// the same page to a browser (and to urlform, as ClassSchemelessHost, which
-// recovers the authority) but NOT to net/url, which reads "animebytes.tv" as
-// the first path segment - so parsing that spelling directly finds no
-// /torrents.php route and yields no id. Prefixing "https://" is what makes the
-// two spellings parse identically, and it is sound because every canonical
-// tracker in the table above is https. The link publisher
-// (trackerlink.usableSchemelessHost) and its parse target
-// (trackerlink.hostFormTargeted) are CALLERS of this function, so a published
-// link and a value parsed here cannot name different pages.
-//
-// It lives here, beside the host table, because more than one consumer needs
-// the normalized value (internal/indexer builds both its match key and its
-// download target from it). Two hand-rolled prefixes would be a drift trap the
-// moment either side gains a form.
-//
-// It is NOT a gate and vouches nothing: ownership - no smuggling, no userinfo,
-// the exact canonical host, the right tracker - must already be established by
-// the caller. Every other form is returned as the classification read it
-// (Form.Trimmed): an absolute URL needs no rewrite, and the documented rooted
-// relative AB path is parsed as the path it already is.
+// SeaDex spells the same tracker page two ways.
 func CanonicalSourceURL(f *urlform.Form) string {
 	if f.Class == urlform.ClassSchemelessHost {
 		return "https://" + f.Trimmed
@@ -228,17 +183,7 @@ var byHost = func() map[string]Tracker {
 // LookupByHost resolves a URL hostname (case-insensitively; one
 // DNS-root trailing dot tolerated) to the tracker whose canonical site host
 // it equals or is a real dot-delimited subdomain of, reporting whether one
-// matched. The tracker label is untrusted upstream data, so consumers that
-// validate an absolute URL's host key on this evidence instead; an empty or
-// unknown host matches nothing, and neither a suffix-confusion host
-// ("evilnyaa.si") nor a parent-domain spoof ("nyaa.si.evil.example")
-// survives the dot-delimited comparison. Two further fail-closed rules live
-// here so every consumer inherits them: a non-ASCII host never matches (see
-// urlform.IsASCIIHost - homograph territory), and an empty-labeled host (".nyaa.si",
-// "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
-// a non-empty label chain counts (see urlform.HostMatchesDomain). When two
-// canonical hosts both match (a table entry that is a subdomain of another),
-// the most specific one wins.
+// matched.
 func LookupByHost(host string) (Tracker, bool) {
 	// The ASCII gate runs on the RAW UNTRIMMED host, BEFORE any Unicode
 	// transform: BOTH strings.ToLower and strings.TrimSpace are full-Unicode
@@ -264,10 +209,7 @@ func LookupByHost(host string) (Tracker, bool) {
 	host = urlform.FoldHostASCII(host)
 	// Most specific match wins, so the result cannot depend on Go's
 	// randomized map iteration order once the table holds a host that is
-	// a subdomain of another (sukebei.nyaa.si beside nyaa.si). Every
-	// canonical key is non-empty by construction (byHost omits an
-	// entry whose BaseURL yields no hostname), so bestLen > 0 is exactly
-	// "something matched".
+	// a subdomain of another (sukebei.nyaa.si beside nyaa.si).
 	var best Tracker
 	bestLen := 0
 	for canonical, t := range byHost {
@@ -279,14 +221,7 @@ func LookupByHost(host string) (Tracker, bool) {
 }
 
 // LookupByRelativeURL resolves tracker-specific relative page shapes
-// to their owning tracker. SeaDex publishes AnimeBytes pages in the
-// documented relative form "/torrents.php?...&torrentid=..."; that shape
-// carries tracker identity even though the URL has no host, so consumers
-// that would otherwise fall back to the untrusted tracker label (the
-// AB-toggle visibility gate, the usable-link canonicalizer) key on this
-// structural evidence instead. A slashless value ("torrents.php?...") is read
-// as that same path rooted, the href reading the link publisher resolves it to
-// (see hrefPath); any other shape matches nothing.
+// to their owning tracker.
 func LookupByRelativeURL(raw string) (Tracker, bool) {
 	f := urlform.Classify(raw)
 	rooted, ok := hrefPath(&f)
@@ -301,18 +236,7 @@ func LookupByRelativeURL(raw string) (Tracker, bool) {
 }
 
 // hrefPath returns the rooted path an href-context consumer resolves a
-// host-less value against, reporting whether the form has one at all. A
-// rooted relative value ("/torrents.php?...") is already it; a slashless
-// value ("torrents.php?...") classifies schemeless-host (net/url reads a
-// bare path while an address bar would read a host), and its href reading is
-// the same path rooted - which is exactly how the link publisher resolves it
-// (trackerlink.usableSchemelessHost). Rooting here keeps the shape rule
-// single-homed: every consumer of LookupByRelativeURL reads both
-// spellings identically, so a mislabeled slashless AB torrent-page URL
-// cannot publish as an animebytes.tv link while the AB gates read it as
-// non-AB. Every other form (absolute, protocol-relative, hidden-host,
-// malformed, empty) carries no host-less path and matches nothing - tracker
-// identity for those comes from the host gate.
+// host-less value against, reporting whether the form has one at all.
 func hrefPath(f *urlform.Form) (string, bool) {
 	switch f.Class {
 	case urlform.ClassRelative:
@@ -326,14 +250,7 @@ func hrefPath(f *urlform.Form) (string, bool) {
 
 // hrefSlashes applies the WHATWG backslash-is-a-slash reading to a host-less
 // value's path, the same canonicalization urlform.Classify used to decide the
-// Class. Form.Trimmed is the preprocessed but NOT slash-canonicalized string,
-// so a rooted value spelled with a leading backslash ("\torrents.php?...")
-// reaches the shape rule as a path net/url reads verbatim while a browser
-// resolves it as "/torrents.php?...". Canonicalizing here keeps the shape rule
-// reading what a browser reads, so a smuggled AB torrent-page URL cannot grade
-// as non-AnimeBytes evidence. Only the pre-query/fragment part is rewritten
-// (past the first '?' or '#' a backslash is an ordinary character, urlform's
-// own rule).
+// Class.
 func hrefSlashes(trimmed string) string {
 	stop := strings.IndexAny(trimmed, "?#")
 	if stop < 0 {
@@ -349,12 +266,7 @@ func hrefSlashes(trimmed string) string {
 // case folding. The raw reading (urlform.RawQueryNames: split on both '&' and
 // ';', percent-decode each name) is a strict superset of the parsed u.Query()
 // view, which drops a malformed pair wholesale - so a semicolon-smuggled pair
-// ("?torrentid=1;x") cannot evade the AB torrent-page shape check. The fold
-// itself is urlform.EqualASCIIFold (the library owns that byte rule, beside
-// FoldHostASCII); what stays here is the match POLICY, because the two
-// consumers of that walk need opposite fail directions: this gate matches only
-// the one name it recognizes, while internal/config's credential warning
-// matches broadly.
+// ("?torrentid=1;x") cannot evade the AB torrent-page shape check.
 func rawQueryHasKeyFold(rawQuery, key string) bool {
 	for name := range urlform.RawQueryNames(rawQuery) {
 		if urlform.EqualASCIIFold(name, key) {

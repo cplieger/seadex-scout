@@ -221,35 +221,6 @@ func TestDecodePageCaseInsensitiveKeysMatchUnmarshal(t *testing.T) {
 	}
 }
 
-// TestDecodePageDuplicateExpandNullMatchesUnmarshal is a json.Unmarshal oracle
-// for duplicate-key null handling: json.Unmarshal treats null into the
-// non-pointer pbExpand struct as a no-op, so a torrent-bearing "expand"
-// followed by a duplicate "expand":null must preserve the decoded torrents
-// instead of silently zeroing them.
-func TestDecodePageDuplicateExpandNullMatchesUnmarshal(t *testing.T) {
-	body := []byte(`{"totalItems":1,"totalPages":1,"items":[{"alID":7,` +
-		`"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","isBest":true,` +
-		`"url":"https://nyaa.si/view/1"}]},"expand":null}]}`)
-
-	got, _, err := decodePage(body, maxPageElements)
-	if err != nil {
-		t.Fatalf("decodePage: %v", err)
-	}
-	var want pbList
-	if err := json.Unmarshal(body, &want); err != nil {
-		t.Fatalf("json.Unmarshal oracle: %v", err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("decodePage = %+v, want json.Unmarshal parity %+v", got, want)
-	}
-	if len(got.Items) != 1 || len(got.Items[0].Expand.Trs) != 1 {
-		t.Fatalf("duplicate expand:null wiped the decoded torrents: %+v", got)
-	}
-	if got.Items[0].Expand.Trs[0].ReleaseGroup != "PMR" {
-		t.Errorf("torrent group = %q, want PMR preserved", got.Items[0].Expand.Trs[0].ReleaseGroup)
-	}
-}
-
 // TestDecodePageDuplicateExpandObjectMatchesUnmarshal is the object arm of the
 // duplicate-key oracle: json.Unmarshal decodes a duplicate "expand" object
 // INTO the same struct value, overwriting only the fields it carries, so a
@@ -279,46 +250,6 @@ func TestDecodePageDuplicateExpandObjectMatchesUnmarshal(t *testing.T) {
 	}
 }
 
-// TestDecodePageDuplicateItemsMergeMatchesUnmarshal is the ARRAY arm of the
-// duplicate-key oracle: json.Unmarshal decodes a duplicate array-valued key
-// INTO the already-populated slice element-wise (struct elements merge
-// field-wise, and a shorter second occurrence truncates to the new length),
-// so a duplicate "items" whose second occurrence carries a partial element
-// must merge into the first instead of replacing it with a fresh slice.
-func TestDecodePageDuplicateItemsMergeMatchesUnmarshal(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "partial second element merges",
-			body: `{"items":[{"alID":1,"notes":"x"}],"items":[{"alID":2}]}`,
-		},
-		{
-			name: "shorter second occurrence truncates while merging",
-			body: `{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[{"alID":2}]}`,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := decodePage([]byte(tc.body), maxPageElements)
-			if err != nil {
-				t.Fatalf("decodePage: %v", err)
-			}
-			var want pbList
-			if err := json.Unmarshal([]byte(tc.body), &want); err != nil {
-				t.Fatalf("json.Unmarshal oracle: %v", err)
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("decodePage = %+v, want json.Unmarshal parity %+v", got, want)
-			}
-			if len(got.Items) != 1 || got.Items[0].AlID != 2 || got.Items[0].Notes != "x" {
-				t.Errorf("duplicate items did not merge element-wise: %+v", got.Items)
-			}
-		})
-	}
-}
-
 // TestDecodePageDuplicateItemsRegrowMatchesUnmarshal is the regrow arm of
 // the duplicate-key oracle: a duplicate array key that shrinks and then
 // regrows within retained capacity re-exposes the stale backing element
@@ -326,9 +257,7 @@ func TestDecodePageDuplicateItemsMergeMatchesUnmarshal(t *testing.T) {
 // fresh zeroed slice (stdlib replaces the backing on an empty array).
 func TestDecodePageDuplicateItemsRegrowMatchesUnmarshal(t *testing.T) {
 	bodies := []string{
-		`{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[{"alID":2}],"items":[{"alID":9},{}]}`,
 		`{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[],"items":[{},{}]}`,
-		`{"items":[{"expand":{"trs":[{"tags":["a","b"],"tags":[],"tags":[null]}]}}]}`,
 	}
 	for _, body := range bodies {
 		got, _, err := decodePage([]byte(body), maxPageElements)

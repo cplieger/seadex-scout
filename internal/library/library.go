@@ -4,19 +4,7 @@
 // fingerprint), the Snapshot one walk produces, and the diff between two
 // snapshots.
 //
-// It is a pure leaf over internal/release, keyenc, and the stdlib. The arr
-// INGEST that produces a Snapshot - the arrapi clients, tag resolution, the
-// bounded episode fan-out and its failure budget - lives in internal/arrwalk,
-// so the six packages that consume only this vocabulary (align, compare, match,
-// audit, state, notify) do not carry the arr wire client in their compile
-// closure and the model can change with the comparison rules rather than with
-// the arr APIs.
-//
-// An item whose file data is MISSING rather than empty (an episode fetch that
-// failed, a movie Radarr reports a file for but sends no file payload) is kept
-// as a placeholder with Failed set. Its absent groups are not a real no-file
-// library state, and Item.Comparable is the one predicate every consumer routes
-// that rule through.
+// It is a pure leaf over internal/release, keyenc, and the stdlib.
 package library
 
 import (
@@ -58,10 +46,7 @@ type Item struct {
 	HasFile   bool            `json:"has_file"`
 	// Failed marks an item whose file data this walk could not establish: a
 	// series whose episode fetch failed, or a movie Radarr reports a file for
-	// while sending no file payload. The item carries its arr identity (so
-	// consumers can tell WHICH items are degraded) but no file data. Consumers
-	// must not read a Failed item's absent groups as a real no-file library
-	// state - ask Comparable rather than reading this field directly.
+	// while sending no file payload.
 	Failed bool `json:"failed,omitempty"`
 }
 
@@ -72,21 +57,12 @@ type Item struct {
 func (it *Item) Key() string {
 	// Assembled through keyenc rather than concatenated: `:` is keyenc's own
 	// separator, and Join makes the split unforgeable by construction instead of
-	// by the accident that the decimal ArrID sits last. Both components are
-	// reserved-char-free today, so the encoding is byte-identical to the old form
-	// (keyenc emits such a component verbatim) and nothing re-keys.
+	// by the accident that the decimal ArrID sits last.
 	return keyenc.Join(it.Arr, strconv.Itoa(it.ArrID))
 }
 
 // Comparable reports whether the item's file state may be compared against a
-// recommendation. It is the model's own expression of the placeholder rule that
-// used to live only in prose (and was therefore enforced per consumer path): a
-// placeholder's file data is MISSING, not empty, so comparing it would misread
-// every recommendation as unmet, resolve the item's prior findings, and count a
-// spurious change in the diff. Every consumer that partitions a snapshot or a
-// match set routes through this predicate - the diff's indexByKey here, the
-// cycle's splitFailedMatches in internal/scout - so a new reader of Snapshot
-// inherits the rule instead of having to rediscover it.
+// recommendation.
 func (it *Item) Comparable() bool { return !it.Failed }
 
 // Snapshot is one library walk.
@@ -94,26 +70,12 @@ type Snapshot struct {
 	TakenAt time.Time `json:"taken_at"`
 	Items   []Item    `json:"items,omitempty"`
 	// Partial reports that the walk could not READ part of the library: at
-	// least one series' episode fetch failed. Those items are present as
-	// placeholders (Failed, no file data), so the snapshot is usable but not a
-	// complete library view - the one-shot report refuses a partial snapshot
-	// outright and the cycle escalates a sustained streak of them. A published
-	// walk never drops a failed series (it keeps the placeholder, or fails the
-	// walk outright), so an item absent from Items is genuinely gone from the
-	// arr, Partial or not.
-	//
-	// A Failed item does NOT imply Partial: a movie Radarr answers with HasFile
-	// and no file payload is a per-item data defect inside a fully-read walk,
-	// so it is a placeholder in a COMPLETE snapshot (internal/arrwalk's
-	// walkRadarr documents that split).
+	// least one series' episode fetch failed.
 	Partial bool `json:"partial,omitempty"`
 	// FilteredEmpty reports that arr_tags filtering kept nothing out of a
 	// non-empty arr list on at least one enabled side, so that side
 	// contributed zero items for a configuration reason (a dead include set,
-	// or labels no item carries) rather than because the library is empty. The
-	// walk still succeeded - the operator may be mid-retag - but the cycle
-	// closes degraded rather than clean, or a daemon watching nothing reads as
-	// fully healthy forever.
+	// or labels no item carries) rather than because the library is empty.
 	FilteredEmpty bool `json:"filtered_empty,omitempty"`
 }
 
@@ -128,20 +90,7 @@ type Diff struct {
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its file presence, group set, per-season group
-// attribution, or current fingerprint differs. Placeholder suppression is
-// scoped to the
-// non-Comparable keys: an item that is a placeholder in cur is not
-// counted as removed (its file state is missing, not gone), and an item that
-// was a placeholder in prev is not counted as added when it walks
-// clean again (a recovery, not an arrival). An item genuinely absent from a
-// snapshot diffs as added/removed even when that snapshot is Partial - a
-// published walk keeps every failed series as a placeholder, so absence
-// means the arr itself no longer lists the item. A key that debuts as a
-// placeholder, or that disappears while one, still
-// counts as added/removed - a placeholder asserts arr presence even though
-// its file state is unknown. A key that is a placeholder on
-// either side never counts as Changed (there is no comparable file state to
-// compare).
+// attribution, or current fingerprint differs.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey, prevFailed := indexByKey(prev)
 	curByKey, curFailed := indexByKey(cur)

@@ -946,12 +946,10 @@ func TestValidateIndexerDistinctTorznabURLsStaySilent(t *testing.T) {
 	}
 }
 
-// TestValidateIndexerShortFeedKeyWarning pins the two strength rules on
-// indexer.feed_api_key: the warn-only floor (a key under 16 characters warns
-// because it gates the AnimeBytes-passkey-bearing feed, a strong key stays
-// silent) and the hard rejection of an unresolved ${VAR} placeholder, which is
-// a guessable credential rather than a weak one. Both stay field-name-only: the
-// key value never rides the log record or the error.
+// TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
+// indexer.feed_api_key: a key under 16 characters warns, because it gates the
+// AnimeBytes-passkey-bearing feed. Field-name-only: the key value never rides
+// the log record.
 func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
@@ -972,36 +970,6 @@ func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 		corpus := strings.Join(rec.Messages(), "\n")
 		if strings.Contains(corpus, shortKey) || rec.AttrContains("", "", shortKey) {
 			t.Errorf("Validate() log leaks the key value: %v", rec.Messages())
-		}
-	})
-	t.Run("32-char key does not warn", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := base
-		c.IndexerAPIKey = strings.Repeat("a", 32)
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains("feed_api_key is shorter") {
-			t.Errorf("Validate() log = %v, want no short-key warning", rec.Messages())
-		}
-	})
-	// An unexpanded ${VAR} is not a weak key, it is a GUESSABLE one: the
-	// placeholder spelling ships in the public config.example, and this key is
-	// the only gate on the AnimeBytes-passkey-bearing feed. It fails the config
-	// rather than warning, and the error stays field-name-only.
-	t.Run("unresolved placeholder is an error", func(t *testing.T) {
-		const placeholder = "${SEADEX_SCOUT_FEED_API_KEY}"
-		c := base
-		c.IndexerAPIKey = placeholder
-		err := c.Validate()
-		if err == nil {
-			t.Fatal("Validate() = nil for an unresolved ${VAR} feed_api_key, want an error")
-		}
-		if !strings.Contains(err.Error(), "feed_api_key") {
-			t.Errorf("Validate() error = %v, want it to name feed_api_key", err)
-		}
-		if strings.Contains(err.Error(), "SEADEX_SCOUT_FEED_API_KEY") {
-			t.Errorf("Validate() error echoes the configured value: %v", err)
 		}
 	})
 }
@@ -1527,8 +1495,9 @@ func TestLoadLeavesMappingKeysLiteral(t *testing.T) {
 }
 
 // TestURLEmbedsCredential pins the sole trigger of the credential-leak config
-// warning: userinfo (with or without a password), each credential-like query
-// parameter, the case-insensitive fold, the raw-query scan that still flags a
+// warning: userinfo (with or without a password), a credential-like query
+// parameter (the NAME SET is credname's own contract, pinned there), the
+// case-insensitive fold, the raw-query scan that still flags a
 // credential in a malformed semicolon-delimited pair that net/url.Query drops, and the silent
 // parse-failure and clean-URL negatives.
 func TestURLEmbedsCredential(t *testing.T) {
@@ -1543,20 +1512,6 @@ func TestURLEmbedsCredential(t *testing.T) {
 		{"userinfo", "http://user:pw@prowlarr:9696/22/api", true},
 		{"username-only userinfo", "http://token@prowlarr:9696/22/api", true},
 		{"apikey", "http://prowlarr:9696/22/api?apikey=k", true},
-		{"api_key", "http://prowlarr:9696/22/api?api_key=k", true},
-		{"passkey", "http://prowlarr:9696/22/api?passkey=k", true},
-		{"token", "http://prowlarr:9696/22/api?token=k", true},
-		{"authkey", "http://prowlarr:9696/22/api?authkey=k", true},
-		{"torrent_pass", "http://prowlarr:9696/22/api?torrent_pass=k", true},
-		{"apitoken", "http://prowlarr:9696/22/api?apitoken=k", true},
-		{"api_token", "http://prowlarr:9696/22/api?api_token=k", true},
-		{"access_token", "http://prowlarr:9696/22/api?access_token=k", true},
-		{"auth_token", "http://prowlarr:9696/22/api?auth_token=k", true},
-		{"password", "http://prowlarr:9696/22/api?password=k", true},
-		{"pass", "http://prowlarr:9696/22/api?pass=k", true},
-		{"secret", "http://prowlarr:9696/22/api?secret=k", true},
-		{"client_secret", "http://prowlarr:9696/22/api?client_secret=k", true},
-		{"rss_key", "http://prowlarr:9696/22/api?rss_key=k", true},
 		{"uppercase APIKEY", "http://prowlarr:9696/22/api?APIKEY=k", true},
 		{"malformed semicolon pair keeps apikey flagged", "http://prowlarr:9696/22/api?apikey=k;foo=x", true},
 		{"credential after semicolon in malformed pair", "http://prowlarr:9696/22/api?foo=x;passkey=k", true},

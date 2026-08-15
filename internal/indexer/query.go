@@ -13,56 +13,44 @@ import (
 )
 
 const (
-	// maxItems caps a rendered feed as a safety bound. It evicts from the
-	// RENDERED view only: the persisted journal is bounded by age alone
-	// (feedJournalMaxAge, journal.go), and Torznab paging (applyPaging)
+	// maxItems caps a rendered feed as a safety bound. It evicts from the RENDERED
+	// view only: the persisted journal is bounded by age alone, and Torznab paging
 	// keeps every journaled item reachable across pages.
 	maxItems = 1000
 	// defaultCapsLimit is the default result count advertised in t=caps.
 	defaultCapsLimit = 100
 )
 
-// --- Curation matching ---
-
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
 // tracker key, each mapping to whether SeaDex marks that release best. byPair
-// records which hash/key combinations were observed on the SAME SeaDex
-// torrent (keyed by pairKey), so lookup can prove an item's two identity
-// signals name one release rather than two same-marker ones. A nil byPair is
-// a legacy snapshot persisted before the pair relation existed; lookup then
-// FAILS CLOSED for items carrying both signals (the relation cannot be
-// proven) while single-signal matching keeps working, until the next cycle
-// rewrites the snapshot with the relation.
+// records which hash/key combinations were observed on the SAME SeaDex torrent, so
+// lookup can prove an item's two identity signals name one release. A nil byPair
+// is a legacy snapshot; lookup then FAILS CLOSED for items carrying both signals
+// while single-signal matching keeps working.
 type curation struct {
 	byHash map[string]bool
 	byKey  map[string]bool
 	byPair map[string]bool
 }
 
-// pairKey joins a validated info hash and a tracker key into the byPair
-// relation key. keyenc.Join is the app's ONE home for a composite key no
-// field's content can forge - it was extracted from this app for exactly this
-// question, and internal/notify and internal/compare assemble their keys
-// through it at every level. Escaping is element-wise, so two distinct
-// hash/key pairs cannot collide onto one relation key whatever either
-// component carries; the old bare-'|' join was sound only while both
-// producers' alphabets held (validInfoHash's hex run, extractID's digits),
-// which is an argument that lives two packages away from this line.
-// The relation is derived in memory on every load (projectCuration) and
-// never persisted, so the encoding is free to change.
+// pairKey joins a validated info hash and a tracker key into the byPair relation
+// key. keyenc.Join is the app's ONE home for a composite key no field's content
+// can forge, and escaping is element-wise, so two distinct hash/key pairs cannot
+// collide whatever either component carries - where the old bare-'|' join was
+// sound only while both producers' alphabets held. The relation is derived in
+// memory on every load and never persisted, so the encoding is free to change.
 func pairKey(hash, key string) string { return keyenc.Join(hash, key) }
 
-// curationMatch accumulates the best/alt agreement state across an item's
-// identity signals: accept admits a signal only when it resolves to a curated
-// entry (ok) that agrees with every previously accepted signal on the
-// best/alt value. Bookkeeping only; lookup owns the ordered policy.
+// curationMatch accumulates the best/alt agreement state across an item's identity
+// signals: accept admits a signal only when it resolves to a curated entry that
+// agrees with every previously accepted one. Bookkeeping only; lookup owns policy.
 type curationMatch struct {
 	isBest  bool
 	matched bool
 }
 
 // accept records one identity signal's curation result, reporting whether the
-// signal keeps the item alive: a signal that missed the curation set (!ok) or
+// signal keeps the item alive: a signal that missed the curation set or
 // contradicts an earlier signal's best/alt value rejects it.
 func (m *curationMatch) accept(candidate, ok bool) bool {
 	if !ok || (m.matched && candidate != m.isBest) {
@@ -73,42 +61,18 @@ func (m *curationMatch) accept(candidate, ok bool) bool {
 }
 
 // lookup reports whether a release (by its info hash and page URLs) is SeaDex-
-// curated, and if so whether it is the best release. Every identity signal the
-// item carries that the curation set KNOWS must agree with the others on the
-// best/alt value; a signal that contradicts an earlier one rejects the whole
-// item. An item carrying BOTH a curated hash and a curated tracker key must
+// curated, and if so whether it is the best release. Every identity signal the item
+// carries that the curation set KNOWS must agree with the others on the best/alt
+// value. An item carrying BOTH a curated hash and a curated tracker key must
 // additionally prove the exact pair was observed on a single SeaDex torrent
-// (byPair): best/alt agreement alone would still admit torrent A's hash
-// cross-wired with torrent B's key whenever both happen to be best (or both
-// alt). Together these keep an untrusted Torznab item from pairing a curated
-// info hash with the page URL or download link of a different torrent. scope
-// binds tracker identity: a tracker key parsed from the item's URLs must belong
-// to the endpoint being served, so a swapped upstream (or a cross-tracker item)
-// cannot pass /ab an accepted Nyaa key or vice versa.
-//
-// An info hash the curation set does not know is NOT a contradiction and does
-// not veto the item: SeaDex records often carry no usable info hash (empty,
-// short, or non-hex - the shape validInfoHash rejects, and the shape every AB
-// record has), so the ownership fact registers only their tracker key, while
-// Prowlarr's Nyaa results always carry the real hash. Reading that miss as
-// "this hash names an uncurated release" vetoed an identity the curated page
-// URL had already proven, and the curated release was invisible to the search
-// with no diagnostic. Corroboration is what the hash is for: it can agree or
-// disagree, but it cannot veto (the same reading the writer's title harvest
-// settled for its own identity match). A hash the set DOES know still has to
-// agree, and still has to prove co-membership with any curated key beside it.
-//
-// conflict reports the rejection kind for the caller's accounting: true when a
-// curated signal was refused by a later identity check (the untrusted-response
-// shapes above), false for an item that simply carries nothing SeaDex curates -
-// which is the overwhelming majority of a proxied search's results and is not
-// worth reporting.
+// (byPair): agreement alone would still admit torrent A's hash cross-wired with
+// torrent B's key whenever both are best. scope binds tracker identity, so a
+// swapped upstream cannot pass /ab an accepted Nyaa key.
 func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched, conflict bool) {
 	var match curationMatch
 
-	// curatedHash is the hash only once the set has vouched for it; an unknown
-	// hash leaves it empty so the pair relation below has no phantom signal to
-	// prove.
+	// curatedHash is the hash only once the set has vouched for it; an unknown hash
+	// leaves it empty so the pair relation below has no phantom signal to prove.
 	var curatedHash string
 	if h := validInfoHash(hash); h != "" {
 		if b, ok := c.byHash[h]; ok {
@@ -135,18 +99,13 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched, c
 	return match.isBest, match.matched, false
 }
 
-// acceptsObservedPair applies lookup's dual-signal relation check: an item
-// carrying BOTH a curated info hash and a curated scoped tracker key must
-// additionally prove the exact pair was observed on a single SeaDex torrent.
-// With either signal absent there is no pair to prove, so it accepts.
-//
-// A nil byPair (a legacy snapshot written before the relation was persisted -
-// an upgraded resident server still serving the old file) fails closed too:
-// absence of the relation that proves co-membership is not permission to fall
-// back to the weaker per-signal checks, which would admit torrent A's hash
-// cross-wired with torrent B's key whenever both share a best/alt bit.
-// Single-signal legacy matching (hash-only Nyaa, key-only AB) is unaffected,
-// and the next cycle's snapshot rewrite restores dual-signal matching.
+// acceptsObservedPair applies lookup's dual-signal relation check: an item carrying
+// BOTH a curated info hash and a curated scoped tracker key must prove the exact
+// pair was observed on a single SeaDex torrent. With either signal absent there is
+// no pair to prove. A nil byPair (a legacy snapshot an upgraded resident server is
+// still serving) fails closed too: absence of the relation is not permission to
+// fall back to the weaker per-signal checks. Single-signal legacy matching is
+// unaffected, and the next cycle's rewrite restores dual-signal matching.
 func (c *curation) acceptsObservedPair(hash, key string) bool {
 	if hash == "" || key == "" {
 		return true
@@ -154,19 +113,13 @@ func (c *curation) acceptsObservedPair(hash, key string) bool {
 	return c.byPair != nil && c.byPair[pairKey(hash, key)]
 }
 
-// acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed
-// from the given page URLs must belong to scope (a key for a different tracker
-// rejects the item outright, and is reported as an identity conflict), must
-// agree with every other parsed key on the SAME release identity (healthy
-// Prowlarr emits the same tracker id in comments and guid, so two URLs naming
-// different curated torrents are an invalid untrusted response and fail closed
-// - even when both ids happen to share a best/alt value), and must pass
-// m.accept (curated, agreeing on best/alt). It reports the resolved scoped key
-// (key - "" when the URLs carried none; lookup's AB rule and hash/key pair
-// check need it), whether the item survives (ok), and whether the rejection was
-// a STRUCTURAL one (conflict) the request line must count as an identity
-// conflict on its own evidence rather than only when some earlier signal was
-// already curated.
+// acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed from
+// the given page URLs must belong to scope, must agree with every other parsed key
+// on the SAME release identity (healthy Prowlarr emits the same tracker id in
+// comments and guid, so two URLs naming different curated torrents are an invalid
+// response and fail closed), and must pass m.accept. It reports the resolved scoped
+// key, whether the item survives, and whether the rejection was a STRUCTURAL one
+// the request line must count as an identity conflict on its own evidence.
 func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatch) (key string, ok, conflict bool) {
 	var identity string
 	for _, raw := range urls {
@@ -175,14 +128,11 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 			continue
 		}
 		if scopeOfKey(k) != scope {
-			// A key naming ANOTHER tracker is an untrusted-response shape, not
-			// an uncurated release, and it must be reported as one WITHOUT
-			// depending on a curated hash having been accepted first: the
-			// likeliest producer is an upstream Torznab URL wired to the wrong
-			// Prowlarr indexer, where every result is out of scope and no other
-			// signal is curated - so keying the conflict on m.matched made that
-			// standing misconfiguration read as a clean no-match on every
-			// search.
+			// A key naming ANOTHER tracker is an untrusted-response shape, not an
+			// uncurated release, and must be reported as one WITHOUT depending on a
+			// curated hash having been accepted first: the likeliest producer is an
+			// upstream wired to the wrong Prowlarr indexer, where every result is out
+			// of scope - which used to read as a clean no-match on every search.
 			return identity, false, true
 		}
 		if identity != "" && k != identity {
@@ -197,25 +147,20 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 	return identity, true, false
 }
 
-// --- Request dispatch and accounting ---
-
-// torznabFault is the one way query tells serve a request could not be
-// answered with a feed. It carries exactly the three arguments rejectTorznab
-// needs, so serve renders any fault without knowing which condition produced
-// it - and an outcome that forgets to build one cannot degrade into the
-// false-empty 200 a zero-valued flag on the log record would produce (an arr
-// records that as a clean no-match).
+// torznabFault is the one way query tells serve a request could not be answered
+// with a feed. It carries exactly the three arguments rejectTorznab needs, so an
+// outcome that forgets to build one cannot degrade into the false-empty 200 a
+// zero-valued flag would produce (an arr records that as a clean no-match).
 type torznabFault struct {
 	summary string
 	detail  string
 	code    int
 }
 
-// snapshotUnavailableFault is the one fault for "no snapshot to serve from",
-// raised both while the startup warm load is still running and after a load
-// fault before any successful install. Single-homed so the two conditions cannot
-// drift into two different wire messages, so the detail names BOTH states rather
-// than asserting a failure the still-loading case has not had.
+// snapshotUnavailableFault is the one fault for "no snapshot to serve from", raised
+// both while the startup warm load is still running and after a load fault before
+// any successful install. Single-homed so the two conditions cannot drift into two
+// wire messages, which is why the detail names BOTH states.
 func snapshotUnavailableFault() *torznabFault {
 	return &torznabFault{
 		summary: "feed snapshot unavailable",
@@ -224,83 +169,48 @@ func snapshotUnavailableFault() *torznabFault {
 	}
 }
 
-// queryStats summarizes one request for the per-request log line: whether the
-// feed answered it (answered), whether it was served from the synthesized RSS
-// feed (feed - an empty-q periodic check) rather than a proxied search, how
-// many upstream results survived the Prowlarr fetch's download-URL origin
-// filter (search only), and how many items survived curation or synthesis
-// (curated - counted before the category filter and paging trim the served
-// view). Observability only: a request that cannot be answered with a feed
-// travels as a torznabFault, not as a field here.
+// queryStats summarizes one request for the per-request log line: whether the feed
+// answered it, whether it was served from the synthesized RSS feed rather than a
+// proxied search, how many upstream results survived the download-URL origin
+// filter, and how many items survived curation or synthesis (counted before the
+// category filter and paging). Observability only: an unanswerable request travels
+// as a torznabFault, not as a field here.
 type queryStats struct {
 	answered bool
 	feed     bool
-	// upstreamFetched is the RAW parsed-item count of the upstream page,
-	// BEFORE filterDownloadURLs' origin gate; upstream is the post-gate
-	// survivor count. A gap between them is the origin filter dropping items,
-	// which is otherwise invisible after its once-per-onset WARN.
+	// upstreamFetched is the RAW parsed-item count of the upstream page, BEFORE
+	// filterDownloadURLs' origin gate; upstream is the post-gate survivor count. A
+	// gap between them is that filter dropping items, otherwise invisible.
 	upstreamFetched int
 	upstream        int
 	curated         int
-	// identityConflicts counts search results dropped because a curated
-	// identity signal was CONTRADICTED by another signal on the same item (a
-	// cross-torrent hash/key pair, two different tracker ids, an out-of-scope
-	// key), as opposed to the ordinary "not curated by SeaDex" drop that
-	// accounts for nearly every filtered result. Without it a tampered or
-	// misbehaving upstream reads exactly like a clean no-match.
+	// identityConflicts counts search results dropped because a curated identity
+	// signal was CONTRADICTED by another signal on the same item, as opposed to the
+	// ordinary not-curated drop. Without it a tampered or misbehaving upstream reads
+	// exactly like a clean no-match.
 	identityConflicts int
 }
 
-// query returns the feed items for a request (restricted to scope's tracker),
-// a queryStats summary for logging, and a non-nil torznabFault when the
-// request could not be answered with a feed at all.
-//
-// An empty-q request (Prowlarr's caps/save test, or an RSS "latest" fetch) is
-// served from the synthesized per-tracker SeaDex journal - the releases newly
-// curated within the journal window, rendered as grabbable items - without
-// contacting a tracker. This is the periodic new-release check: the arr parses
-// each synthesized title and grabs what matches its library.
-//
-// A search (non-empty q) is proxied to that tracker's Prowlarr endpoint and
-// filtered to SeaDex's curation, passing real titles/seeders/links through. A
-// per-episode query is deliberately answered with nothing (without contacting a
-// tracker): Sonarr searches an anime season episode by episode AND as a whole
-// season (see NewznabRequestGenerator), so answering only the season search
-// still delivers the pack while sparing the trackers a query per episode.
+// query returns the feed items for a request (restricted to scope's tracker), a
+// queryStats summary, and a non-nil torznabFault when the request could not be
+// answered with a feed at all.
 func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]item, queryStats, *torznabFault) {
 	if !servesQuery(q) {
 		return nil, queryStats{}, nil
 	}
-	// A disabled tracker has NO feed to read and NO upstream to search,
-	// whatever the snapshot's state, so NEITHER of its documented off-switch
-	// responses may be gated by snapshot state: feedFor already serves an
-	// unconfigured scope nothing, rejectMissingABPasskey promises that same
-	// empty feed earlier in the same request, and fetchRaw answers a search on
-	// an unwired scope with its own once-per-onset WARN (wireUpstreams never
-	// builds an upstream for a scope whose Torznab URL is blank). Answering the
-	// snapshot-unavailable fault for either leg would fail a deliberately-off
-	// tracker on a local fault that has nothing to do with it - the Prowlarr
-	// save-test for the RSS leg, and every search the arr still sends for the
-	// other, where an <error> is a FAILED search counted toward disabling this
-	// indexer, RSS included.
+	// A disabled tracker has NO feed to read and NO upstream to search, whatever the
+	// snapshot's state, so neither off-switch response may be gated by snapshot
+	// state: answering the snapshot-unavailable fault would fail a deliberately-off
+	// tracker on an unrelated local fault - the Prowlarr save-test for the RSS leg,
+	// and for the other every search the arr still sends, where an <error> counts
+	// toward disabling this indexer, RSS included.
 	enabled := ix.enablement.enabled(scope)
 	if isFeedRequest(q) && !enabled {
 		return nil, queryStats{answered: true, feed: true}, nil
 	}
-	// Nothing here LOADS. The served snapshot is installed off the request path -
-	// published in-process by this process's compare cycle, or loaded by the
-	// cache's own reload clock (see snapshotCache) - so a request is one atomic
-	// read of whatever is current: no syscall, no gate, no wait. That is the
-	// whole reason a wedged /config mount can no longer strand a handler, which
-	// net/http's WriteTimeout cannot cancel.
-	//
-	// The one snapshot state a request still reads is whether ANYTHING has ever
-	// been installed. Nothing installed is not an empty catalogue: serving the
-	// synthesized feed would blank it, and a search would filter every Prowlarr
-	// result against nil curation maps - both false-empty, so the arr records a
-	// clean no-match during a local fault. Answer with a fault (serve renders a
-	// Torznab <error>, exactly like an unavailable Prowlarr dependency) without
-	// contacting a tracker.
+	// Nothing here LOADS. The served snapshot is installed off the request path, so a
+	// request is one atomic read of whatever is current: no syscall, no gate, no
+	// wait. That is why a wedged /config mount can no longer strand a handler.
 	if enabled && ix.cache.unavailable() {
 		return nil, queryStats{answered: true}, snapshotUnavailableFault()
 	}
@@ -324,12 +234,10 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 			identityConflicts: conflicts,
 		}
 		if failed {
-			// A total upstream failure (every queried Prowlarr upstream
-			// failed) is reported as a Torznab <error>, not an empty 200
-			// feed: an empty feed reads as a clean "no SeaDex match" to the
-			// arr, which would silently record a Prowlarr outage as a
-			// successful no-results search. A partial failure (one of several
-			// upstreams answered) keeps the degraded-but-successful feed.
+			// A total upstream failure is reported as a Torznab <error>, not an empty
+			// 200 feed: an empty feed reads as a clean no-match, which would record a
+			// Prowlarr outage as a successful search. A partial failure keeps the
+			// degraded-but-successful feed.
 			fault = &torznabFault{
 				summary: "upstream query failed",
 				code:    errCodeUnknown,
@@ -339,20 +247,16 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	}
 
 	if stats.feed {
-		// The category filter applies to the SYNTHESIZED feed only: those items
-		// carry the app's own Fribb-typed vocabulary (categoriesFor - Movies for a
-		// film, Anime otherwise), so the client's cat list is meaningful against
-		// them. Proxied search results carry the TRACKER's categories instead -
-		// both proxied trackers are anime trackers, so a film arrives as Anime
-		// 5070 - and cat was already forwarded upstream (upstreamParams), so
-		// re-filtering here would empty every Movies-category search.
+		// The category filter applies to the SYNTHESIZED feed only: those items carry
+		// the app's own Fribb-typed vocabulary, so the client's cat list is meaningful
+		// against them. Proxied results carry the TRACKER's categories and cat was
+		// already forwarded upstream, so re-filtering would empty every Movies search.
 		items = filterByCats(items, parseCats(q.Get("cat")))
 		items = applyPaging(ix.log, items, q)
 	}
 	if len(items) > maxItems {
-		// The rendered view is capped; say so, so a short feed is never
-		// mistaken for a short catalogue (the render path WARNs on its own
-		// byte-budget truncation for the same reason).
+		// The rendered view is capped; say so, so a short feed is never mistaken for a
+		// short catalogue.
 		ix.log.Warn("feed trimmed to the rendered-item cap",
 			"available", len(items), "max_items", maxItems)
 		items = items[:maxItems]
@@ -361,24 +265,17 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 }
 
 // isFeedRequest reports whether a request is the empty-query periodic RSS check
-// served from the synthesized journal rather than a proxied search. It is the ONE
-// home of that reading: query dispatches on it, and server.go's
-// rejectMissingABPasskey selects the same requests through it, so the AnimeBytes
-// passkey error is rendered for exactly the requests the synthesized feed answers.
+// served from the synthesized journal rather than a proxied search. The ONE home of
+// that reading: query dispatches on it and rejectMissingABPasskey selects the same
+// requests through it, so the passkey error covers exactly those requests.
 func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == "" }
 
-// --- Serving the synthesized feed ---
-
-// applyPaging honors the Torznab offset/limit params (advertised in t=caps)
-// on the synthesized feed. A request without a usable limit gets the
-// advertised default, defaultCapsLimit, newest-first (the feed is sorted
-// newest-first), so the caps document is honest; the arrs always send an
-// explicit limit, so real consumers are unaffected. An explicit limit behaves
-// as before, an absent or invalid offset leaves the window anchored at the
-// newest item, and the proxied search path pages at the UPSTREAM instead, so
-// it never pages locally (it forwards offset to Prowlarr and always asks for
-// the full decoder window - see upstreamParams). A present-but-unusable limit
-// or offset is logged at Debug so a misconfigured client is diagnosable.
+// applyPaging honors the Torznab offset/limit params (advertised in t=caps) on the
+// synthesized feed. A request without a usable limit gets the advertised default,
+// newest-first, so the caps document is honest; the arrs always send an explicit
+// limit. An absent or invalid offset leaves the window anchored at the newest item,
+// and the proxied search path pages at the UPSTREAM instead. A present-but-unusable
+// value is logged at Debug so a misconfigured client is diagnosable.
 func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 	rawOffset := strings.TrimSpace(q.Get("offset"))
 	off, offErr := strconv.Atoi(rawOffset)
@@ -390,10 +287,8 @@ func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 		items = items[off:]
 	case rawOffset != "" && (offErr != nil || off < 0):
 		// An empty or numeric-zero offset IS the first page, so only a
-		// present-but-unusable value (non-numeric, overflowing, or negative)
-		// is named here: the window it asked for was discarded and the
-		// response comes from the newest page instead, which the per-request
-		// access line does not carry.
+		// present-but-unusable value is named here: the window it asked for was
+		// discarded and the response comes from the newest page instead.
 		log.Debug("unusable Torznab offset param; using the first page",
 			"offset", logParam(rawOffset), "default", 0)
 	}
@@ -413,38 +308,25 @@ func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 	return items
 }
 
-// feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
-// read through the snapshot cache, which owns the locking (a cycle rewrite
-// replaces the snapshot under it). A scope whose Prowlarr Torznab URL is not
-// configured serves nothing, even when the loaded snapshot carries items for it
-// (a stale snapshot written before the operator turned the tracker off): the
-// README documents an empty per-tracker URL as that tracker's off switch, and
-// the /ab feed embeds the
-// operator's passkey, so an off tracker's empty-q response must be the same
-// shape as a tracker with no data - never the credential-bearing feed. The
-// returned slice is safe to use after the cache's read returns: reload installs
-// a fresh snapshot with new backing arrays and never mutates the old ones, so a
-// slice handed out here stays immutable even across a swap. Callers must only
-// read it (never append/write in place).
+// feedFor returns the synthesized RSS feed for a tracker scope, read through the
+// snapshot cache, which owns the locking. A scope whose Prowlarr Torznab URL is not
+// configured serves nothing, even when the loaded snapshot carries items for it:
+// an empty per-tracker URL is that tracker's documented off switch, and the /ab
+// feed embeds the operator's passkey, so an off tracker's response must be the same
+// shape as a tracker with no data. The returned slice is safe to use after the read
+// returns - reload installs fresh backing arrays and never mutates the old ones -
+// but callers must only read it.
 func (ix *Indexer) feedFor(scope string) []item {
-	// The enablement gate is the SERVER's, not the cache's: whether a tracker's
-	// feed may be served at all is config policy, while the cache only answers
-	// what is loaded. An unknown scope is not enabled, so it returns nil here.
-	//
-	// query reads the same predicate earlier, to answer a different question -
-	// whether this request needs a snapshot at all - and the two readings share
-	// their one home (UpstreamConfig.enabled), so they cannot disagree. This one
-	// stays because it is the fail-closed gate at the serving boundary: the /ab
-	// feed's links carry the operator's passkey, and that must not depend on a
-	// caller having checked first.
+	// The enablement gate is the SERVER's, not the cache's: whether a tracker's feed
+	// may be served at all is config policy, while the cache only answers what is
+	// loaded.
 	if !ix.enablement.enabled(scope) {
 		return nil
 	}
 	feed := ix.cache.feed(scope)
 	// The serve boundary speaks the WIRE vocabulary only: strip the journal
-	// bookkeeping (never rendered) by projecting each record onto its
-	// embedded item, so the render path cannot depend on persisted-only
-	// fields.
+	// bookkeeping by projecting each record onto its embedded item, so the render
+	// path cannot depend on persisted-only fields.
 	items := make([]item, len(feed))
 	for i := range feed {
 		items[i] = feed[i].item
@@ -452,32 +334,22 @@ func (ix *Indexer) feedFor(scope string) []item {
 	return items
 }
 
-// --- Proxied upstream search ---
-
-// fetchRaw queries the scope's upstream and returns the raw results, before
-// any curation filtering, the RAW parsed-item count of the upstream page
-// (fetched - counted BEFORE the download-URL origin filter, so a gap between
-// it and len(items) is that filter dropping items), plus whether the query was
-// a total upstream failure
-// (every queried upstream failed - with per-tracker scoping that is the one
-// upstream the scope names). On failed=true query builds a torznabFault so
-// serve renders a Torznab <error>
-// instead of a fake-empty 200 feed, so a Prowlarr outage surfaces as a failed
-// search in the arr rather than a clean no-results one. Returns nil,0,false when
-// no upstream is configured for the scope (a standing misconfiguration, not a
-// query failure) or when the caller cancelled the request.
+// fetchRaw queries the scope's upstream and returns the raw results before any
+// curation filtering, the RAW parsed-item count of the upstream page (counted
+// BEFORE the download-URL origin filter, so a gap is that filter dropping items),
+// plus whether the query was a total upstream failure. On failed=true query builds
+// a torznabFault so serve renders a Torznab <error> instead of a fake-empty 200
+// feed. Returns nil,0,false when no upstream is configured for the scope (a
+// standing misconfiguration) or when the caller cancelled the request.
 func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string) (items []item, fetched int, failed bool) {
-	// upstreams is wired once in New, before any request can arrive, and is
-	// never mutated afterwards, so it needs no synchronization; the snapshot
-	// fields live behind snapshotCache's own lock.
+	// upstreams is wired once in New, before any request can arrive, and never
+	// mutated, so it needs no synchronization; the snapshot lives behind its cache.
 	u := upstreamForScope(ix.upstreams, scope)
 	if u == nil {
-		// A search reached a scope whose Prowlarr upstream is not configured
-		// (e.g. an /ab search with only nyaa_torznab_url set): the empty result
-		// is a permanent misconfiguration, not a no-match, so say so - once.
-		// The state cannot change while the process runs, and an arr left
-		// pointing at a turned-off tracker searches a season per series, so
-		// repeats drop to Debug (see noUpstreamWarned).
+		// A search reached a scope whose Prowlarr upstream is not configured: the
+		// empty result is a permanent misconfiguration, not a no-match, so say so -
+		// once. The state cannot change while the process runs, so repeats drop to
+		// Debug (see noUpstreamWarned).
 		log := ix.log.Debug
 		if w, ok := ix.noUpstreamWarned[scope]; ok && w.CompareAndSwap(false, true) {
 			log = ix.log.Warn
@@ -490,26 +362,16 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 	items, fetched, err := u.search(ctx, params)
 	if err != nil {
 		if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err())) {
-			// Caller (the arr) went away or its request deadline fired; not an
-			// upstream fault. A Prowlarr HTTP client timeout leaves ctx.Err()
-			// nil and should warn.
-			//
-			// Say so at Debug: the empty-and-not-failed return is otherwise
-			// indistinguishable from a genuine no-match in the request INFO
-			// line (upstream_fetched=0 upstream=0 curated=0), and this is the
-			// longest abandonment window of the three - its two siblings, the
-			// gate wait and the response write, each already record one.
+			// Caller (the arr) went away or its request deadline fired; not an upstream
+			// fault - a Prowlarr client timeout leaves ctx.Err() nil and should warn.
 			ix.log.Debug("upstream query abandoned by the caller; returning empty",
 				"upstream", u.name, "scope", scope)
 			return nil, 0, false
 		}
-		// The credentials class is ERROR here for the same reason as on the
-		// harvest path (permanentUpstreamCredentialError): it cannot clear
-		// without the operator, and this is the site whose consequence
-		// escalates - every rejected search answers the arr a Torznab <error>,
-		// which counts toward the arr disabling this indexer, RSS included. One
-		// answer covers both sites, so the level split lives with the predicate
-		// rather than being re-decided here.
+		// The credentials class is ERROR here for the same reason as on the harvest
+		// path: it cannot clear without the operator, and this is the site whose
+		// consequence escalates - every rejected search answers a Torznab <error>,
+		// which counts toward the arr disabling this indexer, RSS included.
 		if permanentUpstreamCredentialError(err) {
 			ix.log.Error("upstream rejected the credentials; searches will keep failing until an operator fixes it, "+
 				"and an arr counts these failures toward disabling this indexer (RSS included) - "+
@@ -523,14 +385,11 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 	return items, fetched, false
 }
 
-// markAndDedupe keeps the curated releases, stamps each with the best/alt
-// marker, and drops intra-upstream duplicates by guid (a torrent listed under
-// several title aliases carries distinct guids and is deliberately kept). It
-// also reports how many items were dropped by an identity CONTRADICTION rather
-// than by simply not being curated (see lookup's conflict return), so that
-// class - an untrusted Torznab response pairing a curated signal with a
-// foreign one - is visible in the per-request line instead of reading as a
-// clean no-match.
+// markAndDedupe keeps the curated releases, stamps each with the best/alt marker,
+// and drops intra-upstream duplicates by guid (a torrent listed under several title
+// aliases carries distinct guids and is deliberately kept). It also reports how many
+// items were dropped by an identity CONTRADICTION rather than by not being curated,
+// so that class is visible in the per-request line instead of reading as no-match.
 func markAndDedupe(raw []item, set *curation, scope string) (out []item, conflicts int) {
 	seen := make(map[string]struct{}, len(raw))
 	out = make([]item, 0, len(raw))
@@ -557,29 +416,9 @@ func markAndDedupe(raw []item, set *curation, scope string) (out []item, conflic
 	return out, conflicts
 }
 
-// upstreamParams selects the Torznab query params to forward to Prowlarr,
-// dropping our own apikey. It defaults the search type to a basic search and
-// always asks the upstream for the FULL window the decoder accepts (maxItems).
-//
-// The client's own limit is deliberately NOT forwarded. A Torznab limit
-// describes how many items the CLIENT wants back, and this endpoint filters
-// the upstream page down to the SeaDex-curated releases locally - so
-// forwarding it made the client's page size the upstream's truncation point
-// and dropped every curated release sitting past it. Sonarr's season search
-// arrives as limit=100 while a live AnimeBytes result set for one series runs
-// to ~145 items: a curated torrent at upstream position 100+ was simply
-// invisible, and the arr never paged for it (a handful of curated items looks
-// like a last page for a limit of 100), so the release went missing with no
-// diagnostic (h-f12).
-//
-// maxItems is the right window because it is what both ends of this app
-// already agree on: the caps document advertises max=maxItems and
-// parseTorznab rejects a response above maxUpstreamItems (== maxItems). At
-// real Torznab item sizes a full page is ~1 MiB, well inside
-// upstreamMaxBytes, so the fetch stays a single bounded attempt rather than
-// the bounded-retry-then-Torznab-error an over-contract limit used to cause.
-// offset is still forwarded verbatim: it names where in the upstream's own
-// result list to start, which is not something curation reinterprets.
+// upstreamParams selects the Torznab query params to forward to Prowlarr, dropping
+// our own apikey. It defaults the search type to a basic search and always asks the
+// upstream for the FULL window the decoder accepts (maxItems).
 func upstreamParams(q url.Values) url.Values {
 	out := url.Values{}
 	for _, k := range []string{"t", "q", "cat", "season", "ep", "offset"} {
@@ -594,10 +433,9 @@ func upstreamParams(q url.Values) url.Values {
 	return out
 }
 
-// upstreamForScope returns the upstream a scope targets (nyaa or ab), or nil
-// when no configured upstream matches. Scope is always a specific tracker here
-// (serve rejects an unscoped request) and New wires at most one upstream per
-// name, so a single match is the only case.
+// upstreamForScope returns the upstream a scope targets, or nil when no configured
+// upstream matches. Scope is always a specific tracker here and New wires at most
+// one upstream per name, so a single match is the only case.
 func upstreamForScope(all []*upstream, scope string) *upstream {
 	for _, u := range all {
 		if u.name == scope {
@@ -607,39 +445,20 @@ func upstreamForScope(all []*upstream, scope string) *upstream {
 	return nil
 }
 
-// --- Query admission ---
-
-// servesQuery reports whether the feed answers a request by querying the
-// trackers, or returns empty without contacting them. It answers movie searches
-// (`t=movie`, or a `t=search` carrying the Movies category), season searches
-// (`tvsearch` with no `ep`) and bare/RSS searches, and special/generic text
-// searches - but NOT a per-episode query: a `tvsearch` with an `ep`, or a
-// `t=search` whose `q` ends in the absolute episode number Sonarr appends (e.g.
-// "Frieren 01"). Sonarr issues a season search too, which returns the pack, so
-// dropping the per-episode queries loses nothing for a series while sparing the
-// trackers one query per episode per scene-title alias. Specials and movies are
-// single releases (not packs), so they are always answered - a film search comes
-// through as `t=search` with the movie's year in `q`, so it is recognized by its
-// Movies category rather than the trailing-number heuristic (which the year
-// would otherwise trip).
-//
-// NOTE: this relies on Sonarr issuing the season search. For an Anime-type series
-// that requires the indexer's "Anime Standard Format Search" option to be on (it
-// gates AnimeSeasonSearchCriteria); see the README.
+// servesQuery reports whether the feed answers a request by querying the trackers, or
+// returns empty without contacting them.
 func servesQuery(q url.Values) bool {
 	switch strings.ToLower(strings.TrimSpace(q.Get("t"))) {
 	case "movie", "movie-search", "moviesearch":
 		return true
 	case "tvsearch", "tv-search":
-		// Season 0 is Sonarr's specials bucket: specials are single releases
-		// (never packs), so a season-0 per-episode search is always answered
-		// rather than skipped like an ordinary season's episode barrage.
+		// Season 0 is Sonarr's specials bucket: specials are single releases, so a
+		// season-0 per-episode search is always answered rather than skipped.
 		return strings.TrimSpace(q.Get("ep")) == "" || strings.TrimSpace(q.Get("season")) == "0"
 	default: // "search", "", specials, generic, RSS
-		// A Movies-category search is a film (single release), always answered. It
-		// must not fall through to the anime episode-skip below: a movie query
-		// ends in its year (e.g. "From Up on Poppy Hill 2011"), which the
-		// trailingEpisode regex would otherwise misread as a per-episode number.
+		// A Movies-category search is a film (single release), always answered. It must
+		// not fall through to the episode-skip below: a movie query ends in its year,
+		// which trailingEpisode would misread as a per-episode number.
 		if requestsMovies(q.Get("cat")) {
 			return true
 		}
@@ -659,17 +478,12 @@ func requestsMovies(cat string) bool {
 }
 
 // trailingEpisode matches the absolute episode number Sonarr appends to an anime
-// title query (a space then a 2-4 digit number, e.g. "Frieren 01"), which marks a
-// per-episode search the feed does not answer on the basic-search (t=search) path.
-// NOTE: this regex cannot tell an appended episode from a title that itself ends in
-// a 2-4 digit number, so "Mob Psycho 100" also matches and is skipped on the
-// t=search path (a 1-digit tail like "Steins;Gate 0" does NOT match). That is safe
-// for the whole-season grab: Sonarr issues the season search as t=tvsearch (the
-// tvsearch case above, always answered), which delivers the pack; this heuristic
-// only governs the basic-search fallback, where a per-episode barrage is the risk.
+// title query (a space then a 2-4 digit number), which marks a per-episode search
+// the feed does not answer on the basic-search path. NOTE: it cannot tell an
+// appended episode from a title that itself ends in a 2-4 digit number, so "Mob
+// Psycho 100" is also skipped there. That is safe for the whole-season grab, which
+// arrives as t=tvsearch and is always answered.
 var trailingEpisode = regexp.MustCompile(`\s+\d{2,4}$`)
-
-// --- Category filtering ---
 
 // filterByCats keeps items whose category is requested (an anime item satisfies
 // a request for its TV parent). An empty request keeps everything; an item with
@@ -687,18 +501,16 @@ func filterByCats(items []item, cats map[int]bool) []item {
 	return out
 }
 
-// categoryMatch reports whether an item's categories satisfy the requested
-// set: an item category matches when requested exactly or by its Torznab
-// parent category (the multiple-of-1000 floor, e.g. anime 5070's parent is TV
-// 5000) - generalizing the previous anime->TV special case.
+// categoryMatch reports whether an item's categories satisfy the requested set: an
+// item category matches when requested exactly or by its Torznab parent category
+// (the multiple-of-1000 floor, e.g. anime 5070's parent is TV 5000).
 func categoryMatch(itemCats []int, want map[int]bool) bool {
 	if len(itemCats) == 0 {
 		return true
 	}
 	for _, c := range itemCats {
-		// The parent leg needs no domain guard: parseCats admits only positive
-		// ids, so want[0] is always false, and c - c%1000 is 0 for every c <= 0
-		// and every 0 < c < 1000 - the ids a `c >= 1000` guard would exclude are
+		// The parent leg needs no domain guard: parseCats admits only positive ids, so
+		// want[0] is always false and the ids a `c >= 1000` guard would exclude are
 		// already refused by the lookup itself.
 		if want[c] || want[c-c%1000] {
 			return true

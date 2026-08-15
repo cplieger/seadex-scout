@@ -4,16 +4,11 @@
 // variables via ${VAR} expansion, so secrets can stay in an .env or Docker
 // secret rather than in the file.
 //
-// The file exposes only user-facing settings (arrs, mode, schedule, filters,
-// arr_tags, report dir, logging, the indexer feed). Internal machinery - the
-// upstream endpoints, the politeness/refresh/rate cadences, and the internal
-// /config file paths (state, overrides, feed snapshot) - are fixed package
-// constants, not file keys (the indexer bind address is fixed too, in
-// internal/indexer). The on-disk shape
-// (fileConfig) is loaded onto a defaults baseline, ${VAR}-expanded, then
-// flattened into the runtime Config the rest of the app reads. Call Validate
-// to check the result is runnable. There is no hot reload: the file is read
-// once at startup.
+// The file exposes only user-facing settings; the upstream endpoints, cadences and
+// internal /config paths are fixed package constants. The on-disk shape (fileConfig)
+// is loaded onto a defaults baseline, ${VAR}-expanded, then flattened into the
+// runtime Config. Call Validate to check the result is runnable. There is no hot
+// reload: the file is read once at startup.
 package config
 
 import (
@@ -44,8 +39,7 @@ import (
 )
 
 // DefaultConfigDir is the single container mount every seadex-scout file lives
-// under; every path constant below is derived from it, and it is the directory
-// the cross-process cycle lock is created in.
+// under; every path constant below is derived from it.
 const DefaultConfigDir = "/config"
 
 // DefaultConfigPath is the container-internal config file path.
@@ -54,42 +48,22 @@ const DefaultConfigPath = DefaultConfigDir + "/config.yaml"
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
 
-// Fixed endpoints, cadences, internal /config file paths, and the default
-// report directory. These are internal machinery wired at build time,
-// deliberately NOT exposed as config-file keys: the user should never need to
-// point the app at a different SeaDex/Fribb/AniList, retune the politeness
-// delays, or relocate the state, overrides, or feed-snapshot files (everything
-// lives under the single /config mount). DefaultReportDir is the one
-// configurable baseline here: report.dir overrides it.
+// Fixed endpoints, cadences, internal /config file paths, and the default report
+// directory: internal machinery wired at build time, deliberately NOT config-file
+// keys. DefaultReportDir is the one baseline report.dir overrides.
 const (
-	// The SeaDex (releases.moe) site base deliberately has NO constant here:
-	// internal/seadex owns the releases.moe contract (seadex.DefaultBaseURL,
-	// beside EntryURL/ValidInfoHash), and config - a dependency leaf that
-	// cannot import it - must not keep an equal literal that can silently
-	// drift. The wiring site (build.go) references the seadex constant.
-	// The Fribb and AniList endpoints follow the same rule: internal/mapping
-	// and internal/anilist export their own DefaultURL beside the decoders
-	// that embody each upstream contract. Each upstream's request cadence is
-	// the same class of contract knowledge and lives beside its endpoint too
-	// (seadex.DefaultPageDelay, mapping.DefaultRefresh, anilist.DefaultRate),
-	// so retuning one upstream touches only the package that knows it.
-	// DefaultMappingOverrides is the local alID->IDs override file: drop one in
-	// at this path to pin mappings; absent is fine.
+	// Each upstream's package owns its own DefaultURL and request cadence beside the
+	// decoder that embodies its contract; config is a leaf that cannot import them.
+	// DefaultMappingOverrides is the local alID->IDs override file; absent is fine.
 	DefaultMappingOverrides = DefaultConfigDir + "/overrides.json"
 	// DefaultStatePath is the atomic JSON cache/state file.
 	DefaultStatePath = DefaultConfigDir + "/state.json"
-	// DefaultCycleLockDir is the directory holding cycle.lock, the cross-process
-	// cycle coalescing lock. It is the mount root so the lock lives beside the
-	// state.json and feed.json writes it orders (see internal/cycle), rather
-	// than depending on where either of those files happens to live.
+	// DefaultCycleLockDir holds cycle.lock, the cross-process cycle coalescing lock.
+	// It is the mount root, so the lock lives beside the writes it orders.
 	DefaultCycleLockDir = DefaultConfigDir
 	// DefaultIndexerFeedPath is the atomic JSON file the compare cycle writes the
-	// indexer's materialized feed to (the search curation set, the synthesized
-	// per-tracker RSS journals with their publication log, and the harvested-title
-	// cache) and the indexer HTTP server reads. One
-	// data engine (the cycle) produces both the findings and this feed, and
-	// persisting it lets a cycle run by the `poll` subcommand refresh a resident
-	// daemon's feed across the process boundary.
+	// indexer's materialized feed to and the indexer HTTP server reads; persisting it
+	// lets a `poll` cycle refresh a resident daemon's feed across the process boundary.
 	DefaultIndexerFeedPath = DefaultConfigDir + "/feed.json"
 	// DefaultReportDir is the directory report mode writes timestamped report
 	// pairs into (report-<UTC timestamp>.md / .json).
@@ -100,46 +74,31 @@ const (
 	// RunModeReport is the one-shot audit: scan once, write the report, exit.
 	RunModeReport = "report"
 
-	// DefaultPollInterval is the loop's own interval. Most iterations are a
-	// cheap TICK - one ~88-byte probe plus, when something changed, one request
-	// of a few tens of KiB - and every 24h worth of them is a full reconcile
-	// (the whole catalogue, the whole arr walk, the whole feed and curation-index
-	// rebuild). So this is the FRESHNESS knob, not the cost knob: the upstream
-	// load it drives is proportional to the change RATE, not to the interval.
-	//
-	// 15m follows the consumer rather than a guess. Sonarr's own RSS Sync
-	// Interval is 10-120 minutes with a default of 15, so fetching faster than
-	// that cannot reach the arrs any sooner. There is no natural knee to pick
-	// instead: measured against 90 days of upstream history, the number of
-	// productive passes per day is nearly flat across the whole range.
+	// DefaultPollInterval is the loop's own interval, and it is the FRESHNESS knob
+	// rather than the cost knob: most iterations are a cheap tick, so the upstream load
+	// is proportional to the change RATE. 15m follows the consumer - Sonarr's own RSS
+	// Sync Interval defaults to 15, so fetching faster cannot reach the arrs sooner.
 	DefaultPollInterval = 15 * time.Minute
 )
 
 // Clamp bounds for poll_interval, the only file-provided duration. The floor is
-// the consumer's own floor for the same reason the default follows its default:
-// below Sonarr's 10-minute minimum, a shorter interval buys freshness no arr can
-// read, while still costing the upstream a probe every time.
+// Sonarr's own 10-minute minimum: below it lies freshness no arr can read.
 const (
 	minPollInterval = 15 * time.Minute
 	maxPollInterval = 30 * 24 * time.Hour
 )
 
 // Bounds on the filters.exclude_tags map, the one file key whose KEYS are
-// operator-supplied free text. SeaDex's own curation vocabulary is a handful of
-// short words ("Broken", "Incomplete"), so both bounds are generous ceilings
-// that only a paste error or a hostile file can reach - the point is that the
-// policy map cannot grow unbounded from a 1 MiB config, since every release's
-// tags are matched against it on every surface.
+// operator-supplied free text. Generous ceilings only a paste error or a hostile file
+// can reach; every release's tags are matched against the map on every surface.
 const (
 	maxExcludeTags   = 32
 	maxExcludeTagLen = 64
 )
 
-// maxIgnoreIDs bounds filters.ignore. Findings are reported as STATE, so every
-// entry in this set is consulted once per finding on every emission pass; a
-// generous ceiling keeps a 1 MiB config from turning that into unbounded work,
-// and an operator with more than a few hundred deliberately-declined shows has
-// a different problem than an alert filter can solve (CWE-400).
+// maxIgnoreIDs bounds filters.ignore. Findings are reported as STATE, so every entry
+// is consulted once per finding on every pass; the ceiling keeps a 1 MiB config from
+// turning that into unbounded work (CWE-400).
 const maxIgnoreIDs = 512
 
 // --- On-disk YAML shape and defaults ---
@@ -154,26 +113,18 @@ type fileConfig struct {
 	Radarr       arrFile     `yaml:"radarr"`
 	Sonarr       arrFile     `yaml:"sonarr"`
 	ArrTags      tagsFile    `yaml:"arr_tags"`
-	// Filters sits after the pointer-bearing members and before AnimeBytes
-	// because filtersFile ends in bools: keeping its non-pointer tail late
-	// shortens the struct's GC-scanned prefix (govet fieldalignment).
+	// Filters sits late because filtersFile ends in bools: keeping the non-pointer
+	// tail late shortens the GC-scanned prefix (govet fieldalignment).
 	Filters filtersFile `yaml:"filters"`
-	// AnimeBytes adds AnimeBytes (private tracker) releases and links to findings
-	// and the report; it is a tracker-access toggle (do you have an account?),
-	// not a content filter, so it sits at the top level rather than under filters.
+	// AnimeBytes adds AnimeBytes (private tracker) releases and links; it is a
+	// tracker-access toggle, not a content filter, so it sits at the top level.
 	AnimeBytes bool `yaml:"animebytes"`
 }
 
-// indexerFile configures the optional Torznab feed the daemon serves alongside
-// the compare loop. Searches proxy Prowlarr's per-indexer Torznab endpoints
-// (Nyaa + AnimeBytes) filtered to SeaDex's curation, so they need only the
-// Prowlarr API key. The periodic RSS feed is synthesized from the SeaDex list
-// with directly-built download links; AnimeBytes links need the operator's
-// passkey (ab_passkey), the one tracker credential here - public Nyaa links need
-// none. An empty Nyaa/AnimeBytes URL disables that upstream; both empty disables
-// the feed entirely (the daemon then binds no HTTP port). An empty ab_passkey
-// leaves the AnimeBytes RSS feed without grabbable links (search still works via
-// Prowlarr).
+// indexerFile configures the optional Torznab feed the daemon serves alongside the
+// compare loop. An empty Nyaa/AnimeBytes URL disables that upstream; both empty
+// disables the feed (the daemon then binds no HTTP port). An empty ab_passkey leaves
+// the AnimeBytes RSS feed without grabbable links (search still works via Prowlarr).
 type indexerFile struct {
 	FeedAPIKey     string `yaml:"feed_api_key"`
 	NyaaTorznabURL string `yaml:"nyaa_torznab_url"`
@@ -190,17 +141,12 @@ type arrFile struct {
 }
 
 type filtersFile struct {
-	// ExcludeTags maps a SeaDex tag to the recommendation surfaces it is
-	// excluded from ("findings", "report", "feed"). Absent or empty means
-	// NOTHING is filtered on any surface; see buildTagFilter for the bounds and
-	// the surface vocabulary.
+	// ExcludeTags maps a SeaDex tag to the surfaces it is excluded from ("findings",
+	// "report", "feed"). Absent or empty means NOTHING is filtered on any surface.
 	ExcludeTags map[string][]string `yaml:"exclude_tags"`
-	// Ignore lists AniList IDs whose findings are never emitted. Absent or
-	// empty (the default) reports everything. It suppresses EMISSION only: the
-	// report still shows the row and the RSS feed is untouched, because the
-	// app's standing rule is that a release is never withheld from the arrs -
-	// this withholds an ALERT the operator asked to stop, which is a different
-	// thing. See buildIgnoreSet for the bound.
+	// Ignore lists AniList IDs whose findings are never emitted; absent or empty
+	// reports everything. It suppresses EMISSION only: the report still shows the row
+	// and the RSS feed is untouched, because a release is never withheld from the arrs.
 	Ignore           []int `yaml:"ignore"`
 	ExcludeRemux     bool  `yaml:"exclude_remux"`
 	RequireDualAudio bool  `yaml:"require_dual_audio"`
@@ -221,10 +167,8 @@ type logFile struct {
 	Format string `yaml:"format"`
 }
 
-// defaultFileConfig is the baseline the YAML document overlays. Absent keys
-// keep these values, so a partial config still runs. The filter toggles all
-// default to their false zero value (nothing excluded), so they need no entry
-// here.
+// defaultFileConfig is the baseline the YAML document overlays. Absent keys keep
+// these values, so a partial config still runs.
 func defaultFileConfig() fileConfig {
 	return fileConfig{
 		Sonarr: arrFile{URL: "http://sonarr:8989"},
@@ -235,23 +179,17 @@ func defaultFileConfig() fileConfig {
 	}
 }
 
-// Config is the effective runtime configuration after loading. It holds only
-// the user-configurable settings; the fixed endpoints, cadences, and /config
-// file paths are package constants (see the const block), wired in build.go;
-// the indexer bind address is fixed in internal/indexer. Fields are ordered
-// largest-alignment-first for govet fieldalignment.
+// Config is the effective runtime configuration after loading. It holds only the
+// user-configurable settings; the fixed endpoints, cadences and /config file paths
+// are package constants. Fields are ordered largest-alignment-first (fieldalignment).
 type Config struct {
-	// tagFilterErr holds a rejected filters.exclude_tags map (unknown surface,
-	// blank or over-long tag key, no surfaces, too many tags). It is recorded at
-	// flatten time and returned by Validate, so the single parse happens where
-	// the file shape is still in hand and the startup error still stops the app.
-	// It leads the struct for fieldalignment, not for prominence.
+	// tagFilterErr holds a rejected filters.exclude_tags map, recorded at flatten time
+	// and returned by Validate, so the single parse happens where the file shape is
+	// still in hand. It leads the struct for fieldalignment, not for prominence.
 	tagFilterErr error
 	// TagFilter is the filters.exclude_tags policy: which SeaDex tags exclude a
-	// release from which recommendation surface. The zero value (the default,
-	// and what an absent or empty section yields) filters NOTHING anywhere - a
-	// release SeaDex tagged Broken reaches the findings, the report and the
-	// feed. It is the one policy all three surfaces read.
+	// release from which recommendation surface. The zero value filters NOTHING
+	// anywhere, and it is the one policy all three surfaces read.
 	TagFilter tagfilter.Filter
 	// IgnoreFindings is the filters.ignore policy: AniList IDs whose findings
 	// are never emitted. Nil (the default) reports everything.
@@ -270,12 +208,9 @@ type Config struct {
 	RadarrAPIKey    string
 	RadarrPublicURL string
 
-	// Indexer (Torznab feed) settings. IndexerAPIKey (the feed's own gate),
-	// IndexerProwlarrAPIKey, and IndexerABPasskey are secrets and are never
-	// logged. Searches proxy Prowlarr's per-indexer Torznab endpoints for Nyaa
-	// and AnimeBytes (an empty URL disables that upstream); the RSS feed is
-	// synthesized from SeaDex, and IndexerABPasskey builds its AnimeBytes
-	// download links (empty leaves the AB RSS feed without grabbable links).
+	// Indexer (Torznab feed) settings. IndexerAPIKey, IndexerProwlarrAPIKey and
+	// IndexerABPasskey are secrets and are never logged. An empty upstream URL disables
+	// that upstream; IndexerABPasskey builds the AB RSS download links.
 	IndexerAPIKey         string
 	IndexerNyaaTorznabURL string
 	IndexerABTorznabURL   string
@@ -310,22 +245,12 @@ type Config struct {
 
 // --- Loading ---
 
-// Load reads, ${VAR}-expands, and parses the YAML config at path into the
-// runtime Config. It returns an error on a missing/oversized file, invalid
-// YAML, a file containing more than one YAML document, or an unknown
-// configuration key (a misspelled or misplaced key fails loudly at startup
-// rather than being silently ignored); call Validate for semantic checks.
-//
-// The strict pipeline is yamlenv.Load: the single-document and unknown-key
-// checks on the raw pre-expansion bytes, allowlisted post-parse ${VAR}
-// expansion of string scalar values, the decode onto the defaults baseline
-// (an empty document keeps it), and fail-closed sanitization of every yaml
-// error so an expanded — or pasted literal — secret never reaches the
-// startup log. The one policy choice made here is WithUnknownKeyEcho: the
-// unknown-key name is kept — it IS the diagnostic the operator needs to fix
-// a typo, and the strict probe runs on the pre-expansion bytes so the name
-// cannot carry an expanded secret — while duplicate-key names and scalar
-// excerpts stay redacted per the library default.
+// Load reads, ${VAR}-expands, and parses the YAML config at path into the runtime
+// Config. It returns an error on a missing/oversized file, invalid YAML, a file
+// holding more than one YAML document, or an unknown configuration key; call Validate
+// for semantic checks. The one policy choice made here is WithUnknownKeyEcho: the
+// unknown-key NAME is kept - it IS the diagnostic the operator needs - and the strict
+// probe runs on the pre-expansion bytes, so the name cannot carry an expanded secret.
 func Load(path string) (Config, error) {
 	raw, info, err := readConfigFile(path)
 	if err != nil {
@@ -346,22 +271,15 @@ func Load(path string) (Config, error) {
 	return fc.toConfig(), nil
 }
 
-// readConfigFile reads the config through an os.Root over its own directory,
-// so the read can neither be redirected out of the config directory nor
-// block: atomicfile.OpenRegularInRoot opens through the root with O_NONBLOCK
-// and refuses a directory, FIFO, device node or socket with ErrNotRegular,
-// where atomicfile.ReadBounded's own os.Open follows a symlink and blocks
-// indefinitely on a FIFO with no writer - and this read runs at startup on
-// context.Background(), before any diagnostic, so a planted FIFO wedges the
-// process silently and the health marker is never written.
-// internal/state.readState, internal/mapping.readOverridesFile and
-// internal/indexer.openSnapshot already read their /config files this way,
-// for this reason.
+// readConfigFile reads the config through an os.Root over its own directory, so the
+// read can neither be redirected out of the config directory nor block: the open is
+// O_NONBLOCK and refuses a directory, FIFO, device node or socket, where a plain
+// os.Open follows a symlink and blocks indefinitely on a writerless FIFO - and this
+// read runs at startup before any diagnostic, so a planted FIFO would wedge the
+// process silently.
 //
-// It returns the FileInfo of the OPEN descriptor so the permission warning
-// certifies the inode whose bytes were loaded; stat'ing the pathname a second
-// time can report one file's mode for another file's contents.
-// ErrFileTooLarge is unchanged (ReadBoundedFile raises the same sentinel).
+// It returns the FileInfo of the OPEN descriptor, so the permission warning certifies
+// the inode whose bytes were loaded.
 func readConfigFile(path string) (raw []byte, info os.FileInfo, err error) {
 	dir := filepath.Dir(path)
 	root, err := os.OpenRoot(dir)
@@ -426,11 +344,9 @@ func (fc *fileConfig) toConfig() Config {
 	return c
 }
 
-// applyArr flattens one arr section: an enabled arr's trimmed connection
-// details, or empty strings plus the half-configuration Info signal (a set
-// api_key is always operator-written, so a disabled-but-keyed arr almost
-// always means the enabled toggle was left off; Info, not Warn, so a
-// deliberate temporary disable raises no Loki alert noise).
+// applyArr flattens one arr section: an enabled arr's trimmed connection details, or
+// empty strings plus the half-configuration Info signal (a set api_key is always
+// operator-written, so a disabled-but-keyed arr usually means a forgotten toggle).
 func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
 	if af.Enabled {
 		return strings.TrimSpace(af.URL), strings.TrimSpace(af.APIKey), strings.TrimSpace(af.PublicURL)
@@ -442,12 +358,9 @@ func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
 	return "", "", ""
 }
 
-// buildIgnoreSet turns filters.ignore into the emission-suppression set,
-// rejecting an over-long list and a non-positive AniList ID (SeaDex's own IDs
-// start at 1, so a zero or negative entry is a typo that would silently match
-// nothing). Duplicates are accepted and collapse, since a set is what the
-// caller wants. An empty list yields nil, the same as an absent key: there is
-// one unambiguous way to suppress nothing.
+// buildIgnoreSet turns filters.ignore into the emission-suppression set, rejecting an
+// over-long list and a non-positive AniList ID (SeaDex's own IDs start at 1). An
+// empty list yields nil, the same as an absent key.
 func buildIgnoreSet(raw []int) (map[int]struct{}, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -466,20 +379,14 @@ func buildIgnoreSet(raw []int) (map[int]struct{}, error) {
 	return out, nil
 }
 
-// buildTagFilter turns the filters.exclude_tags map into the one tagfilter
-// policy every recommendation surface reads, or an error the caller records for
-// Validate to return. An absent or empty map yields the zero Filter, which
-// filters nothing anywhere - the default.
+// buildTagFilter turns the filters.exclude_tags map into the one tagfilter policy
+// every recommendation surface reads, or an error the caller records for Validate to
+// return. An absent or empty map yields the zero Filter, which filters nothing.
 //
-// Four rejections, all hard errors rather than silent no-ops, because each one
-// is an operator asking for filtering that would not happen: more tags than
-// maxExcludeTags, a blank or over-long tag key, an unknown surface name, and a
-// tag listing NO surfaces. The last is a judgement call: `broken: []` reads as
-// an intent to filter but means nothing, and the file already has one
-// unambiguous way to filter nothing (an empty exclude_tags), so a second,
-// contradictory spelling of it is refused. Diagnostics are field-name-only like
-// every other config error - never the tag key or the rejected surface - since a
-// ${VAR} typo can place an expanded secret in either position.
+// Four rejections, all hard errors rather than silent no-ops - more tags than
+// maxExcludeTags, a blank or over-long tag key, an unknown surface name, and a tag
+// listing NO surfaces - because each is an operator asking for filtering that would
+// not happen. Diagnostics are field-name-only: a ${VAR} typo can expand into either.
 func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 	if len(raw) == 0 {
 		return tagfilter.Filter{}, nil
@@ -490,9 +397,8 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 	}
 	valid := strings.Join(tagfilter.SurfaceNames(), ", ")
 	bySurface := make(map[string][]tagfilter.Surface, len(raw))
-	// Sorted keys keep the reported defect deterministic when a map holds more
-	// than one: map iteration order would otherwise pick a different error per
-	// run for the same file.
+	// Sorted keys keep the reported defect deterministic when a map holds more than
+	// one; map iteration order would otherwise vary per run for the same file.
 	for _, tag := range slices.Sorted(maps.Keys(raw)) {
 		switch key := strings.TrimSpace(tag); {
 		case key == "":
@@ -520,15 +426,12 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 	return tagfilter.New(bySurface), nil
 }
 
-// parseInterval reads the poll_interval value into a built-in cadence or the
-// external (resident-idle) mode, following the fleet `*_INTERVAL` convention.
-// It delegates to scheduler.ParseInterval (WithBounds clamps a built-in cadence
-// to [minPollInterval, maxPollInterval]): off/disabled/0/0s -> external (no
-// internal timer, cycles triggered via `poll`); empty -> the default; a valid
-// positive duration -> built-in (clamped); a negative or unparseable value ->
-// the default with a warning. WithRedactedValue keeps every scheduler warning
-// field-name-only, because an expanded ${VAR} secret placed in poll_interval
-// by a config typo must never reach the startup log.
+// parseInterval reads the poll_interval value into a built-in cadence or the external
+// (resident-idle) mode, following the fleet `*_INTERVAL` convention: off/disabled/0 ->
+// external, empty -> the default, a valid positive duration -> built-in (clamped to
+// [minPollInterval, maxPollInterval]), anything else -> the default with a warning.
+// Every scheduler warning stays field-name-only, since poll_interval can hold an
+// expanded ${VAR} secret placed there by a config typo.
 func parseInterval(raw string) (time.Duration, bool) {
 	s := scheduler.ParseInterval(raw, DefaultPollInterval,
 		scheduler.WithBounds(minPollInterval, maxPollInterval),
@@ -549,19 +452,15 @@ func (c *Config) SonarrEnabled() bool { return c.SonarrURL != "" && c.SonarrAPIK
 // RadarrEnabled reports whether a complete Radarr pair (URL + key) is set.
 func (c *Config) RadarrEnabled() bool { return c.RadarrURL != "" && c.RadarrAPIKey != "" }
 
-// SonarrWebBase is the base URL for Sonarr report deep-links: the public URL
-// when set, else the internal URL. This is why an internal Docker hostname in
-// url still yields a browser-usable link when public_url points at the reverse
-// proxy - and why leaving public_url empty is fine (links fall back to url).
+// SonarrWebBase is the base URL for Sonarr report deep-links: the public URL when
+// set, else the internal URL, so an internal Docker hostname still links usefully.
 func (c *Config) SonarrWebBase() string { return cmp.Or(c.SonarrPublicURL, c.SonarrURL) }
 
 // RadarrWebBase is the base URL for Radarr report deep-links (see SonarrWebBase).
 func (c *Config) RadarrWebBase() string { return cmp.Or(c.RadarrPublicURL, c.RadarrURL) }
 
-// IndexerConfigured reports whether the Torznab feed has an upstream to
-// proxy: at least one Prowlarr Torznab URL is set. It is the single home of
-// the feed-enablement decision, shared by config validation (validateIndexer)
-// and the composition root.
+// IndexerConfigured reports whether the Torznab feed has an upstream to proxy: at
+// least one Prowlarr Torznab URL is set. It is the single home of that decision.
 func (c *Config) IndexerConfigured() bool {
 	return c.IndexerNyaaTorznabURL != "" || c.IndexerABTorznabURL != ""
 }
@@ -571,21 +470,15 @@ func (c *Config) IndexerConfigured() bool {
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable. It is deliberately not a pure query: on the way
 // through the checks it also emits the config-time diagnostics that need the
-// assembled Config (the field-name-only warn/info lines for
-// suspicious-but-runnable values), so calling it twice duplicates them and a
-// path that skips it loses them. Two limits on that: it stops at the FIRST hard
-// error, so a rejected config surfaces only the diagnostics ahead of the check
-// that failed (the operator sees the rest after fixing it and restarting), and
-// the load-time diagnostics - a config file readable beyond its owner, unresolved
-// ${VAR} references, a disabled-but-keyed arr, an all-blank tag list, an
-// unrecognized log.level or log.format - are emitted by Load/toConfig, not here.
+// assembled Config, so calling it twice duplicates them and a path that skips it
+// loses them. It stops at the FIRST hard error, so the remaining diagnostics surface
+// only after the operator fixes that one and restarts.
 func (c *Config) Validate() error {
 	if err := validateRunMode(c.RunMode); err != nil {
 		return err
 	}
-	// The filters.exclude_tags map and filters.ignore list are parsed once at
-	// flatten time (toConfig); this is where a rejection becomes the startup
-	// error.
+	// The exclude_tags map and the ignore list are parsed once at flatten time; this is
+	// where a rejection becomes the startup error.
 	if c.tagFilterErr != nil {
 		return c.tagFilterErr
 	}
@@ -613,9 +506,8 @@ func (c *Config) Validate() error {
 	return c.validateIndexer()
 }
 
-// validateRunMode rejects an unknown run mode. Field-name-only (do not echo
-// the supplied mode): the value may be an expanded ${VAR} secret placed here
-// by a config typo, and this error reaches the startup log.
+// validateRunMode rejects an unknown run mode. Field-name-only (do not echo the
+// supplied mode): the value may be an expanded ${VAR} secret from a config typo.
 func validateRunMode(mode string) error {
 	if mode != RunModeDaemon && mode != RunModeReport {
 		return fmt.Errorf("mode must be %q or %q", RunModeDaemon, RunModeReport)
@@ -638,10 +530,8 @@ func (c *Config) validateEnabledArrs() error {
 	return nil
 }
 
-// warnPublicURLProblems warns on a malformed or credentialed public_url.
-// public_url only feeds report deep-links, so a malformed value warns (the
-// links will be broken) but still loads; a hard rejection would newly reject
-// configs that load today.
+// warnPublicURLProblems warns on a malformed or credentialed public_url. It only
+// feeds report deep-links, so a malformed value warns but still loads.
 func (c *Config) warnPublicURLProblems() {
 	for _, pu := range []struct{ name, val string }{
 		{"sonarr.public_url", c.SonarrPublicURL},
@@ -651,18 +541,10 @@ func (c *Config) warnPublicURLProblems() {
 			slog.Warn("public_url is malformed; report deep-links will be broken",
 				"field", pu.name, "error", err)
 		} else if pu.val != "" {
-			// Whether a public_url yields a usable deep-link is decided at publish
-			// time by library.SafeLogURL, and this warning must not become a second
-			// answer to that question: the refusal legs are read from
-			// internal/displaylink, the one home of this app's structural vouch step
-			// for a browser-destined URL, so the claim "your report deep-links will
-			// be broken" cannot drift away from the rule that admits the link
-			// (l-f208). Reaching this branch means validateHTTPURL already accepted
-			// the value as an absolute http(s) URL with a host, so the only vouch
-			// leg left to fail is the smuggling one - a backslash or an embedded
-			// tab/newline, which net/url accepts anywhere after the authority while
-			// the publisher refuses it outright. Field-name-only, warn-only,
-			// matching every other check here.
+			// The refusal legs are read from internal/displaylink, the one home of this
+			// app's structural vouch step for a browser-destined URL, so the claim "your
+			// deep-links will be broken" cannot drift from the rule that admits the link.
+			// Warn-only and field-name-only, matching every other check here.
 			if f := urlform.Classify(pu.val); !displaylink.VouchSanitizingForm(&f) {
 				slog.Warn("public_url carries a backslash or an embedded tab/newline; "+
 					"the deep-link publisher refuses such a value outright, so report "+
@@ -670,11 +552,9 @@ func (c *Config) warnPublicURLProblems() {
 					"field", pu.name)
 			}
 		}
-		// arrapi's WebURL joins the base and the route by string concatenation,
-		// so a query in the base (or a bare trailing '?') puts the /series or
-		// /movie route inside the query string and breaks every deep-link.
-		// Warn-only, field-name-only: public_url only feeds deep-links, and the
-		// query may carry a credential-like value that must never be echoed.
+		// arrapi's WebURL joins the base and the route by string concatenation, so a
+		// query in the base (or a bare trailing '?') puts the route inside the query
+		// string and breaks every deep-link. Warn-only, field-name-only.
 		if u, err := url.Parse(pu.val); err == nil && (u.RawQuery != "" || u.ForceQuery) {
 			slog.Warn("public_url contains a query; report deep-links append the "+
 				"route after it and will be broken - remove the query from the base",
@@ -689,21 +569,15 @@ func (c *Config) warnPublicURLProblems() {
 	}
 }
 
-// warnRelativeReportDir warns when report.dir is not an absolute path. Every
-// report write goes through atomicfile, whose path gate rejects a relative
-// path outright (ErrUnsafePath "not absolute"), and nothing absolutizes the
-// configured value on the way there - so a relative report.dir loads and
-// validates cleanly and then fails at the END of a report run, after the whole
-// cycle has been spent, with neither half of the pair written. Warn-only: a
-// daemon that never generates a report is unaffected, and rejecting would
-// newly refuse configs that load today; field-name-only, since report.dir is
-// secret-capable (internal/audit redacts it for that reason).
+// warnRelativeReportDir warns when report.dir is not an absolute path. Every report
+// write goes through an absolute-path-only gate and nothing absolutizes the value on
+// the way there, so a relative report.dir validates cleanly and then fails at the END
+// of a report run. Warn-only (a daemon that never reports is unaffected) and
+// field-name-only, since report.dir is secret-capable.
 func (c *Config) warnRelativeReportDir() {
-	// The predicate is atomicfile.ValidatePath, not filepath.IsAbs: it is the
-	// exported face of the very rule the report write applies later, so this
-	// warning cannot accept a value that gate refuses (IsAbs admits an embedded
-	// NUL byte, which every atomicfile write rejects). Error text is not echoed:
-	// report.dir is secret-capable, so the diagnostic stays field-name-only.
+	// The predicate is atomicfile.ValidatePath, not filepath.IsAbs: it is the exported
+	// face of the rule the report write applies later, and IsAbs admits an embedded NUL
+	// byte. Error text is not echoed: report.dir is secret-capable.
 	if c.ReportDir != "" && atomicfile.ValidatePath(c.ReportDir) != nil {
 		slog.Warn("report.dir is not a usable absolute path; report writes are rejected "+
 			"at the end of a report run and neither report file is written - use an "+
@@ -712,35 +586,12 @@ func (c *Config) warnRelativeReportDir() {
 }
 
 // warnUnexpandedSecretRefs warns when indexer.ab_passkey still holds a literal
-// environment-variable reference. yamlenv expands only the ${VAR} form of an
-// ALLOWLISTED name and reports only allowlisted-but-unset names (naming the
-// VARIABLE, never the field holding it), so two operator spellings reach the
-// runtime verbatim with no diagnostic anywhere: a non-allowlisted name
-// (${AB_PASSKEY} instead of ${SEADEX_SCOUT_AB_PASSKEY}) and the brace-less
-// shell form ($SEADEX_SCOUT_AB_PASSKEY, which docker compose itself accepts,
-// making it a plausible paste). The literal placeholder is then baked into every
-// /ab RSS download link, so each arr grab fails at AnimeBytes while this app logs
-// a served feed.
-//
-// The passkey is the ONLY field left here, and the reason is that it is the only
-// credential in this config with no charset gate. sonarr.api_key,
-// radarr.api_key, indexer.prowlarr_api_key and indexer.feed_api_key are all
-// refused outright for containing a '$' (wellFormedCredential, reached through
-// checkAPIKeyShape / validateFeedAPIKey), and each of those gates runs BEFORE
-// this function on every config shape - so an entry for any of them here could
-// never fire. The passkey keeps its charset unconstrained on purpose: AnimeBytes
-// constrains only the length, so this app must not invent a charset for a
-// credential it does not issue (validateABPasskey). That leaves this warning as
-// the only thing that can see a placeholder in it.
-//
-// This is a warning rather than an error because validateABPasskey - the passkey's
-// own gate - deliberately passes a PARKED value: with no ab_torznab_url nothing
-// builds an AB link, and a placeholder there must not stop the daemon the
-// always-on compare loop rides in. So on a nyaa-only or indexer-less config this
-// line is the whole diagnostic; on a config with AB configured it is a breadcrumb
-// ahead of the hard error validateABPasskey raises.
-//
-// Field-name-only; never echoes the value.
+// environment-variable reference. Two operator spellings reach the runtime verbatim
+// with no diagnostic anywhere - a non-allowlisted name, and the brace-less $VAR form
+// docker compose itself accepts - and the placeholder is then baked into every /ab RSS
+// download link. The passkey is the ONLY field here because it is the only credential
+// with no charset gate; a warning rather than an error because validateABPasskey
+// deliberately passes a PARKED value. Field-name-only; never echoes the value.
 func (c *Config) warnUnexpandedSecretRefs() {
 	if secretref.Unexpanded(c.IndexerABPasskey) {
 		slog.Warn("a secret still holds a literal environment-variable reference; only "+
@@ -752,12 +603,9 @@ func (c *Config) warnUnexpandedSecretRefs() {
 }
 
 // warnOverlappingTags warns when a tag appears in both arr_tags.include and
-// arr_tags.exclude. The library walk gives exclude precedence, so every item
-// carrying such a tag is skipped and the include entry can never match --
-// with a single overlapping include tag the config silently scans nothing.
-// Warn-only (exclude-wins semantics are well defined, so the config still
-// loads); field-name-only like every other config diagnostic, since a tag
-// value can carry an expanded ${VAR} placed there by a config typo.
+// arr_tags.exclude. The library walk gives exclude precedence, so every item carrying
+// the tag is skipped and the include entry can never match - with a single
+// overlapping include tag the config silently scans nothing. Warn-only.
 func (c *Config) warnOverlappingTags() {
 	exclude := make(map[string]struct{}, len(c.ExcludeTags))
 	for _, tag := range c.ExcludeTags {
@@ -772,14 +620,10 @@ func (c *Config) warnOverlappingTags() {
 	}
 }
 
-// warnArrURLCredentials warns (field-name-only, never echoing the URL)
-// when an arr url embeds a credential-like userinfo or query parameter,
-// which would otherwise leak into a library-walk-failure *url.Error log.
-// For arr URLs the query half is defense-in-depth only: Validate's earlier
-// validateArrPair no-query rejection fires first for any query-bearing url,
-// so in practice only the userinfo form reaches this warning; the shared
-// urlEmbedsCredential query scan stays live for torznab and public_url.
-// Mirrors the torznab-URL gate in validateIndexer.
+// warnArrURLCredentials warns (field-name-only, never echoing the URL) when an arr
+// url embeds a credential-like userinfo or query parameter, which would otherwise
+// leak into a library-walk-failure *url.Error log. For arr URLs the query half is
+// defense-in-depth only: validateArrPair's no-query rejection fires first.
 func (c *Config) warnArrURLCredentials() {
 	for _, au := range []struct{ name, val string }{
 		{"sonarr.url", c.SonarrURL},
@@ -794,12 +638,9 @@ func (c *Config) warnArrURLCredentials() {
 	}
 }
 
-// warnIdenticalArrURLs warns when sonarr.url and radarr.url are identical -
-// almost always a paste error: the two arrs are different applications, so a
-// shared full URL points one client at the wrong service and every library
-// walk on that side fails at runtime with confusing API errors. Warn-only
-// (the config still loads), mirroring the identical-torznab-endpoint warning;
-// field-name-only like every other config diagnostic.
+// warnIdenticalArrURLs warns when sonarr.url and radarr.url are identical - almost
+// always a paste error, since a shared URL points one client at the wrong service and
+// every library walk on that side fails. Warn-only, field-name-only.
 func (c *Config) warnIdenticalArrURLs() {
 	if c.SonarrURL != "" && c.SonarrURL == c.RadarrURL {
 		slog.Warn("sonarr.url and radarr.url are identical; the two arrs are different " +
@@ -808,12 +649,10 @@ func (c *Config) warnIdenticalArrURLs() {
 	}
 }
 
-// validateIndexer rejects an enabled Torznab feed with no feed API key. The
-// feed is the only HTTP surface; it authenticates callers by the apikey query
-// param against IndexerAPIKey, so an empty key would leave it unauthenticated
-// (and able to leak the AnimeBytes passkey embedded in synthesized RSS download
-// links). The feed is enabled when either upstream Torznab URL is set; a
-// no-indexer config is unaffected.
+// validateIndexer rejects an enabled Torznab feed with no feed API key. The feed is
+// the only HTTP surface and authenticates callers by the apikey query param, so an
+// empty key would leave it unauthenticated - and able to leak the AnimeBytes passkey
+// embedded in synthesized RSS download links.
 func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
 		c.infoDisabledIndexerKeys()
@@ -829,11 +668,9 @@ func (c *Config) validateIndexer() error {
 	return nil
 }
 
-// infoIndexerModeMismatch signals a configured feed in report mode. The
-// Torznab feed is served only by the daemon; a file-level report mode exits
-// after the one-shot audit, so a configured feed silently never starts.
-// Info, mirroring the other half-configuration signals: a deliberately
-// parked indexer section must not raise Loki alert noise.
+// infoIndexerModeMismatch signals a configured feed in report mode. The Torznab feed
+// is served only by the daemon, so a file-level report mode never starts it. Info,
+// mirroring the other half-configuration signals.
 func (c *Config) infoIndexerModeMismatch() {
 	if c.RunMode == RunModeReport {
 		slog.Info("indexer torznab urls are set but mode is report; " +
@@ -853,10 +690,8 @@ const (
 // torznabEndpoint pairs a per-indexer Torznab URL with its config key name.
 type torznabEndpoint struct{ name, val string }
 
-// torznabEndpoints is the single enumeration of the per-indexer Torznab URL
-// fields, shared by the endpoint validator and the two warn batteries that
-// each walk the pair - so adding or renaming an upstream touches one list
-// instead of three.
+// torznabEndpoints is the single enumeration of the per-indexer Torznab URL fields,
+// shared by the endpoint validator and the two warn batteries that walk the pair.
 func (c *Config) torznabEndpoints() []torznabEndpoint {
 	return []torznabEndpoint{
 		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
@@ -864,33 +699,13 @@ func (c *Config) torznabEndpoints() []torznabEndpoint {
 	}
 }
 
-// validateIndexerEndpoints enforces the feed's authentication requirement,
-// gates the two indexer-owned credentials on their FORMAT, and validates the two
-// upstream Torznab URLs, in the original diagnostic order.
-//
-// The two gated here are indexer.feed_api_key and indexer.ab_passkey - the two
-// whose meaning depends on the feed being configured at all. The third indexer
-// credential, indexer.prowlarr_api_key, is gated UNCONDITIONALLY from Validate
-// (validateProwlarrAPIKey) precisely because this function does not always run;
-// the arr keys are gated in validateArrPair. All four share one shape rule,
-// wellFormedCredential.
-//
-// A credential gate is where an operator-supplied string stops being untrusted
-// text and becomes a value the app may use as a credential: it happens ONCE, at
-// the config boundary, so no downstream site has to ask again (parse, don't
-// validate). They are POSITIVE format checks - "is this the shape a credential
-// takes" - rather than a catalogue of the ways a paste can go wrong, because a
-// catalogue is open-ended: the app used to grade three spellings of one
-// unexpanded reference three different ways (a braced ${VAR} an error, an
-// unbraced $VAR a warning, a reference embedded in a longer value nothing at all)
-// while internal/indexer refused to serve behind all three, so a config could
-// validate clean, start, and then never serve the feed. A configured-but-unusable
-// credential is now a HARD startup error, matching what the runtime refuses
-// (unusableFeedKey / unusableABPasskey).
-//
-// Reference recognition survives only as a HINT inside an error message: it
-// never decides pass or fail, so no regex has to model every spelling an
-// operator can leave behind (including the unterminated "${NAME" paste).
+// validateIndexerEndpoints enforces the feed's authentication requirement, gates the
+// two indexer-owned credentials on their FORMAT, and validates the two upstream
+// Torznab URLs, in the original diagnostic order. indexer.prowlarr_api_key is gated
+// UNCONDITIONALLY from Validate precisely because this function does not always run.
+// The gates are POSITIVE format checks at the config boundary - is this the shape a
+// credential takes - so a configured-but-unusable credential is a hard startup error
+// matching what the runtime refuses, rather than a catalogue of paste spellings.
 func (c *Config) validateIndexerEndpoints() error {
 	if err := c.validateFeedAPIKey(); err != nil {
 		return err
@@ -906,21 +721,11 @@ func (c *Config) validateIndexerEndpoints() error {
 	return nil
 }
 
-// validateFeedAPIKey is the ONE gate on indexer.feed_api_key. The key is
-// required (it is the only authentication on the feed, whose /ab RSS body
-// embeds the operator's AnimeBytes passkey in every download link), and it must
-// look like a credential: one run of printable characters with no whitespace,
-// no control rune, and no '$'.
-//
-// The shape rule itself is wellFormedCredential, shared with the arr and
-// Prowlarr key gates - including the reasoning for '$', which is a charset rule
-// rather than placeholder pattern-matching. What is specific here is how CHEAP
-// the rule is: this is seadex-scout's OWN key, generated the way the README says
-// (openssl rand -hex 16), and no hex or base64 output contains a dollar sign. The
-// only cost is a hand-typed passphrase containing '$' being refused with a
-// message that says to generate a key instead; that is the intended trade for
-// the one gate on a LAN-reachable feed.
-//
+// validateFeedAPIKey is the ONE gate on indexer.feed_api_key. The key is required (it
+// is the only authentication on the feed, whose /ab RSS body embeds the operator's
+// AnimeBytes passkey in every download link), and it must look like a credential: one
+// run of printable characters with no whitespace, no control rune and no '$'. The
+// shape rule is wellFormedCredential, shared with the arr and Prowlarr key gates.
 // Field-name-only on every arm: the key value never rides the error or the log.
 func (c *Config) validateFeedAPIKey() error {
 	if c.IndexerAPIKey == "" {
@@ -929,21 +734,16 @@ func (c *Config) validateFeedAPIKey() error {
 	if !wellFormedCredential(c.IndexerAPIKey) {
 		msg := "indexer.feed_api_key is not a usable key: it must be one run of printable " +
 			"characters with no spaces and no '$' - generate one with openssl rand -hex 16"
-		// Keyed on the CHARACTER, not on secretref.Unexpanded: the charset rule is
-		// what refused the value, so the hint is read from the same fact. Every
-		// reference spelling contains a '$', which makes the regex test a strict
-		// subset of this one - a second, weaker spelling of a rule that already
-		// decided.
+		// Keyed on the CHARACTER, not on a reference regex: the charset rule is what
+		// refused the value, and every reference spelling contains a '$'.
 		if strings.ContainsRune(c.IndexerAPIKey, '$') {
 			msg += unexpandedRefHint + " and the feed would be gated by that literal " +
 				"placeholder - a key guessable from the public README and config.example"
 		}
 		return errors.New(msg)
 	}
-	// Presence is required above; strength is warn-only defense-in-depth. The
-	// key is the only gate on the passkey-bearing /ab feed, so a trivially
-	// guessable hand-typed key deserves a config-time signal without rejecting
-	// a config that runs today. Field-name-only (never echo the key).
+	// Presence is required above; strength is warn-only defense-in-depth on the only
+	// gate protecting the passkey-bearing /ab feed. Field-name-only.
 	if len(c.IndexerAPIKey) < 16 {
 		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the "+
 			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)",
@@ -952,30 +752,13 @@ func (c *Config) validateFeedAPIKey() error {
 	return nil
 }
 
-// validateProwlarrAPIKey is the ONE gate on indexer.prowlarr_api_key. An EMPTY
-// key passes (it is valid when Prowlarr has auth "Disabled for Local Addresses";
-// warnMissingProwlarrKey is the signal for the common misconfiguration), but a
-// key that is SET must be a well-formed credential or the config fails - it is
-// sent as the X-Api-Key header on every proxied search, so a placeholder means
-// Prowlarr 401s and every search answers the arr with a Torznab
-// <error code="900"> instead of results.
-//
-// It runs UNCONDITIONALLY, from Validate rather than from validateIndexer, and
-// that placement is the point: validateIndexer only runs when a Torznab URL is
-// configured, so a gate inside it would leave a placeholder in this field silent
-// on exactly the config where nothing else looks at it. Running it always is also
-// what makes indexer.prowlarr_api_key's removal from warnUnexpandedSecretRefs
-// safe rather than a lost diagnostic - the hard error is now strictly stronger
-// than the warning it replaces, on every config shape.
-//
-// Accepted cost: a deliberately PARKED key holding an unexpanded ${VAR} this
-// deployment never sets now refuses to start instead of warning. That is
-// deliberate and it differs from indexer.ab_passkey, which keeps the warn-only
-// posture: AnimeBytes has a documented off switch (an empty ab_torznab_url) and
-// is opt-in, whereas a written Prowlarr key already means "I expected the feed to
-// start" (see infoDisabledIndexerKeys). The remedy the error names is to set the
-// variable or clear the key.
-//
+// validateProwlarrAPIKey is the ONE gate on indexer.prowlarr_api_key. An EMPTY key
+// passes (it is valid when Prowlarr has auth "Disabled for Local Addresses"), but a
+// key that is SET must be a well-formed credential: it rides the X-Api-Key header on
+// every proxied search, so a placeholder means Prowlarr 401s and every search answers
+// the arr with a Torznab error instead of results. It runs UNCONDITIONALLY, from
+// Validate, because validateIndexer runs only when a Torznab URL is configured - so a
+// gate inside it would stay silent on exactly the config where nothing else looks.
 // Field-name-only; never echoes the key.
 func (c *Config) validateProwlarrAPIKey() error {
 	if c.IndexerProwlarrAPIKey == "" {
@@ -989,35 +772,16 @@ func (c *Config) validateProwlarrAPIKey() error {
 }
 
 // validateABPasskey is the ONE gate on indexer.ab_passkey. AnimeBytes is off at
-// EITHER half - an empty passkey, or an empty indexer.ab_torznab_url - and both
-// off states pass (AnimeBytes searches still work through Prowlarr; the /ab RSS
-// feed answers a Torznab error). A passkey configured BESIDE an AB endpoint must
-// be the shape AnimeBytes issues, or the config fails: every AB download link is
-// built from it, so a malformed value means each arr grab fails at the tracker
-// while this app reports a served feed.
-//
-// The shape is length plus the absence of whitespace, and the lengths are
-// upstream authority rather than an invention here: Jackett's AnimeBytes
-// indexer rejects a passkey with "expected length: 32, 48, or 56" and
-// Prowlarr's AnimeBytesSettingsValidator asserts the same three lengths, and
-// both send the value as scrape.php's torrent_pass exactly as this app does.
-// NEITHER constrains the charset, so this app must not either - no 32-hex
-// assumption, and no Gazelle passkey convention (AnimeBytes is not
-// Gazelle-based; it runs its own codebase with a chihaya fork as its tracker).
-//
-// The app validates SHAPE, never CORRECTNESS: a well-shaped but wrong passkey
-// is the operator's to fix and must surface as a runtime auth failure at
-// AnimeBytes, not as a config error. Field-name-only; never echoes the secret.
+// EITHER half - an empty passkey, or an empty indexer.ab_torznab_url - and both off
+// states pass. A passkey configured BESIDE an AB endpoint must be the shape AnimeBytes
+// issues, or the config fails: every AB download link is built from it. The lengths
+// are upstream authority (Jackett's AnimeBytes indexer and Prowlarr's validator both
+// assert 32, 48 or 56) while NEITHER constrains the charset, so this app must not
+// either. It validates SHAPE, never CORRECTNESS; field-name-only.
 func (c *Config) validateABPasskey() error {
-	// AnimeBytes is OFF at EITHER half: an empty passkey, or an empty
-	// ab_torznab_url (README: "" = AB RSS off). With no AB endpoint nothing
-	// builds an AB download link from this value, so a parked passkey - an
-	// unexpanded ${VAR} this deployment never sets, or a truncated paste - must
-	// not block the daemon the ALWAYS-ON compare loop rides in. This gate runs
-	// for a nyaa-only feed too (IndexerConfigured is either URL), and the reason
-	// it fails the config - every AB link is built from the passkey - does not
-	// hold there. warnABPasskeyConfiguration's parked-passkey INFO is the signal
-	// for that state.
+	// AnimeBytes is OFF at EITHER half, so a parked passkey - an unexpanded ${VAR} this
+	// deployment never sets, or a truncated paste - must not block the daemon the
+	// always-on compare loop rides in. warnABPasskeyConfiguration signals that state.
 	if c.IndexerABTorznabURL == "" || c.IndexerABPasskey == "" ||
 		wellFormedABPasskey(c.IndexerABPasskey) {
 		return nil
@@ -1032,33 +796,14 @@ func (c *Config) validateABPasskey() error {
 	return errors.New(msg)
 }
 
-// wellFormedCredential reports whether v is the shape a machine-generated
-// credential takes: non-empty, and one run of printable characters with no
-// whitespace, no control rune and no '$'. It is the ONE shape rule every
-// credential field in this config is gated on - sonarr.api_key, radarr.api_key,
-// indexer.prowlarr_api_key and indexer.feed_api_key - so a paste that cannot
-// possibly authenticate is refused once, at the config boundary, in the same
-// vocabulary everywhere.
-//
-// The '$' rule is a charset rule, not placeholder pattern-matching, and it is
-// what makes the gate closed rather than a catalogue: every unexpanded-reference
-// spelling contains a dollar sign - ${VAR}, $VAR, a reference embedded in a
-// longer value, and the unterminated "${NAME" paste that no reference regex
-// matches - so refusing the character refuses all of them without this app
-// enumerating them, and it makes each gate's acceptance set a SUBSET of what the
-// runtime will serve behind (internal/indexer's unusableFeedKey /
-// unusableABPasskey). Subset is the safe direction for two gates on one
-// credential: the config can only ever refuse more than the runtime, never less.
-//
-// The cost differs per field and is stated at each call site. It is smallest for
-// indexer.feed_api_key (this app's own key, generated by the starter) and
-// largest for an arr key, where an operator who deliberately set a custom
-// SONARR__AUTH__APIKEY containing a dollar sign is refused even though Sonarr
-// itself would accept it - see validateArrPair for why that trade is taken.
-//
-// indexer.ab_passkey is deliberately NOT gated on this rule: AnimeBytes
-// constrains only the length, so wellFormedABPasskey stops there rather than
-// inventing a charset (validateABPasskey).
+// wellFormedCredential reports whether v is the shape a machine-generated credential
+// takes: non-empty, and one run of printable characters with no whitespace, no
+// control rune and no '$'. It is the ONE shape rule every credential field in this
+// config is gated on. The '$' rule is a charset rule, not placeholder pattern
+// matching: every unexpanded-reference spelling contains a dollar sign, so refusing
+// the character refuses all of them without enumerating them, and it keeps each
+// gate's acceptance set a SUBSET of what the runtime will serve behind.
+// indexer.ab_passkey is deliberately NOT gated on it (see validateABPasskey).
 func wellFormedCredential(v string) bool {
 	if v == "" {
 		return false
@@ -1071,30 +816,18 @@ func wellFormedCredential(v string) bool {
 	return true
 }
 
-// generatedAPIKeyLen is the length of the key Sonarr, Radarr and Prowlarr
-// generate: a .NET Guid in its default "D" format with the hyphens stripped, so
-// 32 lower-case hex characters. See generatedArrAPIKey.
+// generatedAPIKeyLen is the length of the key Sonarr, Radarr and Prowlarr generate: a
+// .NET Guid with the hyphens stripped, so 32 lower-case hex characters.
 const generatedAPIKeyLen = 32
 
 // generatedArrAPIKey reports whether v is exactly the shape Sonarr, Radarr and
-// Prowlarr GENERATE: 32 lower-case hex characters.
+// Prowlarr GENERATE: 32 lower-case hex characters (all three carry the identical
+// Guid.NewGuid().ToString().Replace("-", "") generator).
 //
-// All three carry the identical generator in
-// src/NzbDrone.Core/Configuration/ConfigFileProvider.cs -
-// Guid.NewGuid().ToString().Replace("-", "") - and .NET's default Guid "D"
-// format is lower-case xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, so stripping the
-// hyphens yields 32 lower-case hex characters and nothing else.
-//
-// It is a GENERATOR, not a VALIDATOR, which is the whole reason nothing fails
-// the config on it. The same property reads _authOptions.ApiKey FIRST - the
-// SONARR__AUTH__APIKEY / RADARR__AUTH__APIKEY / PROWLARR__AUTH__APIKEY
-// environment variable - and the only check applied to that value is
-// IsNullOrWhiteSpace, so an operator-supplied key of ANY shape is a working key
-// against a real arr. Contrast indexer.ab_passkey, where Jackett's AnimeBytes
-// indexer AND Prowlarr's AnimeBytesSettingsValidator both REJECT a wrong length:
-// that is upstream authority, which is why validateABPasskey is entitled to
-// hard-fail on shape and this predicate is not. Do NOT "tighten" this into a
-// refusal.
+// It is a GENERATOR, not a VALIDATOR, which is the whole reason nothing fails the
+// config on it: each also reads its *__AUTH__APIKEY environment variable FIRST and
+// checks it only for blank, so an operator-supplied key of ANY shape is a working key
+// against a real arr. Do NOT "tighten" this into a refusal.
 func generatedArrAPIKey(v string) bool {
 	if len(v) != generatedAPIKeyLen {
 		return false
@@ -1107,15 +840,10 @@ func generatedArrAPIKey(v string) bool {
 	return true
 }
 
-// checkAPIKeyShape is the HARD gate every arr/Prowlarr API key passes: the value
-// must be a well-formed credential (wellFormedCredential), or the config fails
-// with a field-name-only error naming the real remedy. A value carrying a '$'
-// gets the unexpanded-reference hint on top, keyed on the CHARACTER rather than
-// on a reference regex: the charset rule is what decided the refusal, so the
-// hint must be read from the same fact, and no regex has to model every spelling
-// an operator can leave behind.
-//
-// Field-name-only on every arm: the key value never rides the error or the log.
+// checkAPIKeyShape is the HARD gate every arr/Prowlarr API key passes: the value must
+// be a well-formed credential, or the config fails with a field-name-only error naming
+// the real remedy. A value carrying a '$' gets the unexpanded-reference hint on top,
+// keyed on the CHARACTER rather than on a reference regex.
 func checkAPIKeyShape(field, v string) error {
 	if wellFormedCredential(v) {
 		return nil
@@ -1129,12 +857,9 @@ func checkAPIKeyShape(field, v string) error {
 	return errors.New(msg)
 }
 
-// warnUnexpectedAPIKeyShape warns when a key that PASSED checkAPIKeyShape is not
-// the 32-lower-case-hex shape all three upstreams generate. It is a warn and
-// never an error, because the upstreams accept an operator-supplied key of any
-// shape (generatedArrAPIKey): the likely cause is a truncated or mistyped paste,
-// but a deliberately custom key is legitimate and must not be refused.
-// Field-name-only; never echoes the key.
+// warnUnexpectedAPIKeyShape warns when a key that PASSED checkAPIKeyShape is not the
+// 32-lower-case-hex shape all three upstreams generate. Never an error, because the
+// upstreams accept an operator-supplied key of any shape. Field-name-only.
 func warnUnexpectedAPIKeyShape(field, v string) {
 	// v is non-empty by construction: both callers run this only after
 	// checkAPIKeyShape returned nil, and wellFormedCredential refuses "".
@@ -1147,10 +872,8 @@ func warnUnexpectedAPIKeyShape(field, v string) {
 		"field", field)
 }
 
-// wellFormedABPasskey reports whether v is the shape an AnimeBytes passkey
-// takes: one of the three lengths AnimeBytes issues, carrying no whitespace or
-// control rune. The charset is deliberately unconstrained beyond that (see
-// validateABPasskey).
+// wellFormedABPasskey reports whether v is one of the three lengths AnimeBytes
+// issues, carrying no whitespace or control rune; the charset is unconstrained.
 func wellFormedABPasskey(v string) bool {
 	switch len(v) {
 	case 32, 48, 56:
@@ -1165,11 +888,9 @@ func wellFormedABPasskey(v string) bool {
 	return true
 }
 
-// warnIndexerEndpointProblems emits the warn/info diagnostics for suspicious
-// but runnable endpoint combinations: a pasted-twice shared endpoint, a
-// torznab url whose path cannot be a per-indexer Torznab endpoint, and the
-// two AB passkey half-configurations. All field-name-only; never echo a URL
-// or secret.
+// warnIndexerEndpointProblems emits the warn/info diagnostics for suspicious but
+// runnable endpoint combinations: a pasted-twice shared endpoint, a torznab url whose
+// path cannot be a per-indexer endpoint, and the two AB passkey half-configurations.
 func (c *Config) warnIndexerEndpointProblems() {
 	c.warnIdenticalIndexerEndpoints()
 	c.warnNonPerIndexerEndpoints()
@@ -1180,11 +901,9 @@ func (c *Config) warnIndexerEndpointProblems() {
 // warnIdenticalIndexerEndpoints warns when both per-indexer Torznab URLs hold
 // the same value. Field-name-only; never echoes a URL.
 func (c *Config) warnIdenticalIndexerEndpoints() {
-	// The two upstream URLs are per-indexer Prowlarr Torznab endpoints
-	// (/1/api vs /2/api); identical values are almost always a paste error.
-	// The AB matcher is torrent-id-only, so pointing it at a Nyaa endpoint
-	// yields wrong-tracker attribution and duplicate upstream queries.
-	// Warn-only: the config still runs. Field-name-only; never echoes URLs.
+	// The two upstream URLs are per-indexer Prowlarr Torznab endpoints (/1/api vs
+	// /2/api); identical values are almost always a paste error, and the AB matcher is
+	// torrent-id-only, so a Nyaa endpoint yields wrong-tracker attribution.
 	if c.IndexerNyaaTorznabURL != "" && c.IndexerNyaaTorznabURL == c.IndexerABTorznabURL {
 		slog.Warn("indexer.nyaa_torznab_url and indexer.ab_torznab_url are identical; " +
 			"they should be Prowlarr's per-indexer endpoints (e.g. /1/api vs /2/api) - " +
@@ -1196,22 +915,16 @@ func (c *Config) warnIdenticalIndexerEndpoints() {
 // be a Prowlarr per-indexer Torznab endpoint. Field-name-only; never echoes a
 // URL.
 func (c *Config) warnNonPerIndexerEndpoints() {
-	// A Prowlarr per-indexer Torznab endpoint always carries a path (.../1/api).
-	// A bare origin, or Prowlarr's REST API (/api/v1/...), is a paste error that
-	// loads cleanly and then answers every proxied search with a Torznab
-	// <error code="900">: internal/indexer/prowlarr.go appends the Torznab params
-	// to whatever was configured, so a wrong base is visible only in
-	// upstream-failure logs. The synthesized RSS feed is unaffected - an
-	// empty-query check is served from the persisted journal and never contacts
-	// Prowlarr. Warn-only (the config still runs) and field-name-only; never
-	// echoes a URL.
+	// A Prowlarr per-indexer Torznab endpoint always carries a path (.../1/api). A bare
+	// origin, or Prowlarr's REST API, is a paste error that loads cleanly and then
+	// answers every proxied search with a Torznab error 900. Warn-only,
+	// field-name-only; the synthesized RSS feed never contacts Prowlarr.
 	for _, tu := range c.torznabEndpoints() {
 		if tu.val == "" {
 			continue
 		}
-		// validateIndexerEndpoints parsed this same immutable string above and
-		// refused every value url.Parse rejects, so the error cannot occur here
-		// (the posture validateArrPair already takes on its own re-parse).
+		// validateIndexerEndpoints parsed this same immutable string above and refused
+		// every value url.Parse rejects, so the error cannot occur here.
 		u, _ := url.Parse(tu.val)
 		if p := strings.TrimSuffix(u.Path, "/"); p == "" || strings.HasPrefix(p, "/api/v1") {
 			slog.Warn("torznab url is not a Prowlarr per-indexer Torznab endpoint "+
@@ -1225,45 +938,26 @@ func (c *Config) warnNonPerIndexerEndpoints() {
 // warnABPasskeyConfiguration emits the three AB half-configuration
 // diagnostics. Field-name-only; never echoes a secret.
 func (c *Config) warnABPasskeyConfiguration() {
-	// The /ab RSS feed builds its download links from indexer.ab_passkey; a
-	// stable AB-URL-without-passkey config makes that endpoint return a
-	// Torznab <error> on every arr RSS check while searches (Prowlarr-proxied,
-	// passkey-free) keep working. Warn at startup so the operator gets a
-	// config-time signal instead of discovering it in downstream arr RSS
-	// failures. Field-name-only; never echoes a secret.
-	//
-	// EMPTY, not "unusable": validateIndexerEndpoints has already failed the
-	// config for a configured-but-malformed passkey (validateABPasskey, the one
-	// format gate), so the only unusable state that can reach this diagnostic is
-	// the documented off switch. Testing for a placeholder here too would be a
-	// second spelling of a rule that already decided.
+	// The /ab RSS feed builds its download links from indexer.ab_passkey, so an
+	// AB-URL-without-passkey config returns a Torznab error on every arr RSS check while
+	// Prowlarr-proxied searches keep working. EMPTY, not "unusable":
+	// validateABPasskey has already failed a configured-but-malformed passkey.
 	if c.IndexerABTorznabURL != "" && c.IndexerABPasskey == "" {
 		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, "+
 			"but the /ab RSS feed returns a Torznab error until a passkey is configured",
 			"field", "indexer.ab_passkey")
 	}
-	// The inverse half-configuration: a passkey with no AB Torznab URL is
-	// inert - the AB URL is the AnimeBytes on switch, so neither AB
-	// journaling nor the /ab feed uses the passkey. Info, mirroring
-	// infoDisabledIndexerKeys: a deliberately parked passkey must not raise
-	// Loki alert noise. Field-name-only; never echoes the secret.
+	// The inverse half-configuration: a passkey with no AB Torznab URL is inert, since
+	// the AB URL is the on switch. Info - a parked passkey must not raise alert noise.
 	if c.IndexerABTorznabURL == "" && c.IndexerABPasskey != "" {
 		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; "+
 			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)",
 			"field", "indexer.ab_passkey")
 	}
-	// The third AB half-configuration, and the only one that narrows the
-	// MONITORING half: the top-level animebytes toggle and the indexer's AB
-	// endpoint are separate surfaces (the README states the feed applies none of
-	// the filter keys) sitting in different config sections, so configuring AB
-	// for the feed while leaving animebytes at its false default is a plausible
-	// miss. The feed then hands the arrs grabbable AnimeBytes releases while
-	// compare and audit drop every AB release and link (classify.Obtainable /
-	// filter.ABVisible), so a show whose only best release is on AB is never
-	// alerted on and never appears in the report. Info, mirroring the other
-	// half-configuration signals: the split is legitimate (an operator may want
-	// arr-side grabs without AB alerts), so it must not raise Loki alert noise.
-	// Field-name-only; echoes no value.
+	// The third AB half-configuration, and the only one that narrows the MONITORING
+	// half: configuring AB for the feed while animebytes stays at its false default
+	// hands the arrs grabbable AnimeBytes releases while compare and audit drop every AB
+	// release and link. Info: the split is legitimate, so it must not alert.
 	if c.IndexerABTorznabURL != "" && !c.AnimeBytes {
 		slog.Info("indexer.ab_torznab_url is set but animebytes is false; the Torznab feed "+
 			"serves AnimeBytes releases while findings and the report drop every AB release "+
@@ -1272,15 +966,11 @@ func (c *Config) warnABPasskeyConfiguration() {
 	}
 }
 
-// warnReusedIndexerSecrets warns when indexer.feed_api_key repeats another
-// indexer secret. feed_api_key is the least protected of the three: the arrs
-// send it as the apikey QUERY parameter on every request and store it in their
-// own indexer configuration, so pasting the Prowlarr API key (header-only by
-// design) or the AnimeBytes passkey into it widens that credential's exposure
-// to anything that can read an arr's indexer settings or an intermediate
-// access log. The two keys sit on adjacent lines of the same config section,
-// which is what makes the paste plausible. Warn-only (the config still runs)
-// and field-name-only; never echoes a secret.
+// warnReusedIndexerSecrets warns when indexer.feed_api_key repeats another indexer
+// secret. feed_api_key is the least protected of the three - the arrs send it as the
+// apikey QUERY parameter and store it in their own indexer configuration - so pasting
+// the Prowlarr key or the AnimeBytes passkey into it widens that credential's
+// exposure. Warn-only and field-name-only; never echoes a secret.
 func (c *Config) warnReusedIndexerSecrets() {
 	for _, s := range []struct{ name, val string }{
 		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
@@ -1295,17 +985,11 @@ func (c *Config) warnReusedIndexerSecrets() {
 	}
 }
 
-// warnMissingProwlarrKey warns on an empty Prowlarr API key. A search proxies
-// Prowlarr using indexer.prowlarr_api_key in the X-Api-Key header. An empty
-// key is accepted rather than rejected (it is valid when Prowlarr has auth
-// "Disabled for Local Addresses"), but the common case is a misconfiguration:
-// Prowlarr then answers 401 for every proxied search, and the feed reports
-// each one to the arr as a Torznab <error code="900"> document (upstream
-// query failed) rather than results. Warn so the operator gets a config-time
-// signal without breaking the legitimate no-auth deployment.
-//
-// EMPTY only: a key that is SET but malformed has already failed the config in
-// validateProwlarrAPIKey, so this diagnostic never has to reason about shape.
+// warnMissingProwlarrKey warns on an empty Prowlarr API key. Empty is accepted (it is
+// valid when Prowlarr has auth "Disabled for Local Addresses"), but the common case is
+// a misconfiguration: Prowlarr then 401s every proxied search and the feed answers the
+// arr with a Torznab error 900. EMPTY only - a key that is SET but malformed has
+// already failed the config in validateProwlarrAPIKey.
 func (c *Config) warnMissingProwlarrKey() {
 	if c.IndexerProwlarrAPIKey == "" {
 		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key - "+
@@ -1315,36 +999,23 @@ func (c *Config) warnMissingProwlarrKey() {
 	}
 }
 
-// infoDisabledIndexerKeys emits the half-configuration signal for indexer
-// secrets set with no torznab URL, mirroring the disabled-arr-with-key Info
-// in toConfig: the Prowlarr key and the AB passkey are always
-// operator-written, so either one without a torznab URL almost always means
-// the operator expected the feed to start.
-// Info, not Warn - deliberately parked keys must not raise Loki alert noise.
+// infoDisabledIndexerKeys emits the half-configuration signal for indexer secrets set
+// with no torznab URL: the Prowlarr key and the AB passkey are always
+// operator-written. Info, not Warn - parked keys must not raise Loki alert noise.
 func (c *Config) infoDisabledIndexerKeys() {
-	// indexer.feed_api_key is deliberately NOT a trigger, unlike the other two:
-	// the first-boot starter this app writes SEEDS it with a generated key
-	// (SeedStarter, starter.go), so every default no-indexer deployment carries
-	// one.
-	// Including it made the signal fire on the correct default configuration at
-	// every start, telling an operator who never asked for the feed to go
-	// configure a torznab url - and destroyed the only thing the signal is for,
-	// distinguishing an operator who wrote indexer secrets and expected the feed
-	// from a stock install. The Prowlarr key and the AB passkey are still
-	// operator-written and still trigger it.
+	// indexer.feed_api_key is deliberately NOT a trigger: the first-boot starter seeds
+	// it with a generated key, so every default no-indexer deployment carries one and
+	// including it would fire the signal on the correct stock configuration.
 	if c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
 		slog.Info("indexer keys are set but no torznab url is configured; " +
 			"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")
 	}
 }
 
-// warnTorznabURLCredentials warns (field-name-only, never echoing the URL)
-// when a torznab url embeds a credential-like userinfo or query parameter.
-// The header-based Prowlarr key posture (X-Api-Key, never in a logged URL)
-// is defeated when the operator pastes a Jackett-style URL with an embedded
-// credential: upstream failures log the request URL, shipping the pasted
-// key to the WARN log on every failed search. Matches the public_url
-// warn-only posture.
+// warnTorznabURLCredentials warns (field-name-only, never echoing the URL) when a
+// torznab url embeds a credential-like userinfo or query parameter. The header-based
+// Prowlarr key posture is defeated when the operator pastes a Jackett-style URL with
+// an embedded credential: upstream failures log the request URL.
 func (c *Config) warnTorznabURLCredentials() {
 	for _, tu := range c.torznabEndpoints() {
 		if urlEmbedsCredential(tu.val) {
@@ -1356,26 +1027,15 @@ func (c *Config) warnTorznabURLCredentials() {
 	}
 }
 
-// validateArrPair rejects a half-configured enabled arr (a URL with no key or a
-// URL that is not an absolute http(s) URL with a host), and gates the arr's API
-// key on its FORMAT.
+// validateArrPair rejects a half-configured enabled arr (a URL with no key, or a URL
+// that is not an absolute http(s) URL with a host), and gates the arr's API key on its
+// FORMAT: the shared wellFormedCredential rule via checkAPIKeyShape, then a warn-only
+// note when the value is not the 32-hex shape the arrs generate.
 //
-// The key gate is where an operator-supplied string stops being untrusted text
-// and becomes a value this app may send as a credential; it happens ONCE, here at
-// the config boundary, so no downstream site has to ask again (parse, don't
-// validate). It is the shared wellFormedCredential rule via checkAPIKeyShape,
-// then a warn-only note when the value is not the 32-hex shape the arrs generate
-// (generatedArrAPIKey).
-//
-// The accepted cost, stated honestly because it is larger here than for this
-// app's own feed key: an operator who DELIBERATELY set a custom arr key
-// containing a dollar sign is refused, even though Sonarr and Radarr would accept
-// it (their only check on an operator-supplied SONARR__AUTH__APIKEY is
-// IsNullOrWhiteSpace). That trade is taken because a '$' in an arr key is
-// overwhelmingly an unexpanded ${VAR}, and the alternative failure mode is far
-// worse and points at the wrong thing: every arr call 401s, the library walk
-// fails, cycle health flips and the container goes unhealthy - loud, but naming
-// the arr rather than the config typo that caused it.
+// The accepted cost is larger here than for this app's own feed key: an operator who
+// DELIBERATELY set a custom arr key containing a dollar sign is refused, even though
+// the arrs would accept it. The trade is taken because the alternative failure mode -
+// every arr call 401ing - names the arr rather than the config typo that caused it.
 func validateArrPair(name, rawURL, key string) error {
 	switch {
 	case rawURL == "" && key == "":
@@ -1392,14 +1052,10 @@ func validateArrPair(name, rawURL, key string) error {
 	if err := validateHTTPURL(name+".url", rawURL); err != nil {
 		return err
 	}
-	// arrapi's base-URL contract forbids a query: a non-empty query passes
-	// this load-time validation only to be rejected by arrapi.NewSonarr/
-	// NewRadarr with an error that echoes the full configured URL (and any
-	// credential-like query parameter with it), and a bare trailing '?'
-	// (ForceQuery) is accepted by arrapi but turns every appended API path
-	// into a query. Reject both here, field-name-only like the shared
-	// validator's branches, so the failure is early and never URL-echoing.
-	// validateHTTPURL parsed this same immutable string above.
+	// arrapi's base-URL contract forbids a query: a non-empty query would pass this
+	// validation only to be rejected by the constructor with an error echoing the full
+	// URL, and a bare trailing '?' turns every appended API path into a query. Reject
+	// both here, field-name-only. validateHTTPURL parsed this same string above.
 	u, _ := url.Parse(rawURL)
 	if u.RawQuery != "" || u.ForceQuery {
 		return fmt.Errorf("%s.url must not contain a query", name)
@@ -1409,10 +1065,9 @@ func validateArrPair(name, rawURL, key string) error {
 
 // --- URL helpers ---
 
-// validateHTTPURL rejects a non-empty rawURL that is not an absolute http(s) URL
-// with a host; an empty rawURL passes (the caller decides whether the field is
-// required). Shared by the arr-pair and indexer Torznab-URL validators so a
-// malformed URL fails at config load rather than at first request.
+// validateHTTPURL rejects a non-empty rawURL that is not an absolute http(s) URL with
+// a host; an empty rawURL passes (the caller decides whether the field is required).
+// Shared by the arr-pair and indexer Torznab-URL validators.
 func validateHTTPURL(name, rawURL string) error {
 	if rawURL == "" {
 		return nil
@@ -1424,32 +1079,20 @@ func validateHTTPURL(name, rawURL string) error {
 		return fmt.Errorf("%s is not a valid URL", name)
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		// Field-name-only, matching the parse-error branch: u.Redacted() masks only
-		// a userinfo password, so echoing the URL would still ship a username-only
-		// token or a query-string apikey to the startup log.
+		// Field-name-only, matching the parse-error branch: u.Redacted() masks only a
+		// userinfo password, so echoing would still ship a query-string apikey.
 		return fmt.Errorf("%s must be an absolute http(s) URL with a host", name)
 	}
-	// url.Parse accepts URI shapes the base-URL consumers cannot use: a
-	// fragment survives the parse but is never sent over HTTP (the indexer's
-	// request builder merges Torznab params into RawQuery component-wise -
-	// see internal/indexer/prowlarr.go - precisely so a fragment cannot
-	// swallow them, leaving a config fragment pure paste-error noise), and
-	// an out-of-range port passes parsing but fails every later dial. Both
-	// must fail at startup, not at first request.
-	// Errors stay field-name-only, matching the branches above.
-	// The raw string is scanned for the literal delimiter because u.Fragment
-	// misses a bare trailing '#' (an empty fragment parses to ""), yet arrapi
-	// would still append its API path after that delimiter as fragment data
-	// and send every request to '/'. An encoded %23 remains valid path data.
+	// url.Parse accepts URI shapes the base-URL consumers cannot use: a fragment
+	// survives the parse but is never sent over HTTP, and an out-of-range port fails
+	// every later dial. The raw string is scanned for the literal '#' because u.Fragment
+	// misses a bare trailing one, after which arrapi would send every request to '/'.
 	if strings.Contains(rawURL, "#") {
 		return fmt.Errorf("%s must not contain a URL fragment", name)
 	}
 	if port := u.Port(); port != "" {
-		// ParseUint bounds the range; port 0 parses but is never a dialable
-		// destination (the wildcard "any port" in bind contexts only), so a
-		// config carrying it would start cleanly and then fail every later
-		// arr walk / proxied search at connect time - exactly the
-		// runnable-but-broken class these checks exist to reject.
+		// ParseUint bounds the range; port 0 parses but is never a dialable destination,
+		// so a config carrying it would start cleanly and fail every later request.
 		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return fmt.Errorf("%s has an invalid port", name)
 		}
@@ -1457,20 +1100,12 @@ func validateHTTPURL(name, rawURL string) error {
 	return nil
 }
 
-// urlEmbedsCredential reports whether rawURL carries a credential in userinfo
-// or a credential-like query parameter (internal/credname owns the name set,
-// shared with the indexer's broader redaction policy over the same vocabulary).
-// Such a URL survives validation but leaks the credential to
-// upstream-failure logs,
-// which wrap the full request URL; validateIndexer warns on it field-name-only.
-// The query is scanned on the raw string via urlform.RawQueryNames (split on
-// both '&' and ';', each name percent-decoded): that is a strict superset of
-// the parsed u.Query() view, which drops any malformed pair wholesale (an
-// unescaped ';' in "?apikey=SECRET;foo=x" discards the entire pair while the
-// secret stays in RawQuery for outgoing requests and logs). This consumer's
-// fail direction is broad on purpose - over-matching a parameter name only
-// costs a warning - which is why the library reports names and leaves the
-// predicate here. Matches field names only, never values.
+// urlEmbedsCredential reports whether rawURL carries a credential in userinfo or a
+// credential-like query parameter (internal/credname owns the name set). Such a URL
+// survives validation but leaks the credential to upstream-failure logs, which wrap
+// the full request URL. The query is scanned on the raw string, a strict superset of
+// the parsed u.Query() view: that view drops a malformed pair wholesale while the
+// secret stays in RawQuery for outgoing requests and logs. Matches names, never values.
 func urlEmbedsCredential(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -1492,16 +1127,11 @@ func urlEmbedsCredential(rawURL string) bool {
 
 // --- Parse helpers and policies ---
 
-// isAllowedEnvVar reports whether an env var name is safe to expand in the
-// config: only the app's own SONARR_*, RADARR_*, and SEADEX_SCOUT_* names, so a
-// stray ${HOME} or ${PATH} in the file is left literal. It is the allowlist
-// policy Load hands to yamlenv.Expand (the shared post-parse, string-values-only
-// expansion engine).
-// allowedEnvPrefixes is the ${VAR} expansion allowlist and the ONE place the
-// set is written: isAllowedEnvVar is the rule, envAllowlistSpelling is its
-// operator-facing rendering, and unexpandedRefHint is the clause three
-// credential errors quote - so adding or renaming a prefix cannot leave a
-// diagnostic naming a set the expander no longer uses.
+// isAllowedEnvVar reports whether an env var name is safe to expand in the config:
+// only the app's own SONARR_*, RADARR_* and SEADEX_SCOUT_* names, so a stray ${HOME}
+// is left literal. allowedEnvPrefixes is the ONE place the set is written - the rule,
+// its operator-facing rendering, and the clause three credential errors quote all
+// read it, so renaming a prefix cannot leave a diagnostic naming a stale set.
 var allowedEnvPrefixes = []string{"SONARR_", "RADARR_", "SEADEX_SCOUT_"}
 
 // envAllowlistSpelling renders allowedEnvPrefixes the way every config
@@ -1533,29 +1163,21 @@ func trimList(items []string) []string {
 	return out
 }
 
-// warnAllBlankTagList warns when a configured arr_tags list holds only
-// blank entries: trimList drops them all, so that filter is silently OFF -
-// the include side then admits every item past the operator's scoping and
-// the exclude side excludes nothing, and no unmatched-tag warning fires
-// from the walk (blank labels never reach it; arrapi.UnmatchedLabels
-// ignores them too).
+// warnAllBlankTagList warns when a configured arr_tags list holds only blank entries:
+// trimList drops them all, so that filter is silently OFF and no unmatched-tag
+// warning fires from the walk either.
 func warnAllBlankTagList(which string, raw, trimmed []string) {
 	if len(raw) > 0 && len(trimmed) == 0 {
 		slog.Warn("configured tag list holds only blank entries; the filter is off", "field", which)
 	}
 }
 
-// warnConfigPermissions warns when the config file is readable beyond its
-// owner. This file carries every secret the app has - the arr api_keys, the
-// Prowlarr api key, and the AnimeBytes passkey - which is why the starter this
-// app writes is 0600 (starterFileMode) and why the indexer's feed snapshot is
-// owner-only too; an operator-authored or age-decrypted config commonly lands
-// 0644, exposing all of them to any other uid on the host that mounts /config.
-// Warn-only: a deliberately widened mode must not stop the daemon. The mode
-// itself is not secret, so it is the one value this diagnostic echoes.
-// warnConfigPermissions takes the FileInfo of the descriptor the config was
-// READ from (readConfigFile), never a second stat of the pathname: a mode
-// read from a fresh lookup can describe a different inode than the bytes.
+// warnConfigPermissions warns when the config file is readable beyond its owner. This
+// file carries every secret the app has, and an operator-authored or age-decrypted
+// config commonly lands 0644, exposing them to any other uid on the host that mounts
+// /config. Warn-only; the mode itself is not secret, so it is the one value this
+// diagnostic echoes. It takes the FileInfo of the descriptor the config was READ
+// from, never a second stat of the pathname, which could describe another inode.
 func warnConfigPermissions(info os.FileInfo) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		slog.Warn("config file is readable beyond its owner; it holds the arr api keys, "+
@@ -1581,9 +1203,8 @@ func parseLogFormat(s string) slogx.Format {
 // (case-insensitive, trims, accepts the long-form "warning" alias and slog
 // offset syntax), falling back to Info for an empty or unrecognized value.
 func parseLogLevel(s string) slog.Level {
-	// ParseLevel returns ok=true for an empty value (an unset level is not an
-	// error), so ok=false is specifically a non-empty unrecognized level worth a
-	// warning rather than a silent fallback to Info.
+	// ParseLevel returns ok=true for an empty value, so ok=false is specifically a
+	// non-empty unrecognized level worth a warning.
 	lvl, ok := slogx.ParseLevel(s, slog.LevelInfo)
 	if !ok {
 		// Field-name-only: the rejected value may be an expanded ${VAR} secret

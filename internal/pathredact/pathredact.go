@@ -3,21 +3,6 @@
 // substring-plus-ancestor masking rule over diagnostic text, an
 // errors.Is/As-preserving error wrapper, and a pass-through slog.Handler that
 // rewrites messages, string attributes, error attributes and group members.
-//
-// It lives in a leaf so every package that needs the rule can reach it without
-// importing a domain package: the report generator (internal/audit) applies it
-// to its own pipeline, and the composition root applies it to the report-lock
-// errors internal/cycle returns. The marker text is fixed HERE rather than
-// passed in by the caller, because both consumers must spell it identically
-// and share no other home (see ReportDirMarker); beyond that one string this
-// package knows nothing about reports, verdicts or config keys.
-//
-// The masked value is secret-capable because config.Load expands any
-// allowlisted ${SEADEX_SCOUT_*} reference in every string field, so a paste
-// typo such as `report.dir: ${SEADEX_SCOUT_AB_PASSKEY}` makes a passkey the
-// effective directory. Filesystem calls keep the real path; only the
-// diagnostics that cross into slog (shipped to Loki) or main's error log are
-// redacted.
 package pathredact
 
 import (
@@ -43,10 +28,7 @@ const minRedactablePath = 8
 
 // Text replaces every occurrence of dir - and of each of its path-prefix
 // ancestors, which an os.PathError for a failed intermediate component
-// (MkdirAll) can carry instead of the full dir - with ReportDirMarker. Ancestor
-// redaction is deliberately broad: the texts this runs over are scoped
-// diagnostics whose only path-like content derives from dir, so over-masking a
-// benign ancestor costs nothing while a missed fragment could ship a secret.
+// (MkdirAll) can carry instead of the full dir - with ReportDirMarker.
 func Text(dir, s string) string {
 	if dir == "" {
 		return s
@@ -157,11 +139,7 @@ func (h *redactingHandler) WithGroup(name string) slog.Handler {
 
 // redactAttr rewrites one attribute: string values are redacted in place,
 // error values are flattened to their redacted text (an *os.PathError's
-// rendered form carries the full path), and groups recurse. Every other
-// value passes through unchanged: numeric/time kinds cannot carry the dir,
-// and a non-error KindAny value is deliberately not flattened (pinned by
-// the passthrough test) - no caller logs the dir inside such a value, and
-// flattening would change the record's wire shape.
+// rendered form carries the full path), and groups recurse.
 func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
 	switch v.Kind() {

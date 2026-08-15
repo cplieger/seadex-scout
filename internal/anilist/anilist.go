@@ -39,8 +39,6 @@ const DefaultURL = "https://graphql.anilist.co"
 
 const (
 	// DefaultRate is the AniList request/minute ceiling. It is AniList contract
-	// knowledge, so it lives here beside DefaultURL and the throttle that
-	// enforces it; the wiring site (build.go) references it.
 	DefaultRate = 30
 
 	maxBodyBytes = 1 << 20
@@ -50,58 +48,24 @@ const (
 	// the client proactively waits for the window reset to avoid a 429.
 	lowRemaining = 2
 	// defaultRetryAfter is the wait applied when a 429 carries neither a usable
-	// Retry-After nor a future X-RateLimit-Reset. AniList's budget is per-minute,
-	// so with no upstream evidence the client sits out a whole window: a shorter
-	// value puts every one of maxAttempts attempts AND the shared throttle penalty
-	// inside the same window, which is the failure rateLimitError's reset-window
-	// branch exists to avoid. It is also observeRateHeaders' fallback when a
-	// low-budget response omits the reset header, so both no-evidence paths sit
-	// out one window instead of disagreeing by 12x.
+	// Retry-After nor a future X-RateLimit-Reset: AniList's budget is per-minute, so
+	// with no upstream evidence the client sits out a whole window.
 	defaultRetryAfter = time.Minute
 	// maxRetryAfter is the PER-ATTEMPT ceiling: the longest one lookup's retry
 	// loop will wait for a rate-limit hint, passed to httpx.WithRateLimitRetry so
 	// a pathological header cannot stall a single request. httpx enforces it
-	// itself (it waits min(hint, maxWait)), so nothing in this package needs to
-	// clamp the retry path.
 	maxRetryAfter = time.Minute
 	// maxThrottlePenalty is the POLITENESS ceiling: the longest the shared
-	// process-wide throttle will sit out an upstream-stated window, applied in
-	// backOff before penalize.
-	//
-	// It is a SEPARATE number from maxRetryAfter because the two waits answer
-	// different questions, and one number serving both was the defect (l-f7).
-	// The per-attempt ceiling keeps a single lookup responsive; this one decides
-	// how strictly the client honours an upstream that has told it to stop. Held
-	// at a minute, a stated window longer than that was honoured for 60s and then
-	// discarded - the throttle handed out slots again at the ordinary spacing and
-	// the client resumed spending budget inside a window AniList had explicitly
-	// closed, so a cold reconcile's remaining prefetch chunks re-probed a
-	// rate-limited community index once a minute and every probe returned another
-	// 429. This app is deliberately polite to its upstreams everywhere else (a
-	// fixed page delay, a User-Agent, a header-adaptive throttle); that was the
-	// one place it argued with one.
-	//
-	// Derived rather than invented (the app's convention for a second threshold):
-	// five times the per-attempt ceiling. The cost is bounded and small - the
-	// AniList half of a cold reconcile is ~9 batched requests inside a ~25-minute
-	// pass, against a 3h health-marker lease - so a few minutes is noise against
-	// the deadline while a minute was not enough to honour a real window.
-	//
-	// Still a CLAMP rather than a plausibility gate, deliberately. Treating an
-	// implausible value as absent (falling back to defaultRetryAfter) is the
-	// publish-or-drop stance this repo takes for untrusted input elsewhere, and it
-	// is the wrong answer here: for a window a little past the ceiling - the
-	// likely case - clamping waits the ceiling and is partially rude, while
-	// falling back to one minute is MORE rude for the remainder. The clamp is the
-	// politer reading near the boundary. What the clamp must not do is hide an
-	// absurd value, which is why backOff diagnoses one (see implausibleWindow).
+	// process-wide throttle will sit out an upstream-stated window, applied in backOff
+	// before penalize. It is a SEPARATE number from the per-attempt maxRetryAfter
+	// because honouring a stated window and keeping one lookup responsive are different
+	// questions; derived as five times that ceiling rather than invented.
 	maxThrottlePenalty = 5 * maxRetryAfter
-	// implausibleWindow is when an upstream-stated wait stops being a window this
-	// client is merely unwilling to honour in full and becomes evidence the header
-	// is wrong: AniList's budget is per-minute, so a stated wait an order of
-	// magnitude past the politeness ceiling is a bug or a hostile intermediary,
-	// not a rate-limit window. Clamping it silently would render a 24h header as a
-	// few minutes and leave no trace of the upstream defect.
+	// implausibleWindow is where an upstream-stated wait stops being a window this
+	// client is merely unwilling to honour in full and becomes evidence the header is
+	// wrong: AniList's budget is per-minute, so an order of magnitude past the
+	// politeness ceiling is a bug or a hostile intermediary, and clamping it silently
+	// would leave no trace of the upstream defect.
 	implausibleWindow = 10 * maxThrottlePenalty
 )
 
@@ -109,33 +73,18 @@ const (
 var ErrNotFound = errors.New("anilist: media not found")
 
 // errBatchRecord marks a record-local validation failure inside an otherwise
-// well-formed batch response, distinguishing it from a request/envelope failure
-// so FetchMany keeps fetching later chunks instead of reading one poisoned
-// record as a total outage. It is FetchMany's own internal classification and is
-// deliberately unexported: what a CALLER reads is BatchResult.Verdicts, which
-// already says per id whether the answer is trustworthy. An aborting
-// envelope/request error does NOT wrap it (it is joined with an earlier chunk's
-// record error when there was one), so errors.Is classifies the FAILURE rather
-// than naming a wrapper type.
+// well-formed batch response, distinguishing it from a request/envelope failure so
+// FetchMany keeps fetching later chunks instead of reading one poisoned record as a
+// total outage. Deliberately unexported: what a CALLER reads is BatchResult.Verdicts.
 var errBatchRecord = errors.New("anilist: batch response")
 
 // --- upstream failure classification ---
 
 // retryableUpstreamStatus reports whether an upstream status is a self-healing
-// server-side failure worth another attempt. It is httpx.IsRetryableStatus - the
-// same rule internal/indexer's Prowlarr door reads, so the two upstream doors
-// cannot drift as the library's set grows (it gained 408 in v4.1.0) - NARROWED
-// twice for this client:
-//
-//   - 429 is excluded because this client gives a rate limit its own dedicated
-//     path (rateLimitError / envelopeRateLimitError, which penalize the shared
-//     throttle). httpx includes 429 for the GetBytes door, which retries rate
-//     limits by default; request() is a Do caller, where they are not retryable
-//     except under WithRateLimitRetry - so excluding it here is the pairing the
-//     library's own doc asks for, not a disagreement with it.
-//   - a status of 600 or more is excluded because this predicate also reads
-//     e.Status out of the untrusted GraphQL errors[] envelope, where a value
-//     above the 5xx band is not a server status at all.
+// server-side failure worth another attempt: httpx.IsRetryableStatus, narrowed twice.
+// 429 is excluded because this client gives a rate limit its own dedicated path (which
+// penalizes the shared throttle), and a status of 600 or more is excluded because this
+// predicate also reads e.Status out of the untrusted GraphQL errors[] envelope.
 func retryableUpstreamStatus(code int) bool {
 	if code == http.StatusTooManyRequests || code >= 600 {
 		return false
@@ -143,10 +92,9 @@ func retryableUpstreamStatus(code int) bool {
 	return httpx.IsRetryableStatus(code)
 }
 
-// envelopeErrors decodes the untrusted GraphQL errors[] list, the one shape
-// both envelope classifiers (transientEnvelopeError, envelopeRateLimitError)
-// read. An undecodable body carries NO envelope error: that failure is the
-// parser's business, and the retry boundary must not invent one.
+// envelopeErrors decodes the untrusted GraphQL errors[] list, the one shape both
+// envelope classifiers read. An undecodable body carries NO envelope error: that
+// failure is the parser's business, and the retry boundary must not invent one.
 func envelopeErrors(raw []byte) gqlErrors {
 	var env struct {
 		Errors gqlErrors `json:"errors"`
@@ -157,16 +105,11 @@ func envelopeErrors(raw []byte) gqlErrors {
 	return env.Errors
 }
 
-// transientEnvelopeError classifies a GraphQL envelope that arrived with a
-// successful HTTP status but reports a SERVER-side failure in its errors[] list.
-// AniList answers such faults as 200 with {"errors":[{"status":500,...}]}, so
-// httpx.Do has already declared the attempt successful by the time the parser
-// sees it and no retry ever happens. Returning a transient error here - at the
-// retry boundary, before parsing - puts that class back inside the budget.
-//
-// Only the retryable statuses qualify: a 404 envelope is AniList's genuine
-// not-found (Fetch's ErrNotFound contract depends on it reaching the parser),
-// and an unparseable body is the parser's business, not the retrier's.
+// transientEnvelopeError classifies a GraphQL envelope that arrived with a successful
+// HTTP status but reports a SERVER-side failure in its errors[] list. AniList answers
+// such faults as 200, so httpx.Do has already declared the attempt successful and no
+// retry ever happens; returning a transient error here puts that class back inside the
+// budget. Only retryable statuses qualify - a 404 envelope is a genuine not-found.
 func transientEnvelopeError(raw []byte) error {
 	for _, e := range envelopeErrors(raw) {
 		if retryableUpstreamStatus(e.Status) {
@@ -177,27 +120,12 @@ func transientEnvelopeError(raw []byte) error {
 	return nil
 }
 
-// ErrRecordUnusable marks a rejection determined entirely by the upstream
-// record's OWN CONTENT: after every individually defective title has been
-// dropped, no title remains that normalizes to a usable match key (a CJK-only
-// or symbol-only title set, or a set whose every member was over-cap or unsafe
-// to memoize). It is PERMANENT - the same record fails identically on every
-// future cycle - so it is not an outage and must not be classified as one.
-//
-// It is deliberately NOT raised for a defective FORMAT field (knownFormat
-// collapses that to the unknown sentinel, l-f140) and no longer for an
-// individually defective TITLE either: a bad title costs the record that title,
-// not its usable siblings (h-f1). Only an EMPTY survivor set reaches here.
-//
-// The distinction is load-bearing for alerting. Treated as transient, such a
-// record is re-fetched every cycle forever, keeps Result.Degraded true, and
-// advances the persisted AniList degradation streak until it escalates to a
-// standing ERROR whose remediation text points at graphql.anilist.co
-// reachability that is perfectly healthy. It is also not a plain not-found: the
-// record exists, it just cannot be matched on, and the operator's real remedy is
-// an overrides.json entry supplying the arr id directly. Callers therefore
-// memoize it negatively (a definitive answer) and say so once, with that remedy
-// named. Callers match with errors.Is.
+// ErrRecordUnusable marks a rejection determined entirely by the upstream record's OWN
+// CONTENT: after every individually defective title has been dropped, no title remains
+// that normalizes to a usable match key. It is PERMANENT - the same record fails
+// identically on every future cycle - so callers memoize it negatively instead of
+// re-fetching forever and escalating a healthy upstream to a standing ERROR. The
+// operator's real remedy is an overrides.json entry supplying the arr id directly.
 var ErrRecordUnusable = errors.New("anilist: record unusable for matching")
 
 // query fetches the fields needed for a title fallback match, plus the id so
@@ -216,28 +144,22 @@ var batchQuery = fmt.Sprintf(`query ($ids: [Int]) { Page(perPage: %d) { media(id
 
 // Media is the subset of an AniList entry used for title matching.
 type Media struct {
-	// Format is a canonical internal/mediatype token (the AniList MediaFormat
-	// member, upper-cased and trimmed) or "" when the type is unknown -
-	// including when the wire value was unrecognized, over-long, or not
-	// single-line-safe. knownFormat enforces that, so every reader (and the
-	// memo that persists it) can treat the field as bounded safe text.
+	// Format is a canonical internal/mediatype token (the AniList MediaFormat member,
+	// upper-cased and trimmed) or "" when the type is unknown; knownFormat enforces
+	// that, so every reader can treat the field as bounded safe text.
 	Format string
 	Titles []string
 	Year   int
 }
 
-// Verdict is what the batch learned about ONE requested id. It replaces the
-// Completed / UnverifiedIDs / UnrequestedIDs join a caller used to compute from
-// three separate channels: the caller reads one verdict per id and never
-// reasons about chunks.
+// Verdict is what the batch learned about ONE requested id: the caller reads one
+// verdict per id and never reasons about chunks.
 type Verdict uint8
 
 const (
-	// VerdictUnrequested means no request ever covered this id (the batch
-	// aborted at or before its chunk). No answer exists yet, so the caller may
-	// re-batch. It is the ZERO value deliberately - an id missing from the map,
-	// or a nil map after a total failure, must read as "no answer" rather than
-	// as an answer nobody produced.
+	// VerdictUnrequested means no request ever covered this id (the batch aborted at or
+	// before its chunk), so the caller may re-batch. It is the ZERO value deliberately:
+	// a missing entry, or a nil map after a total failure, must read as "no answer".
 	VerdictUnrequested Verdict = iota
 	// VerdictFound means BatchResult.Media holds the media for this id.
 	VerdictFound
@@ -251,15 +173,10 @@ const (
 )
 
 // BatchResult is what FetchMany resolved, answered PER REQUESTED ID rather than
-// through a set of mechanism-shaped channels the caller had to join (l-f5,
-// l-f135). The outcomes a caller must tell apart are then all one value: media
-// exists, absence is definitive, absence proves nothing, or no request covered
-// the id at all. No error out of FetchMany carries id sets either, so a caller
-// never joins an error's id lists against the media map to work out what it may
-// memoize: reading the old nil-versus-empty convention (and later the Completed /
-// UnverifiedIDs / UnrequestedIDs join) backwards was compile-clean and cost ~450
-// already-answered ids a rate-limited per-id Fetch each - the ~1700-request cold
-// cycle batching exists to avoid.
+// through mechanism-shaped channels a caller had to join: media exists, absence is
+// definitive, absence proves nothing, or no request covered the id at all. No error
+// out of FetchMany carries id sets either, so a caller never joins an error's id lists
+// against the media map to work out what it may memoize.
 type BatchResult struct {
 	// Media holds the media that exist, keyed by AniList id. An id AniList has
 	// no anime for is absent; whether that absence is trustworthy evidence is
@@ -271,10 +188,9 @@ type BatchResult struct {
 	Verdicts map[int]Verdict
 }
 
-// Stats is a snapshot of client activity for cycle observability logs.
-// Calls counts outbound HTTP attempts (retries included), so during 429 or
-// transient-network episodes it exceeds the number of logical fetches;
-// RateLimitWaits counts 429 responses plus proactive low-budget backoffs.
+// Stats is a snapshot of client activity for cycle observability logs. Calls counts
+// outbound HTTP attempts (retries included), so it exceeds the number of logical
+// fetches during a 429 episode; RateLimitWaits counts 429s plus proactive backoffs.
 type Stats struct {
 	Calls          int64
 	RateLimitWaits int64
@@ -315,21 +231,12 @@ func (c *Client) Stats() Stats {
 	return Stats{Calls: c.calls.Load(), RateLimitWaits: c.rlWaits.Load()}
 }
 
-// request marshals the GraphQL payload and performs one retried POST,
-// returning the raw response body. Shared by Fetch and FetchMany. The throttle
-// is claimed INSIDE the retry closure so every actual HTTP attempt reserves
-// its own rate slot: a transient 5xx/transport retry would otherwise re-fire
-// after only the backoff delay, exceeding the configured requests-per-minute
-// ceiling. WithRateLimitRetry makes the 429's *httpx.RateLimitError retryable
-// (httpx classifies it non-transient by default) and bounds its wait at
-// maxRetryAfter — the PER-ATTEMPT ceiling, so one lookup can never stall on a
-// long hint. rateLimitError clamps the hint it carries to the longer
-// maxThrottlePenalty instead, because that value also becomes the shared
-// throttle's penalty, and how long the client honours a stated window is a
-// different question from how long one attempt may block (l-f7). httpx waits
-// min(hint, maxRetryAfter), so the two ceilings compose without either needing
-// to know the other: the attempt waits a minute at most, while later callers
-// retain the full penalty.
+// request marshals the GraphQL payload and performs one retried POST, returning the
+// raw response body. Shared by Fetch and FetchMany. The throttle is claimed INSIDE the
+// retry closure so every actual HTTP attempt reserves its own rate slot; a transient
+// retry would otherwise re-fire after the backoff alone and exceed the configured
+// ceiling. WithRateLimitRetry bounds one attempt's wait at maxRetryAfter while the
+// hint rateLimitError carries keeps the longer shared-throttle penalty.
 func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{"query": gql, "variables": variables})
 	if err != nil {
@@ -344,10 +251,9 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 			if err != nil {
 				return nil, err
 			}
-			// Classify a server-side failure delivered inside a successful
-			// envelope here, at the retry boundary: past this point httpx has
-			// recorded the attempt as a success and the class can never be
-			// retried (see transientEnvelopeError).
+			// Classify a server-side failure delivered inside a successful envelope
+			// here, at the retry boundary: past this point httpx has recorded the
+			// attempt as a success and the class can never be retried.
 			if transientErr := transientEnvelopeError(raw); transientErr != nil {
 				return nil, transientErr
 			}
@@ -358,28 +264,16 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 		httpx.WithLabel("anilist"),
 		httpx.WithLogger(c.log),
 		httpx.WithRateLimitRetry(maxRetryAfter),
-		// Demote httpx's terminal "http retries exhausted" line to Debug. Every
-		// exhausted request is republished by the matcher with strictly more
-		// context: a total batch outage as "anilist batch prefetch failed;
-		// skipping per-id fallback for pending ids" (match's prefetch, carrying
-		// the pending count) and a per-id miss as "anilist fallback failed"
-		// (carrying al_id, plus the repeated-failure gate line), and a sustained
-		// outage escalates to ERROR with consecutive_anilist_degraded
-		// (scout.recordAniListDegradation). Leaving both at Warn reports one
-		// AniList outage twice, generic line first. request is SHARED by Fetch
-		// (per-id) and FetchMany (batch), so this covers both paths - wider than
-		// the single call path the finding named, and correct, because both
-		// already publish their own contextual record. Demoting rather than
-		// dropping the logger keeps the per-attempt retry diagnostics - the same
-		// rule internal/seadex and internal/indexer's Prowlarr door already
-		// apply (l-f20).
+		// Demote httpx's terminal "http retries exhausted" line to Debug: every
+		// exhausted request is republished by the matcher with strictly more context,
+		// so leaving both at Warn reports one AniList outage twice. Demoting rather
+		// than dropping the logger keeps the per-attempt retry diagnostics.
 		httpx.WithExhaustedLevel(slog.LevelDebug))
 }
 
-// Fetch returns the AniList media for the given ID, or ErrNotFound when AniList
-// has no such anime. It throttles before the request and retries transient
-// failures and 429s (honoring Retry-After). A non-positive id is rejected
-// without a request; the identity invariant requires a positive requested id.
+// Fetch returns the AniList media for the given ID, or ErrNotFound when AniList has no
+// such anime. It throttles before the request and retries transient failures and 429s
+// (honoring Retry-After). A non-positive id is rejected without a request.
 func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 	if aniListID <= 0 {
 		return Media{}, fmt.Errorf("anilist: invalid media id %d", aniListID)
@@ -391,29 +285,16 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 	return parseMediaForID(raw, aniListID)
 }
 
-// FetchMany resolves many AniList ids in batched requests (up to batchSize ids
-// each, every batch throttled and retried like Fetch), returning a BatchResult
-// whose Media holds the media that exist keyed by id and whose Verdicts answers,
-// per REQUESTED id, what the batch learned about it.
+// FetchMany resolves many AniList ids in batched requests (up to batchSize ids each,
+// every batch throttled and retried like Fetch), returning a BatchResult whose Media
+// holds the media that exist keyed by id and whose Verdicts answers, per REQUESTED id,
+// what the batch learned about it.
 //
-// Verdicts is the whole caller contract: VerdictFound and VerdictAbsent are the
-// definitive answers a completed chunk produced, VerdictUnverified marks an id
-// whose chunk answered untrustworthily, and VerdictUnrequested marks one no
-// request ever covered - the aborting chunk and every chunk after it - which a
-// caller can re-batch instead of falling back one id at a time. A TOTAL failure
-// (no chunk completed) returns a zero BatchResult with the error, so every id
-// reads VerdictUnrequested and the caller can tell an all-not-found batch apart
-// from an outage without a completion flag.
-//
-// A record-local failure (errBatchRecord, a poisoned record inside an otherwise
-// well-formed response) does NOT abort the batch: the chunk still counts as
-// completed, later chunks are still fetched,
-// and the first record error is surfaced alongside the merged result, so one
-// malformed record cannot hide every id after it or read as a total outage to
-// the caller. The response is untrusted: an id the current chunk never
-// requested is dropped before the merge (retainRequested) and surfaced like
-// any other record-local failure, so a malformed or compromised response
-// cannot inject an unrelated Media or overwrite an earlier chunk's value.
+// A TOTAL failure (no chunk completed) returns a zero BatchResult with the error, so
+// every id reads VerdictUnrequested and an all-not-found batch is distinguishable from
+// an outage. A record-local failure does NOT abort the batch: later chunks are still
+// fetched, and an id the current chunk never requested is dropped before the merge
+// (retainRequested), so a compromised response cannot overwrite an earlier value.
 func (c *Client) FetchMany(ctx context.Context, ids []int) (BatchResult, error) {
 	out := make(map[int]Media, len(ids))
 	verdicts := make(map[int]Verdict, len(ids))
@@ -444,14 +325,10 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (BatchResult, error) 
 	return BatchResult{Media: out, Verdicts: verdicts}, nil
 }
 
-// abortedBatch builds FetchMany's answer for a chunk failure that ABORTS the
-// batch. The aborting chunk and every chunk after it keep their
-// VerdictUnrequested zero value, so the ids no request covered are nameable
-// without a second id list. With nothing completed yet the whole call is a total
-// failure; otherwise the completed chunks' verdicts ride along so their absences
-// stay definitive evidence. An earlier chunk's record diagnostic is preserved
-// with the abort leading, since the abort is the classification a caller reads
-// first.
+// abortedBatch builds FetchMany's answer for a chunk failure that ABORTS the batch.
+// The aborting chunk and every chunk after it keep their VerdictUnrequested zero value,
+// so the ids no request covered are nameable without a second id list; completed
+// chunks' verdicts ride along so their absences stay definitive evidence.
 func abortedBatch(
 	out map[int]Media, verdicts map[int]Verdict, completed bool, err, firstRecordErr error,
 ) (BatchResult, error) {
@@ -464,10 +341,9 @@ func abortedBatch(
 	return BatchResult{Media: out, Verdicts: verdicts}, err
 }
 
-// recordChunkVerdicts records one completed chunk's per-id verdicts: an id the
-// page answered is VerdictFound, and every other requested id takes the absent
-// verdict the chunk's trustworthiness selected (VerdictAbsent for a clean chunk,
-// VerdictUnverified for a record-local failure).
+// recordChunkVerdicts records one completed chunk's per-id verdicts: an id the page
+// answered is VerdictFound, and every other requested id takes the absent verdict the
+// chunk's trustworthiness selected.
 func recordChunkVerdicts(verdicts map[int]Verdict, chunk []int, page map[int]Media, absent Verdict) {
 	for _, id := range chunk {
 		if _, ok := page[id]; ok {
@@ -478,12 +354,9 @@ func recordChunkVerdicts(verdicts map[int]Verdict, chunk []int, page map[int]Med
 	}
 }
 
-// fetchBatchChunk fetches and parses one chunk of FetchMany's id list. A
-// request failure returns a nil page (nothing to merge); otherwise the parsed
-// page is returned alongside the joined parse and identity-set errors, so
-// FetchMany's caller-facing contract logic reads as one linear loop. A
-// record-local failure (errBatchRecord) still returns the chunk's valid
-// records, matching FetchMany's does-not-abort-the-batch rule.
+// fetchBatchChunk fetches and parses one chunk of FetchMany's id list. A request
+// failure returns a nil page; otherwise the parsed page is returned alongside the
+// joined parse and identity-set errors, a record-local failure included.
 func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Media, error) {
 	raw, err := c.request(ctx, batchQuery, map[string]any{"ids": chunk})
 	if err != nil {
@@ -493,16 +366,11 @@ func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Medi
 	return page, errors.Join(parseErr, retainRequested(page, chunk))
 }
 
-// retainRequested enforces FetchMany's identity-set invariant on one parsed
-// page: every id in the response must have been in the chunk that requested
-// it. An unsolicited id is deleted from the page - never merged, where it
-// could inject an unrelated Media or overwrite a value an earlier chunk
-// legitimately resolved - and one such id (the first encountered in map
-// iteration order, so arbitrary when several are unsolicited) is reported as
-// an errBatchRecord-wrapped error so the caller sees the malformed response
-// without losing the chunk's valid records. When MORE than one id is
-// unsolicited the count rides the error too, so one stray id reads differently
-// from a wholesale identity-set violation.
+// retainRequested enforces FetchMany's identity-set invariant on one parsed page:
+// every id in the response must have been in the chunk that requested it. An
+// unsolicited id is deleted from the page - never merged, where it could inject an
+// unrelated Media or overwrite an earlier chunk's value - and one is reported as an
+// errBatchRecord error, with the count when several are, keeping the valid records.
 func retainRequested(page map[int]Media, chunk []int) error {
 	requested := make(map[int]struct{}, len(chunk))
 	for _, id := range chunk {
@@ -528,11 +396,9 @@ func retainRequested(page map[int]Media, chunk []int) error {
 	return first
 }
 
-// do performs one GraphQL POST attempt, translating a 429 into a
-// *httpx.RateLimitError carrying a capped Retry-After hint (retried by
-// request's WithRateLimitRetry mode) and reading the rate headers on every
-// response that is not itself a rate limit (error statuses included, an
-// envelope-delivered 429 excluded) to pre-empt the next 429.
+// do performs one GraphQL POST attempt, translating a 429 into a *httpx.RateLimitError
+// carrying a capped Retry-After hint and reading the rate headers on every response
+// that is not itself a rate limit, to pre-empt the next 429.
 func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
@@ -552,19 +418,11 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 		httpx.DrainClose(resp.Body)
 		return nil, c.rateLimitError(resp)
 	}
-	// The budget headers are read on EVERY response that is not itself a rate
-	// limit, error statuses included: AniList stamps X-RateLimit-Remaining/Reset
-	// on a 4xx/5xx too, and dropping a low-remaining signal there would let the
-	// next lookup race into the 429 this pre-emption exists to avoid. A response
-	// without the headers is a no-op (the Atoi guard), so error statuses that
-	// carry no budget information are unaffected. Each exit below observes them
-	// exactly once.
-	//
-	// AniList mirrors a GraphQL-level not-found into the HTTP status: a
-	// nonexistent id answers 404 while still carrying the normal envelope
-	// {"data":{"Media":null},"errors":[{"message":"Not Found."}]} (verified
-	// live). Pass the 404 body through to the parser so Fetch can honor its
-	// ErrNotFound contract instead of surfacing an opaque HTTP 404.
+	// The budget headers are read on EVERY response that is not itself a rate limit,
+	// error statuses included: AniList stamps them on a 4xx/5xx too, and dropping a
+	// low-remaining signal there would race the next lookup into the 429 this exists to
+	// avoid. AniList also mirrors a not-found into a 404 that still carries the normal
+	// envelope, so that body passes through to the parser for Fetch's ErrNotFound.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		c.observeRateHeaders(resp)
 		httpx.DrainClose(resp.Body)
@@ -578,35 +436,27 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, statusErr
 	}
 
-	// ReadLimitedBody closes the body and fails loud with a distinct
-	// *httpx.ResponseTooLargeError on an over-cap body, so an oversized
-	// response surfaces as its own error rather than a silently truncated
-	// payload that only fails later as a confusing JSON decode error.
+	// ReadLimitedBody closes the body and fails loud with a distinct error on an
+	// over-cap body, so an oversized response is not a silently truncated payload.
 	respBody, err := httpx.ReadLimitedBody(resp.Body, maxBodyBytes)
 	if err != nil {
 		c.observeRateHeaders(resp)
 		return nil, fmt.Errorf("anilist: read response: %w", err)
 	}
-	// A 429 AniList reports INSIDE a successful envelope must take the same
-	// dedicated rate-limit path as an HTTP 429, or the throttle is never
-	// penalized and the next lookup spends budget inside the window AniList
-	// just closed.
+	// A 429 AniList reports INSIDE a successful envelope must take the same dedicated
+	// rate-limit path as an HTTP 429, or the throttle is never penalized.
 	if rlErr := c.envelopeRateLimitError(resp, respBody); rlErr != nil {
 		return nil, rlErr
 	}
-	// Order matters: an envelope-delivered 429 is the SAME rate-limit response,
-	// so observing a low-remaining header before classifying it penalizes the
-	// throttle through both paths and reports one response as two
-	// Stats().RateLimitWaits (pinned by TestEnvelopeRateLimitCountsOneWait).
+	// Order matters: an envelope-delivered 429 is the SAME response, so observing a
+	// low-remaining header before classifying it would penalize twice and count two waits.
 	c.observeRateHeaders(resp)
 	return respBody, nil
 }
 
-// envelopeRateLimitError applies the dedicated 429 path to a rate limit
-// AniList reports inside a successful GraphQL envelope. retryableUpstreamStatus
-// deliberately excludes 429 because 429 has its own path - but that path only
-// ever ran on the HTTP status, so an envelope-delivered 429 surfaced as a
-// terminal query error that penalized nothing.
+// envelopeRateLimitError applies the dedicated 429 path to a rate limit AniList
+// reports inside a successful GraphQL envelope. That path only ever ran on the HTTP
+// status, so such a 429 surfaced as a terminal query error that penalized nothing.
 func (c *Client) envelopeRateLimitError(resp *http.Response, raw []byte) error {
 	for _, e := range envelopeErrors(raw) {
 		if e.Status == http.StatusTooManyRequests {
@@ -629,26 +479,17 @@ func resetWait(resp *http.Response) time.Duration {
 	return 0
 }
 
-// rateLimitError handles a 429 response: it derives a capped wait from
-// Retry-After (or X-RateLimit-Reset, or the default), penalizes the throttle,
-// and returns the *httpx.RateLimitError carrying that wait as its RetryAfter
-// hint, which request's WithRateLimitRetry mode retries.
+// rateLimitError handles a 429 response: it derives a capped wait from Retry-After (or
+// X-RateLimit-Reset, or the default), penalizes the throttle, and returns the
+// *httpx.RateLimitError carrying that wait as its retry hint.
 func (c *Client) rateLimitError(resp *http.Response) error {
-	// ParseRetryAfterResponse, not ParseRetryAfter: the latter caps at
-	// httpx.RetryAfterCap (60s) INSIDE the library, so it could never deliver a
-	// longer stated window to the politeness ceiling at all - the Retry-After path
-	// would stay truncated at a minute while the X-RateLimit-Reset path honoured
-	// the full window, and the two 429 shapes would disagree for no reason the
-	// upstream expressed. The library documents this accessor for exactly this
-	// choice ("preserves the raw duration so callers can make their own
-	// decisions"); backOff applies the app's own ceiling, and httpx still caps the
-	// per-ATTEMPT wait independently via WithRateLimitRetry (l-f7).
+	// ParseRetryAfterResponse, not ParseRetryAfter: the latter caps at 60s INSIDE the
+	// library, so a longer stated window could never reach the politeness ceiling and
+	// the two 429 shapes would disagree for no reason the upstream expressed.
 	wait := httpx.ParseRetryAfterResponse(resp)
 	if wait <= 0 {
-		// A 429 without a usable Retry-After often still carries the
-		// window end in X-RateLimit-Reset; waiting for that instead of a
-		// blind default keeps the bounded attempts from all landing
-		// inside the same rate window.
+		// A 429 without a usable Retry-After often still carries the window end in
+		// X-RateLimit-Reset, which keeps the bounded attempts out of one rate window.
 		wait = resetWait(resp)
 	}
 	if wait <= 0 {
@@ -663,19 +504,10 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 }
 
 // backOff caps an upstream-supplied wait at the POLITENESS ceiling
-// (maxThrottlePenalty), counts it, and penalizes the shared throttle, returning
-// the capped value the caller logs. It is the one place that ceiling is applied,
-// so no back-off path can hand throttle.penalize an unbounded upstream duration.
-//
-// It is deliberately NOT maxRetryAfter: that is the per-attempt ceiling and
-// httpx enforces it inside the retry loop on its own, so clamping to it here only
-// ever shortened how long the client honoured a window every LATER lookup shares
-// (l-f7).
-//
-// An absurd value is clamped like any other but also reported, because silently
-// rendering a 24h header as a few minutes leaves no trace of an upstream defect.
-// Warn, not error: a bogus header is the upstream's problem and the clamp already
-// contains it, so it needs no operator action here.
+// (maxThrottlePenalty), counts it, and penalizes the shared throttle, returning the
+// capped value the caller logs. It is deliberately NOT maxRetryAfter, the per-attempt
+// ceiling httpx enforces itself. An absurd value is clamped like any other but also
+// warned, since silently rendering a 24h header as minutes leaves no trace.
 func (c *Client) backOff(wait time.Duration) time.Duration {
 	if wait >= implausibleWindow {
 		c.log.Warn("anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead",
@@ -724,74 +556,26 @@ type gqlMedia struct {
 	SeasonYear int `json:"seasonYear"`
 }
 
-// maxTitleBytes is the per-title wire limit. The 1 MiB body cap bounds each
-// response, but a decoded title outlives the request in the matcher's memo and
-// state.json, so a compromised upstream could otherwise inflate state and
-// exhaust memory one near-cap title at a time. An over-limit title is DROPPED
-// from the record's title set, never truncated — truncation could forge a false
-// normalized-title match — and never fatal to the record, whose three titles are
-// independent facts (see toMedia, h-f1). The cap still does its job: it bounds
-// what any single title can contribute to the memo.
-//
-// The format field needs no such cap: knownFormat admits only a member of
-// AniList's own MediaFormat enum and publishes it in mediatype's canonical
-// form, so Media.Format is by construction one of seven short ASCII tokens or
-// the empty unknown sentinel, whatever the wire sent (l-f140).
+// maxTitleBytes is the per-title wire limit. The 1 MiB body cap bounds each response,
+// but a decoded title outlives the request in the matcher's memo and state.json, so a
+// compromised upstream could otherwise inflate state one near-cap title at a time. An
+// over-limit title is DROPPED from the record's title set, never truncated (which
+// could forge a false normalized-title match) and never fatal to the record.
 const maxTitleBytes = 1024
 
-// toMedia converts the wire shape to a Media, preferring seasonYear and
-// falling back to the start-date year. It DROPS an individual title that
-// exceeds the wire limit or is unsafe to memoize, and rejects the record only
-// when no usable (non-blank, matchable) title survives.
-//
-// A defective FORMAT field is deliberately NOT a rejection: knownFormat already
-// collapses anything that is not a member of AniList's own MediaFormat enum to
-// the unknown sentinel "", so a hostile or garbled format value costs the
-// record only its arr hint and never its usable titles (l-f140). Rejecting the
-// whole record for it was strictly worse, because ErrRecordUnusable is a
-// DEFINITIVE answer the matcher negative-memoizes: a record whose only defect
-// was a stray control rune or an over-long format string could never be
-// title-matched again until the memo expired, with an overrides.json entry as
-// the operator's only remedy - while the neighbouring defect class (an
-// unrecognized token like "NOT_A_FORMAT") kept its titles.
-//
-// Every remaining rejection here is a function of the RECORD'S OWN CONTENT, so
-// it is permanent: the same upstream record fails identically on every future
-// cycle. They therefore wrap ErrRecordUnusable, which the matcher treats as a
-// definitive answer (negative-memoized, like a not-found) instead of a
-// transient outage to retry forever - see that sentinel's doc for why the
-// distinction is load-bearing for alerting.
-//
-// Every gate here is a fact about the WIRE record or about Media's own
-// published contract (its byte cap, its safe-text rule, its unknown sentinels
-// "" and 0, and the shared key domains in internal/mediatype and
-// internal/titlekey that a token/title must fall inside to be usable at all) -
-// deliberately not a consumer's weighting of evidence, and no rule here is
-// stated in terms of a match symbol. The runner-up shape (l-f95) was moving the
-// title/year/format rules out to a consumer-side evidence adapter in match; it
-// was declined because these are normalizations of untrusted input into this
-// package's OWN sentinels, and a consumer-side adapter would have to be applied
-// by every reader of a Media (the matcher, the memo it persists, and the feed's
-// stale-title tier) instead of once at the boundary that produced it.
+// toMedia converts the wire shape to a Media, preferring seasonYear and falling back
+// to the start-date year. It DROPS an individual title that exceeds the wire limit or
+// is unsafe to memoize, and rejects the record only when no usable (non-blank,
+// matchable) title survives. A defective FORMAT field is deliberately NOT a rejection:
+// knownFormat collapses it to the unknown sentinel, so a garbled format costs the
+// record its arr hint and never its titles. Every rejection here is a function of the
+// RECORD'S OWN CONTENT, hence permanent, so they wrap ErrRecordUnusable.
 func (m *gqlMedia) toMedia() (Media, error) {
-	// One list of the wire title fields, used for both validation and dedupe,
-	// so a future title field cannot be validated in one place and dropped in
-	// the other.
-	//
-	// A defective title costs the record THAT TITLE, not its siblings. Each of
-	// the three is an independent fact: each is memoized and republished on its
-	// own, and the byte cap exists so no SINGLE title can inflate state.json -
-	// so nothing about one bad alias requires the other two to die with it. This
-	// is the rule knownFormat already states for the neighbouring field ("only
-	// the TYPE claim is ever discarded, never the record's usable titles"), and
-	// rejecting the whole record broke it: an English title AniList happened to
-	// serve with a stray control rune made an anime permanently unmatchable -
-	// negative-memoized, no finding, and a movie routed to Sonarr for want of a
-	// format hint - with an overrides.json entry as the operator's only remedy
-	// (h-f1). The failure was silent, which is what made it worth closing.
-	//
-	// The 3 x maxTitleBytes raw bound is unchanged: dropping members can only
-	// shrink the survivor set, never grow it.
+	// One list of the wire title fields, used for both validation and dedupe, so a
+	// future title field cannot be validated in one place and dropped in the other.
+	// A defective title costs the record THAT TITLE, not its siblings: each of the
+	// three is an independent fact, memoized and republished on its own, and the byte
+	// cap already stops any single title from inflating state.json.
 	wireTitles := make([]string, 0, 3)
 	for _, t := range []string{m.Title.Romaji, m.Title.English, m.Title.Native} {
 		if len(t) > maxTitleBytes || unsafeWireText(t) {
@@ -799,13 +583,9 @@ func (m *gqlMedia) toMedia() (Media, error) {
 		}
 		wireTitles = append(wireTitles, t)
 	}
-	// Both wire year fields are untrusted, and Media.Year's contract is a
-	// four-digit release year with 0 as its documented unknown sentinel - so an
-	// impossible value (negative, or outside four digits) is not usable evidence
-	// for ANY consumer: it cannot match a real library year, and it outlives the
-	// request in the matcher's memo and state.json (Memo.StaleTitle republishes
-	// it to the feed's stale-title tier). Normalizing it to the sentinel at this
-	// one boundary is what keeps every reader from having to re-check it.
+	// Both wire year fields are untrusted and Media.Year's contract is a four-digit
+	// release year with 0 as its unknown sentinel, so an impossible value is normalized
+	// to the sentinel at this one boundary rather than re-checked by every reader.
 	// Falling back through startDate first.
 	year := m.SeasonYear
 	if !plausibleYear(year) {
@@ -821,48 +601,23 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	return Media{Titles: titles, Format: knownFormat(m.Format), Year: year}, nil
 }
 
-// plausibleYear reports whether an untrusted wire year is a possible release
-// year: a four-digit value. Anything else (0/unset, negative, or out of range)
-// carries no usable evidence, and the caller maps it to the unknown sentinel 0
-// rather than publishing it as a hard match constraint.
+// plausibleYear reports whether an untrusted wire year is a possible release year: a
+// four-digit value. Anything else carries no usable evidence, and the caller maps it to
+// the unknown sentinel 0 rather than publishing it as a hard match constraint.
 func plausibleYear(year int) bool {
 	return year >= 1000 && year <= 9999
 }
 
-// knownFormat returns the CANONICAL form of format when it names a real AniList
-// media format, else "" - Media.Format's own documented "type unknown" value.
+// knownFormat returns the CANONICAL form of format when it names a real AniList media
+// format, else "" - Media.Format's own documented "type unknown" value. Returning the
+// canonical token rather than the raw wire string is what makes the field bounded and
+// single-line-safe by construction, and the accepted vocabulary lives in the shared
+// internal/mediatype leaf so this half and the mapping half cannot drift.
 //
-// Returning the canonical token rather than the raw wire string is what makes
-// Media.Format bounded and single-line-safe by construction (l-f140): every
-// value it can carry is one of internal/mediatype's seven short ASCII members
-// or the empty sentinel, so no byte cap and no unsafeWireText gate is needed on
-// the wire field, and a record whose only defect is its format keeps its usable
-// titles instead of being rejected outright.
-//
-// The accepted vocabulary and its canonical form live in the shared
-// internal/mediatype leaf, not in a private copy here (l-f87): the token this
-// function admits is fed verbatim into a mapping Record.Type and classified
-// there, so both halves must agree on the token set AND on the canonical form,
-// and one shared home is what makes that structural instead of two mirrored
-// copies drifting silently.
-//
-// This gate is a wire-shape fact - does the token name a member of AniList's
-// own MediaFormat enum - so it stays at this boundary, and "" is this package's
-// published unknown sentinel, not a consumer's convention. It is load-bearing
-// downstream because arr routing reads the format by exclusion (MOVIE routes to
-// Radarr, everything else to Sonarr), so an unrecognized non-empty token did
-// not read as "unknown", it read as "not a movie" - a garbled or hostile value
-// like "NOT_A_FORMAT" supplied false Sonarr evidence for an entirely unmapped
-// entry, removed the Radarr candidate that a title+year match would otherwise
-// have left ambiguous, and persisted that wrong match in state.json for the
-// memo's life (l-f12). An empty format has always behaved correctly, leaving
-// the arr unknown and the cross-arr candidates ambiguous, so collapsing an
-// unrecognized token onto empty is the fix.
-//
-// Fail direction: a format AniList ADDS in future is unrecognized here and
-// degrades to unknown, which costs a title-fallback match its arr hint rather
-// than routing it wrongly. That is the safe side, and only the TYPE claim is
-// ever discarded, never the record's usable titles.
+// It is load-bearing because arr routing reads the format by exclusion (MOVIE routes
+// to Radarr, everything else to Sonarr): an unrecognized non-empty token did not read
+// as "unknown", it read as "not a movie" and supplied false Sonarr evidence. A format
+// AniList adds in future degrades to unknown, which is the safe side.
 func knownFormat(format string) string {
 	canonical := mediatype.Normalize(format)
 	if mediatype.Known(canonical) {
@@ -871,14 +626,10 @@ func knownFormat(format string) string {
 	return ""
 }
 
-// unsafeWireText reports whether an untrusted AniList TITLE must be rejected
-// rather than sanitized or memoized. JSON escapes are valid UTF-8 wire bytes
-// but may decode to U+FFFD (a lone surrogate), controls, line separators, or
-// bidi controls; titlekey.Normalize would strip those runes into a forged match
-// key, and a title outlives the request in the matcher's memo and state.json.
-// The format field needs no such guard: knownFormat republishes it as a
-// canonical mediatype token, so an unsafe rune can only make the token
-// unrecognized (l-f140).
+// unsafeWireText reports whether an untrusted AniList TITLE must be rejected rather
+// than sanitized or memoized. JSON escapes are valid UTF-8 wire bytes but may decode to
+// U+FFFD, controls, line separators or bidi controls; titlekey.Normalize would strip
+// those runes into a forged match key, and a title outlives the request in state.json.
 func unsafeWireText(s string) bool {
 	return strings.ContainsRune(s, utf8.RuneError) || runesafe.SanitizeSingleLine(s) != s
 }
@@ -889,11 +640,9 @@ type gqlError struct {
 	Status  int    `json:"status"`
 }
 
-// maxEnvelopeErrors bounds the untrusted GraphQL errors[] array. The 1 MiB
-// body cap alone permits ~350k empty objects, which json.Unmarshal expands
-// into []gqlError before any consumer looks at errs[0] (CWE-400, the same
-// amplification boundedMediaList exists to close). A real envelope carries a
-// handful of errors; an over-cap array is malformed by construction.
+// maxEnvelopeErrors bounds the untrusted GraphQL errors[] array. The 1 MiB body cap
+// alone permits ~350k empty objects, which json.Unmarshal expands into []gqlError
+// before any consumer looks at errs[0] (CWE-400). A real envelope carries a handful.
 const maxEnvelopeErrors = 32
 
 // gqlErrors is the bounded decode of the untrusted errors[] array. A named
@@ -902,15 +651,9 @@ const maxEnvelopeErrors = 32
 type gqlErrors []gqlError
 
 // UnmarshalJSON implements the bounded element-at-a-time decode described on
-// maxEnvelopeErrors. An over-cap array fails the decode, which matches the
-// existing policy: transientEnvelopeError already treats an undecodable body
-// as "no envelope error" and the parsers already surface it as a plain
-// retryable error.
-//
-// A JSON null needs no pre-check here: bounded.Array reports it through
-// Decoder.Open (ok=false, no error) and yields a nil slice, which is exactly
-// this field's null contract — unlike boundedMediaList, which must read null as
-// UNSET and therefore keeps its own pre-check.
+// maxEnvelopeErrors. An over-cap array fails the decode, which matches the existing
+// policy: an undecodable body already reads as "no envelope error". A JSON null needs
+// no pre-check here, since a nil slice is exactly this field's null contract.
 func (l *gqlErrors) UnmarshalJSON(data []byte) error {
 	*l = nil
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
@@ -923,10 +666,9 @@ func (l *gqlErrors) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// gqlResponse is the GraphQL envelope for the media query. Media is a
-// json.RawMessage so parseMediaForID can distinguish a missing Media field (a
-// malformed or failed response) from an explicit null (AniList's genuine
-// not-found), which a typed pointer alone cannot.
+// gqlResponse is the GraphQL envelope for the media query. Media is a json.RawMessage
+// so parseMediaForID can distinguish a missing Media field (a malformed or failed
+// response) from an explicit null (a genuine not-found), which a pointer alone cannot.
 type gqlResponse struct {
 	Data *struct {
 		Media json.RawMessage `json:"Media"`
@@ -934,19 +676,11 @@ type gqlResponse struct {
 	Errors gqlErrors `json:"errors"`
 }
 
-// sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
-// message before it is wrapped into an error that reaches the logs. The
-// message lands inline in a single log line, so the strict single-line
-// policy applies (runesafe.SanitizeSingleLine: C0 controls including CR/LF,
-// DEL, C1 controls, Unicode line and paragraph separators, and every
-// Bidi_Control rune each become a space), and the retained message is capped
-// at 200 bytes on a rune boundary via runesafe.CapBytes (truncated output
-// appends "...", for a 203-byte maximum) so a long message stays valid
-// UTF-8. The composition lives in the library
-// (runesafe.SanitizeSingleLineBounded), shared with internal/indexer's
-// capLogText - a fix to the single-line bounded preset belongs there, not in
-// either app-side wrapper (internal/logattr owns the separate
-// structured-attribute policy; see its package doc for the split).
+// sanitizeUpstreamMessage bounds and cleans an untrusted upstream error message before
+// it is wrapped into an error that reaches the logs: the strict single-line policy
+// (controls, line separators and bidi controls become spaces) plus a 200-byte cap on a
+// rune boundary. The composition lives in runesafe.SanitizeSingleLineBounded, so a fix
+// to the preset belongs there rather than in either app-side wrapper.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
 	return runesafe.SanitizeSingleLineBounded(s, maxLen)
@@ -958,19 +692,12 @@ func mediaQueryError(e gqlError) error {
 	return fmt.Errorf("anilist: query error: %s", sanitizeUpstreamMessage(e.Message))
 }
 
-// classifyNullMedia maps an explicit Media null plus its error list to the
-// error parseMediaForID surfaces: ErrNotFound for no error or AniList's verified
-// not-found shape (a sole error with status 404 / message "Not Found."), and a
-// plain query error for anything else. Classification runs on the ORIGINAL
-// upstream message: sanitizeUpstreamMessage replaces embedded controls and
-// bidi marks with spaces, so classifying the sanitized text would let a
-// malformed message such as "Not\nFound." launder into the trusted "Not
-// Found." sentinel and be negative-memoized. It also does NOT trim the raw
-// message: TrimSpace is the same laundering by another route, normalizing
-// "\nNot Found.\n" (or the tab/CR forms) into the trusted sentinel. A status
-// 404 stays authoritative on its own; the message-only fallback must match the
-// verified raw phrase exactly. Only the text rendered into the returned error
-// is sanitized.
+// classifyNullMedia maps an explicit Media null plus its error list to the error
+// parseMediaForID surfaces: ErrNotFound for no error or AniList's verified not-found
+// shape (a sole error with status 404 / message "Not Found."), and a plain query error
+// for anything else. Classification runs on the ORIGINAL upstream message and does not
+// trim it: either laundering would let a control-bearing message become the trusted
+// sentinel and be negative-memoized. Only the returned error's text is sanitized.
 func classifyNullMedia(errs []gqlError) error {
 	if len(errs) == 0 {
 		return ErrNotFound
@@ -985,24 +712,12 @@ func classifyNullMedia(errs []gqlError) error {
 
 // validateResponse gates a response body before it reaches encoding/json.
 //
-// UTF-8: json.Unmarshal replaces malformed UTF-8 inside JSON strings with
-// U+FFFD instead of failing, so without this gate a wire title with invalid
-// bytes could lossily normalize to a legitimate title key, be title-matched,
-// and be memoized even though the upstream payload was not valid JSON text.
-// This half stays app-side because it is a CONTENT policy: it matters only
-// because the decoded titles outlive the request in the matcher's memo and
-// state.json.
-//
-// Structure: bounded.Preflight owns the rest. encoding/json accepts a
-// duplicate object key and applies the LAST occurrence to the struct field,
-// discarding the earlier value unseen - which erases the evidence every
-// downstream invariant relies on, since a body carrying both a valid Media and
-// a later null Media would reach classifyNullMedia as a genuine not-found and
-// be negative-memoized, and a batch could have its Page.media replaced by an
-// empty array. The preflight also bounds nesting, because json.Decoder.Token
-// does not apply encoding/json's own depth limit and an all-opens body would
-// otherwise recurse once per byte. Either rejection surfaces as a plain
-// retryable error. Shared by parseMediaForID and parseMediaPage.
+// UTF-8: json.Unmarshal replaces malformed UTF-8 inside JSON strings with U+FFFD
+// instead of failing, so a wire title with invalid bytes could lossily normalize to a
+// legitimate title key, be title-matched, and be memoized. That half stays app-side
+// because it is a CONTENT policy. Structure: bounded.Preflight owns the rest, because
+// encoding/json applies the LAST duplicate object key and discards the earlier value
+// unseen, erasing the evidence every downstream invariant relies on.
 func validateResponse(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errors.New("anilist: response is not valid UTF-8")
@@ -1013,20 +728,12 @@ func validateResponse(raw []byte) error {
 	return nil
 }
 
-// parseMediaForID decodes the GraphQL envelope into a Media. Only an explicit
-// Media null with no error, or AniList's verified not-found error shape
-// (a sole error with status 404 / message "Not Found."), is classified as
-// ErrNotFound — the matcher negative-memoizes ErrNotFound, so an HTTP-200
-// GraphQL failure, a mixed error envelope, a partial response (non-null Media
-// alongside field-resolution errors), or a malformed envelope must surface as
-// a plain error (degraded, retried next cycle) rather than permanently
-// suppressing the id. It also enforces the single-response identity invariant
-// unconditionally: a decoded Media whose id differs from expectedID is
-// rejected as a plain (transient, non-memoized) error, so a caller passing 0
-// asserts the record carries no id —
-// the batch path's retainRequested equivalent for the per-id fallback, so a
-// malformed or compromised endpoint cannot answer a request for one id with
-// a valid Media for another and have it memoized under the wrong key.
+// parseMediaForID decodes the GraphQL envelope into a Media. Only an explicit Media
+// null with no error, or AniList's verified not-found error shape, is classified as
+// ErrNotFound - the matcher negative-memoizes that, so an HTTP-200 GraphQL failure, a
+// partial response or a malformed envelope must surface as a plain retryable error. It
+// also enforces the identity invariant unconditionally: a decoded Media whose id
+// differs from expectedID is rejected, so no answer is memoized under the wrong key.
 func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	if err := validateResponse(raw); err != nil {
 		return Media{}, err
@@ -1053,12 +760,10 @@ func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	return parsed, nil
 }
 
-// mediaPayload classifies the single-media envelope and returns the raw
-// non-null Media value: a missing data/Media field or a GraphQL error fails
-// plainly, an explicit null routes to classifyNullMedia (the one path that may
-// yield ErrNotFound), and a partial response (non-null Media beside
-// field-resolution errors) fails like any other query error, because
-// accepting it would memoize incomplete titles/year.
+// mediaPayload classifies the single-media envelope and returns the raw non-null Media
+// value: a missing data/Media field or a GraphQL error fails plainly, an explicit null
+// routes to classifyNullMedia, and a partial response fails like any other query error
+// because accepting it would memoize incomplete titles/year.
 func mediaPayload(r *gqlResponse) (json.RawMessage, error) {
 	if r.Data == nil || len(r.Data.Media) == 0 {
 		if len(r.Errors) > 0 {
@@ -1083,44 +788,29 @@ type gqlPage struct {
 	Media boundedMediaList `json:"media"`
 }
 
-// boundedMediaList decodes the untrusted Page.media array element by element
-// via json.Decoder, rejecting the element after batchSize BEFORE decoding or
-// appending it. The batched query requests perPage=batchSize, so a longer
-// array is malformed by construction; without the bound a hostile endpoint
-// could pack hundreds of thousands of tiny objects under the 1 MiB body cap
-// and json.Unmarshal would expand them all before parsePageRecords validates
-// anything (CWE-400 resource exhaustion). A post-decode length check would be
-// too late: the allocation has already happened. set stays false for a
-// missing field (UnmarshalJSON never runs)
-// or an explicit null, both rejected by parseMediaPage as a malformed
-// envelope; an explicit empty array sets it with zero records (valid).
-//
-// The elements are retained RAW and materialized one at a time by
-// parsePageRecords, so an element whose field types are out of schema is a
-// record-local failure (errBatchRecord) like every other per-record defect
-// instead of failing the whole envelope - the classification FetchMany reads
-// to decide whether the remaining chunks are still worth fetching.
+// boundedMediaList decodes the untrusted Page.media array element by element,
+// rejecting the element after batchSize BEFORE decoding or appending it: the query
+// requests perPage=batchSize, so a longer array is malformed by construction, and a
+// post-decode length check would come after the allocation (CWE-400). set stays false
+// for a missing field or an explicit null, both rejected as a malformed envelope.
+// Elements are retained RAW, so an out-of-schema one is a record-local failure.
 type boundedMediaList struct {
 	records []json.RawMessage
 	set     bool
 }
 
 // UnmarshalJSON implements the bounded element-at-a-time decode described on
-// boundedMediaList via jsonx/bounded's Array (cap checked BEFORE the element
-// is decoded, so over-cardinality never materializes the excess).
-// Over-cardinality is an envelope error (the whole batch fails), not an
-// errBatchRecord: the response shape itself violates the query's perPage
-// contract, so no record in it is trustworthy.
+// boundedMediaList (the cap is checked BEFORE the element is decoded). Over-cardinality
+// is an envelope error, not an errBatchRecord: the response itself violates the query's
+// perPage contract, so no record in it is trustworthy.
 func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 	// encoding/json processes duplicate object keys in order, invoking this
 	// method once per occurrence on the same receiver. Reset before each
 	// value so a later null cannot retain an earlier array.
 	l.records = nil
 	l.set = false
-	// The explicit null pre-check STAYS app-side: bounded.Array nulls to
-	// (nil, nil) by Unmarshal parity, but this field's contract must read
-	// null as UNSET (rejected like a missing field), never as a valid empty
-	// array.
+	// The explicit null pre-check STAYS app-side: this field's contract must read null
+	// as UNSET (rejected like a missing field), never as a valid empty array.
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
@@ -1143,19 +833,11 @@ type gqlPageResponse struct {
 	Errors gqlErrors `json:"errors"`
 }
 
-// parseMediaPage decodes a batched Page(media) response into a map keyed by
-// AniList id. A GraphQL-level error or a missing/null Page or media field
-// fails the batch; the record loop's per-record invariants (a decodable
-// element, positive id, valid fields, no duplicate ids) live in
-// parsePageRecords - a rejected record is skipped and surfaced via an
-// errBatchRecord-wrapped error alongside the chunk's valid records, so one
-// poisoned record cannot discard
-// the chunk or read as a total outage - a skipped id is absent from the map
-// AND covered by the non-nil error, so the caller never negative-memoizes it,
-// and FetchMany distinguishes the record-local failure from an envelope
-// failure and keeps fetching later chunks. Ids absent from the media array of
-// an error-free response are simply not in the map (the caller treats them as
-// not-found).
+// parseMediaPage decodes a batched Page(media) response into a map keyed by AniList
+// id. A GraphQL-level error or a missing/null Page or media field fails the batch; the
+// per-record invariants live in parsePageRecords, whose rejected record is skipped and
+// surfaced via an errBatchRecord error beside the chunk's valid records, so one
+// poisoned record cannot hide the rest or read as a total outage.
 func parseMediaPage(raw []byte) (map[int]Media, error) {
 	if err := validateResponse(raw); err != nil {
 		return nil, err
@@ -1176,17 +858,11 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	return parsePageRecords(r.Data.Page.Media.records)
 }
 
-// parsePageRecords validates one batch response's record list into a map
-// keyed by AniList id: an UNDECODABLE element (a field whose JSON type is out
-// of schema) or a record with a non-positive id or rejected fields (toMedia)
-// is skipped, and a DUPLICATE id is conflicting untrusted data - two records
-// claiming one identity - so NO record for that id is returned
-// (the earlier occurrence is deleted and the id stays excluded however many
-// duplicates follow) rather than silently letting the last write win. Each
-// failure surfaces the first offender via an errBatchRecord-wrapped error
-// beside the valid sibling records. When MORE than one record is rejected the
-// count rides the error too, so one poisoned record reads differently from a
-// wholesale schema drift.
+// parsePageRecords validates one batch response's record list into a map keyed by
+// AniList id: an UNDECODABLE element, or a record with a non-positive id or rejected
+// fields, is skipped, and a DUPLICATE id is conflicting untrusted data - two records
+// claiming one identity - so NO record for that id is returned. The first offender
+// surfaces via an errBatchRecord error, with the count when more than one was rejected.
 func parsePageRecords(media []json.RawMessage) (map[int]Media, error) {
 	set := newPageRecordSet(len(media))
 	var recordErr error
@@ -1194,10 +870,8 @@ func parsePageRecords(media []json.RawMessage) (map[int]Media, error) {
 	for i := range media {
 		accepted := len(set.out)
 		if err := set.add(media[i], i); err != nil {
-			// A duplicate id also invalidates the record already accepted for
-			// that id, so charge every record this failure excluded - the
-			// offender plus whatever it retracted - or the magnitude signal
-			// would under-report a conflict as a single poisoned record.
+			// A duplicate id also invalidates the record already accepted for that id,
+			// so charge every record this failure excluded, not just the offender.
 			rejected += 1 + accepted - len(set.out)
 			if recordErr == nil {
 				recordErr = err
@@ -1241,10 +915,9 @@ func (s *pageRecordSet) claim(id int) bool {
 func (s *pageRecordSet) add(raw json.RawMessage, i int) error {
 	var decoded gqlMedia
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		// encoding/json continues populating decodable fields after a type
-		// error, so a positive id on an undecodable element is still an
-		// identity claim: claim it (dropping any earlier value), so a
-		// malformed/well-formed duplicate pair fails closed in either order.
+		// encoding/json continues populating decodable fields after a type error, so a
+		// positive id on an undecodable element is still an identity claim: claim it, so
+		// a malformed/well-formed duplicate pair fails closed in either order.
 		if decoded.ID > 0 {
 			s.claim(decoded.ID)
 		}
@@ -1284,12 +957,10 @@ func dedupeTitles(titles ...string) []string {
 }
 
 // hasMatchableTitle reports whether at least one title falls inside the shared
-// normalized-title key domain (internal/titlekey, the dependency-free leaf both
-// this client and the matcher read, holding the lowercased [a-z0-9] key). A
-// payload whose every title normalizes to an empty key (punctuation-only, or
-// entirely non-ASCII) carries no usable title at all: it would parse into a
-// Media that can never key anything and would be memoized as a permanent false
-// negative; erroring instead lets the lookup degrade and retry next cycle.
+// normalized-title key domain (internal/titlekey, the leaf both this client and the
+// matcher read). A payload whose every title normalizes to an empty key carries no
+// usable title and would be memoized as a permanent false negative, so it errors and
+// the lookup retries next cycle instead.
 func hasMatchableTitle(titles []string) bool {
 	for _, title := range titles {
 		if titlekey.Normalize(title) != "" {
@@ -1301,14 +972,10 @@ func hasMatchableTitle(titles []string) bool {
 
 // --- adaptive throttle ---
 
-// throttle spaces requests to a minimum interval, with a penalty hook for
-// backing off when the budget is low or a 429 was seen. Each request reserves
-// a slot TIMESTAMP (not a fixed sleep duration), and wait revalidates the
-// reservation against the shared penalty epoch after sleeping: a penalty
-// raised while a reservation was outstanding would otherwise be invisible to
-// that waiter, which would wake on its stale pre-penalty slot and spend
-// budget inside the reset/Retry-After window the upstream told the client to
-// sit out.
+// throttle spaces requests to a minimum interval, with a penalty hook for backing off
+// when the budget is low or a 429 was seen. Each request reserves a slot TIMESTAMP
+// (not a fixed sleep), and wait revalidates the reservation against the shared penalty
+// epoch after sleeping, so a penalty raised meanwhile cannot be invisible to a waiter.
 type throttle struct {
 	next         time.Time
 	penaltyUntil time.Time
@@ -1316,10 +983,9 @@ type throttle struct {
 	mu           sync.Mutex
 }
 
-// wait blocks until this request's reserved slot, or ctx is cancelled. A slot
-// that predates a penalty raised after it was reserved is stale: the waiter
-// re-reserves at the end of the current schedule (preserving both the penalty
-// wait and the configured spacing against sibling waiters) and sleeps again.
+// wait blocks until this request's reserved slot, or ctx is cancelled. A slot that
+// predates a penalty raised after it was reserved is stale: the waiter re-reserves at
+// the end of the current schedule and sleeps again.
 func (t *throttle) wait(ctx context.Context) error {
 	slot := t.reserveSlot()
 	for {
@@ -1336,10 +1002,9 @@ func (t *throttle) wait(ctx context.Context) error {
 	}
 }
 
-// reserveSlot claims and returns the next slot timestamp. The clock is
-// sampled under t.mu so a caller descheduled before acquiring the lock
-// cannot schedule from a stale timestamp and hand out already-expired
-// slots that break the minimum spacing.
+// reserveSlot claims and returns the next slot timestamp. The clock is sampled under
+// t.mu so a caller descheduled before acquiring the lock cannot schedule from a stale
+// timestamp and hand out already-expired slots.
 func (t *throttle) reserveSlot() time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -1356,10 +1021,9 @@ func (t *throttle) reserveSlotLocked(now time.Time) time.Time {
 	return start
 }
 
-// penalize pushes the next slot out by at least d from now and advances the
-// penalty epoch, invalidating every outstanding pre-penalty reservation (wait
-// re-reserves them after the epoch). A smaller later penalty never shortens
-// either the schedule or the epoch.
+// penalize pushes the next slot out by at least d from now and advances the penalty
+// epoch, invalidating every outstanding pre-penalty reservation. A smaller later
+// penalty never shortens either the schedule or the epoch.
 func (t *throttle) penalize(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

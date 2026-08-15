@@ -26,25 +26,16 @@ const (
 const torznabNS = "http://torznab.com/schemas/2015/feed"
 
 // errCodeIncorrectCredentials is the Newznab/Torznab error code for missing or
-// incorrect credentials (100), the closest fit for a required-but-unset secret.
-// Prowlarr surfaces the <error> element's description on the indexer's test, so
-// the operator sees why the save failed.
+// incorrect credentials (100). Prowlarr surfaces the <error> description on the
+// indexer's test, so the operator sees why the save failed.
 const errCodeIncorrectCredentials = 100
 
 // errCodeUnknown is the Newznab/Torznab "unknown error" code (900), used for an
 // unexpected internal failure such as a recovered handler panic.
 const errCodeUnknown = 900
 
-// item is one Torznab feed release in the WIRE vocabulary - the real fields
-// parsed from a Prowlarr Torznab result, plus the SeaDex
-// download-volume-factor marker this feed adds; writeItem renders exactly
-// these fields back out. It carries no journal bookkeeping: the persisted
-// RSS journal wraps this type as journalItem (journal.go), so a change to
-// the volatile upstream parse shape and a change to the on-disk snapshot
-// contract can never silently be the same edit. The json tags pin the
-// persisted feed.json snapshot contract (journalItem embeds item, and
-// encoding/json flattens the embed, so these names ARE the historical
-// on-disk field names an upgraded binary must keep reading).
+// item is one Torznab feed release in the WIRE vocabulary - the fields parsed from
+// a Prowlarr result plus the SeaDex download-volume-factor marker this feed adds.
 type item struct {
 	PubDate              time.Time `json:"PubDate"`
 	Title                string    `json:"Title"`
@@ -71,10 +62,9 @@ func (it *item) guid() string {
 	}
 }
 
-// renderCaps returns the t=caps response. The categories and search modes match
-// the Nyaa + AnimeBytes indexer definitions this feed proxies (q-based search
-// with season/ep for TV; no id search, since neither tracker supports it), so
-// the arrs query the feed exactly as they would those indexers.
+// renderCaps returns the t=caps response. The categories and search modes match the
+// Nyaa + AnimeBytes indexer definitions this feed proxies (q-based search with
+// season/ep for TV; no id search), so the arrs query the feed as they would those.
 func renderCaps() string {
 	var b strings.Builder
 	b.WriteString(xml.Header)
@@ -96,8 +86,7 @@ func renderCaps() string {
 
 // renderError returns a Newznab/Torznab <error> document. The arrs and Prowlarr
 // treat a response carrying this element as a failed request and show the
-// description, so it is how the feed reports a misconfiguration (a required
-// secret not set) on the indexer's save-test rather than returning empty.
+// description, so it is how a misconfiguration surfaces on the save-test.
 func renderError(code int, description string) string {
 	var b strings.Builder
 	b.WriteString(xml.Header)
@@ -105,14 +94,11 @@ func renderError(code int, description string) string {
 	return b.String()
 }
 
-// renderFeed returns the Torznab RSS feed for items plus how many items it
-// actually emitted: rendered < len(items) means the byte budget below
-// truncated the document, and the serving layer (serveQuery) surfaces that
-// deliberate degradation - the returned count is what the request log's
-// `returned` field and the truncation WARN report, so a truncated feed is
-// never logged as a complete result. It is written by hand so the `torznab:`
-// prefixed attribute elements come out exactly as the arrs expect, without
-// the namespace rewriting encoding/xml would apply on output.
+// renderFeed returns the Torznab RSS feed for items plus how many it actually
+// emitted: rendered < len(items) means the byte budget truncated the document, and
+// the returned count is what the request log and the truncation WARN report, so a
+// truncated feed is never logged as complete. It is written by hand so the
+// `torznab:` prefixed attributes come out exactly as the arrs expect.
 func renderFeed(items []item) (doc string, rendered int) {
 	var b strings.Builder
 	b.WriteString(xml.Header)
@@ -121,10 +107,8 @@ func renderFeed(items []item) (doc string, rendered int) {
 	b.WriteString("<title>seadex-scout</title>")
 	for i := range items {
 		if b.Len() > maxRenderedFeedBytes {
-			// A pathological feed (every field at maxPersistedFieldBytes,
-			// escape-amplified ~5x) must degrade to a truncated-but-valid
-			// document instead of OOMing the container; a realistic feed
-			// never comes near the budget.
+			// A pathological feed (every field at the cap, escape-amplified ~5x) must
+			// degrade to a truncated-but-valid document instead of OOMing the container.
 			break
 		}
 		writeItem(&b, &items[i])
@@ -134,13 +118,10 @@ func renderFeed(items []item) (doc string, rendered int) {
 	return b.String(), rendered
 }
 
-// writeItem renders one release as an <item>: its title, size, seeders, and
-// download URL (Prowlarr's proxy link for a search, a directly-built tracker
-// link for a synthesized RSS item), plus the SeaDex marker. The enclosure is
-// omitted when there is no download URL, so a link-less item never renders an
-// empty enclosure. Seeders are floored to 1 (never 0, so the arrs' minimum-
-// seeders check cannot reject a curated release when the swarm count is
-// momentarily 0/unknown or synthesized).
+// writeItem renders one release as an <item>: title, size, seeders and download URL,
+// plus the SeaDex marker. The enclosure is omitted when there is no download URL.
+// Seeders are floored to 1, so the arrs' minimum-seeders check cannot reject a
+// curated release whose swarm count is momentarily 0 or synthesized.
 func writeItem(b *strings.Builder, it *item) {
 	b.WriteString("<item>")
 	writeText(b, "title", it.Title)
@@ -148,26 +129,18 @@ func writeItem(b *strings.Builder, it *item) {
 	if it.InfoURL != "" {
 		writeText(b, "comments", it.InfoURL)
 	}
-	// Always render pubDate: Sonarr's RSS parser rejects the WHOLE response
-	// when any item lacks the element (UnsupportedFeedException), so omitting
-	// it turns one unparseable upstream date into an empty search answer. A
-	// search-path item whose upstream <pubDate> did not parse arrives with the
-	// zero time (parsePubDate); the epoch stands in for "date unknown" -
-	// deterministic, always parseable by the arrs, and honest, since it claims
-	// no freshness the feed cannot vouch for (the synthesized RSS path always
-	// carries the journal's FirstSeen, so it never takes this branch).
+	// Always render pubDate: Sonarr's RSS parser rejects the WHOLE response when any
+	// item lacks the element, so omitting it turns one unparseable upstream date into
+	// an empty search answer.
 	pub := it.PubDate
 	if pub.IsZero() {
 		pub = time.Unix(0, 0)
 	}
 	writeText(b, "pubDate", pub.UTC().Format(time.RFC1123Z))
-	// Clamp like the peer counts below: render-side validation is the final
-	// totality guard, independent of which ingress produced the item. Each
-	// producer normalizes its own domain - toItem clamps a parsed search
-	// result, totalSize plus validPersistedItem cover the persisted journal -
-	// but no single gate covers both paths, so an item reaching the renderer
-	// with a negative size or a non-positive category id must not render an
-	// invalid enclosure length/size attr or an invalid Torznab category id.
+	// Clamp like the peer counts below: render-side validation is the final totality
+	// guard, independent of which ingress produced the item. Each producer normalizes
+	// its own domain, but no single gate covers both paths, so an item reaching the
+	// renderer with a negative size must not render an invalid enclosure length.
 	size := max(it.Size, 0)
 	if it.DownloadURL != "" {
 		b.WriteString(`<enclosure url="`)
@@ -191,9 +164,6 @@ func writeItem(b *strings.Builder, it *item) {
 	}
 	// The marker: best -> downloadvolumefactor 0.75 (Freeleech25), alt -> 0.25
 	// (Freeleech75). uploadvolumefactor 1 keeps it from also flagging DoubleUpload.
-	// Search results and synthesized RSS items that were matched to SeaDex carry
-	// this marker. When DownloadVolumeFactor is empty, omit both factor attrs so
-	// the arr treats the item as normal (factor 1).
 	if it.DownloadVolumeFactor != "" {
 		writeAttr(b, "downloadvolumefactor", it.DownloadVolumeFactor)
 		writeAttr(b, "uploadvolumefactor", "1")
@@ -201,11 +171,9 @@ func writeItem(b *strings.Builder, it *item) {
 
 	seeders := max(it.Seeders, 1)
 	leechers := max(it.Leechers, 0)
-	// Saturate instead of wrapping: attrInt accepts counts through
-	// math.MaxInt, so a malformed-but-valid upstream item with huge counts
-	// would otherwise overflow seeders+leechers negative and render an
-	// invalid negative peers attr, contradicting toItem's non-negative
-	// normalization.
+	// Saturate instead of wrapping: attrInt accepts counts through math.MaxInt, so a
+	// malformed-but-valid item with huge counts would otherwise overflow negative and
+	// render an invalid peers attr.
 	peers := seeders + min(leechers, math.MaxInt-seeders)
 	writeAttr(b, "seeders", strconv.Itoa(seeders))
 	writeAttr(b, "peers", strconv.Itoa(peers))
@@ -228,43 +196,25 @@ func writeAttr(b *strings.Builder, name, value string) {
 	b.WriteString(`"/>`)
 }
 
-// escTo escapes s for use in XML text or attribute values, writing directly
-// into b. Escaping in place keeps renderFeed from holding a second escaped
-// copy of every field beside the document builder: XML escaping can expand an
-// ampersand-heavy value ~5x, and the temporary copies esc-per-field rendering
-// retained were one leg of the snapshot memory-amplification path (the other
-// is the shared persisted-item limits in writer.go).
-//
-// The escape composes the shared rune policy: xml.EscapeText
-// covers XML's own metacharacters and the C0 controls, but passes C1
-// controls (U+0080-U+009F), Unicode bidi controls, and U+2028/U+2029 through
-// RAW - and every text value on this feed is upstream-controlled (tracker
-// titles via Prowlarr, SeaDex file names synthesized into titles), consumed
-// by arr web UIs and operator terminals. Sanitizing at the one emit boundary
-// (the runesafe adoption rule) keeps the raw bytes intact everywhere they
-// are computed on - the persisted snapshot, matching, dedupe keys - while no
-// rendered document can carry the unsafe classes, wherever the value came
-// from (a live search passthrough, the persisted journal, or a legacy
-// snapshot written before this policy).
+// escTo escapes s for use in XML text or attribute values, writing directly into b.
+// Escaping in place keeps renderFeed from holding a second escaped copy of every
+// field: XML escaping can expand an ampersand-heavy value ~5x, and those temporary
+// copies were one leg of the snapshot memory-amplification path.
 func escTo(b *strings.Builder, s string) {
 	_ = xml.EscapeText(b, []byte(runesafe.Sanitize(s)))
 }
 
-// esc escapes a string for use in XML text or attribute values, returning it
-// as a new string. Rendering paths that already own a strings.Builder should
-// prefer escTo; esc remains for call sites that interpolate (renderError).
+// esc escapes a string for XML text or attribute values, returning a new string.
+// Paths that already own a strings.Builder should prefer escTo.
 func esc(s string) string {
 	var b strings.Builder
 	escTo(&b, s)
 	return b.String()
 }
 
-// --- Parsing Prowlarr's per-indexer Torznab responses ---
-
 // feedXML / channelXML / itemXML / attrXML mirror the Torznab RSS a Prowlarr
 // indexer endpoint returns. The manual decoders switch on each element's LOCAL
-// name, so a torznab:attr element matches regardless of the declared namespace
-// prefix.
+// name, so a torznab:attr element matches regardless of the declared prefix.
 type feedXML struct {
 	XMLName xml.Name   `xml:"rss"`
 	Channel channelXML `xml:"channel"`
@@ -272,28 +222,22 @@ type feedXML struct {
 
 type channelXML struct {
 	// budget is the response-wide decoded-text allowance, created on the first
-	// UnmarshalXML call and handed to each item as it decodes. It lives on the
-	// struct (not a per-call local) because encoding/xml re-invokes UnmarshalXML
-	// on the same channelXML value for each <channel> sibling, accumulating
-	// Items across invocations - a per-call budget would reset while the
-	// retained items kept growing.
+	// UnmarshalXML call and handed to each item as it decodes. It lives on the struct
+	// because encoding/xml re-invokes UnmarshalXML on the same channelXML value for
+	// each <channel> sibling, so a per-call budget would reset while items grew.
 	budget *xmlx.Budget
 	Items  []itemXML
 }
 
-// Decode limits on an untrusted upstream Torznab response. The transport cap
-// (prowlarr.go's upstreamMaxBytes) bounds wire bytes only: a compromised
-// Prowlarr could pack millions of tiny item/attr elements into that byte
-// budget, or one multi-megabyte field, amplifying allocations in the decoded
-// object graph and again in renderFeed (CWE-400). These constants bound the
-// decoded representation independently; any overflow fails the whole parse
-// closed with a torznabLimitError, which fetchAndParse wraps as a transient
-// malformed-body failure inside the existing bounded retry budget.
+// Decode limits on an untrusted upstream Torznab response. The transport cap bounds
+// wire bytes only: a compromised Prowlarr could pack millions of tiny elements into
+// that budget, or one multi-megabyte field, amplifying allocations in the decoded
+// graph and again in renderFeed (CWE-400). These constants bound the decoded
+// representation independently; any overflow fails the parse closed.
 const (
-	// maxUpstreamItems caps item elements per response. It reuses the render
-	// cap (query.go's maxItems): the served feed never renders more than
-	// maxItems items, so accepting more from one upstream has no value. Real
-	// responses are far smaller (a live AB series search returns ~145).
+	// maxUpstreamItems caps item elements per response. It reuses the render cap:
+	// the served feed never renders more than maxItems, so accepting more has no
+	// value. A live AB series search returns ~145.
 	maxUpstreamItems = maxItems
 	// maxUpstreamAttrs caps torznab:attr elements per item. Prowlarr emits
 	// roughly a dozen (size, seeders, categories, flags); 64 is generous.
@@ -308,49 +252,33 @@ const (
 	maxUpstreamTextBytes = 4 << 20
 )
 
-// Lexical preflight limits: the values this app gives xmlx.Preflight, the
-// allocation gate over the RAW response bytes enforced BEFORE encoding/xml
-// constructs any token. The decode-time caps above bound the RETAINED object
-// graph, but encoding/xml materializes each token first: one text node or one
-// start tag can force a transient allocation up to the transport cap
-// (prowlarr.go's upstreamMaxBytes) before DecodeElement or the attr-element
-// cap ever sees it, and concurrent authenticated searches can stack several
-// such transients past the container memory budget. The library owns the scan;
-// these numbers are the Torznab contract, chosen to reject a response already
-// far outside it while preserving every valid feed: a legitimate 4 KiB field
-// XML-escapes to well under the text-run cap, and no Torznab element carries
-// more than a handful of XML attributes.
+// Lexical preflight limits: the values this app gives xmlx.Preflight, the allocation
+// gate over the RAW response bytes enforced BEFORE encoding/xml constructs any
+// token. The decode-time caps above bound the RETAINED graph, but one text node or
+// start tag can force a transient allocation up to the transport cap before either
+// sees it, and concurrent searches can stack several such transients past the
+// container memory budget. The library owns the scan; these numbers are the Torznab
+// contract, chosen to reject a response already far outside it.
 const (
-	// maxUpstreamTextRunBytes caps one contiguous raw text or CDATA run.
-	// The decoded per-field cap is maxUpstreamFieldBytes (4 KiB); entity
-	// escaping only ever EXPANDS raw text relative to its decoded form, so
-	// 64 KiB of raw text is far past any field that could still decode
-	// legally.
+	// maxUpstreamTextRunBytes caps one contiguous raw text or CDATA run. Entity
+	// escaping only EXPANDS raw text relative to its decoded form, so 64 KiB is far
+	// past any field that could still decode legally under the 4 KiB field cap.
 	maxUpstreamTextRunBytes = 64 << 10
-	// maxUpstreamTokenBytes caps one markup token (a tag, comment,
-	// processing instruction, or <!-directive). A start tag holding
-	// maxUpstreamTagAttrs attributes of maxUpstreamFieldBytes each stays
-	// under this with margin.
+	// maxUpstreamTokenBytes caps one markup token. A start tag holding
+	// maxUpstreamTagAttrs attributes of maxUpstreamFieldBytes each stays under it.
 	maxUpstreamTokenBytes = 128 << 10
-	// maxUpstreamTagAttrs caps XML attributes on ONE start tag - the
-	// lexical twin of maxUpstreamAttrs, which counts <torznab:attr>
-	// ELEMENTS per item, not XML attributes on a tag. Torznab elements
-	// carry at most a handful (enclosure: url/length/type; attr:
-	// name/value; rss: version plus namespaces); 16 is generous.
+	// maxUpstreamTagAttrs caps XML attributes on ONE start tag - the lexical twin of
+	// maxUpstreamAttrs, which counts <torznab:attr> ELEMENTS per item. Torznab
+	// elements carry at most a handful; 16 is generous.
 	maxUpstreamTagAttrs = 16
 	// maxUpstreamDepth caps element nesting depth. The decoder pushes one
-	// heap-allocated stack entry per open element and its Skip path (which
-	// every child this schema does not model takes) has no depth bound, so an
-	// all-opens body of tiny tags (~3 bytes each under the token cap) could
-	// otherwise grow the decoder's element stack by ~2.7M entries from one
-	// 8 MiB response. A Torznab document is depth ~4 (rss/channel/item/attr).
+	// heap-allocated stack entry per open element and its Skip path has no depth
+	// bound, so an all-opens body of tiny tags could grow that stack by ~2.7M entries
+	// from one 8 MiB response. A Torznab document is depth ~4.
 	maxUpstreamDepth = 64
 	// maxUpstreamElements caps total elements in one response, the bound for
-	// amplification by COUNT rather than size: a body of millions of tiny
-	// empty elements passes every per-token bound and charges nothing to the
-	// text budget, yet still expands into a decoded object graph. A real
-	// response is maxUpstreamItems items of ~10 elements each, so 8x that is
-	// generous while still rejecting a body two orders of magnitude larger.
+	// amplification by COUNT rather than size: millions of tiny empty elements pass
+	// every per-token bound and charge nothing to the text budget.
 	maxUpstreamElements = 8 * maxUpstreamItems * 10
 )
 
@@ -365,36 +293,30 @@ var upstreamLimits = xmlx.Limits{
 	MaxElements:     maxUpstreamElements,
 }
 
-// preflightTorznab is the lexical gate over the raw response bytes, converting
-// an xmlx bound rejection into this package's *torznabLimitError so a lexical
-// breach classifies exactly like a decode-time one (see asLimitError).
+// preflightTorznab is the lexical gate over the raw response bytes, converting an
+// xmlx bound rejection into this package's *torznabLimitError so a lexical breach
+// classifies exactly like a decode-time one.
 func preflightTorznab(body []byte) error {
 	return asLimitError(xmlx.Preflight(body, upstreamLimits))
 }
 
 // newUpstreamBudget returns the decode-time text budget for ONE response: the
 // per-field cap and the response-wide cumulative cap, shared by the feed item
-// decoders and the <error>-document decoder so the cap policy cannot drift
-// between the two parse paths. Errors are converted at each charge site
-// (asLimitError), not here.
+// decoders and the <error>-document decoder so the policy cannot drift.
 func newUpstreamBudget() *xmlx.Budget {
 	b, err := xmlx.NewBudget(maxUpstreamFieldBytes, maxUpstreamTextBytes)
 	if err != nil {
-		// Unreachable: both caps are positive constants. A panic here would be
-		// a build-time mistake surfaced on the first request, so fail loudly
-		// rather than serving unbounded.
+		// Unreachable: both caps are positive constants. A panic here would be a
+		// build-time mistake, so fail loudly rather than serving unbounded.
 		panic("indexer: invalid upstream decode budget: " + err.Error())
 	}
 	return b
 }
 
-// asLimitError wraps an xmlx bound rejection in this package's
-// *torznabLimitError. Every decode-limit breach - the app's own cardinality
-// caps and the library's byte/shape bounds alike - then presents as one error
-// type, which is what fetchAndParse classifies on (transient with the
-// malformedBody marker) and what parseTorznab checks before re-parsing the body
-// as an <error> document. Any other error, including a genuine encoding/xml
-// parse failure, passes through untouched.
+// asLimitError wraps an xmlx bound rejection in this package's *torznabLimitError,
+// so every decode-limit breach presents as one error type - which is what
+// fetchAndParse classifies on and what parseTorznab checks before re-parsing the
+// body as an <error> document. Any other error passes through untouched.
 func asLimitError(err error) error {
 	var le *xmlx.LimitError
 	if errors.As(err, &le) {
@@ -403,22 +325,18 @@ func asLimitError(err error) error {
 	return err
 }
 
-// maxRenderedFeedBytes bounds one rendered feed document, the render-side
-// twin of maxUpstreamTextBytes: the search path is aggregate-bounded at
-// decode, but the persisted journal path is bounded only per field and per
-// snapshot, and XML escaping can expand an ampersand-heavy field ~5x.
-// Overshoot past the check is at most one item (~120 KiB).
+// maxRenderedFeedBytes bounds one rendered feed document, the render-side twin of
+// maxUpstreamTextBytes: the search path is aggregate-bounded at decode, but the
+// persisted journal path is bounded only per field, and escaping can expand a field
+// ~5x. Overshoot past the check is at most one item.
 const maxRenderedFeedBytes = 8 << 20
 
-// torznabLimitError is parseTorznab's fail-closed error for a syntactically
-// valid response that exceeds the decode limits above. fetchAndParse treats
-// it like any other 2xx decode failure: transient with the malformedBody
-// marker, so it retries within the bounded budget and, after exhaustion, the
-// harvest scopes the failure to the one result set rather than the upstream.
+// torznabLimitError is parseTorznab's fail-closed error for a syntactically valid
+// response that exceeds the decode limits above. fetchAndParse treats it like any
+// other 2xx decode failure: transient with the malformedBody marker.
 type torznabLimitError struct {
-	// err is the library's *xmlx.LimitError when the bound was one of xmlx's,
-	// nil for an app-side cap. Unwrapping it lets a consumer match
-	// errors.Is(err, xmlx.ErrLimit) as well as this type.
+	// err is the library's *xmlx.LimitError when the bound was xmlx's, nil for an
+	// app-side cap, so a consumer can also match errors.Is(err, xmlx.ErrLimit).
 	err error
 	// limit describes an app-side cardinality cap (item count, attr count).
 	limit string
@@ -436,20 +354,16 @@ func (e *torznabLimitError) Error() string {
 // for a bound xmlx enforced.
 func (e *torznabLimitError) Unwrap() error { return e.err }
 
-// UnmarshalXML decodes <channel> one <item> at a time so the item-count cap
-// rejects an oversized response before its object graph is built, instead of
-// after encoding/xml has already allocated an unbounded Items slice. Each
-// item bounds itself during decoding (see itemXML.UnmarshalXML) and its
-// decoded text is folded into the response-wide budget before it is
-// retained. Non-item children are skipped. The decoder this runs under is
-// xml.Unmarshal's, which keeps Strict enabled.
+// UnmarshalXML decodes <channel> one <item> at a time so the item-count cap rejects
+// an oversized response before its object graph is built, instead of after
+// encoding/xml has allocated an unbounded Items slice. Each item bounds itself and
+// its decoded text is folded into the response-wide budget. Non-item children are
+// skipped, under xml.Unmarshal's Strict decoder.
 func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	if c.budget == nil {
-		// First invocation owns the response-wide allowance. Setting it here
-		// rather than at the parse entry point means no construction path can
-		// leave it nil, and the field persists across sibling <channel>
-		// invocations on this same value, so repetition is bounded once for the
-		// whole response rather than reset per channel.
+		// First invocation owns the response-wide allowance. Setting it here means no
+		// construction path can leave it nil, and the field persists across sibling
+		// <channel> invocations rather than resetting per channel.
 		c.budget = newUpstreamBudget()
 	}
 	for {
@@ -470,10 +384,9 @@ func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	}
 }
 
-// decodeChild skips a non-item child and decodes one <item>, appending it
-// under the item cap and folding its decoded text into the response-wide
-// budget. A nil return on a skipped non-item child lets the caller's token
-// loop continue exactly as before.
+// decodeChild skips a non-item child and decodes one <item>, appending it under the
+// item cap and folding its decoded text into the response-wide budget. A nil return
+// on a skipped child lets the caller's token loop continue.
 func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	if t.Name.Local != "item" {
 		return d.Skip()
@@ -491,24 +404,12 @@ func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 
 // The element names this type decodes are NOT struct tags: itemXML implements
 // UnmarshalXML, so encoding/xml never reads them. decodeChild owns the
-// child-element vocabulary (dispatching to decodeField, decodeUntrustedField,
-// decodeSizeField, decodeEnclosure and decodeAttr); decodeEnclosure and
-// decodeAttr own the attribute vocabulary. Adding a field here decodes nothing
-// until it is wired into one of those.
+// child-element vocabulary and decodeEnclosure/decodeAttr the attribute one, so a
+// field added here decodes nothing until it is wired into one of those.
 type itemXML struct {
-	// Title is the tracker-controlled release title. It is tagged
-	// runesafe.Untrusted at this decode boundary — the one place Prowlarr
-	// titles enter the program — so the trust decision is recorded on the
-	// wire struct and any emission of the wire form (a bare slog attr, an
-	// fmt.Errorf) is sanitized automatically. toItem unwraps via Raw() into
-	// the plain persisted/compute form (runesafe's machine-read persistence
-	// rule: feed.json stores raw bytes in plain string fields), and the
-	// human-facing sinks keep their own layers: the XML render escapes over
-	// the rune belt (escTo), capped log lines use capLogText.
-	// budget is the response-wide decoded-text allowance this item charges as
-	// it decodes (unexported: invisible to encoding/xml). It is the SAME
-	// budget every sibling item charges, so repetition across items is bounded
-	// by one cumulative cap rather than per item.
+	// Title is the tracker-controlled release title, tagged runesafe.Untrusted at this
+	// decode boundary - the one place Prowlarr titles enter the program - so any
+	// emission of the wire form is sanitized automatically.
 	budget    *xmlx.Budget
 	Attrs     []attrXML
 	Title     runesafe.Untrusted
@@ -520,12 +421,10 @@ type itemXML struct {
 	Size      int64
 }
 
-// UnmarshalXML decodes one <item> child-by-child so the attr-count and
-// per-field caps reject an oversized item DURING decoding - before
-// encoding/xml materializes an unbounded []attrXML from a run of tiny
-// <attr/> elements or retains a multi-megabyte field - instead of
-// validating the fully-built object graph after the fact. Unknown children
-// are skipped whole; the decoder stays xml.Unmarshal's Strict one.
+// UnmarshalXML decodes one <item> child-by-child so the attr-count and per-field
+// caps reject an oversized item DURING decoding - before encoding/xml materializes
+// an unbounded []attrXML or retains a multi-megabyte field. Unknown children are
+// skipped whole, under xml.Unmarshal's Strict decoder.
 func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	for {
 		tok, err := d.Token()
@@ -544,13 +443,10 @@ func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	}
 }
 
-// decodeChild decodes and validates one child element of an <item>: each
-// recognized child decodes into its own destination - the plain string
-// scalars through decodeField's bounded text decode, the rest through their
-// dedicated decoders - and unknown children are skipped. Each recognized
-// field is bounded as it decodes; an
-// <attr> is rejected BEFORE decoding once the per-item attr cap is reached,
-// so the cap bounds the allocation instead of merely reporting it.
+// decodeChild decodes and validates one child element of an <item>: each recognized
+// child decodes into its own destination through a bounded text decode, and unknown
+// children are skipped. An <attr> is rejected BEFORE decoding once the per-item
+// attr cap is reached, so the cap bounds the allocation rather than reporting it.
 func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	switch t.Name.Local {
 	case "guid":
@@ -577,24 +473,18 @@ func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	}
 }
 
-// decodeSizeField decodes the <size> child: bounded text first, numeric
-// conversion second - decoding straight into the int64 would let a
-// multi-megabyte <size> text bypass the per-field cap and the cumulative
-// budget entirely (the conversion error, when it came, arrived only after
-// the allocation).
+// decodeSizeField decodes the <size> child: bounded text first, numeric conversion
+// second - decoding straight into the int64 would let a multi-megabyte <size> text
+// bypass the per-field cap and the cumulative budget entirely.
 func (x *itemXML) decodeSizeField(d *xml.Decoder) error {
 	s, err := x.budget.DecodeText(d)
 	if err != nil {
 		return asLimitError(err)
 	}
 	if s == "" {
-		// Mirror encoding/xml's own numeric conversion, which treats an
-		// EMPTY value as zero (copyValue's len(src) == 0 arm): an
-		// <size></size> element must degrade into the zero-as-unknown
-		// domain itemSize already falls back through, not fail the whole
-		// response and cost every other curated item in it. The test is on
-		// the RAW value, exactly like copyValue's len(src) == 0 arm, so a
-		// whitespace-only value still fails the response as it did before.
+		// Mirror encoding/xml's own numeric conversion, which treats an EMPTY value as
+		// zero: an <size></size> element must degrade into the zero-as-unknown domain
+		// rather than fail the whole response and cost every other curated item in it.
 		x.Size = 0
 		return nil
 	}
@@ -609,10 +499,8 @@ func (x *itemXML) decodeSizeField(d *xml.Decoder) error {
 
 // decodeEnclosure reads an <enclosure>'s recognized attributes off its start
 // element, bounding and accounting each retained value BEFORE it is parsed or
-// stored. The struct decode it replaces materialized the attributes first and
-// accounted only the URL afterwards, leaving the length text outside the
-// budget; here the same accounting helper covers every recognized field. The
-// element body is skipped whole (Torznab enclosures are attribute-only).
+// stored - where the struct decode it replaces materialized the attributes first
+// and left the length text outside the budget. The body is skipped whole.
 func (x *itemXML) decodeEnclosure(d *xml.Decoder, t xml.StartElement) error {
 	var enc enclosureXML
 	for _, a := range t.Attr {
@@ -634,10 +522,9 @@ func (x *itemXML) decodeEnclosure(d *xml.Decoder, t xml.StartElement) error {
 	return d.Skip()
 }
 
-// decodeAttr reads one <torznab:attr>'s name/value off its start element,
-// bounding and accounting both retained fields before they are stored (the
-// struct decode it replaces materialized them first and accounted after).
-// The element body is skipped whole (attr elements are attribute-only).
+// decodeAttr reads one <torznab:attr>'s name/value off its start element, bounding
+// and accounting both retained fields before they are stored. The element body is
+// skipped whole (attr elements are attribute-only).
 func (x *itemXML) decodeAttr(d *xml.Decoder, t xml.StartElement) error {
 	var a attrXML
 	for _, at := range t.Attr {
@@ -658,33 +545,26 @@ func (x *itemXML) decodeAttr(d *xml.Decoder, t xml.StartElement) error {
 	return d.Skip()
 }
 
-// boundedInt64 bounds and accounts one numeric text value through the same
-// accounting helper as the string fields, then parses it, so an oversized
-// numeric field is charged against the item's budget (and capped) before
-// strconv ever sees it. TrimSpace mirrors encoding/xml's own numeric
-// conversion.
+// boundedInt64 bounds and accounts one numeric text value through the same helper as
+// the string fields, then parses it, so an oversized numeric field is charged and
+// capped before strconv sees it. TrimSpace mirrors encoding/xml's own conversion.
 func (x *itemXML) boundedInt64(s string) (int64, error) {
 	if err := x.account(s); err != nil {
 		return 0, err
 	}
 	if s == "" {
-		// Same empty-is-zero mirror as decodeSizeField, keyed on the RAW
-		// value: an <enclosure length=""/> decoded as zero before this
-		// manual decoder replaced the struct unmarshal, and itemSize treats
-		// a zero length as unknown and falls through. A whitespace-only
-		// length still fails, as it did under the struct unmarshal.
+		// Same empty-is-zero mirror as decodeSizeField, keyed on the RAW value: an
+		// <enclosure length=""/> decoded as zero before this manual decoder, and
+		// itemSize treats a zero length as unknown. A whitespace-only length fails.
 		return 0, nil
 	}
 	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }
 
 // decodeField decodes one text child into dst, bounded and charged as it
-// accumulates: xmlx.Budget.DecodeText stops at the CharData token that would
-// cross either cap, so a value split across CDATA seams is rejected during
-// token iteration instead of after encoding/xml has materialized the whole
-// string. Every decoded occurrence is charged (a repeated <title> overwrites
-// dst but still consumes budget), so duplicate elements cannot amplify past the
-// cumulative cap.
+// accumulates: DecodeText stops at the CharData token that would cross either cap,
+// so a value split across CDATA seams is rejected during token iteration. Every
+// decoded occurrence is charged, so duplicate elements cannot amplify past the cap.
 func (x *itemXML) decodeField(d *xml.Decoder, dst *string) error {
 	s, err := x.budget.DecodeText(d)
 	if err != nil {
@@ -695,10 +575,8 @@ func (x *itemXML) decodeField(d *xml.Decoder, dst *string) error {
 }
 
 // decodeUntrustedField decodes one text element into an Untrusted-tagged
-// destination: the same accounting as decodeField, with the provenance tag
-// applied at the decode boundary (raw bytes preserved — Untrusted has no
-// UnmarshalText, and the explicit conversion here keeps the manual decoder's
-// *string plumbing out of the tagged field).
+// destination: the same accounting as decodeField, with the provenance tag applied
+// at the decode boundary and the raw bytes preserved.
 func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) error {
 	var s string
 	if err := x.decodeField(d, &s); err != nil {
@@ -709,13 +587,12 @@ func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) 
 }
 
 // account charges one decoded string against the response-wide budget, which
-// enforces the per-field cap and the cumulative cap and mutates nothing on
-// rejection.
+// enforces the per-field and cumulative caps and mutates nothing on rejection.
 func (x *itemXML) account(s string) error { return asLimitError(x.budget.Charge(s)) }
 
 // enclosureXML and attrXML are decoded-value carriers, not XML schema:
-// decodeEnclosure and decodeAttr read the attributes off the start element by
-// hand so each retained value is charged to the budget before it is stored.
+// decodeEnclosure and decodeAttr read the attributes off the start element by hand
+// so each retained value is charged to the budget before it is stored.
 type enclosureXML struct {
 	URL    string
 	Length int64
@@ -726,33 +603,26 @@ type attrXML struct {
 	Value string
 }
 
-// errorXML mirrors a Newznab/Torznab <error> document an upstream can return
-// in place of an RSS feed (bad credentials, a named indexer failure) - the
-// same shape renderError emits on the serving side. Decoding is custom (see
-// UnmarshalXML) so every attribute is bounded BEFORE assignment.
+// errorXML mirrors a Newznab/Torznab <error> document an upstream can return in
+// place of an RSS feed - the same shape renderError emits. Decoding is custom so
+// every attribute is bounded BEFORE assignment.
 type errorXML struct {
 	Code        string
 	Description string
 }
 
-// UnmarshalXML decodes the <error> document under the same decode-time
-// budget itemXML.account enforces on feed items: only an <error> root is
-// accepted, and every attribute value is charged against
-// maxUpstreamFieldBytes and the cumulative maxUpstreamTextBytes BEFORE it is
-// assigned, returning a *torznabLimitError on breach - the plain struct
-// unmarshal this replaces copied up to the transport cap into the fields and
-// only len()-checked them afterwards.
+// UnmarshalXML decodes the <error> document under the same decode-time budget feed
+// items charge: only an <error> root is accepted, and every attribute value is
+// charged against the per-field and cumulative caps BEFORE assignment, returning a
+// *torznabLimitError on breach.
 func (e *errorXML) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	if start.Name.Local != "error" {
 		return fmt.Errorf("expected torznab error element, got %s", start.Name.Local)
 	}
-	// One allowance per document, scoped to this call: xml.Unmarshal decodes
-	// only a document's FIRST element, so unlike channelXML - which
-	// encoding/xml re-invokes for each <channel> sibling on the same value -
-	// this decoder runs exactly once and needs no field to carry the budget
-	// across invocations. The <error> fallback re-parses the SAME body the
-	// feed parse just walked, so it gets a fresh allowance rather than a
-	// half-spent one either way.
+	// One allowance per document, scoped to this call: xml.Unmarshal decodes only a
+	// document's FIRST element, so unlike channelXML this decoder runs exactly once
+	// and needs no field to carry the budget across invocations. The <error> fallback
+	// re-parses the SAME body, so it gets a fresh allowance either way.
 	budget := newUpstreamBudget()
 	for _, attr := range start.Attr {
 		if err := asLimitError(budget.Charge(attr.Value)); err != nil {
@@ -768,45 +638,33 @@ func (e *errorXML) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return d.Skip()
 }
 
-// upstreamDocError is parseTorznab's error for a syntactically VALID Torznab
-// <error> document delivered in place of an RSS feed (the errorXML shape: bad
-// credentials, a named indexer failure). It is a deliberate upstream-scoped
-// answer, not a garbled body: fetchAndParse still wraps it transient (the
-// bounded retry budget is unchanged) but never marks it malformedBody, so
-// after retry exhaustion the harvest latches the failed scope instead of
-// treating an upstream-wide auth/config failure as one show's poison result
-// set. The string fields hold the RAW upstream text (so fetchAndParse's
-// exact-substring API-key redaction sees the untruncated key); Error() is the
-// sanitizing emit boundary.
+// upstreamDocError is parseTorznab's error for a syntactically VALID Torznab <error>
+// document delivered in place of an RSS feed. It is a deliberate upstream-scoped
+// answer, not a garbled body: fetchAndParse still wraps it transient but never marks
+// it malformedBody, so after retry exhaustion the harvest latches the failed scope
+// instead of treating an upstream-wide failure as one show's poison result set. The
+// string fields hold RAW upstream text, so the exact-substring API-key redaction
+// sees the untruncated key; Error() is the sanitizing emit boundary.
 type upstreamDocError struct {
 	code        string
 	description string
-	// codeNum is the document code parsed ONCE at construction from the raw
-	// upstream text (-1 when non-numeric), before fetchAndParse's API-key
-	// redaction can rewrite the code string. Both classification consumers -
-	// terminalTorznabCode's retry decision and requestScopedHarvestError's
-	// show-vs-scope decision - read this field, so a short all-digit
-	// Prowlarr key occurring inside a valid code (key "2" turning "201"
-	// into "REDACTED01") can no longer corrupt control flow: redaction
-	// rewrites only the display strings.
+	// codeNum is the document code parsed ONCE at construction from the raw upstream
+	// text (-1 when non-numeric), before fetchAndParse's API-key redaction can rewrite
+	// the code string.
 	codeNum int
 }
 
-// newUpstreamDocError builds the error from the document's raw code and
-// description, parsing codeNum from the untouched code text (see the field
-// comment for why classification must never re-parse the string).
+// newUpstreamDocError builds the error from the document's raw code and description,
+// parsing codeNum from the untouched code text (see the field comment for why).
 func newUpstreamDocError(code, description string) *upstreamDocError {
 	return &upstreamDocError{code: code, description: description, codeNum: torznabCodeNum(code)}
 }
 
-// torznabCodeNum parses a Torznab <error> document code, returning -1 for
-// anything non-numeric (an unknown shape classifies as neither terminal nor
-// request-scoped, the conservative default).
+// torznabCodeNum parses a Torznab <error> document code, returning -1 for anything
+// non-numeric (an unknown shape classifies as neither terminal nor request-scoped).
 func torznabCodeNum(code string) int {
-	// TrimSpace like every other untrusted numeric parse in this file
-	// (boundedInt64, attrInt, the category and size-attr parses): XML
-	// preserves attribute whitespace, and a padded code must not
-	// degrade to the unknown-shape classification.
+	// TrimSpace like every other untrusted numeric parse in this file: XML preserves
+	// attribute whitespace, and a padded code must not degrade to unknown-shape.
 	n, err := strconv.Atoi(strings.TrimSpace(code))
 	if err != nil {
 		return -1
@@ -814,17 +672,12 @@ func torznabCodeNum(code string) int {
 	return n
 }
 
-// parseErrorDocument strictly parses a Newznab/Torznab <error> document
-// (errorXML.UnmarshalXML only accepts an <error> root), bounding its code and
-// description AT DECODE TIME before an upstreamDocError retains them: the
-// previous unrestricted unmarshal let a compromised upstream park up to the
-// transport cap (upstreamMaxBytes) in the retained error strings, which the retry loop
-// then redacted and logged on every attempt. The bound REJECTS an over-cap
-// document (the decoder's *torznabLimitError, a definitive verdict
-// parseTorznab propagates) rather than truncating it, which preserves the
-// redact-before-sanitize ordering: the retained fields stay RAW and
-// untruncated so fetchAndParse's exact-substring API-key redaction always
-// sees the intact key, and Error() remains the sanitizing emit boundary.
+// parseErrorDocument strictly parses a Newznab/Torznab <error> document, bounding
+// its code and description AT DECODE TIME before an upstreamDocError retains them:
+// the previous unrestricted unmarshal let a compromised upstream park up to the
+// transport cap in the retained strings, which the retry loop then logged on every
+// attempt. The bound REJECTS an over-cap document rather than truncating it, which
+// keeps the retained fields raw so the API-key redaction sees the intact key.
 func parseErrorDocument(body []byte) (*upstreamDocError, error) {
 	var e errorXML
 	if err := xml.Unmarshal(body, &e); err != nil {
@@ -838,49 +691,31 @@ func (e *upstreamDocError) Error() string {
 		sanitizeUpstreamText(e.code), sanitizeUpstreamText(e.description))
 }
 
-// capLogText bounds and cleans an untrusted string before it reaches a log
-// line, delegating to runesafe.SanitizeSingleLineBounded (single-line rune
-// safety, then a rune-boundary byte cap with the "..." truncation marker).
-// It is the shared emit-boundary policy behind sanitizeUpstreamText and
-// logParam; the composition itself now lives in the library, so the policy
-// cannot drift per consumer (internal/anilist's sanitizeUpstreamMessage is the
-// same one-line delegate over its own budget).
-//
-// internal/logattr is the SIBLING policy, not a second home for this one: it
-// renders STRUCTURED attributes under one 8 KiB budget, keeps CR/LF for the
-// JSON sink, and caps before sanitizing so a multi-MB SeaDex value never walks
-// the sanitizer. Values here land inline in one message string, must lose
-// CR/LF, and are already bounded by the transport, so the library's
-// sanitize-then-cap preset is the right composition - see logattr's package
-// doc for the full split.
+// capLogText bounds and cleans an untrusted string before it reaches a log line,
+// delegating to runesafe.SanitizeSingleLineBounded. It is the shared emit-boundary
+// policy behind sanitizeUpstreamText and logParam.
 func capLogText(s string, maxLen int) string {
 	return runesafe.SanitizeSingleLineBounded(s, maxLen)
 }
 
 // sanitizeUpstreamText bounds and cleans an untrusted Torznab <error>
-// code/description before it is carried into an error that reaches slog
-// (fetchRaw's Warn, httpx.Do's retry logs) - the same emit-boundary policy
-// report.go/anilist.go apply to untrusted upstream text, mirroring anilist's
-// sanitizeUpstreamMessage: single-line rune safety, then a 200-byte cap on a
-// rune boundary (truncated output appends "...", for a 203-byte maximum) so
-// a multi-MB or control-laden <error> body can never spoof or flood a log
-// line.
+// code/description before it is carried into an error that reaches slog: single-line
+// rune safety, then a 200-byte cap on a rune boundary, so a multi-MB or
+// control-laden <error> body can never spoof or flood a log line.
 func sanitizeUpstreamText(s string) string { return capLogText(s, 200) }
 
-// parseTorznab decodes a Prowlarr Torznab response into feed items. The
-// lexical preflight runs over the raw bytes BEFORE either xml.Unmarshal (the
-// feed parse and the <error>-document fallback both re-tokenize body), so an
-// attacker-shaped response cannot force encoding/xml's transient token
-// allocations past the decode caps on either path.
+// parseTorznab decodes a Prowlarr Torznab response into feed items. The lexical
+// preflight runs over the raw bytes BEFORE either xml.Unmarshal, so an
+// attacker-shaped response cannot force transient token allocations past the
+// decode caps on either path.
 func parseTorznab(body []byte) ([]item, error) {
 	if err := preflightTorznab(body); err != nil {
 		return nil, err
 	}
 	var feed feedXML
 	if err := xml.Unmarshal(body, &feed); err != nil {
-		// A decode-limit overflow is already a definitive verdict on a
-		// well-formed feed document; skip the <error>-document re-parse of
-		// the (up to upstreamMaxBytes) body it could never match.
+		// A decode-limit overflow is already a definitive verdict on a well-formed
+		// feed document; skip the <error>-document re-parse it could never match.
 		if limitErr, ok := errors.AsType[*torznabLimitError](err); ok {
 			return nil, limitErr
 		}
@@ -888,9 +723,8 @@ func parseTorznab(body []byte) ([]item, error) {
 		if docParseErr == nil {
 			return nil, docErr
 		}
-		// An over-cap <error> attribute is a definitive decode-limit
-		// verdict on the fallback parse too; propagate it over the generic
-		// RSS parse failure so it classifies like every other limit breach.
+		// An over-cap <error> attribute is a definitive limit verdict on the fallback
+		// parse too; propagate it over the generic RSS parse failure.
 		if limitErr, ok := errors.AsType[*torznabLimitError](docParseErr); ok {
 			return nil, limitErr
 		}
@@ -915,11 +749,9 @@ func (x *itemXML) toItem() item {
 	seeders, leechers := itemPeers(attrs)
 
 	return item{
-		// Raw() by design: item rides journalItem into feed.json, and
-		// runesafe's machine-read persistence rule stores raw bytes in
-		// plain fields (a tagged field would round-trip sanitized). The
-		// emit boundaries own the policy: escTo for the XML render,
-		// capLogText for log lines.
+		// Raw() by design: item rides journalItem into feed.json, and runesafe's
+		// machine-read persistence rule stores raw bytes in plain fields. The emit
+		// boundaries own the policy: escTo for the render, capLogText for logs.
 		Title:       strings.TrimSpace(x.Title.Raw()),
 		GUID:        strings.TrimSpace(x.GUID),
 		InfoURL:     strings.TrimSpace(x.Comments),
@@ -940,10 +772,8 @@ func splitItemAttrs(in []attrXML) (attrs map[string]string, cats []int) {
 	attrs = make(map[string]string, len(in))
 	for _, a := range in {
 		if a.Name == "category" {
-			// Categories are tracker-controlled numerics rendered back into the
-			// served feed; only positive ids are meaningful Torznab categories,
-			// so a negative/zero value is dropped like the count fields
-			// itemSize/itemPeers clamp.
+			// Categories are tracker-controlled numerics rendered back into the served
+			// feed; only positive ids are meaningful Torznab categories.
 			if n, err := strconv.Atoi(strings.TrimSpace(a.Value)); err == nil && n > 0 {
 				cats = append(cats, n)
 			}
@@ -954,11 +784,10 @@ func splitItemAttrs(in []attrXML) (attrs map[string]string, cats []int) {
 	return attrs, cats
 }
 
-// itemSize resolves a decoded item's byte size from the enclosure length, the
-// <size> element, then the size torznab:attr, in that order. The decoded
-// numeric fields are tracker-controlled, so the result is normalized to the
-// feed's zero-as-unknown domain: a malformed-but-valid response cannot render
-// a negative enclosure length or size attr.
+// itemSize resolves a decoded item's byte size from the enclosure length, the <size>
+// element, then the size torznab:attr, in that order. The decoded numerics are
+// tracker-controlled, so the result is normalized to the feed's zero-as-unknown
+// domain: a malformed-but-valid response cannot render a negative length.
 func itemSize(x *itemXML, attrs map[string]string) int64 {
 	size := x.Enclosure.Length
 	if size <= 0 {
@@ -971,9 +800,8 @@ func itemSize(x *itemXML, attrs map[string]string) int64 {
 }
 
 // itemPeers normalizes the tracker-controlled peer counts to the feed's
-// zero-as-unknown domain, deriving leechers from a peers attr only when it
-// exceeds the seeders - so an inflated peer count cannot be derived from an
-// unbounded negative seeders value.
+// zero-as-unknown domain, deriving leechers from a peers attr only when it exceeds
+// the seeders, so an inflated count cannot come from a negative seeders value.
 func itemPeers(attrs map[string]string) (seeders, leechers int) {
 	seeders = max(attrInt(attrs, "seeders"), 0)
 	leechers = max(attrInt(attrs, "leechers"), 0)

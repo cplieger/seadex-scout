@@ -6,39 +6,13 @@
 //     names EXACTLY, via IsName. Over-matching a name there costs only a
 //     spurious operator warning, and the message is field-name-only, so the
 //     exact list is the honest scope for a diagnostic.
-//   - internal/indexer's redaction of reflected upstream text (upstreamSecrets ->
-//     redactSecrets) matches the credential WORDS those names are built from, via
-//     ContainsWord. It is deliberately BROADER: a name added to the list later is
-//     already redacted rather than silently leaked, because under-redacting
-//     writes a credential to a log line (CWE-532) while over-redacting only
-//     mangles a diagnostic.
-//
-// Why one home rather than a copy per policy: the two rules used to live in the
-// two consumer packages independently, each doc comment describing the other.
-// Their relation - every name config warns about is redacted by the indexer -
-// was load-bearing (the asymmetric consequence sits on the redaction side) yet
-// held only by coincidence of English word choice, with nothing linking the two
-// sets. Here the containment is a test over both (credname_test.go), so a name
-// added to the list without a matching word fails the build instead of leaking.
-//
-// The runner-up home was exporting the list from internal/config for the indexer
-// to import, which loses: only the composition root imports internal/config, and
-// internal/indexer deliberately takes no dependency on it, so a pure leaf both
-// may import is the only home that keeps that rule intact (l-f22).
 package credname
 
 import "strings"
 
-// names is the canonical credential-like parameter-name set: apikey/api_key and
-// the apitoken/api_token/access_token/auth_token variants, the bare token,
-// passkey/authkey/torrent_pass, and
-// password/pass/secret/client_secret/rss_key. Compared case-insensitively
-// through IsName.
-//
-// authkey and torrent_pass are AnimeBytes' own credential parameter names,
-// carried by every AB direct download/announce URL - exactly the paste mistake
-// (a real tracker URL where a Prowlarr per-indexer endpoint belongs) the
-// operator warning exists to catch.
+// names is the canonical credential-like parameter-name set: apikey/api_key and the
+// apitoken/api_token/access_token/auth_token variants, the bare token,
+// passkey/authkey/torrent_pass, and password/pass/secret/client_secret/rss_key.
 var names = map[string]struct{}{
 	"apikey": {}, "api_key": {}, "apitoken": {}, "api_token": {},
 	"access_token": {}, "auth_token": {}, "passkey": {}, "token": {},
@@ -47,10 +21,8 @@ var names = map[string]struct{}{
 }
 
 // words are the credential word stems the canonical names are built from - the
-// vocabulary the broad ContainsWord policy matches on. Every canonical name
-// contains at least one of them (pinned by the containment test), which is what
-// makes ContainsWord a superset of IsName by construction rather than by
-// coincidence.
+// vocabulary the broad ContainsWord policy matches on. Every canonical name contains
+// at least one, which is what makes ContainsWord a superset of IsName by construction.
 var words = []string{"key", "token", "pass", "secret", "auth", "cred"}
 
 // IsName reports whether name is one of the canonical credential parameter

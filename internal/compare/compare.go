@@ -3,23 +3,7 @@
 // the content filters (remux/dual-audio) AND are obtainable (on a public
 // tracker, or on AnimeBytes when the operator enables it), and compares the
 // surviving recommended release groups against the groups present on the
-// library item. The comparison is season-scoped and decided by the shared
-// internal/align decision core (align.Decide) - the same decision rules the
-// audit report renders, so the two flows cannot drift on shared inputs (they
-// deliberately prepare different ones: the report judges the SeaDex best/alt
-// sets minus only the operator's tag exclusions and unobtainable releases,
-// while this pass
-// additionally applies the content filters and keeps best-only): a
-// mapped TVDB season against that season's groups, a special against Sonarr's
-// season-0 bucket, a movie against its groups, and an absolute-numbered or
-// title-only run against every real season conservatively -
-// so a later season that needs a better release is not masked by an earlier
-// season that already has it. An item that provenly has a recommended group is
-// aligned and produces no finding; an item whose group evidence is unknown on
-// either side (the release.NoGroup sentinel) is unverifiable and produces an
-// informational finding, never an aligned silence or a better-release warning;
-// a recommended release the operator cannot obtain is simply absent, never a
-// finding.
+// library item.
 package compare
 
 import (
@@ -56,8 +40,7 @@ const (
 	// group evidence on at least one side is unknown (a group-less on-disk
 	// file or a group-less SeaDex release, both carried as the release.NoGroup
 	// sentinel) and could hide an alignment - so neither a confident aligned
-	// silence nor a better_release warning is honest. An informational
-	// manual-review nudge.
+	// silence nor a better_release warning is honest.
 	StatusUnverifiable Status = "unverifiable"
 )
 
@@ -69,38 +52,16 @@ type ReleaseLink struct {
 	Tracker string
 	URL     string
 	// AB is the AnimeBytes grade classify.ABEvidence read from the RAW
-	// upstream (tracker, URL) pair this link was published from. It travels
-	// with the link because the URL here is the PUBLISHED one, and grading
-	// that instead is the mistake internal/classify's raw-URL invariant
-	// exists to prevent: publishing trusts the tracker label and rewrites or
-	// erases the very host evidence the grade reads. Carrying it keeps ONE
-	// grading site for the whole app (compare and audit already read
-	// classify.ABEvidence) and leaves notify owning only slot PRECEDENCE,
-	// which is genuinely its policy (h-f43).
-	//
-	// The zero value is tracker.ABNone, so a link assembled without a producer
-	// (a test literal, a future caller) carries no AnimeBytes evidence rather
-	// than a silently re-derived one.
+	// upstream (tracker, URL) pair this link was published from.
 	AB tracker.ABEvidence
 	// Headline reports whether this link belongs to the HEADLINE candidate's
-	// group - the group Finding.RecommendedGroup names. It carries
-	// obtainableLinks' already-computed affinity to the consumer as data,
-	// because slice ORDER alone is not enough: notify.trackerURLs picks per
-	// tracker CLASS, so a Nyaa link from another recommended group would
-	// otherwise outrank a headline-group link on a different public tracker
-	// and the alert's clickable URL would not belong to the group the same
-	// line names. The zero value (false) is safe: with no producer affinity
-	// supplied, every link is a non-headline source and the tracker-class
-	// preference decides alone.
+	// group - the group Finding.RecommendedGroup names.
 	Headline bool
 }
 
 // Finding is one comparison result for a library item. It carries the
-// semantic fields the notification layer emits; alert dedupe-key construction
-// (the persisted suppression identity) is the notify package's own policy,
-// derived from these fields at the notification boundary. It is a plain
-// domain value: nothing serializes a Finding, and the persisted attribute
-// schema is declared solely by notify.StoredFinding.
+// semantic fields the notification layer emits; finding-set identity is the notify
+// package's own policy, derived from these fields at the notification boundary.
 type Finding struct {
 	Kind             string
 	Reason           string
@@ -117,18 +78,13 @@ type Finding struct {
 	Status           Status
 	// Scope is the comparison scope the shared decision resolved
 	// (align.Decision.Kind, rendered via its String): "season", "movie",
-	// "special" or "series". Season alone cannot carry it - a movie, a
-	// season-0 special and a whole-series aggregate all report season 0 - so
-	// without this the alert cannot say what unit was compared, where the
-	// audit report's scope cell does.
+	// "special" or "series".
 	Scope             string
 	RecommendedGroups []string
 	Links             []ReleaseLink
 	// CurrentGroups preserves the scoped on-disk group set with its element
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
-	// Nil on manually constructed findings, which the notify key builder
-	// falls back to the flattened CurrentGroup for.
 	CurrentGroups []string
 	AniListID     int
 	Season        int
@@ -161,9 +117,7 @@ type Config struct {
 	ExcludeSpecials bool
 	// AnimeBytes includes AnimeBytes (private tracker) releases in the
 	// obtainability check; public trackers are always considered. Off means
-	// AnimeBytes releases are invisible. It is the comparer's own carrier for
-	// the tracker toggle (mirroring audit.Config.AnimeBytes) because
-	// filter.Options holds only the content filters.
+	// AnimeBytes releases are invisible.
 	AnimeBytes bool
 }
 
@@ -205,17 +159,7 @@ type candidate struct {
 }
 
 // compareOne compares one matched, in-library entry and returns a finding, or
-// nil when there is nothing to report. The branch order and decision rules
-// live in the shared align.Decide (the same decision the audit report
-// renders); this function only projects the outcome into finding vocabulary:
-// silence for a unit with no file on disk (the audit's no_file - compare has
-// no no-file status, so report-by-exception means the daemon stays quiet) and
-// for a provenly aligned unit, the classify.Fallback nudge when no
-// recommended release survives the filters, an unverifiable info nudge when
-// unknown group evidence makes the comparison indeterminate (never a
-// confident aligned silence, never a better_release warning), a
-// mixed_group_manual nudge for a not-aligned multi-group unit, and a better
-// release otherwise.
+// nil when there is nothing to report.
 func (c *Comparer) compareOne(m *match.Match) *Finding {
 	entry := &m.Entry
 	recommended := c.recommended(entry)
@@ -241,11 +185,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	case align.OutcomeDiverged:
 		return betterResult(entry, &base, recommended, recGroups)
 	default:
-		// Every Outcome the shared linearization produces is handled above. An
-		// Outcome added later must not fall into the STRONGEST claim in this
-		// projection (the warn-level better_release): mirror
-		// align.outcomeOf's own conservative default and project an
-		// unrecognized outcome as the informational unverifiable nudge.
+		// Every Outcome the shared linearization produces is handled above.
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusUnverifiable)
 	}
@@ -266,20 +206,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		// The operator's configured tag exclusions for THIS surface, asked
 		// per occurrence: only the torrent whose own tags are excluded drops
 		// out, unlike the feed's identity-wide closure in
-		// internal/indexer's splitCurationWarned. That asymmetry is
-		// deliberate and measured, not an oversight: across the live
-		// catalogue (2806 entries, 9175 torrent records, 254 curation-warned,
-		// measured 2026-07-29) 380 of the identities are shared by more than
-		// one entry and ZERO of them carry differing tag sets, so the two
-		// scopes cannot currently disagree - and an alert names ONE
-		// occurrence the operator looks at, while the feed hands the arrs
-		// bytes that must not be grabbable under any listing.
-		//
-		// Nothing is excluded by default (the zero Filter), so a torrent
-		// SeaDex tags Broken IS recommended and DOES produce a finding unless
-		// the operator lists that tag for the findings surface. An entry whose
-		// every best is excluded flows through emptyResult (the
-		// theoretical/incomplete nudge or silence) unchanged.
+		// internal/indexer's splitCurationWarned.
 		if c.tags.Excludes(t.Tags, tagfilter.SurfaceFindings) {
 			continue
 		}
@@ -375,19 +302,7 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 // obtainableLinks returns the distinct (tracker, URL) links across the pool,
 // deduped, ordered headlineGroup-first and then by (URL, tracker). This is
 // what lets a finding surface both a Nyaa and an AnimeBytes link for the same
-// recommended release. The dedupe keys on the (tracker, URL) identity as a
-// comparable struct, so a crafted tracker or URL containing a would-be
-// delimiter cannot collide two distinct pairs.
-//
-// The ORDER is part of the contract, not incidental: notify.trackerURLs fills
-// the alert's nyaa_url / public_url / ab_url slots first-link-wins, so leaving
-// the slice in upstream (PocketBase relation) order would let the operator's
-// clickable link be chosen by upstream ordering and belong to a group the same
-// line's recommended_group does not name. Sorting the headline candidate's own
-// sources first makes the rendered link agree with the headline fields, and the
-// total (URL, tracker) order makes the rest reproducible across cycles - the
-// same order-independence representative/candidateStableKey already guarantee
-// for the headline pick.
+// recommended release.
 func obtainableLinks(pool []candidate, headlineGroup string) []ReleaseLink {
 	sources := sourcedLinks(pool, headlineGroup)
 	slices.SortFunc(sources, compareSourcedLinks)
@@ -412,12 +327,7 @@ type sourcedLink struct {
 }
 
 // sourcedLinks collects the pool's distinct URL-carrying links in first-seen
-// order, each ranked headline-first. The rank is computed BEFORE the dedupe so
-// a duplicate link keeps the best rank any of its occurrences earns: the same
-// (tracker, URL) pair can arrive on several candidates whose upstream group
-// metadata differs, and first-occurrence-wins would leave a shared link ranked
-// as a non-headline source purely because the non-headline candidate came
-// first in relation order.
+// order, each ranked headline-first.
 func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
 	// Keyed on the link IDENTITY (tracker + URL) only: ReleaseLink.Headline
 	// is producer affinity, not identity, so it must never take part in the
@@ -484,13 +394,7 @@ func finalize(f *Finding, status Status) *Finding {
 
 // representative picks the headline recommended release: highest resolution,
 // then a public tracker, then the stable content key (never upstream order).
-// It assumes len(pool) > 0. The stable content key is computed inside
-// betterCandidate's final tie-break, so a pool whose ranks separate - every
-// pool in the measured catalogue, where an entry carries ~3 torrents - hashes
-// nothing at all. An all-tied pool hashes two keys per comparison; that is
-// linear in the pool, which the per-entry torrent cap already bounds, and
-// candidateStableKey's own keyenc size bound is what keeps each hash bounded
-// on attacker-controlled URLs.
+// It assumes len(pool) > 0.
 func representative(pool []candidate) candidate {
 	bestIdx := 0
 	for i := 1; i < len(pool); i++ {
@@ -503,12 +407,7 @@ func representative(pool []candidate) candidate {
 
 // betterCandidate reports whether a should outrank b as the headline
 // recommendation (higher resolution, then public-over-private tracker, then
-// the candidates' stable content keys, computed only when the ranks tie). The final
-// tie-break must not fall through to upstream slice order: the chosen
-// candidate's identity enters the dedupe key, so two equal-ranked candidates
-// arriving in the opposite relation order from PocketBase would otherwise
-// flip the headline and emit a different key for an unchanged finding (a
-// duplicate alert plus a false resolution).
+// the candidates' stable content keys, computed only when the ranks tie).
 func betterCandidate(a, b *candidate) bool {
 	ra, rb := release.ResolutionRank(a.rel.Resolution), release.ResolutionRank(b.rel.Resolution)
 	if ra != rb {
@@ -525,14 +424,7 @@ func betterCandidate(a, b *candidate) bool {
 // candidateStableKey is the deterministic content identity that breaks
 // equal-rank headline ties independently of upstream order: the same
 // candidate set always selects the same representative, whatever order
-// PocketBase returned the torrents relation in. The components are assembled
-// with keyenc, so a field containing the separator cannot make two distinct
-// candidates compare equal, and the component set is size-bounded (the same
-// encoding notify's dedupe keys use): the components are attacker-controlled
-// URLs across up to 512 torrents per entry, so an unbounded escaped join would
-// recreate the memory amplification the bounding removed (CWE-400). Components free of the
-// reserved characters keep their exact plain representation, so ordinary
-// headline selection is unchanged.
+// PocketBase returned the torrents relation in.
 func candidateStableKey(c *candidate) string {
 	return keyenc.Join(
 		release.NormalizeGroup(c.rel.Group),

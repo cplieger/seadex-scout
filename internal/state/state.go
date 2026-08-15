@@ -30,29 +30,12 @@ import (
 
 const (
 	// maxStateBytes bounds the state file on read AND write (Save refuses to
-	// persist what Load would reject). An honest state file (library snapshot
-	// + mapping cache + memo) runs ~10-20 MB, so 32 MB keeps
-	// real headroom while fitting the 256 MiB deployment container: Load
-	// holds the raw JSON and the decoded State simultaneously, so the cap
-	// must leave room for both — a larger bound would let a valid at-cap file
-	// OOM-kill the container during Load instead of degrading to the intended
-	// clean cold start.
+	// persist what Load would reject).
 	maxStateBytes = 32 << 20
-	// stateSizeWarnBytes is the pre-cliff warning threshold (80% of
-	// maxStateBytes): crossing the bound refuses every subsequent Save and
-	// freezes the persisted cache, so writeState warns while there is still
-	// headroom to act. The 80% fraction is internal/degradation's app-wide
-	// persisted-file policy, shared with the indexer feed snapshot's
-	// feedSizeWarnBytes.
+	// stateSizeWarnBytes is the pre-cliff warning threshold (80% of maxStateBytes):
+	// crossing the bound refuses every subsequent Save, so writeState warns earlier.
 	stateSizeWarnBytes = maxStateBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// dirMode / fileMode are applied to the created state directory and file.
-	// The file holds the operator's library snapshot, mapping cache, AniList
-	// memo, and degradation streaks, so it stays owner-only (least
-	// privilege). dirMode matches every other
-	// creator of this same directory - it is config.DefaultConfigDir, also
-	// created by main.go's starter-config write, cycle.NewExclusive's cycle
-	// lock and the indexer feed snapshot, all at 0o700 - so which writer
-	// reaches a fresh volume first cannot change the mode /config lands at.
 	dirMode  = 0o700
 	fileMode = 0o600
 )
@@ -62,69 +45,23 @@ const (
 // a future loader can detect the old shape and migrate (or refuse) explicitly
 // instead of silently zero-loading it. A file whose version field is absent or
 // zero is a legacy envelope written before versioning and loads unchanged.
-//
-// Cross-version coupling with maxStateBytes: the newer-schema preservation
-// guarantee (Load refuses the file but keeps it at the live path with Save
-// blocked) can only hold for a file that passes the bounded read. An
-// over-cap file fails ReadBounded before the version discriminator can be
-// inspected and is quarantined as foreign/corrupt (renamed to .corrupt), so
-// a future schema bump must not grow the persisted state past the
-// maxStateBytes of any binary it may be rolled back to - or must teach the
-// over-cap read path to stream-scan the version discriminator before
-// choosing quarantine over preservation.
 const SchemaVersion = 1
 
 // State is the persisted cross-cycle cache.
 //
-// It carries NO finding state. Findings used to persist here as a dedupe table
-// (Findings/Baselined/BaselineIncomplete) so each one was emitted exactly once,
-// ever - which is precisely what made a notification lost anywhere downstream
-// permanent. internal/notify now reports findings as STATE, re-emitting the
-// current set every pass and holding it in memory, refilled by the compare
-// pass that runs at startup. Nothing about a finding survives a restart, and
-// nothing needs to: a completed pass reconstructs the whole set.
+// It carries NO finding state.
 type State struct {
-	// The four streak counters below are persisted DATA, not policy. Their
-	// thresholds and the advance/reset rule live in internal/degradation
-	// (TickEscalationThreshold, ReconcileEscalationThreshold,
-	// ShrunkWalkAcceptThreshold, Advance), and each streak's OWNING site in
-	// internal/scout documents when it advances, resets, and what the remedy
-	// is. This envelope deliberately does not restate that lifecycle: it cannot
-	// enforce it, and a copy of a rule the persistence layer has no say over is
-	// exactly the drift h-f23 was raised about. What belongs here is the wire
-	// shape and anything about the FIELD a reader of state.json needs.
+	// The four streak counters below are persisted DATA, not policy.
 	Memo    match.Memo    `json:"anilist_memo"`
 	Mapping mapping.Cache `json:"mapping"`
-	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the scout's
-	// library shrink guard judged that arr's fresh item count a suspicious
-	// truncation (below half its OWN prior count, degradation.Shrunk) and
-	// carried that side's prior items forward instead of accepting them. Keyed
-	// by the library.Arr name ("sonarr"/"radarr"). A side whose walk passes the
-	// guard has its entry DELETED (a passing side costs no bytes), and so does a
-	// side whose streak reaches degradation.ShrunkWalkAcceptThreshold, where the
-	// smaller library is accepted as the new shape - so an entry is bounded by
-	// that threshold rather than growing forever.
-	//
-	// It is per-arr because the aggregate count it replaced could not see one
-	// arr emptying while the other kept the total above half: the guard never
-	// fired, the compare ran against a library missing that whole side, and
-	// every finding for it silently resolved.
-	//
-	// It is also a NEW key rather than a re-typed `shrunk_walks`, deliberately.
-	// Load decodes with json.Unmarshal, which FAILS on a scalar-into-map type
-	// mismatch, and a decode error there quarantines the live file and discards
-	// the operator's AniList memo (a measured ~25-minute cold reconcile). An
-	// unknown key is ignored instead, so an older file's scalar `shrunk_walks`
-	// is dropped silently - it is a transient counter, so the cost is at most
-	// one extra cycle of tolerance, which is exactly what the app's
-	// no-rollback-no-migration decision covers.
+	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
+	// judged that arr's fresh item count a suspicious truncation and carried its prior
+	// items forward instead.
 	ShrunkWalksByArr map[string]int   `json:"shrunk_walks_by_arr,omitempty"`
 	Library          library.Snapshot `json:"library"`
-	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed (so the
-	// compare was skipped, so findings were not re-reported), whichever
-	// pre-compare gate closed the cycle - the scout records the fetch outcome
-	// ahead of gate selection, so a coinciding walk/mapping failure cannot hide
-	// the outage from the streak. Owner: recordSeaDexFetch.
+	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed, whichever
+	// pre-compare gate closed the cycle: the scout records the fetch outcome ahead of
+	// gate selection, so a coinciding failure cannot hide the outage.
 	SeadexFailures int `json:"seadex_failures,omitempty"`
 	// AniListDegraded counts consecutive COMPLETED cycles whose matching left
 	// AniList lookups incomplete (match.Result.Degraded), preserving the
@@ -132,57 +69,28 @@ type State struct {
 	AniListDegraded int `json:"anilist_degraded,omitempty"`
 	// PartialWalks counts consecutive COMPLETED cycles whose library walk came
 	// back partial (per-series episode-fetch failures left Failed placeholder
-	// items the compare excluded). A single permanently failing series holds
-	// Snapshot.Partial true forever, which is why notify.Report carries that
-	// item's rows forward rather than dropping them (its absence from a pass is
-	// missing data, not alignment). Owner: recordPartialWalk.
+	// items the compare excluded).
 	PartialWalks int `json:"partial_walks,omitempty"`
 	// Version is the persisted envelope's schema version, stamped with
 	// SchemaVersion by every Save (on the shallow copy it writes; the
-	// caller's State is never mutated). A file with the field absent or zero
-	// loads as a legacy pre-version envelope, exactly like any other missing
-	// field; a version NEWER than SchemaVersion is refused by Load (an image
-	// rollback must not silently zero-load moved members and then overwrite
-	// the newer-schema file); and a future member move or rename bumps
-	// SchemaVersion so the old shape can be migrated (or refused) explicitly
-	// instead of silently zero-loaded.
+	// caller's State is never mutated).
 	Version int `json:"version,omitempty"`
 }
 
 // Store loads and saves the state file at a fixed path.
 //
-// A Store is NOT safe for concurrent use. Load and Save communicate through
-// unsynchronized fields (unsupportedVersion, loadFailed) that carry one call's
-// classification of the on-disk file into the next, and those fields exist to
-// make Save REFUSE: a Save racing a Load can read a stale verdict and
-// overwrite bytes the Load meant to preserve (an unclassified read failure's
-// possibly-recoverable state, or a newer-schema envelope an image rollback
-// must leave intact). Confine each Store to one goroutine - the cycle body,
-// which the cross-process cycle lock already serializes - the same contract
-// atomicfile.PendingFile states for its own lifecycle state.
+// A Store is NOT safe for concurrent use.
 type Store struct {
 	log  *slog.Logger
 	path string
 	// unsupportedVersion remembers a newer-than-supported schema version the
-	// last Load found at the live path. While non-zero, Save is refused: the
-	// newer-schema file must stay in place so rolling forward to the image
-	// that wrote it consumes it again, instead of this older binary
-	// overwriting it with a fresh cold-start envelope.
+	// last Load found at the live path.
 	unsupportedVersion int
-	// loadFailed remembers that the last Load did not leave the live path in
-	// a state Save may replace: either it failed WITHOUT classifying the
-	// file (an EACCES/EIO-style read error or a read cut short by context
-	// cancellation - not absence, not a newer schema, which sets
-	// unsupportedVersion), or it classified an over-cap/corrupt payload but
-	// could NOT preserve it (the quarantine rename failed, so the live file
-	// is still the only copy). While set, Save is refused - the unread bytes
-	// may be fully recoverable (a permissions mistake, a transient I/O
-	// fault), and an unpreserved corrupt file is the only forensic evidence,
-	// so it must be preserved like every classified failure preserves its
-	// evidence, instead of the cold-started cycle overwriting it at its end.
-	// The scout loads at the start of
-	// every cycle, so the block clears as soon as a Load succeeds, or
-	// classifies AND preserves the file.
+	// loadFailed remembers that the last Load did not leave the live path in a state
+	// Save may replace: it either failed WITHOUT classifying the file, or classified an
+	// over-cap/corrupt payload it could not preserve. While set, Save is refused,
+	// because the unread bytes may be recoverable and an unpreserved corrupt file is the
+	// only forensic evidence. It clears as soon as a Load succeeds.
 	loadFailed bool
 	readOnly   bool
 }
@@ -198,9 +106,7 @@ func NewStore(path string, logger *slog.Logger) *Store {
 // NewReadOnlyStore returns a Store for flows documented read-only on the
 // state file (the one-shot report): Load reports corruption without
 // quarantining, leaving the file in place for the daemon's own Load to
-// quarantine and surface on the container's log stream. Save is refused, so
-// the read-only contract is enforced by the type rather than relied on from
-// callers.
+// quarantine and surface on the container's log stream.
 func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
 	st := NewStore(path, logger)
 	st.readOnly = true
@@ -217,23 +123,6 @@ const staleTempMaxAge = time.Hour
 // decoded version - zero when the key is absent, which the envelope's
 // contract treats as the legacy pre-version shape (see SchemaVersion) -
 // and any wire-level failure.
-// It is the single source of truth for the discriminator on BOTH the clean
-// and error decode paths: decode must never read it from State.Version. Go
-// documents that json.Unmarshal may populate fields before returning a type
-// error, and it also deliberately accepts JSON null into an int WITHOUT an
-// error - so {"version":null} would otherwise pass as legacy version zero,
-// and {"version":99,"version":null} would leave the stale earlier 99 in
-// State.Version and be preserved forever as newer-schema state. Save can
-// never produce either payload; both violate the documented integer
-// discriminator contract. The streaming decode below validates EVERY
-// case-insensitive occurrence of the key, explicitly rejecting null (via the
-// *int decode) and any negative value (the documented discriminator domain is
-// non-negative), so a payload like {"version":"bad","Version":99} or
-// {"version":-1,"version":99} - corrupt for this binary AND for a
-// roll-forward binary reading the same integer discriminator - errors instead
-// of reading as newer-schema 99. Any error (a non-object, a malformed member,
-// a null, negative, or non-integer version occurrence, trailing data) sends
-// the caller to the quarantine path.
 func schemaVersion(data []byte) (version int, err error) {
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	err = dec.Object(func(key string) error {
@@ -254,12 +143,7 @@ func schemaVersion(data []byte) (version int, err error) {
 		if *decoded < 0 {
 			// The documented legacy envelope's version is absent or zero, and
 			// Save only ever stamps SchemaVersion - a negative occurrence can
-			// only be corruption or tampering. Validate the domain while each
-			// occurrence is still visible: checking only the final
-			// accumulated value would let a payload like
-			// {"version":-1,"version":99} shed its invalid earlier occurrence
-			// and read as preserved newer-schema state (blocking Save every
-			// cycle) instead of quarantining as corruption.
+			// only be corruption or tampering.
 			return fmt.Errorf("invalid negative schema version %d", *decoded)
 		}
 		version = *decoded
@@ -278,26 +162,9 @@ func schemaVersion(data []byte) (version int, err error) {
 // and no error (cold start); a present but corrupt or oversized file is
 // quarantined where possible - see maybeQuarantine for the rename-failed
 // fallback, which blocks Save instead - and returns the error so the caller
-// can decide (the scout logs it and starts cold). A valid file stamped by a
-// NEWER binary (an image rollback) is NOT quarantined: it stays at the live
-// path and this Store refuses every subsequent Save, so rolling forward to the
-// newer image finds its state intact instead of a freshly-overwritten older
-// envelope.
+// can decide (the scout logs it and starts cold).
 func (s *Store) Load(ctx context.Context) (State, error) {
 	// ONE os.Root spans the whole read -> classify -> preserve decision.
-	// os.Root only confines what happens after the OpenRoot, so reopening the
-	// directory by AMBIENT PATH once the read has already failed would leave a
-	// window in which a redirected directory component sends the quarantine
-	// rename into a REPLACEMENT directory, moving a file this Load never read.
-	// Holding the read's own root open across the classification closes it:
-	// every inode probe and the quarantine rename resolve against the exact
-	// directory handle the state bytes were read through.
-	//
-	// A missing state DIRECTORY surfaces here as fs.ErrNotExist and is
-	// classified as the cold start it is, exactly like a missing file; any
-	// other open failure reaches the unclassified read-fault arm below, where
-	// a nil root reports no foreign inode and cannot preserve anything - the
-	// same conservative outcome the reopen-on-demand shape had.
 	root, err := os.OpenRoot(filepath.Dir(s.path))
 	if root != nil {
 		defer func() {
@@ -307,17 +174,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		}()
 	}
 	// Sweep stale temps through the SAME root the read -> classify -> preserve
-	// decision is pinned to. The ambient CleanupStaleTemps rebuilds each
-	// candidate path with filepath.Join and unlinks it with os.Remove, which
-	// atomicfile documents as unsafe for a directory a co-mounting writer can
-	// modify underneath - the very threat model this root exists for, and the
-	// only unpinned filesystem write Load performed. A missing state directory
-	// needs no special case any more: OpenRoot already reported it as
-	// fs.ErrNotExist and classifyReadFailure treats it as the cold start it is.
-	// Read-only stores (the one-shot report) still skip state-directory
-	// maintenance entirely: that flow is documented read-only, and removing
-	// files here would also risk unlinking a stalled concurrent daemon Save's
-	// still-open temp.
+	// decision is pinned to.
 	if err == nil && !s.readOnly {
 		// Unlike the ambient variant this reports counts instead of logging its
 		// own Info summary, so Load narrates the reclaim itself.
@@ -353,15 +210,8 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		"memo_entries", len(st.Memo.Entries),
 	}
 	if !st.Library.TakenAt.IsZero() {
-		// Surface the persisted snapshot's age: the indexer feed's title
-		// synthesis reads this snapshot (arr-independent, never a fresh
-		// walk), so diagnosing a stale synthesized title needs to see how old
-		// the snapshot backing it is. A legacy or walk-less state carries the
-		// zero TakenAt and skips the attribute rather than logging a
-		// nonsensical multi-century age. A future TakenAt (a backward host
-		// clock step, or a syntactically valid state file with a future
-		// timestamp) is clamped to zero rather than logging a misleading
-		// negative age, matching the mapping cache's clock-skew handling.
+		// Surface the persisted snapshot's age: the indexer feed's title synthesis reads
+		// this snapshot, so diagnosing a stale title needs to see how old it is.
 		age := max(time.Since(st.Library.TakenAt), 0)
 		attrs = append(attrs, "library_age", age.Round(time.Second).String())
 	}
@@ -372,13 +222,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 // classifyReadFailure applies Load's read-failure policy to a failed open or
 // read and returns the error Load reports: nil for the cold start a missing
 // file (or a missing state DIRECTORY, which os.OpenRoot reports the same way)
-// is, otherwise the wrapped failure. It owns the state transitions each class
-// implies - clearing the flags for a cold start, preserving a deterministically
-// unusable payload through maybeQuarantine (which owns loadFailed for that
-// class), and arming the Save block for an unclassified fault - so the caller
-// keeps only the read/decode flow. It preserves through the root the read was
-// resolved against, so the rename cannot land in a directory swapped in after
-// the read.
+// is, otherwise the wrapped failure.
 func (s *Store) classifyReadFailure(root *os.Root, err error) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		s.unsupportedVersion = 0
@@ -387,37 +231,20 @@ func (s *Store) classifyReadFailure(root *os.Root, err error) error {
 		return nil
 	}
 	if errors.Is(err, atomicfile.ErrFileTooLarge) || errors.Is(err, atomicfile.ErrNotRegular) {
-		// Save enforces maxStateBytes and only ever writes a regular file, so
-		// an oversized file - or a directory, FIFO, device or socket at the
-		// state path, which ReadBoundedInRoot reports as ErrNotRegular - can
-		// only be foreign or corrupt; preserve it like any other corruption.
-		// Both are DETERMINISTIC: no retry turns an over-cap payload or a
-		// non-regular inode into valid state, so neither belongs in the
-		// recoverable read-fault class below (which blocks every later Save
-		// until a Load classifies the path, and would freeze persistence
-		// forever here).
+		// Save enforces maxStateBytes and only ever writes a regular file, so an
+		// oversized or non-regular file can only be foreign or corrupt; preserve it.
 		s.maybeQuarantine(root)
 		return fmt.Errorf("state: read %s: %w", s.path, err)
 	}
 	if s.foreignInode(root) {
-		// A non-regular inode the confined open could not report as
-		// ErrNotRegular: os.Root refuses to traverse a symlink pointing out
-		// of the state directory and reports it as "path escapes from
-		// parent", an unexported error carrying no sentinel to match. It is
-		// as DETERMINISTIC as the two cases above (no retry makes it
-		// readable, and Save's temp+rename replaces the inode outright), so
-		// classify it as corruption instead of arming the recoverable-fault
-		// block forever.
+		// A non-regular inode the confined open could not report as ErrNotRegular:
+		// os.Root refuses an escaping symlink with an error carrying no sentinel.
 		s.maybeQuarantine(root)
 		return fmt.Errorf("state: read %s: %w", s.path, err)
 	}
-	// An UNCLASSIFIED read failure (EACCES, EIO, a cancelled read - not
-	// absence, not an over-cap file, not a decode error): the bytes at the
-	// live path may be fully recoverable, so they must be preserved like every
-	// classified failure preserves its evidence (quarantine / the newer-schema
-	// Save block). Block Save until a later Load can classify the file -
-	// without this, the cycle that started cold after the failed read would
-	// overwrite the unread bytes at its end.
+	// An UNCLASSIFIED read failure (EACCES, EIO, a cancelled read): the bytes at the live
+	// path may be fully recoverable, so they are preserved like every classified failure
+	// preserves its evidence.
 	s.loadFailed = true
 	return fmt.Errorf("state: read %s: %w", s.path, err)
 }
@@ -437,12 +264,7 @@ func (s *Store) readState(ctx context.Context, root *os.Root) ([]byte, error) {
 // read can never turn into state: a non-regular inode, or a symlink that
 // escapes the state directory. An in-root symlink to a regular file is NOT
 // foreign - the confined read follows it - so a failure over one keeps the
-// recoverable classification. It probes through the SAME confined root the
-// read used, so the probe never follows a symlink out of the state directory
-// and never re-resolves the directory by ambient path; a probe that cannot run
-// (a nil root, because the directory could not be opened at all, or an lstat
-// failure) reports false so the caller keeps its conservative
-// recoverable-fault classification.
+// recoverable classification.
 func (s *Store) foreignInode(root *os.Root) bool {
 	if root == nil {
 		return false
@@ -454,15 +276,9 @@ func (s *Store) foreignInode(root *os.Root) bool {
 	if info.Mode().IsRegular() {
 		return false
 	}
-	// A symlink that stays INSIDE the state directory is followed by the
-	// confined read exactly like a regular file (ReadBoundedInRoot opens
-	// through the root without O_NOFOLLOW and stats the open handle), so it
-	// is NOT an inode Save cannot replace: a read that failed over one failed
-	// for a transient reason - a cancelled read during a redeploy, EACCES,
-	// EIO - and must keep the recoverable classification. Resolving through
-	// the root separates the two cases: root.Stat follows an in-root link and
-	// refuses one that escapes, so only an escaping link (or a link onto a
-	// non-regular inode) reports foreign.
+	// A symlink that stays INSIDE the state directory is followed by the confined read
+	// exactly like a regular file, so it is NOT an inode Save cannot replace. Resolving
+	// through the root separates the cases: only an escaping link reports foreign.
 	resolved, err := root.Stat(filepath.Base(s.path))
 	if err != nil {
 		return true
@@ -476,44 +292,26 @@ func (s *Store) foreignInode(root *os.Root) bool {
 // root Load read the bytes with, so the rename cannot land in a directory
 // swapped in after the read.
 func (s *Store) decode(root *os.Root, data []byte) (State, error) {
-	// Save always emits valid UTF-8 JSON. encoding/json otherwise replaces
-	// malformed UTF-8 inside strings with U+FFFD, silently altering cache
-	// keys and values instead of reporting corruption.
+	// Save always emits valid UTF-8 JSON.
 	if !utf8.Valid(data) {
 		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: invalid UTF-8", s.path)
 	}
-	// Require a JSON object envelope before unmarshalling: json.Unmarshal
-	// accepts a literal null into a struct, so a corrupt file holding "null"
-	// would otherwise load as a silently-empty state (a fake cold start that
-	// discards every cache) instead of surfacing the
-	// corruption. Save can never produce anything but an object.
+	// Require a JSON object envelope before unmarshalling: json.Unmarshal accepts a
+	// literal null into a struct, so a corrupt file holding "null" would load as a
+	// silently-empty state instead of surfacing the corruption.
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
 		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
 	}
-	// Bound the structural walk below before it runs. schemaVersion streams
-	// the whole envelope through json.Decoder.Token (via bounded.Decoder.Skip),
-	// and Token tracks nesting in its own Decoder.tokenStack - one int per
-	// open container, with NO depth limit (the scanner's maxNestingDepth of
-	// 10000 is only applied on the scanner path, not by Token). A nested
-	// payload up to maxStateBytes would therefore allocate ~8 bytes per level
-	// (~256 MB at the cap) and OOM-kill the 256 MiB container mid-Load, before
-	// the quarantine below can preserve or replace the file - so every restart
-	// re-reads it and dies again. json.Valid runs the scanner, which caps
-	// nesting at the same 10000 the json.Unmarshal below already enforces, so
-	// no payload this rejects could ever have loaded; it only moves the
-	// rejection ahead of the unbounded walk.
+	// Bound the structural walk below before it runs.
 	if !json.Valid(data) {
 		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: not valid JSON", s.path)
 	}
-	// The wire discriminator is decoded independently BEFORE the State
-	// unmarshal, on every load: State.Version is never trusted (Unmarshal may
-	// populate it from an earlier duplicate key, and accepts null into an int
-	// silently - see schemaVersion). A wire-level failure - a malformed
-	// member, a null or non-integer version occurrence, trailing data - is
-	// corruption Save can never have produced; quarantine it.
+	// The wire discriminator is decoded independently BEFORE the State unmarshal, on
+	// every load: State.Version is never trusted, since Unmarshal may populate it from an
+	// earlier duplicate key and accepts null into an int silently.
 	wireVersion, err := schemaVersion(data)
 	if err != nil {
 		s.maybeQuarantine(root)
@@ -522,14 +320,9 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 	// An absent version key decodes as zero, which is below SchemaVersion,
 	// so the legacy envelope takes the ordinary load path here.
 	if wireVersion > SchemaVersion {
-		// A file stamped by a newer binary (an image rollback): its members
-		// may have moved, so field-by-field zero-loading is exactly the
-		// silent discard SchemaVersion exists to prevent - and a type-level
-		// State decode error on such a file is the "moved member" case
-		// itself. This is valid state, not corruption: keep it at the live
-		// path and block this older Store from overwriting it (Save refuses
-		// while unsupportedVersion is set), so rolling forward again consumes
-		// it in place.
+		// A file stamped by a newer binary (an image rollback): its members may have
+		// moved, so field-by-field zero-loading is exactly the silent discard
+		// SchemaVersion exists to prevent.
 		s.unsupportedVersion = wireVersion
 		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, wireVersion, SchemaVersion)
 	}
@@ -543,20 +336,11 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 
 // maybeQuarantine preserves a corrupt state file unless this Store belongs
 // to a read-only flow, which must leave the live path untouched so the
-// daemon's own Load detects and reports the corruption. It owns the
-// loadFailed transition for every classified-corruption path: preservation
-// SUCCEEDING clears the Save block (the corrupt bytes are safe at the
-// .corrupt path, so the next Save may replace the live file), while
-// preservation FAILING arms it, so Save refuses rather than atomically
-// overwriting the still-live corrupt file - the only forensic copy - with a
-// cold envelope.
+// daemon's own Load detects and reports the corruption.
 func (s *Store) maybeQuarantine(root *os.Root) {
-	// Load positively classified the live file as corrupt, so a newer-schema
-	// block remembered from an earlier Load no longer describes the file at
-	// the live path (unsupportedVersion is documented as what the LAST Load
-	// found there); clear it so the next Save is judged against reality. The
-	// generic read-error path keeps the flag: an unreadable file may still
-	// be the newer-schema state.
+	// Load positively classified the live file as corrupt, so a newer-schema block
+	// remembered from an earlier Load no longer describes the file at the live path;
+	// clear it so the next Save is judged against reality.
 	s.unsupportedVersion = 0
 	if s.readOnly {
 		// Leaving the file in place IS the read-only flow's preservation, and
@@ -571,19 +355,12 @@ func (s *Store) maybeQuarantine(root *os.Root) {
 // quarantine preserves a corrupt state file beside the original so the decode
 // failure can be examined after the next successful Save atomically replaces
 // state.json, and reports whether that preservation succeeded. A repeat
-// corruption overwrites the previous .corrupt copy (latest wins). A rename
-// failure - an existing non-empty .corrupt directory, a cross-device or
-// read-only parent - is logged at Warn and returns false, which arms the
-// caller's Save block: without a preserved copy, letting the cycle's Save
-// replace the live file would erase the corruption evidence entirely.
+// corruption overwrites the previous .corrupt copy (latest wins).
 func (s *Store) quarantine(root *os.Root) bool {
 	dir, base := filepath.Dir(s.path), filepath.Base(s.path)
-	// Preserve through the very root Load's read was resolved against - never a
-	// freshly opened one: the rename acts on the open directory handle that
-	// held the bytes just read, so a component redirected AFTER that open
-	// cannot move the corrupt bytes to a path the read never validated. A nil
-	// root means the directory could not be opened at all, so there is nothing
-	// to preserve into and the caller's Save block is armed instead.
+	// Preserve through the very root Load's read was resolved against, never a freshly
+	// opened one: the rename acts on the open directory handle that held the bytes just
+	// read, so a component redirected after that open cannot move them elsewhere.
 	if root == nil {
 		s.log.Warn("could not open state directory to preserve corrupt state file", "dir", dir)
 		return false
@@ -598,24 +375,7 @@ func (s *Store) quarantine(root *os.Root) bool {
 
 // Save atomically writes the state file, creating the parent directory if
 // needed. It returns an error only when the data did not reach disk; a
-// non-durable (unsynced) write is logged, not failed. Save owns the
-// sanitize-on-persist invariant: the library snapshot is passed through
-// SanitizedForStorage here, at the persistence boundary, so a credentialed
-// ArrURL can never land in state.json regardless of which caller saves
-// (SafeLogURL is idempotent, so an already-sanitized snapshot is unchanged).
-// Save also stamps SchemaVersion into the envelope's version field. Both
-// happen on a shallow copy, so the caller's State is never mutated.
-// A context already cancelled on entry fails fast — before the sanitize and
-// encode work — so scout.save's detached shutdown retry runs immediately
-// instead of after a doomed full serialization of the same state. A Store
-// whose last Load found a newer-than-supported schema version refuses to
-// save: the newer-schema file must survive at the live path for a
-// roll-forward to consume (see Load). A Store whose last Load failed WITHOUT
-// classifying the file (loadFailed: an EACCES/EIO-style read error, or a read
-// cut short by context cancellation), or whose last Load classified
-// corruption it could not preserve (the quarantine rename failed), refuses
-// too, preserving the possibly-recoverable or still-unpreserved bytes until a
-// Load classifies and preserves them.
+// non-durable (unsynced) write is logged, not failed.
 func (s *Store) Save(ctx context.Context, st *State) error {
 	sanitized, err := s.prepareSave(ctx, st)
 	if err != nil {
@@ -630,16 +390,7 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 // unclassified-read-failure block (a read that failed without classifying the
 // file must not be overwritten by a cold envelope), and classified corruption
 // the load could NOT preserve (the quarantine rename failed, so the live file
-// is still the only forensic copy). It is never a
-// write fault - nothing was lost by the refusal itself - so a caller that
-// would otherwise log a failed save at ERROR should classify it instead. Note
-// the third case is not benign like the first two: the on-disk state stays
-// corrupt and every later Save is refused until an operator clears the
-// quarantine destination. Callers match with errors.Is.
-//
-// The distinction matters for alerting: a redeploy SIGTERM landing in Load's
-// read window sets loadFailed, so the cycle's Save refuses; reporting that
-// refusal as a write fault fires the cycle-error alert on a routine redeploy.
+// is still the only forensic copy).
 var ErrSavePreserved = errors.New("state preserved; save refused")
 
 // prepareSave validates whether this Store may write (nil state, read-only,
@@ -707,26 +458,6 @@ func (s *Store) writeState(ctx context.Context, st *State) error {
 
 // encodeState serializes st into the pending temp file under Load's size
 // bound and drops the encoder's trailing newline.
-//
-// It enforces the reader's bound on write too: persisting a file Load is
-// contractually unable to consume would silently discard the whole cache
-// next cycle (fail-open). The bound is atomicfile's WithMaxBytes cap, wired
-// in Save: the pending file rejects the encoder's over-cap write whole -
-// before any byte lands - and the caller's Cleanup discards the temp on any
-// encode failure, so the last readable state file stays intact until Commit
-// replaces it. (encoding/json's Encoder still buffers the complete encoding
-// internally before its single Write, so peak encode memory is unchanged
-// from the json.Marshal it replaced; the buffer is pooled and released
-// after Encode rather than held across the atomic replacement.)
-//
-// The cap admits ONE byte beyond maxStateBytes for the trailing newline
-// json.Encoder.Encode appends (json.Marshal produces none): a state whose
-// json.Marshal encoding is exactly maxStateBytes must stay accepted, and
-// the newline is truncated away below so the persisted file never exceeds
-// what Load can read. The over-cap error therefore quotes the staged size
-// including that newline, while the wrap names the limit Load enforces.
-// The truncation also makes the persisted size match the json.Marshal
-// encoding Load's bound is defined against.
 func encodeState(pf *atomicfile.PendingFile, st *State, path string) error {
 	if encErr := json.NewEncoder(pf).Encode(st); encErr != nil {
 		if errors.Is(encErr, atomicfile.ErrFileTooLarge) {

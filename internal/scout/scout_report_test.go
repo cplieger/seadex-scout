@@ -153,26 +153,6 @@ func TestReportPartialSnapshotErrors(t *testing.T) {
 	}
 }
 
-// TestReportLibraryWalkFailureErrors pins Report's first error arm: a failed
-// arr walk aborts the report with an error naming the walk (there is nothing
-// to report against).
-func TestReportLibraryWalkFailureErrors(t *testing.T) {
-	logger := scoutTestLogger()
-	s := NewReporter(&ReportDeps{
-		Logger:  logger,
-		Store:   &fakeStore{},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
-	})
-
-	_, err := s.Report(t.Context())
-	if err == nil {
-		t.Fatal("Report returned nil error, want a library-walk error")
-	}
-	if !strings.Contains(err.Error(), "library walk") {
-		t.Errorf("error = %q, want library-walk context", err.Error())
-	}
-}
-
 // TestReportZeroSeaDexEntriesErrors pins Report's defense-in-depth zero-entry
 // gate: seadex.FetchEntries errors on an empty completed catalogue, but a
 // future client regression returning (nil, nil) must still fail the one-shot

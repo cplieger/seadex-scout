@@ -21,39 +21,18 @@ import (
 const (
 	// upstreamMaxAttempts bounds the per-query retry.
 	upstreamMaxAttempts = 3
-	// upstreamMaxBytes bounds a single Torznab response before decode. 8 MiB
-	// deliberately rejects pathological escape-heavy documents before decode:
-	// 4 MiB of decoded ampersands can require about 20 MiB on the wire. Real
-	// responses are ~150 KiB. The tighter cap also bounds the one allocation the
-	// decode caps cannot: encoding/xml materializes a start element's whole
-	// attribute slice per token at ~10x per-attr overhead (CWE-400).
+	// upstreamMaxBytes bounds a single Torznab response before decode.
 	upstreamMaxBytes = 8 << 20
-	// minEmbeddedSecretLen is the length from which a query VALUE on the
-	// configured feed URL is treated as a credential by upstreamSecrets even
-	// though its parameter NAME says nothing about credentials. It matches the
-	// floor config already applies to indexer.feed_api_key, so a structural
-	// value ("?indexer=1") is never substituted out of a diagnostic while an
-	// unlabelled 32-hex token still is. A credential-NAMED parameter is a
-	// secret at any length (credentialParamName), so this floor never gates
-	// the shapes config actually warns about.
+	// minEmbeddedSecretLen is the length from which a query VALUE on the configured
+	// feed URL is treated as a credential by upstreamSecrets even though its parameter
+	// NAME says nothing about credentials.
 	minEmbeddedSecretLen = 16
 )
 
-// upstreamAttemptTimeout bounds ONE Prowlarr Torznab attempt: search passes it
-// to the retry loop (httpx.WithAttemptTimeout), so the package enforces
-// its own retry arithmetic instead of relying on the composition root to wire
-// an http.Client.Timeout that matches. server.go's writeTimeout is derived
-// from the same value, which keeps the write deadline sized above the whole
-// retry tree by construction. It is package-private for that reason: the root
-// still owns the CLIENT (the X-Api-Key header rides redirects, so the redirect
-// policy must stay there - see wireUpstreams), but it owes this package no
-// knowledge of the per-attempt budget; its client timeout is only a transport
-// backstop above this one.
-//
-// A var, not a const, ONLY so the test that pins this package-owned deadline
-// can exercise it without spending a minute in real time (the same reason
-// reload.go's warmLoadTimeout is one). writeTimeout is evaluated at init, so
-// shortening it in a test does not shrink the write deadline.
+// upstreamAttemptTimeout bounds ONE Prowlarr Torznab attempt: search passes it to the
+// retry loop (httpx.WithAttemptTimeout), so the package enforces its own retry
+// arithmetic instead of relying on the composition root to wire an http.Client.Timeout
+// that matches.
 var upstreamAttemptTimeout = 60 * time.Second
 
 // upstreamBaseDelay bounds the per-query retry's backoff. A var, not a const,
@@ -62,8 +41,6 @@ var upstreamAttemptTimeout = 60 * time.Second
 // (TestMain shortens it, exactly as it does the harvest's politeness gap).
 // Production reads the unchanged one-second value.
 var upstreamBaseDelay = time.Second
-
-// --- Upstream search and retry classification ---
 
 // upstream is one Prowlarr per-indexer Torznab endpoint (Nyaa or AnimeBytes).
 // The feed proxies these to source real release data (title, seeders, size,
@@ -74,15 +51,11 @@ type upstream struct {
 	name   string
 	feed   string
 	apiKey string
-	// dropWarned / displayWarned bound the two filterDownloadURLs
-	// diagnostics to one WARN per onset (plus one recovery INFO), so a
-	// SYSTEMATIC condition - a Prowlarr endpoint whose emitted download
-	// links sit on a different origin than the configured Torznab URL, or
-	// an upstream emitting non-tracker display URLs - cannot WARN once per
-	// query. The title harvest admits up to harvestTimeBudget /
-	// harvestQueryInterval (~300) queries per rebuild, every rebuild,
-	// while such a condition persists. Atomic because the server's
-	// upstreams are shared across concurrent requests.
+	// dropWarned / displayWarned bound the two filterDownloadURLs diagnostics to one
+	// WARN per onset (plus one recovery INFO), so a SYSTEMATIC condition - a Prowlarr
+	// endpoint whose emitted download links sit on a different origin than the
+	// configured Torznab URL, or an upstream emitting non-tracker display URLs - cannot
+	// WARN once per query.
 	dropWarned    atomic.Bool
 	displayWarned atomic.Bool
 }
@@ -101,24 +74,13 @@ func newUpstream(client *http.Client, log *slog.Logger, name, feed, apiKey strin
 // filterDownloadURLs), so the request log line's upstream_fetched reports what
 // the upstream actually returned, not what survived the origin
 // filter.
-//
-// The retry boundary encloses the WHOLE attempt - transport, status, bounded
-// body read, AND the Torznab decode - so a transient truncated or malformed
-// 200 response participates in the same bounded budget as a failed request
-// (the query is an idempotent GET). Exactly one layer owns multiple attempts:
-// the outer Do runs upstreamMaxAttempts total, and fetchAndParse
-// performs exactly one bounded GET per call, so there is no nested retry
-// explosion. A 429's capped Retry-After survives as a RetryAfterHint on the
-// transient error, so Do waits the upstream-requested delay
-// instead of its jittered backoff.
 func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, error) {
 	parsed, err := url.Parse(u.feed)
 	if err != nil {
-		// Deliberately NOT wrapped: a *url.Error echoes the raw configured
-		// URL, which may carry a username-only userinfo token
-		// (validateHTTPURL accepts one), and this error reaches httpx.Do's
-		// retry logger - the same redaction stance the StatusError path
-		// below applies (CWE-532).
+		// Deliberately NOT wrapped: a *url.Error echoes the raw configured URL, which
+		// may carry a username-only userinfo token (validateHTTPURL accepts one), and
+		// this error reaches httpx.Do's retry logger - the same redaction stance the
+		// StatusError path below applies (CWE-532).
 		return nil, 0, errors.New("invalid upstream feed URL")
 	}
 	// Merge the Torznab params into RawQuery component-wise: appending to the
@@ -143,23 +105,19 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 		// component logger so they carry component=indexer instead of
 		// falling through to slog.Default().
 		httpx.WithLogger(u.log),
-		// Demote httpx's terminal "retries exhausted" line to Debug. BOTH
-		// callers of search publish their own WARN for the same failed query
-		// with strictly more context - the harvest names the show, the query
-		// shape and the page and drives its latch state (classifyHarvestError),
-		// the request path names the upstream (query.go's fetchRaw) - so leaving
-		// httpx's verdict at Warn produced two terminal WARNs per failure, six per
-		// three-show homogeneous malformed run, and doubled the Loki volume of
-		// exactly the incident the once-per-onset cadence exists to keep
-		// readable. Demoting rather than dropping the logger keeps the
-		// per-attempt retry diagnostics, which are the half worth having here.
+		// Demote httpx's terminal "retries exhausted" line to Debug. BOTH callers of
+		// search publish their own WARN for the same failed query with strictly more
+		// context - the harvest names the show, the query shape and the page and drives
+		// its latch state (classifyHarvestError), the request path names the upstream
+		// (query.go's fetchRaw) - so leaving httpx's verdict at Warn produced two
+		// terminal WARNs per failure, six per three-show homogeneous malformed run, and
+		// doubled the Loki volume of exactly the incident the once-per-onset cadence
+		// exists to keep readable.
 		httpx.WithExhaustedLevel(slog.LevelDebug),
-		// The per-attempt bound is the loop's, not a context this callback
-		// derives: WithAttemptTimeout installs it AND marks its expiry
-		// retryable (httpx.AttemptTimeout), which IsTransient consults ahead
-		// of its caller-context rejection. The package still owns the number
-		// (upstreamAttemptTimeout), so writeTimeout's derivation is unchanged
-		// and the root's http.Client.Timeout stays a transport backstop.
+		// The per-attempt bound is the loop's, not a context this callback derives:
+		// WithAttemptTimeout installs it AND marks its expiry retryable
+		// (httpx.AttemptTimeout), which IsTransient consults ahead of its
+		// caller-context rejection.
 		httpx.WithAttemptTimeout(upstreamAttemptTimeout))
 	if err != nil {
 		return nil, 0, err
@@ -167,40 +125,12 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 	return u.filterDownloadURLs(items, parsed), len(items), nil
 }
 
-// fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
-// followed by the Torznab decode. The attempt's own deadline
-// (upstreamAttemptTimeout) is installed by the enclosing retry loop
-// (httpx.WithAttemptTimeout in search), so the per-attempt bound the retry
-// budget is sized against is enforced by the package that owns that budget
-// rather than by an unenforced obligation on whoever built the client; a
-// client-level http.Client.Timeout may still sit above it as a transport
-// backstop. Classification no longer reads a context at all: the loop is the
-// only layer that can tell its own attempt's deadline from the caller's, and it
-// marks the expiry (httpx.AttemptTimeout) so IsTransient sees it.
-//
-// Errors the enclosing Do should
-// retry are marked transient: a 408/429/5xx status (with the response's capped
-// Retry-After carried as the transient error's RetryAfterHint, so the outer
-// loop honors the upstream-requested delay), a garbled/truncated 2xx body,
-// and a Torznab <error> document carrying a generic/server-side code (e.g.
-// 900). A Torznab <error> document naming a deterministic auth/account
-// (100-199) or request/parameter (200-299) code is terminal - retrying
-// cannot recover a credentials or request-validation failure
-// (terminalTorznabCode). Transient transport errors (timeouts, resets, DNS)
-// already classify via httpx.IsTransient through the returned chain;
-// anything else (a non-retryable 4xx, an unparseable URL) stays terminal.
+// fetchAndParse performs ONE search attempt: a single bounded HTTP fetch followed by
+// the Torznab decode.
 func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
 	// GetBytes owns the one-attempt HTTP mechanics: request construction, header
 	// injection, transport-error reduction, non-2xx drain + *StatusError, the
-	// Retry-After parse, and the bounded body read. WithMaxAttempts(1) keeps the
-	// attempt budget single-owner - the enclosing typed Do runs the retries, so
-	// letting GetBytes retry too would multiply the two budgets - which makes
-	// attemptError, not GetBytes, the owner of every retry decision here.
-	//
-	// ctx is the loop's per-attempt context (WithAttemptTimeout in search),
-	// already bounded by upstreamAttemptTimeout and cancelled when this
-	// callback returns - so the whole attempt (connect, headers, bounded
-	// body read) is inside it and the body is fully read here.
+	// Retry-After parse, and the bounded body read.
 	body, err := httpx.GetBytes(ctx, u.http, reqURL,
 		httpx.WithMaxAttempts(1),
 		httpx.WithHeaders(u.setHeaders),
@@ -220,33 +150,6 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // Do reads. GetBytes runs with WithMaxAttempts(1), so its every failure exit
 // arrives here and this function alone decides whether the search spends
 // another of its upstreamMaxAttempts.
-//
-// Two classes:
-//
-//   - A non-2xx surfaces as *httpx.StatusError. A self-healing status
-//     (httpx.IsRetryableStatus) becomes transient, carrying the response's
-//     already-capped Retry-After forward so Do waits the upstream-requested
-//     delay instead of its jittered backoff; GetBytes exposes that hint on its
-//     exhaustion error via the httpx.RetryAfterHint interface, which it
-//     deliberately does not pair with Transient (the retry decision is the
-//     caller's). Any other status (auth/config 4xx) stays terminal and fails
-//     the search on the first attempt.
-//   - Everything else (a per-attempt deadline, transport resets, DNS, an
-//     over-cap body) passes through unchanged for httpx.IsTransient to classify
-//     through the error chain. The per-attempt deadline is deliberately NOT
-//     classified here: the enclosing Do installs the bound
-//     (httpx.WithAttemptTimeout) and marks its expiry, which is the only place
-//     that can tell the attempt's deadline from the caller's - a
-//     context.DeadlineExceeded value is identical either way, and net/http's own
-//     timeout matches it without carrying it. IsTransient consults the mark
-//     ahead of its caller-context rejection, so a marked attempt timeout is
-//     retryable while an expired CALLER context stays terminal and
-//     single-attempt.
-//
-// No app-side URL scrub is needed on any path: httpx's redactor drops the whole
-// userinfo component and REDACTs every query value, so the username-only
-// Prowlarr token that validateHTTPURL accepts cannot reach a log line through
-// *StatusError (CWE-532).
 func (u *upstream) attemptError(err error) error {
 	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
 		// httpx.IsRetryableStatus is the SAME rule GetBytes's own attempt
@@ -260,11 +163,9 @@ func (u *upstream) attemptError(err error) error {
 		// prefix is noise for a budget the app deliberately set to one attempt.
 		return &transientUpstreamError{err: statusErr, retryAfter: retryAfterHint(err)}
 	}
-	// A per-attempt deadline is NOT classified here: the enclosing Do
-	// installed the bound (WithAttemptTimeout) and marks its expiry, which
-	// is the only place that can tell the attempt's deadline from the
-	// caller's. LogSafeError has already reduced the *url.Error, so the
-	// deadline reaches the mark log-safe and with its real cause intact.
+	// A per-attempt deadline is NOT classified here: the enclosing Do installed the
+	// bound (WithAttemptTimeout) and marks its expiry, which is the only place that can
+	// tell the attempt's deadline from the caller's.
 	return httpx.LogSafeError(err)
 }
 
@@ -281,24 +182,9 @@ func retryAfterHint(err error) time.Duration {
 	return 0
 }
 
-// upstreamSecrets returns every credential the app TRANSMITS to this upstream
-// and must therefore keep out of an error message or log line (CWE-532): the
-// X-Api-Key header value, plus any credential embedded in the CONFIGURED feed
-// URL. config.validateHTTPURL deliberately accepts both embedded shapes
-// (urlEmbedsCredential only WARNs), and both reach the upstream: Go's
-// http.Client turns userinfo into an Authorization: Basic header on the
-// outgoing request, and a query value rides the request URL. A compromised or
-// spoofed Prowlarr can therefore reflect either one back inside an <error>
-// document or a decode-error message, so both belong in the same
-// exact-substring redaction the header key already gets.
-//
-// The query is scanned on the RAW query string, split on both '&' and ';': that
-// is the string the outgoing request carries, and it is a strict superset of
-// url.Values (which discards a whole semicolon-delimited pair, leaving its value
-// transmitted but uncollected). A value is a secret when its parameter name is
-// credential-like at ANY length, or when an unlabelled value is long enough to
-// be a token (minEmbeddedSecretLen); both the raw and the percent-decoded form
-// are registered, since a reflection can echo either.
+// upstreamSecrets returns every credential the app TRANSMITS to this upstream and must
+// therefore keep out of an error message or log line (CWE-532): the X-Api-Key header
+// value, plus any credential embedded in the CONFIGURED feed URL.
 func (u *upstream) upstreamSecrets() []string {
 	secrets := []string{u.apiKey}
 	parsed, err := url.Parse(u.feed)
@@ -332,16 +218,8 @@ func (u *upstream) upstreamSecrets() []string {
 	return secrets
 }
 
-// userinfoSecrets returns every wire representation of a credential embedded in
-// the configured feed URL's userinfo. Userinfo is a credential POSITION by
-// construction; length is irrelevant there, and mangling an unlucky diagnostic
-// is the safe direction. The plaintext components alone are NOT enough:
-// net/http never transmits them verbatim - it sends
-// "Authorization: Basic base64(user:pass)" - so a hostile upstream reflecting
-// that header (or the bare token) back inside an <error> document would escape
-// an exact-substring scrub that only knows the plaintext. Both encoded forms are
-// registered, longest first, so the full header is replaced before its token
-// substring is.
+// userinfoSecrets returns every wire representation of a credential embedded in the
+// configured feed URL's userinfo.
 func userinfoSecrets(user *url.Userinfo) []string {
 	username := user.Username()
 	password, _ := user.Password()
@@ -363,10 +241,6 @@ func isRawQuerySeparator(r rune) bool {
 // internal/config's operator warning reads its exact-match list from - and this
 // consumer takes the deliberately BROADER ContainsWord policy over it: a name
 // config adds later is already covered here rather than silently unredacted.
-// Over-matching only costs a mangled diagnostic; under-matching writes a
-// credential to Loki (CWE-532). A shared leaf rather than reaching into
-// internal/config, which this package deliberately does not depend on (only the
-// composition root imports config).
 func credentialParamName(name string) bool {
 	decoded, err := url.QueryUnescape(name)
 	if err != nil {
@@ -387,29 +261,12 @@ func (u *upstream) redactSecrets(s string) string {
 }
 
 // classifyParseError maps a parseTorznab failure onto the retry taxonomy.
-// A syntactically valid Torznab <error> document (upstreamDocError:
-// bad credentials, a named indexer failure) is a deliberate
-// upstream-scoped answer, not a garbled body, so it never carries
-// the malformedBody marker - after the search fails, the harvest
-// latches the failed scope instead of treating an upstream-wide
-// auth/config failure as one show's poison result set. Its
-// retryability splits on the numeric Torznab code: a deterministic
-// auth/account (100-199) or request/parameter (200-299) error
-// cannot recover without a config change, so it returns terminal
-// and the enclosing Do fails fast; a generic/server-side or
-// unparseable code stays transient within the bounded budget.
 func (u *upstream) classifyParseError(err error) error {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
-		// The document's code/description are attacker-influenced text
-		// and the request carried the Prowlarr API key: a compromised
-		// upstream could reflect the key into the error message, which
-		// httpx.Do's retry logger and the harvest WARN would then expand
-		// into the log stream (CWE-532). Classify on the ORIGINAL code
-		// first, then redact any reflection of the key from both fields
-		// before the error escapes this function. The fields are RAW
-		// (untruncated) here - upstreamDocError.Error() sanitizes at the
-		// emit boundary - so the exact-substring replacement always sees
-		// the intact key.
+		// The document's code/description are attacker-influenced text and the request
+		// carried the Prowlarr API key: a compromised upstream could reflect the key
+		// into the error message, which httpx.Do's retry logger and the harvest WARN
+		// would then expand into the log stream (CWE-532).
 		terminal := terminalTorznabCode(docErr.codeNum)
 		docErr.code = u.redactSecrets(docErr.code)
 		docErr.description = u.redactSecrets(docErr.description)
@@ -422,27 +279,23 @@ func (u *upstream) classifyParseError(err error) error {
 		// App-controlled message; keep it verbatim.
 		return &transientUpstreamError{err: limitErr, malformedBody: true}
 	}
-	// A generic decode failure can echo attacker-controlled body text
-	// verbatim (encoding/xml returns raw strconv errors quoting the full
-	// unparsed <size>/length value, up to the wire cap upstreamMaxBytes), and the
-	// request carried the Prowlarr API key: redact any reflection of the
-	// key FIRST (the exact-substring replacement must see intact text),
-	// then bound the text, before the error reaches httpx.Do's retry
-	// logger or fetchRaw's WARN - the same emit-boundary policy the
+	// A generic decode failure can echo attacker-controlled body text verbatim
+	// (encoding/xml returns raw strconv errors quoting the full unparsed <size>/length
+	// value, up to the wire cap upstreamMaxBytes), and the request carried the Prowlarr
+	// API key: redact any reflection of the key FIRST (the exact-substring replacement
+	// must see intact text), then bound the text, before the error reaches httpx.Do's
+	// retry logger or fetchRaw's WARN - the same emit-boundary policy the
 	// upstreamDocError path applies.
 	msg := sanitizeUpstreamText(u.redactSecrets(err.Error()))
 	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 
-// terminalTorznabCode reports whether a Torznab <error> document's parsed
-// code (upstreamDocError.codeNum, -1 for non-numeric) names a deterministic
-// failure a retry cannot recover: the Newznab error ranges 100-199 (incorrect
-// credentials, account problems) and 200-299 (missing or invalid request
-// parameters) stay wrong on every attempt until the operator fixes
-// configuration, so retrying only multiplies upstream load and warning noise
-// while delaying the error. Generic/server-side codes (e.g. 900 "unknown
-// error") and a non-numeric code are NOT terminal: they may recover, and an
-// unknown shape defaults to the bounded retry rather than failing fast.
+// terminalTorznabCode reports whether a Torznab <error> document's parsed code
+// (upstreamDocError.codeNum, -1 for non-numeric) names a deterministic failure a retry
+// cannot recover: the Newznab error ranges 100-199 (incorrect credentials, account
+// problems) and 200-299 (missing or invalid request parameters) stay wrong on every
+// attempt until the operator fixes configuration, so retrying only multiplies upstream
+// load and warning noise while delaying the error.
 func terminalTorznabCode(n int) bool {
 	return n >= 100 && n < 300
 }
@@ -454,15 +307,6 @@ func terminalTorznabCode(n int) bool {
 // and capped Retry-After (httpx parses it, so it can never exceed
 // httpx.RetryAfterCap), exposed through RetryAfterHint so Do
 // waits the upstream-requested delay instead of its jittered backoff.
-// malformedBody distinguishes the decode failure of a SUCCESSFUL (2xx)
-// response from the status/transport failures: after retry exhaustion the
-// harvest treats a persistently malformed body as specific to one show's
-// result set (malformedUpstreamBody), never as evidence the upstream itself
-// is down. A valid Torznab <error> document (upstreamDocError) with a
-// retryable generic/server-side code is the one 2xx parse failure that stays
-// UNMARKED: it is an upstream-scoped answer, not a garbled body. A doc error
-// with a deterministic auth/request code never reaches this wrapper at all -
-// it returns terminal from fetchAndParse (terminalTorznabCode).
 type transientUpstreamError struct {
 	err           error
 	retryAfter    time.Duration
@@ -485,19 +329,13 @@ func malformedUpstreamBody(err error) bool {
 	if tue, ok := errors.AsType[*transientUpstreamError](err); ok {
 		return tue.malformedBody
 	}
-	// GetBytes reads the body only after its status check admitted a 2xx, so
-	// an over-cap body is by construction the read failure of a SUCCESSFUL
-	// response - the same class as a garbled or over-cardinality one, and
-	// scoped to the one result set that came back too large rather than to
-	// the upstream's availability. It stays TERMINAL (no transient wrapper,
-	// so a deterministic overflow still does not burn the retry budget and
-	// the single-attempt contract is unchanged); only the harvest's
-	// show-vs-scope attribution changes.
+	// GetBytes reads the body only after its status check admitted a 2xx, so an
+	// over-cap body is by construction the read failure of a SUCCESSFUL response - the
+	// same class as a garbled or over-cardinality one, and scoped to the one result set
+	// that came back too large rather than to the upstream's availability.
 	_, tooLarge := errors.AsType[*httpx.ResponseTooLargeError](err)
 	return tooLarge
 }
-
-// --- Download/display URL gates ---
 
 // filterDownloadURLs drops items whose download URL is not an absolute http(s)
 // URL on the same origin as the configured Prowlarr Torznab endpoint. The
@@ -505,23 +343,12 @@ func malformedUpstreamBody(err error) bool {
 // not bind the download target, so a tampered Prowlarr response could
 // otherwise pair a curated id with an internal or attacker-controlled URL the
 // arr then fetches as a curated release (SSRF / arbitrary download, CWE-918).
-// A healthy Prowlarr hands out its own proxy links on the queried endpoint's
-// origin, so same-origin is the safe default; the rejected URL itself is never
-// logged.
-//
-// feedURL is the endpoint search already parsed for the request, which is the
-// only origin this filter may anchor on: search returns "invalid upstream feed
-// URL" before any fetch when it does not parse, so there is no reachable state
-// in which the filter runs without one. Only its scheme, host and port are read.
 func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 	out := make([]item, 0, len(items))
 	dropped := 0
 	blankedDisplay := 0
-	// observedDisplay counts the display-URL fields actually INSPECTED on the
-	// surviving items. A page of items carrying neither an InfoURL nor a GUID
-	// observes nothing about the display gate, so it must not be allowed to
-	// clear displayWarned - the same reasoning the len(items) == 0 early
-	// return already applies to the page as a whole.
+	// observedDisplay counts the display-URL fields actually INSPECTED on the surviving
+	// items.
 	observedDisplay := 0
 	for i := range items {
 		if !sameHTTPOrigin(items[i].DownloadURL, feedURL) {
@@ -535,22 +362,14 @@ func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 	}
 	if len(items) == 0 {
 		// An empty page observes nothing: neither an onset nor a recovery.
-		// Clearing dropWarned/displayWarned here would let a title-harvest
-		// query that matched no results re-arm the WARN, so a persisting
-		// systematic condition would still WARN once per non-empty page -
-		// the flood the onset gate exists to bound.
 		return out
 	}
 	u.reportDroppedDownloadURLs(dropped, len(out), feedURL)
 	if observedDisplay > 0 {
 		// The display gate's observation set is the display-URL FIELDS actually
-		// inspected, not the input page and not the surviving item count: when
-		// every item is dropped for an off-origin download URL, or when the
-		// survivors carry neither an InfoURL nor a GUID, no display URL was
-		// inspected at all. Reporting a zero blanked count there would clear
-		// displayWarned and announce a recovery on the strength of a page
-		// nothing was observed on, letting a persistent display-URL fault
-		// re-arm a WARN on the next surviving bad item.
+		// inspected, not the input page and not the surviving item count: when every
+		// item is dropped for an off-origin download URL, or when the survivors carry
+		// neither an InfoURL nor a GUID, no display URL was inspected at all.
 		u.reportBlankedDisplayURLs(blankedDisplay, len(out))
 	}
 	return out
@@ -559,18 +378,6 @@ func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 // sanitizeItemDisplayURLs sanitizes one surviving item's two passthrough
 // display-URL fields in place, returning how many of them were INSPECTED and
 // how many were blanked (the counts filterDownloadURLs' onset ladder reads).
-//
-// The display-URL fields are not fetch targets, but the arr renders <comments>
-// as the item's clickable info link and a URL that parses to no tracker key
-// skips the curation gate entirely, so a tampered upstream could attach a
-// javascript:/data: or foreign-host link to a legitimately curated item. Blank
-// (never drop) anything that is not a userinfo-free absolute http(s) URL on
-// this upstream's own tracker host: a healthy Prowlarr always hands out the
-// served tracker's canonical page URLs here. Display sanitization is
-// independent of key extraction - a URL that fails this gate is blanked even
-// when a tracker key could still be derived from it (e.g. a scheme-relative
-// //host/... form), leaving such an item to match by info hash alone, which
-// fails closed for a URL shape a healthy Prowlarr never emits.
 func (u *upstream) sanitizeItemDisplayURLs(it *item) (observed, blanked int) {
 	for _, field := range []*string{&it.InfoURL, &it.GUID} {
 		if *field == "" {
@@ -649,14 +456,8 @@ func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 
 // sameHTTPOrigin reports whether raw is an absolute http or https URL, free of
 // userinfo, whose ORIGIN matches origin's: scheme and hostname compared
-// case-insensitively, and the EFFECTIVE port compared after defaulting an
-// omitted port to the scheme's (80 for http, 443 for https). Comparing the
-// serialized authority verbatim would read
-// "https://prowlarr.example" and "https://prowlarr.example:443" as different
-// origins, and a reverse proxy or an external-URL setting can legitimately add
-// or drop the default port - which would drop every Prowlarr proxy link and
-// answer the arr a successful EMPTY feed while the upstream held curated
-// releases. A non-default port difference still rejects.
+// case-insensitively, and the EFFECTIVE port compared after defaulting an omitted port
+// to the scheme's (80 for http, 443 for https).
 func sameHTTPOrigin(raw string, origin *url.URL) bool {
 	parsed, ok := httpNoUserinfoURL(raw)
 	if !ok {
@@ -696,22 +497,6 @@ func effectiveHTTPPort(u *url.URL) string {
 // (search-path display links) and trackerKeyFromURL (match.go, the curation
 // IDENTITY gate), so relaxing it changes what mints a curation key, not only
 // what renders as a clickable link.
-//
-// The structural legs are internal/displaylink's, the app's one home for that
-// vouch step (h-f13) - shared with internal/trackerlink's publisher and with
-// reload.go's snapshotInfoURLAllowed, each of which keeps only its own host
-// policy on top, exactly as this gate does. Those legs read their facts from
-// urlform, the app's classifier of record for this browser-vs-net/url
-// divergence. The hand-rolled net/url version they replace was a second
-// taxonomy of the same knowledge, drifting from what the library learns
-// (l-f24): it accepted hidden-host, protocol-relative and backslash-authority
-// forms whose browser reading differs from its own, since it only checked
-// scheme and userinfo.
-//
-// The one leg that stays HERE is the non-empty host, because this gate's host
-// is load-bearing: the caller's tracker.Is*Host lookup (itself gated on
-// urlform.IsASCIIHost) must see the same string a browser would navigate to.
-// Returned Host is urlform's ASCII-lowercased evidence.
 func httpDisplayHost(raw string) (host string, ok bool) {
 	f, ok := httpDisplayForm(raw)
 	if !ok {
@@ -734,20 +519,10 @@ func httpDisplayForm(raw string) (f urlform.Form, ok bool) {
 	return f, true
 }
 
-// sanitizeDisplayURL returns raw when it is a display-admissible URL
-// (httpDisplayHost) whose host belongs to the scope's own tracker (scopeOfHost,
-// the single home of the host->scope mapping),
-// else "" - the item survives with the field blanked (writeItem omits an empty
-// <comments> and item.guid() falls back to InfoHash/DownloadURL). Used on the
-// passthrough display-URL fields (InfoURL, GUID) that neither the origin filter
-// (fetch targets only) nor the curation gate (key-bearing URLs only)
-// constrains. Healthy Prowlarr output carries the served tracker's canonical
-// page URLs here, so a foreign-host or userinfo-bearing link (a phishing target
-// a tampered upstream could attach to a curated item) is blanked rather than
-// rendered clickable. The host match is safe against homograph lookalikes
-// because scopeOfHost delegates to tracker.LookupByHost, which
-// carries the centralized ASCII/homograph gate (urlform.IsASCIIHost) every
-// host-table match inherits.
+// sanitizeDisplayURL returns raw when it is a display-admissible URL (httpDisplayHost)
+// whose host belongs to the scope's own tracker (scopeOfHost, the single home of the
+// host->scope mapping), else "" - the item survives with the field blanked (writeItem
+// omits an empty <comments> and item.guid() falls back to InfoHash/DownloadURL).
 func sanitizeDisplayURL(scope, raw string) string {
 	host, ok := httpDisplayHost(raw)
 	if !ok {
@@ -758,8 +533,6 @@ func sanitizeDisplayURL(scope, raw string) string {
 	}
 	return raw
 }
-
-// --- Request headers ---
 
 // setHeaders sets the User-Agent, Accept, and the Prowlarr API key header.
 func (u *upstream) setHeaders(req *http.Request) {

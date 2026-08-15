@@ -1143,11 +1143,12 @@ func degradedReasons(recorder *capture.Recorder) []string {
 
 // TestCycleDegradedEarlyReturnsEmitCycleDegraded pins the degraded completion
 // line: every degraded-but-healthy gate (unusable map, failed SeaDex fetch,
-// empty SeaDex result, and the scoped AniList degradation, which now compares
-// the unaffected majority instead of returning early) must emit exactly one
+// empty SeaDex result) must emit exactly one
 // "cycle degraded" WARN with a reason attr naming the gate, and never "cycle
 // complete" - so the cycle-deadman alert (which counts completion lines) does
 // not fire as if the daemon died during a long upstream outage.
+// The scoped AniList degradation's own arm of this contract is pinned by
+// TestCycleAniListDegradedComparesMajority.
 func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 	sonarrOK := func() *fakeSonarr {
 		return &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -1199,26 +1200,6 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 					SeaDex:   &fakeSeaDex{},
 					Logger:   logger,
 					Notifier: notify.NewNotifier(logger, nil),
-				}
-			},
-		},
-		{
-			name:       "anilist degraded",
-			wantReason: "anilist-degraded",
-			deps: func(t *testing.T, logger *slog.Logger) *Deps {
-				t.Helper()
-				// The scoped degradation runs the compare (on the unaffected
-				// majority), so the compare/report deps are wired here unlike
-				// the true early-return gates above.
-				return &Deps{
-					Store:    &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-					Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
-					Mapping:  fakeMapping{},
-					SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-					Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
-					Comparer: compare.NewComparer(compare.Config{}),
-					Notifier: notify.NewNotifier(scoutTestLogger(), nil),
-					Logger:   logger,
 				}
 			},
 		},

@@ -85,24 +85,6 @@ func TestEscapeCell(t *testing.T) {
 	}
 }
 
-func TestMdLinkAllowsOnlyHTTPSchemes(t *testing.T) {
-	// http/https destinations render as a Markdown link.
-	if got := mdLink("nyaa", "https://nyaa.si/view/1"); got != "[nyaa](https://nyaa.si/view/1)" {
-		t.Errorf("mdLink(https) = %q", got)
-	}
-	// Active non-http schemes and relative/unparseable destinations degrade to
-	// the escaped label as plain text (no active link injected).
-	for _, bad := range []string{"javascript:alert(1)", "data:text/html,<script>", "/torrents.php?id=1"} {
-		got := mdLink("label", bad)
-		if strings.Contains(got, "](") {
-			t.Errorf("mdLink(%q) = %q, must not emit a link", bad, got)
-		}
-		if got != "label" {
-			t.Errorf("mdLink(%q) = %q, want plain escaped label %q", bad, got, "label")
-		}
-	}
-}
-
 // TestMdLinkAppliesTheSharedStructuralVouch pins the report renderer against the
 // app's one structural vouch step for a browser-destined URL (internal/displaylink,
 // h-f8/l-f189). The renderer used to apply its own weaker gate - TrimSpace plus

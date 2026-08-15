@@ -3,17 +3,6 @@
 // of that decision, so the daemon's findings, the audit report, and the
 // Torznab feed ask the same question instead of each applying its own
 // hardcoded rule.
-//
-// The policy comes from the filters.exclude_tags config map and is empty by
-// default: a zero Filter excludes nothing anywhere, so an absent config and a
-// test literal behave identically. Nothing here knows the SeaDex tag
-// vocabulary - any tag the operator names is filterable - and nothing here
-// decides DISPLAY: internal/audit's curationWarnings still annotates a warned
-// release with its fixed broken/incomplete vocabulary whether or not this
-// policy filters it.
-//
-// Matching is exact and case-insensitive, never substring, so a stray upstream
-// tag that merely contains a configured tag cannot trip a gate.
 package tagfilter
 
 import "strings"
@@ -102,10 +91,7 @@ type Filter struct {
 // New builds a Filter from a per-tag surface list, as config.filters.exclude_tags
 // spells it. Tag keys are canonicalized (trimmed, lowercased) and their surface
 // lists unioned, so two case variants of one tag combine rather than one
-// overwriting the other. A blank tag key, an unknown surface, and a tag with no
-// surfaces are the config package's to reject; New simply ignores a blank key
-// and a non-surface value so no input can produce a policy that matches a
-// release's blank tag. An empty or nil map yields the zero Filter.
+// overwriting the other.
 func New(bySurface map[string][]Surface) Filter {
 	var excluded map[key]struct{}
 	// Insertion order is irrelevant: excluded is a set, so any iteration

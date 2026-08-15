@@ -1,32 +1,7 @@
 // Package match links SeaDex entries to library items. It resolves an entry's
 // AniList ID to arr IDs through the Fribb mapping (overrides already applied),
 // and on a miss falls back to an AniList title lookup plus a conservative
-// normalized-title-plus-year match against the library. It also reports
-// ID-mapping coverage and maintains a memo of AniList lookups (positive
-// answers and not-found negatives) so each id is fetched at most once per
-// expiry window.
-//
-// Memo entries expire because AniList data is not immutable: entries are
-// created and English titles added after licensing, so a permanent memo would
-// hold a stale answer forever (a show added to AniList later would stay
-// not-found; a later-added title would never be seen). Every memo write
-// stamps the entry with an explicit expiry - now plus a uniform random TTL in
-// [memoMinTTL, memoMaxTTL) (mean two weeks, ±25% jitter) - so entries written
-// together renew spread out instead of in lockstep. Expiry is lazy: an
-// expired entry is a lookup miss that re-enters the existing batched prefetch
-// (or the per-entry fetch) and is re-stamped on renewal - and when the upstream
-// that would renew it is unreachable, the match serves the expired positive
-// rather than nothing (Memo.staleMedia; the pass still counts as degraded) -
-// and entries still
-// expired when a CLEAN (non-degraded) Match pass ends are pruned from the
-// returned memo, EXCEPT the positives whose AniList id SeaDex still curates -
-// those stay as stale feed-title/type fallback data (Memo.StaleTitle,
-// Memo.StaleFormat), whose readers ignore expiry on purpose. A degraded pass
-// could not renew anything, so it retains every expired entry. An entry
-// carrying no expiry at all (written by a build older than this policy) reads
-// as expired and is re-fetched: there is no migration, deliberately. The
-// batched prefetch (up to 50 ids per request) amortizes renewals, so a few
-// expiries per day cost effectively nothing.
+// normalized-title-plus-year match against the library.
 package match
 
 import (
@@ -74,12 +49,6 @@ func (m *Match) InLibrary() bool { return m.Item != nil }
 // log line. Hits counts entries whose record carries a usable arr id - the ID
 // bridge resolved an arr id - whether or not the item is in the library (a
 // resolved id absent from the library is a missing item, not a mapping gap).
-// An untyped record whose AniList format makes an id it ALREADY carried usable
-// counts here too (matchIDLessEntry's re-entry): the id resolved, even though
-// the typing came from AniList. Unmapped counts every entry the ID bridge could
-// not resolve: no Fribb record at all, a record still without a usable arr id
-// (counted here even when the AniList title fallback links it), or an unusable
-// AniList id.
 type Coverage struct {
 	Hits     map[string]int
 	Unmapped map[string]int
@@ -89,20 +58,10 @@ type Coverage struct {
 // memo to persist. Degraded is set when a needed AniList fallback lookup could
 // not be completed because of a transient/upstream error (not a definitive
 // not-found), so the caller can preserve prior findings rather than treat the
-// missing matches as resolved. IncompleteIDs scopes that degradation: it holds
-// exactly the AniList ids whose needed lookup failed transiently this pass, so
-// the caller can preserve the affected entries' prior findings while handling
-// the unaffected majority normally. An id served from the memo or answered
-// with a definitive not-found is complete, never in the set; a pass cut short
-// by context cancellation is Degraded with the ids it never attempted absent
-// from the set (the caller treats a shutdown as a whole-cycle event). With a
-// live context, Degraded is true exactly when IncompleteIDs is non-empty.
+// missing matches as resolved.
 type Result struct {
 	// at is the pass's single clock reading, carried so PruneMemo prunes against
-	// the same instant every lookup and stamp in the pass compared against. It is
-	// unexported because only this package produces or consumes it (Memo.dirty is
-	// the same shape); a zero value - a hand-built Result - prunes nothing, which
-	// is the safe fail direction.
+	// the same instant every lookup and stamp in the pass compared against.
 	at            time.Time
 	Coverage      Coverage
 	Memo          Memo
@@ -139,13 +98,7 @@ func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 // matches, ID-mapping coverage, and the updated memo to persist: an expiry
 // beyond anything this policy could have written is re-stamped, renewed lookups
 // are re-stamped, and entries still expired at the end of a clean pass are
-// pruned. Degraded
-// passes retain expired entries as stale feed-title fallback data. The
-// caller's memo.Entries map is updated in place (Result.Memo aliases it, not
-// a copy), so the pre-call memo is not preserved. Match never fails as a
-// whole: an AniList fallback error for one entry is logged, that entry is
-// left unmatched, and its id is reported in Result.IncompleteIDs so the
-// caller can scope its degradation handling to the affected entries.
+// pruned.
 func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *library.Snapshot, idx *mapping.Index, memo Memo) Result {
 	lib := NewLibIndex(snap)
 	if memo.Entries == nil {
@@ -178,16 +131,11 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		matches = append(matches, run.matchEntry(ctx, &entries[i]))
 	}
 	// Cancellation can arrive while the final entry is being matched, after
-	// the loop's boundary check. Classify it before the clean-pass-only prune
-	// so the caller takes the whole-cycle interruption path and stale memo
-	// entries remain available to the next cycle.
+	// the loop's boundary check.
 	if ctx.Err() != nil {
 		run.degraded = true
 	}
-	// Match does NOT prune the memo. Pruning is garbage collection against the
-	// WHOLE catalogue, and Match is called with a bounded window too (the tick),
-	// which has no standing to decide that an id it never fetched is no longer
-	// curated. The caller that holds a catalogue calls PruneMemo.
+	// Match does NOT prune the memo.
 	return Result{at: now, Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
 }
 
@@ -195,19 +143,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 // in place.
 //
 // It takes the Result rather than the memo because both of its preconditions are
-// non-negotiable and both live there. A DEGRADED pass could not renew what
-// expired, so pruning it would drop entries the next pass would have refreshed.
-// And a PARTIAL catalogue cannot judge what is still curated: pruning keeps an
-// expired positive precisely when SeaDex still lists its id, so handing this a
-// 48-hour window would delete almost every expired entry in the memo - including
-// the ones the feed's stale-title tier reads (scout/feedinfo.go), which silently
-// downgrades those items' RSS titles to the file-name derivation and their
-// category to the default. That is why the parameter is named catalogue: passing
-// anything less is a defect, not a scoped variant, which is why there is no
-// scoped door onto this operation.
-//
-// It lives on the Matcher for symmetry with Match, whose clock reading it reuses
-// through Result.at - so a caller needs no clock seam of its own to test it.
+// non-negotiable and both live there.
 func (m *Matcher) PruneMemo(res *Result, catalogue []seadex.Entry) {
 	if res.Degraded {
 		// A degraded pass (outage, tripped breaker, shutdown) could not renew
@@ -253,12 +189,7 @@ type matchRun struct {
 // aniListNeed classifies an entry's AniList-lookup need - the ONE definition
 // of the trigger BOTH pendingAniListIDs (the batch prefetch) and matchEntry
 // (the per-entry pass) consult, so the two cannot drift. item != nil means
-// resolved by id (no lookup). needsLookup means AniList must be consulted:
-// either no Fribb record exists at all, or the record is id-less (a split
-// AniList<->arr mapping) so the title is the only remaining link. A record
-// that HAS its arr id but missed FindByID simply is not in the library, so
-// no lookup (it would only confirm the miss); a non-positive id never
-// resolves, so no lookup either.
+// resolved by id (no lookup).
 func aniListNeed(alID int, idx *mapping.Index, lib *LibIndex) (rec mapping.Record, recOK bool, item *library.Item, needsLookup bool) {
 	if alID <= 0 {
 		return mapping.Record{}, false, nil, false
@@ -303,8 +234,8 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	if item != nil {
 		// The RESOLVED item's arr is authoritative over the type label's
 		// routing: FindByID's secondary movie lookup can resolve a Radarr movie
-		// from a non-MOVIE-typed record carrying an unambiguous movie TMDB id
-		// (h-f9), and the per-arr index split guarantees the item belongs to the
+		// from a non-MOVIE-typed record carrying an unambiguous movie TMDB id, and
+		// the per-arr index split guarantees the item belongs to the
 		// arr its id was looked up in - so for every record the type label
 		// already routed correctly this is the same value recordArr returned.
 		arr = item.Arr
@@ -342,9 +273,6 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 // remaining link to the arr item. It resolves AniList once: the format types an
 // untyped record and picks the search arr, then the normalized title + year
 // matches within that arr. Coverage counts under the resolved arr either way.
-// One exception: if typing the record makes an identifier it already carried
-// usable (a MOVIE type routing its TMDB-movie/IMDb ids), the record is no
-// longer id-less and re-enters matchMappedEntry's ID-first branch.
 func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, arr string) Match {
 	// needsLookup under a present record means the record is id-less (see
 	// aniListNeed): the ID bridge could not resolve an arr id from the record
@@ -361,9 +289,7 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	// An UNTYPED id-less record carries no routing evidence at all: recordArr
 	// routes every non-MOVIE value (including "") to Sonarr, which would
 	// restrict the title search to Sonarr and can miss the real Radarr movie
-	// or bind a same-titled series. AniList is authoritative for the format
-	// here, so type the record from it and search the arr that format names
-	// (arrUnknown - unrestricted - when the format is genuinely unknown).
+	// or bind a same-titled series.
 	if rec.Type == "" {
 		rec.Type = mapping.RecordFromFormat(media.Format).Type
 		arr = formatArr(media.Format)
@@ -371,11 +297,7 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 		// the record may no longer be id-less: RoutedIDs only routes the
 		// TMDB-movie/IMDb fields once the type says MOVIE, and both Fribb
 		// (the object-form themoviedb_id movie list) and an operator override
-		// (tmdb_movies / imdb_ids) can carry them on an untyped record. A
-		// newly-usable id is stronger evidence than a title, so such a record
-		// re-enters the ID-first branch: title-matching it could bind a
-		// different same-titled movie while the id proves the intended one is
-		// absent.
+		// (tmdb_movies / imdb_ids) can carry them on an untyped record.
 		if rec.HasArrIdentifier() {
 			return r.matchMappedEntry(ctx, e, rec, r.lib.FindByID(rec), false)
 		}
@@ -441,11 +363,6 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 // Each ID index has exactly one arr-gated consumer (byTvdb only via the
 // Sonarr branch of FindByID, byTmdb/byImdb only via findMovie's Radarr
 // gate), so index each map only with items of the arr that consumes it.
-// Pooling both arrs added no lookup capability - it only let a wrong-arr
-// item shadow the right-arr one under a shared key (TMDB movie and TV ids
-// are disjoint namespaces over the same small-int key space, and TVDB
-// reuses movie IMDb ids on the parent series), making FindByID/findMovie
-// falsely miss a library item that IS present, depending on item order.
 func (li *LibIndex) indexIDs(it *library.Item) {
 	switch it.Arr {
 	case library.ArrSonarr:
@@ -481,22 +398,7 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 // match must be arr-consistent: a MOVIE record resolves only to a Radarr movie
 // and a series record only to a Sonarr series, so a movie whose Fribb record
 // carries a TV themoviedb_id (or an IMDb id TVDB reuses for the parent series)
-// cannot silently link to the same-named Sonarr series. The rule is enforced
-// structurally, in two places and no others: RoutedIDs returns only the ids the
-// record's own arr consumes, and NewLibIndex indexes each ID map with only the
-// items of the arr that consumes it - so a wrong-arr item is never a candidate
-// and a map miss is the arr gate.
-//
-// A record that routes NO series id and is not typed MOVIE still gets one more
-// chance, against its unambiguous movie TMDB ids
-// (mapping.Record.TmdbMovies): a TMDB movie id is a Radarr id by
-// construction, and the live Fribb body carries ~300 records shaped non-MOVIE
-// type + no tvdb_id + a positive movie id, whose Radarr copy the type label
-// alone could never resolve (h-f9). It is a SECONDARY lookup on purpose - a
-// record that routes a TVDB id keeps series routing as its authoritative answer,
-// unchanged - and it stays out of HasArrIdentifier, so a miss here still falls
-// through to the AniList title fallback exactly as before rather than reading as
-// "this record has its id, the item is simply absent".
+// cannot silently link to the same-named Sonarr series.
 func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	if rec.IsMovie() {
 		return li.findMovie(rec)
@@ -504,9 +406,7 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	tvdb, _, _ := rec.RoutedIDs()
 	// RoutedIDs already drops every non-usable id it returns, scalar and slice
 	// alike, so the usability POLICY has one home there and this is a presence
-	// check, not a second policy check (l-f37/l-f109). The guard is kept in the
-	// > 0 form deliberately, so it reads the same way as its slice siblings'
-	// presence checks below and in catalogue.go.
+	// check, not a second policy check.
 	if tvdb > 0 {
 		// byTvdb is populated only with Sonarr items (indexIDs' arr switch),
 		// so the map miss IS the arr gate.
@@ -548,18 +448,11 @@ func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 // Only library-side inputs reach it: a mapping Record's ids are already
 // canonical, because Record.canonicalize trims them at every producer and
 // mapping.buildIndex reapplies the invariant to a decoded cache, so RoutedIDs
-// cannot return a padded or blank id. A blank or whitespace-only Item id yields
-// "", which both callers skip.
+// cannot return a padded or blank id.
 func imdbKey(id string) string { return strings.TrimSpace(id) }
 
 // narrowByYear applies the AniList year constraint to a title-fallback
-// candidate set, returning the set unchanged when the year is unknown. When the
-// constraint rejects every candidate the result is empty, which findByTitle
-// treats as a miss - and that arm is logged here, because it is the actionable
-// one: the title DID resolve library items and only the years disagreed (a
-// December or split-cour premiere routinely differs by one), so the remedy is an
-// overrides.json entry pinning the arr id. Counts and the AniList year only: no
-// untrusted string crosses the log boundary.
+// candidate set, returning the set unchanged when the year is unknown.
 func narrowByYear(candidates []*library.Item, year int, log *slog.Logger) []*library.Item {
 	if year == 0 {
 		return candidates
@@ -634,14 +527,6 @@ func (li *LibIndex) appendTitleCandidates(candidates []*library.Item, seen map[*
 
 // filterByYear narrows candidates to those whose year matches, KEEPING items
 // whose year is unknown (0): absence of year evidence is not a mismatch.
-// findByTitle already skips narrowing entirely when the ANILIST year is
-// unknown, and hard-failing a library item for the same missing evidence
-// made the asymmetry fatal in one direction and invisible in the other - an
-// id-less Fribb record whose library item carries no year could never
-// title-match at all. The single-candidate requirement still gates the final
-// match, so a kept unknown-year candidate can only leave a set ambiguous (a
-// miss) or let the one true candidate survive - never force a wrong match on
-// its own.
 func filterByYear(candidates []*library.Item, year int) []*library.Item {
 	var out []*library.Item
 	for _, it := range candidates {

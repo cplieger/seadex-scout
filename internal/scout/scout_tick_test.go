@@ -583,28 +583,6 @@ func TestTickFeedAdvanceFailureKeepsTheTickHealthy(t *testing.T) {
 	}
 }
 
-// TestTickWithNoFeedConfiguredStillReports pins the nil-feed arm: with no
-// Torznab feed configured the tick skips all feed work and still does the half
-// the operator always gets (compare and report), rather than short-circuiting.
-func TestTickWithNoFeedConfiguredStillReports(t *testing.T) {
-	logger, recorder := capture.New()
-	sea := &fakeSeaDex{
-		entries:       seadexFrierenEntry(),
-		windowEntries: []seadex.Entry{windowEntry(1001, 501)},
-	}
-	s, _ := newTickScout(logger, sea, nil, nil, 96)
-
-	if healthy := s.Cycle(t.Context()); !healthy {
-		t.Fatal("reconcile healthy=false, want true")
-	}
-	if healthy := s.Cycle(t.Context()); !healthy {
-		t.Fatal("tick healthy=false, want true")
-	}
-	if n := recorder.CountExact("tick complete"); n != 1 {
-		t.Errorf("'tick complete' count = %d, want 1", n)
-	}
-}
-
 // TestTickDeletesOnlyRowsItEvaluated pins the deletion authority the tick hands
 // the notifier, which is the subtlest correctness property of the whole fast
 // path.

@@ -127,14 +127,9 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 }
 
 // buildScout wires config into the compare-cycle components and returns the
-// runnable scout plus a cleanup func that releases the HTTP and arr clients -
-// including the feed writer's Prowlarr client when a Torznab feed is configured.
-//
-// server is the Torznab feed server running in this process, or nil when none
-// does (the `poll` subcommand). It is threaded through to the feed writer so a
-// completed cycle hands its snapshot straight to that server instead of leaving
-// it to be re-read from the file (see indexer.FeedWriterConfig.Server), which is
-// why the daemon builds the server BEFORE the scout.
+// runnable scout plus a cleanup func that releases the HTTP and arr clients.
+// server is the Torznab feed server running in this process, or nil when none does
+// (the `poll` subcommand); a completed cycle hands its snapshot straight to it.
 func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer) (built, error) {
 	c, err := buildCore(ctx, cfg, false)
 	if err != nil {
@@ -172,11 +167,9 @@ func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer
 	return built{scout: sc, cleanup: cleanup}, nil
 }
 
-// buildReporter wires config into the read-only one-shot report's components:
-// the shared core plus the auditor. It deliberately builds no comparer, no
-// notifier and no feed writer - the report cannot reach them - so a report run
-// also opens no Prowlarr connection, and it reads state through the read-only
-// store.
+// buildReporter wires config into the read-only one-shot report's components: the
+// shared core plus the auditor. It builds no comparer, notifier or feed writer -
+// the report cannot reach them - and reads state through the read-only store.
 func buildReporter(ctx context.Context, cfg *config.Config) (builtReporter, error) {
 	c, err := buildCore(ctx, cfg, true)
 	if err != nil {
@@ -198,9 +191,8 @@ func buildReporter(ctx context.Context, cfg *config.Config) (builtReporter, erro
 	return builtReporter{reporter: sc, cleanup: c.cleanup}, nil
 }
 
-// upstreamConfig projects the operator config into the indexer's shared
-// Prowlarr upstream wiring - built in one place so the feed writer (title
-// harvest) and the feed server (search proxying) cannot drift apart.
+// upstreamConfig projects the operator config into the indexer's shared Prowlarr
+// upstream wiring, built in one place so the feed writer and server cannot drift.
 func upstreamConfig(cfg *config.Config) indexer.UpstreamConfig {
 	return indexer.UpstreamConfig{
 		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
@@ -210,25 +202,18 @@ func upstreamConfig(cfg *config.Config) indexer.UpstreamConfig {
 	}
 }
 
-// indexerLogger scopes a logger to the Torznab feed, so every feed-owned
-// record (the writer's title harvest, the server's requests, the daemon
-// goroutine's terminal lines) carries one component label and stays
-// queryable together in the shared slog stream.
+// indexerLogger scopes a logger to the Torznab feed, so every feed-owned record
+// carries one component label in the shared slog stream.
 func indexerLogger(log *slog.Logger) *slog.Logger {
 	return log.With("component", "indexer")
 }
 
 // feedWriter returns the indexer feed writer the compare cycle drives when the
-// Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP
-// client - else a nil writer (the cycle then does no feed work) and a no-op.
-// It persists the materialized feed snapshot (curation set + the synthesized
-// RSS journal) and hands it to server, the feed server running in this process
-// (nil in the `poll` subcommand, whose snapshot reaches the resident daemon
-// through the file), so one cycle feeds both the findings and the feed from a
-// single SeaDex fetch. The cycle owns the shared SeaDex + Fribb fetch and hands
-// the results to Rebuild; the writer's own client only serves the title harvest,
-// which queries the same per-indexer Prowlarr Torznab endpoints the server
-// proxies searches through.
+// Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP client
+// - else a nil writer (the cycle then does no feed work) and a no-op. It persists
+// the materialized feed snapshot and hands it to server (nil in the `poll`
+// subcommand, whose snapshot reaches the resident daemon through the file), so one
+// cycle feeds both the findings and the feed from a single SeaDex fetch.
 func feedWriter(cfg *config.Config, log *slog.Logger, server *indexer.Indexer) (fw scout.FeedWriter, cleanup func()) {
 	if !cfg.IndexerConfigured() {
 		return nil, func() {}
@@ -251,15 +236,11 @@ type builtIndexer struct {
 	cleanup func()
 }
 
-// buildIndexer wires the Torznab feed server the daemon runs alongside the
-// compare loop, or the zero builtIndexer when no Prowlarr Torznab URL is
-// configured (the daemon then binds no HTTP port). It needs only an HTTP client
-// for Prowlarr's per-indexer Torznab endpoints (a search proxies them); the
-// curation set and RSS feeds it serves come from the compare cycle, in-process
-// once the cycle is wired to it (see feedWriter) and from
-// config.DefaultIndexerFeedPath on restart or when a `poll` cycle wrote it. Its
-// logger carries component=indexer so its lines separate cleanly from the compare
-// findings in a shared slog stream.
+// buildIndexer wires the Torznab feed server the daemon runs alongside the compare
+// loop, or the zero builtIndexer when no Prowlarr Torznab URL is configured (the
+// daemon then binds no HTTP port). It needs only an HTTP client for Prowlarr's
+// per-indexer Torznab endpoints; the curation set and RSS feeds it serves come from
+// the compare cycle, in-process once wired and from the feed path on restart.
 func buildIndexer(cfg *config.Config) builtIndexer {
 	if !cfg.IndexerConfigured() {
 		return builtIndexer{cleanup: func() {}}
@@ -286,14 +267,9 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 		s, err := arrapi.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey,
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
-			// arrapi's constructor error echoes the full baseURL with %q
-			// (validateClientParams: `arrapi: invalid baseURL %q`), and an arr
-			// url may carry configured userinfo - config.Validate only WARNS on
-			// that shape. main logs a dispatch error at ERROR, so the message
-			// must stay field-name-only, like reportSnapshot's LogSafeError
-			// reduction and logPing below. config.validateArrPair already
-			// rejects every shape arrapi rejects, so this arm only fires if the
-			// two validators drift apart.
+			// arrapi's constructor error echoes the full baseURL with %q and an arr
+			// url may carry configured userinfo, so this message stays
+			// field-name-only: main logs a dispatch error at ERROR.
 			return nil, nil, errors.New("sonarr client: sonarr.url or sonarr.api_key rejected by the arr client")
 		}
 		sonarr = s
@@ -325,12 +301,10 @@ func pingArrs(ctx context.Context, sonarr *arrapi.Sonarr, radarr *arrapi.Radarr)
 	}
 }
 
-// logPing logs one arr's startup reachability, classifying a context
-// cancellation (shutdown mid-startup) as routine rather than an arr fault.
-// The logged error rides httpx.LogSafeError like the cycle and per-series
-// walk boundaries: arrapi wraps transport failures around *url.Error, whose
-// text carries the full request URL, so an accepted arr URL with embedded
-// reverse-proxy credentials would otherwise leak them to this WARN/DEBUG.
+// logPing logs one arr's startup reachability, classifying a context cancellation
+// (shutdown mid-startup) as routine rather than an arr fault. The error rides
+// LogSafeError because a *url.Error's text carries the full request URL, which may
+// hold configured reverse-proxy credentials.
 func logPing(arr string, err error) {
 	if err == nil {
 		slog.Info(arr + " reachable")

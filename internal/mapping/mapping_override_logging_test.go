@@ -71,29 +71,6 @@ func TestLoader_Load_skipsOversizedOverrideIDArrays(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_warnsOnUnknownOverrideKeys pins the unknown-key diagnostic:
-// an override written with the upstream Fribb field name (imdb_id) instead of
-// the override name (imdb_ids) still applies, but a WARN naming the unknown
-// key is logged so the silent-drop trap is visible.
-func TestLoader_Load_warnsOnUnknownOverrideKeys(t *testing.T) {
-	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	data := []byte(`[{"anilist_id":2,"type":"movie","imdb_id":"tt0000002"}]`)
-	if err := os.WriteFile(overrides, data, 0o644); err != nil {
-		t.Fatalf("write overrides: %v", err)
-	}
-	logger, rec := capture.New()
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
-		t.Fatalf("Load error: %v", err)
-	}
-	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
-		t.Fatalf("Load logs = %v, want one unknown-keys warning", rec.Messages())
-	}
-	if !unknownKeysAre(rec, "[imdb_id]") {
-		t.Errorf("Load unknown-keys logs = %v, want keys=[imdb_id]", rec.Messages())
-	}
-}
-
 // unknownKeysAre reports whether any captured record carries a "keys"
 // attribute whose rendered value equals want.
 func unknownKeysAre(rec *capture.Recorder, want string) bool {

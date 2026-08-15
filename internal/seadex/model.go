@@ -1,14 +1,9 @@
 // Package seadex is the releases.moe (SeaDex) vocabulary: the value objects
 // and contract predicates every consumer of the SeaDex model reads.
 //
-// SeaDex curates the best available release per anime, keyed by AniList ID.
-// This package is the STABLE half of what used to be one package: the model
-// here changes with this app's comparison rules, while the volatile
-// releases.moe PocketBase wire client that produces it (internal/seadexapi)
-// changes with the upstream API. The model lives in this pure leaf (stdlib
-// strings/time only) so the seven packages that consume only the vocabulary do
-// not reach it through the client's httpx/jsonx closure; only the cycle
-// orchestrator and the composition root depend on the client.
+// SeaDex curates the best available release per anime, keyed by AniList ID. The model
+// here changes with this app's comparison rules; the wire client that produces it
+// (internal/seadexapi) changes with the upstream API.
 package seadex
 
 import (

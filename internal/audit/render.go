@@ -36,14 +36,10 @@ const (
 	emptyCell = "-"
 	// unknownCell marks a column whose fact was never established, as distinct
 	// from emptyCell's positive "there is nothing here". The angle brackets are
-	// load-bearing rather than decorative: escapeCell entity-encodes `<` and
-	// `>`, so no upstream release group can render this cell's bytes, and the
-	// sentinel cannot be confused with an on-disk group literally named
-	// "unknown".
+	// load-bearing: escapeCell entity-encodes < and >, so no upstream release
+	// group can render this cell's bytes.
 	unknownCell = "<unknown>"
 )
-
-// --- Markdown + JSON rendering ---
 
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
@@ -56,10 +52,8 @@ var verdictDesc = map[Verdict]string{
 }
 
 // renderJSON renders the report as indented JSON (the machine-ingestible copy).
-// It serializes a sanitized copy (sanitizeOutput) rather than the canonical
-// Report: encoding/json escapes C0 controls but passes C1 controls (CSI/OSC/ST
-// terminal-escape introducers) and Unicode bidi controls through as raw UTF-8,
-// which a terminal viewing the file could honor.
+// It serializes a sanitized copy (sanitizeOutput): encoding/json escapes C0
+// controls but passes C1 and bidi controls through as raw UTF-8.
 func renderJSON(r *Report) ([]byte, error) {
 	return json.MarshalIndent(sanitizeOutput(r), "", "  ")
 }
@@ -67,8 +61,7 @@ func renderJSON(r *Report) ([]byte, error) {
 // renderMarkdown renders the report as human-readable Markdown, grouped into a
 // section per verdict (most actionable first) with a compact links column. A
 // degraded run additionally carries the completeness caveat in the header and
-// the incomplete-mapping section after the verdict sections; a fully resolved
-// run renders byte-identically to the pre-caveat format.
+// the incomplete-mapping section after the verdict sections.
 func renderMarkdown(r *Report) string {
 	var b strings.Builder
 	b.WriteString("# SeaDex alignment report\n\n")
@@ -109,13 +102,9 @@ func renderMarkdown(r *Report) string {
 	return b.String()
 }
 
-// annotationLegend explains the parenthesized annotations the Scope column
-// carries and the Notes column that holds this report's annotations of the
-// listed SeaDex best releases, so the report file stays self-explanatory for a
-// reader who has only the file (the same reason each verdict section carries
-// verdictDesc). Without it "S2 (approx, mixed)" and a bare `broken` in the
-// Notes column are unexplained in both the report and the README. It also
-// explains how a Notes entry associates with a best group.
+// annotationLegend explains the parenthesized Scope annotations and the Notes
+// column, so the report file stays self-explanatory for a reader who has only
+// the file.
 const annotationLegend = "Scope annotations: `approx` - the comparison used a coarse bucket " +
 	"(the season-0 specials bucket, or a whole-series aggregate spanning more than one season or group), " +
 	"so the verdict means \"present somewhere in the series\" rather than an exact per-season attribution; " +
@@ -149,8 +138,7 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 const incompleteHeader = "incomplete (transient AniList failure)"
 
 // writeIncompleteCaveat states the completeness caveat in the report header
-// when the run left SeaDex entries unmapped, so a reader cannot take a
-// degraded report for a complete audit. Silent on a fully resolved run.
+// when the run left SeaDex entries unmapped. Silent on a fully resolved run.
 func writeIncompleteCaveat(b *strings.Builder, n int) {
 	if n == 0 {
 		return
@@ -165,9 +153,7 @@ func writeIncompleteCaveat(b *strings.Builder, n int) {
 
 // writeIncompleteSection renders the incomplete-mapping section: one row per
 // SeaDex entry whose library mapping could not be resolved this run, listed by
-// AniList id with its releases.moe link. Omitted entirely on a fully resolved
-// run (matching the JSON key's omitempty), so a total AniList outage that
-// affected no entry - or a healthy run - renders no section.
+// AniList id with its releases.moe link. Omitted on a fully resolved run.
 func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
 	if len(incomplete) == 0 {
 		return
@@ -193,10 +179,8 @@ func writeRow(b *strings.Builder, row *Row) {
 }
 
 // groupsCell renders the on-disk groups column. A row whose group evidence was
-// never established (Row.GroupsUnknown) renders "unknown" rather than the empty
-// marker, because the two mean opposite things to the operator: emptyCell is the
-// positive claim "nothing identifiable is on disk", which is the false reading
-// this column used to give a degraded item.
+// never established (Row.GroupsUnknown) renders unknownCell rather than the
+// empty marker: emptyCell is the positive claim "nothing identifiable is here".
 func groupsCell(row *Row) string {
 	if row.GroupsUnknown {
 		return unknownCell
@@ -206,21 +190,9 @@ func groupsCell(row *Row) string {
 
 // bestCell renders the SeaDex best column: the displayed best groups, plus the
 // count of BEST releases the operator's AnimeBytes toggle withheld
-// (Row.HiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes). The
-// marker exists so a row whose only bests are AnimeBytes releases is
-// distinguishable from an entry SeaDex lists no best for - both otherwise show
-// an empty best column, no qualifier and a have_unlisted verdict. The same
-// count rides the JSON key and the slog attribute under its own name, so every
-// renderer of the pair can make that distinction.
-// Counting hidden ALTS here would make the same claim for an entry SeaDex
-// genuinely lists no best for, so the projection is best-only. The count leaks
-// no AnimeBytes group, tracker, or link.
-//
-// The marker deliberately stays in THIS column rather than moving to the Notes
-// column with the per-release annotations: it counts releases that are NOT
-// listed here, so it annotates the column's completeness, not any group the
-// reader can see. A Notes entry, by contrast, is positionally bound to one
-// listed group, and there is no listed group for a withheld release to bind to.
+// (Row.HiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes), so a
+// row whose only bests are AnimeBytes releases is distinguishable from an entry
+// SeaDex lists no best for. The count leaks no group, tracker, or link.
 func bestCell(row *Row) string {
 	shown := displayBestGroups(row.Releases)
 	for i := range shown {
@@ -234,20 +206,10 @@ func bestCell(row *Row) string {
 }
 
 // notesCell renders the Notes column: this report's annotations of the best
-// releases the SeaDex-best column lists. It is the OTHER half of the l-f192
-// split - upstream group text and this app's annotation vocabulary no longer
-// share one display string, so no upstream group name can be read as a
-// curation warning from us (and quoting, which only moved the forgeable
-// boundary, is gone).
-//
-// Association is POSITIONAL, deliberately: one entry per group the best column
-// lists (same selectBestGroups order), `;`-separated, with emptyCell for a
-// group carrying no note. Naming the group inside the entry would put
-// untrusted group text back into the annotation string - the very seam this
-// change removes - and would then need an escape layer of its own to stay
-// unforgeable. Position needs neither: the group text stays in its own column.
-// A row with nothing to annotate renders the single empty marker the other
-// columns use, so the common case adds no noise.
+// releases the SeaDex-best column lists, kept out of the upstream group text so
+// no group name can be read as a curation warning from us. Association is
+// POSITIONAL: one entry per group the best column lists (same selectBestGroups
+// order), `;`-separated, with emptyCell for a group carrying no note.
 func notesCell(row *Row) string {
 	var entries []string
 	annotatedAny := false
@@ -263,16 +225,13 @@ func notesCell(row *Row) string {
 	if !annotatedAny {
 		return emptyCell
 	}
-	// The note words are this app's own canonical vocabulary, never upstream
-	// text; escapeCell is applied anyway so a future note spelling cannot
-	// break the cell.
+	// The note words are this app's own vocabulary; escapeCell is applied anyway.
 	return escapeCell(strings.Join(entries, "; "))
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison
-// annotations in parentheses: "approx" when the comparison used a coarse
-// multi-group bucket, and the daemon-vocabulary qualifier
-// (mixed/theoretical/incomplete) when one applies - e.g. "S2 (approx, mixed)".
+// annotations in parentheses: "approx" for a coarse multi-group bucket and the
+// qualifier when one applies - e.g. "S2 (approx, mixed)".
 func scopeCell(row *Row) string {
 	var notes []string
 	if row.Approx {
@@ -289,13 +248,9 @@ func scopeCell(row *Row) string {
 
 // scopeLabel renders the comparison scope recorded on the row at build time:
 // "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
-// comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
-// library item). It is a pure reader of Row.Scope — the classification itself
-// is the align.Decide scope decision recorded on the Row, so the label cannot drift
-// from the comparison actually performed. The JSON renderer publishes the same
-// value through align.ScopeKind.MarshalJSON, which is why this composes the season
-// number into a display label here rather than storing the composed string: the
-// wire keeps the kind and the number separable.
+// comparison. A pure reader of Row.Scope, so the label cannot drift from the
+// comparison actually performed; the JSON renderer publishes the same value
+// through align.ScopeKind.MarshalJSON, keeping kind and number separable.
 func scopeLabel(row *Row) string {
 	if row.Scope == align.ScopeSeason {
 		return "S" + strconv.Itoa(row.Season)
@@ -303,10 +258,9 @@ func scopeLabel(row *Row) string {
 	return row.Scope.String()
 }
 
-// releaseLinkKey is the structural dedupe identity for a links-cell entry.
-// Deduping on a comparable tuple (not a delimiter-joined string) means a
-// crafted tracker or URL containing the would-be delimiter cannot collide two
-// distinct (tracker, URL) pairs and silently drop a best-release link.
+// releaseLinkKey is the structural dedupe identity for a links-cell entry: a
+// comparable tuple, not a joined string, so a crafted tracker or URL carrying
+// the would-be delimiter cannot collide two distinct pairs.
 type releaseLinkKey struct {
 	tracker, url string
 }
@@ -324,16 +278,9 @@ func links(row *Row) string {
 	seen := make(map[releaseLinkKey]struct{}, len(row.Releases))
 	for i := range row.Releases {
 		rel := &row.Releases[i]
-		// A curation-warned or unobtainable best is not offered as a grab
-		// link: the links cell is an action affordance, and either SeaDex's
-		// own curators warn against the release or the daemon's obtainability
-		// rule says the operator cannot get it (it is annotated in the Notes
-		// column instead). This gate stays ANNOTATION-driven even though the
-		// verdict's best rung is now the operator's configured tag policy
-		// (audit.go's forfeitsBest): with filtering off a warned release is
-		// counted and displayed, but the report still does not hand out a
-		// one-click grab for something the curators flagged - the releases.moe
-		// link in the same cell is the deliberate route for that.
+		// A curation-warned or unobtainable best is not offered as a grab link: the
+		// cell is an action affordance, and the release is annotated in the Notes
+		// column instead. Deliberately annotation-driven, not verdict-driven.
 		if !rel.Best || rel.URL == "" || annotated(rel) {
 			continue
 		}
@@ -353,11 +300,8 @@ func links(row *Row) string {
 // selectBestGroups streams the distinct best-release groups in the report's
 // clean-before-annotated precedence, calling fn once per survivor and stopping
 // early when fn returns false. It is the ONE home for the selection rule both
-// best-group renderings share - the Markdown cell (displayBestGroups) and the
-// bounded slog attribute pair (joinBestAttrs) - so the two cannot disagree
-// about which groups a row lists or in what order. It yields per release and
-// never builds a slice, so the bounded consumer still caps before any
-// untrusted aggregate is materialized.
+// best-group renderings share, and it never builds a slice, so a bounded
+// consumer still caps before any untrusted aggregate is materialized.
 func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool) bool) {
 	seen := make(map[[sha256.Size]byte]struct{}, len(releases))
 	for _, annotatedPass := range []bool{false, true} {
@@ -380,16 +324,9 @@ func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool
 
 // displayBestGroups returns the distinct best-release groups in their original
 // case (deduped case-insensitively), for display. The returned text is UPSTREAM
-// SeaDex data and nothing else: this app's annotations for those releases are
-// rendered by notesCell, in their own column (l-f192). Sharing one display
-// string with them - even with the group quoted - left a forgeable boundary,
-// because the quote character is itself upstream-writable, so a group named
-// `SEV" (broken) "x` still opened with the exact bytes of a genuine curation
-// warning. The column stays complete (the report shows raw SeaDex data) while
-// the Notes column explains why the verdict did not count a release. Clean
-// bests are collected first and win the dedupe, so a group genuinely available
-// as a clean best never displays as the annotated one - which is also what
-// makes the positional Notes association stable.
+// SeaDex data and nothing else; this app's annotations are notesCell's column.
+// Clean bests are collected first and win the dedupe, which is also what makes
+// the positional Notes association stable.
 func displayBestGroups(releases []Release) []string {
 	var out []string
 	selectBestGroups(releases, func(rel *Release, _ bool) bool {
@@ -400,14 +337,10 @@ func displayBestGroups(releases []Release) []string {
 }
 
 // foldedGroupKey returns the case-insensitive dedupe identity of an untrusted
-// release group as a fixed-size digest. It streams unicode.ToLower rune by
-// rune into SHA-256 instead of materializing strings.ToLower's result, so a
-// hostile SeaDex entry (up to 512 torrents, each admitting a multi-MB group
-// string) can never make a dedupe map retain input-sized copies - the same
-// no-untrusted-aggregate-allocation contract logattr.Joiner enforces on the
-// rendered bytes (CWE-400). The digest is a lookup identity only, never
-// displayed, and matches strings.ToLower's per-rune folding, so dedupe
-// decisions are unchanged.
+// release group as a fixed-size digest. It streams unicode.ToLower rune by rune
+// into SHA-256 instead of materializing strings.ToLower's result, so a hostile
+// entry can never make a dedupe map retain input-sized copies (CWE-400). The
+// digest is a lookup identity only, never displayed.
 func foldedGroupKey(group string) [sha256.Size]byte {
 	h := sha256.New()
 	var encoded [utf8.UTFMax]byte
@@ -421,56 +354,39 @@ func foldedGroupKey(group string) [sha256.Size]byte {
 }
 
 // releaseNotes returns a release's display annotations: its canonical
-// curation-warning tags, plus "unobtainable" when the daemon's obtainability
-// rule (filter.Obtainable, computed in classifyReleases) rejected it as
-// verdict evidence, plus "url error" when SeaDex's record carries a url the
-// publisher refused, plus "unknown tracker" when the record's tracker is not
-// in this app's canonical table. The returned slice is always a fresh
+// curation-warning tags, plus "unobtainable", "url error" and "unknown tracker"
+// for the corresponding refusals. The returned slice is always a fresh
 // allocation, so callers can append without aliasing Release.Warnings.
 func releaseNotes(rel *Release) []string {
 	notes := append([]string(nil), rel.Warnings...)
 	if rel.URLError {
-		// Listed BEFORE "unobtainable" because it is the more specific and more
-		// actionable of the two: the record itself is wrong upstream, which is
+		// Listed BEFORE "unobtainable": the record itself is wrong upstream, which is
 		// also usually WHY the release reads unobtainable.
 		notes = append(notes, "url error")
 	}
 	if rel.UnknownTracker {
-		// The other refusal, and deliberately NOT spelled as a url error: the
-		// remedy is a seadex-scout tracker-table entry, not a SeaDex record fix
-		// (l-f127). Mutually exclusive with "url error" by construction (one
-		// refusal grade per release), so a row never shows both.
+		// The other refusal, mutually exclusive with "url error" by construction (one
+		// refusal grade per release), and deliberately not spelled as a url error.
 		notes = append(notes, "unknown tracker")
 	}
 	if rel.Unobtainable {
 		notes = append(notes, "unobtainable")
 	}
 	if rel.Filtered {
-		// The operator's own filters.exclude_tags policy excluded this release
-		// from the report surface, which forfeits its BEST evidence
-		// (audit.go's forfeitsBest). Without a note the row self-contradicts
-		// whenever the excluded tag is not a curation warning: the best column
-		// lists the group, the verdict says the on-disk copy of that same group
-		// is unlisted, and nothing explains why.
+		// The operator's own tag policy excluded this release, which forfeits its BEST
+		// evidence. Without a note the row self-contradicts whenever the excluded tag
+		// is not a curation warning.
 		notes = append(notes, "filtered")
 	}
 	return notes
 }
 
 // annotated reports whether a release carries display annotations - curation
-// warnings, a publisher refusal, the daemon obtainability rule's rejection, or the
-// operator's tag policy. It is the one predicate behind both render sites (the
-// grab-links cell excludes an annotated best, the SeaDex-best column marks it),
-// and it READS releaseNotes rather than restating its class list: that is what
-// actually stops a new annotation class from rendering a note while still being
-// offered as a grab link. Before this it was a second copy of the same list, and
-// the two had to be edited together (the `filtered` class was added to both in one
-// commit).
-//
-// It is DISPLAY only. Whether a release counts toward the verdict's best group
-// set is audit.go's forfeitsBest, which asks the operator's configured
-// filters.exclude_tags policy instead of the warning vocabulary - so a warned
-// release is annotated here while still being counted there (the default).
+// warnings, a publisher refusal, the obtainability rule's rejection, or the
+// operator's tag policy. It READS releaseNotes rather than restating its class
+// list, which is what stops a new annotation class from rendering a note while
+// still being offered as a grab link. DISPLAY only: verdict eligibility is
+// audit.go's forfeitsBest.
 func annotated(rel *Release) bool {
 	return len(releaseNotes(rel)) > 0
 }
@@ -486,28 +402,14 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 	return out
 }
 
-// --- slog emission ---
-
 // Log emits the report to slog: a summary line then one INFO line per row, so
-// the report is queryable in Loki alongside the human-readable Markdown. The
-// summary's msg is "report summary", deliberately distinct from Scout.Report's
-// "report generated" completion line, so a Loki query or counter keyed on
-// either message never double-counts a report run. Cancellation is observed
-// between row records (the signal context is one report-wide budget), so a
-// shutdown does not spend its grace period synchronously emitting hundreds of
-// row lines; the returned error wraps context.Cause, keeping a routine SIGTERM
-// off main's ERROR alert. Cancellation is also checked before the summary
-// line, so a shutdown that lands before Log is called never emits a
-// complete-looking summary with no rows behind it. Every row-derived string is
-// passed through capDisplayText (after URL redaction where applicable):
-// slog's JSONHandler escapes C0 controls but emits C1 controls and bidi
-// controls raw, so untrusted titles/groups/tracker strings could otherwise
-// smuggle terminal escapes or visual reordering into raw log/Loki views, and
-// the same values carry no size bound upstream, so each is also capped at the
-// per-attribute volume budget the notify emit path uses. The three aggregate
-// attributes (current_group, seadex_best, seadex_best_notes) apply that same
-// policy through the bounded logattr.Joiner, which never materializes the
-// untrusted aggregate before the cap applies.
+// the report is queryable in Loki alongside the Markdown. The summary's msg is
+// "report summary", deliberately distinct from Scout.Report's "report
+// generated", so a Loki counter keyed on either never double-counts a run.
+// Cancellation is observed before the summary and between row records, so a
+// shutdown neither emits a rowless summary nor spends its grace on row lines.
+// Every untrusted string passes through capDisplayText; the three aggregate
+// attributes stream through logattr.Joiner instead of being materialized.
 func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	if err := interrupted(ctx, "report log"); err != nil {
 		return err
@@ -561,11 +463,9 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 }
 
 // interrupted maps a done context to the audit-interrupted error for stage,
-// wrapping ctx.Err() as the classification token main's shutdown handling
-// keys on (errors.Is context.Canceled, keeping a routine SIGTERM off the
-// ERROR alert) plus the signal cause for display. It returns nil while the
-// context is live, so callers can gate each stage of the report's
-// log/persist pipeline on the one report-wide budget.
+// wrapping ctx.Err() as the classification token main's shutdown handling keys
+// on (errors.Is context.Canceled) plus the signal cause for display. It returns
+// nil while the context is live, so callers can gate each stage on one budget.
 func interrupted(ctx context.Context, stage string) error {
 	if ctx.Err() == nil {
 		return nil
@@ -573,56 +473,34 @@ func interrupted(ctx context.Context, stage string) error {
 	return shutdown.InterruptedAs(ctx, "audit: "+stage+" interrupted")
 }
 
-// --- File persistence ---
-
 // reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
 // filesystem-safe (no colons), second precision.
 const reportStampLayout = "2006-01-02T15-04-05Z"
 
 // WriteFiles renders the report and atomically writes a timestamped JSON +
-// Markdown pair into dir (report-<UTC timestamp>.json and .md), creating dir
-// as needed. The timestamp (the report's GeneratedAt) keeps successive reports
-// from overwriting one another; when a same-second pair already exists (a
-// duplicate or rapidly repeated scheduler invocation), a deterministic
-// -2/-3/... suffix is probed (reportPairStem) so the earlier report is never
-// silently replaced. The caller holds the report lock across the whole
-// generate+write, so the probe cannot race a concurrent writer.
+// Markdown pair into dir (report-<UTC timestamp>.json and .md), creating dir as
+// needed. A same-second pair takes a deterministic -2/-3/... suffix
+// (reportPairStem), so an earlier report is never silently replaced.
 //
-// Interruption contract: every stage up to and including the JSON write
-// observes ctx, so a shutdown stops the pipeline before it spends the grace
-// period on work it would lose anyway. Publishing the JSON half is the point
-// of no return - after it, the pair's completeness rests on the Markdown write,
-// which therefore runs on a short detached budget (markdownWriteGrace) rather
-// than being abandoned mid-pair. The one remaining half-pair outcome is a
-// non-durable JSON half or a hard Markdown write failure, both of which say so
-// in the log.
+// Interruption contract: every stage up to and including the JSON write observes
+// ctx. Publishing the JSON half is the point of no return, so the Markdown write
+// runs on a short detached budget rather than being abandoned mid-pair.
 func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
-	// dir is the secret-capable report.dir config value: every slog record
-	// below (including atomicfile's own WithLogger diagnostics) rides the
-	// redacting logger, and every returned error carries only the stage plus
-	// a redacted cause, so the expanded value never reaches Loki or main's
-	// error log. Filesystem calls keep the real path.
+	// dir is the secret-capable report.dir config value: every record below rides
+	// the redacting logger, and every returned error carries only the stage plus a
+	// redacted cause. Filesystem calls keep the real path.
 	log = pathredact.Logger(log, dir)
-	// The signal context is one report-wide budget: check it before each
-	// stage (cleanup, stem probing, rendering, the JSON write) so a shutdown
-	// stops the pipeline instead of spending its grace period on CPU-bound
-	// work whose atomic write would fail with context canceled anyway.
+	// The signal context is one report-wide budget: check it before each stage, so
+	// a shutdown stops the pipeline instead of spending its grace on lost work.
 	if err := interrupted(ctx, "report write"); err != nil {
 		return err
 	}
-	// Reap stale atomicfile temps first: a crash (SIGKILL/OOM/power loss)
-	// between temp create and rename orphans a .atomicfile-<digits>.tmp in
-	// the report dir forever otherwise. The caller holds report.lock, so no
-	// concurrent report writer owns an in-flight temp, and CleanupStaleTemps
-	// matches only the exact temp-name convention - never a report file.
-	// WithLogger keeps the library's own diagnostics (including its one
-	// removed-stale-temps INFO) on the report logger; only the top-level
-	// readdir failure is unlogged by the library, so that WARN stays here. A
-	// missing dir is not an error at all (atomicfile's documented contract), and
-	// cycle.TryReportLock has already created it before this runs.
+	// Reap stale atomicfile temps first: a crash between temp create and rename
+	// orphans a .atomicfile-<digits>.tmp in the report dir forever otherwise. The
+	// caller holds report.lock, so no concurrent writer owns an in-flight temp, and
+	// a missing dir is not an error.
 	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
-		// No dir attribute: the redacting logger would mask it anyway, and
-		// the fixed message already identifies the location as report.dir.
+		// No dir attribute: the redacting logger would mask it anyway.
 		log.Warn("stale report temp cleanup failed", "error", err)
 	}
 	base, err := reportPairStem(ctx, dir, r.GeneratedAt)
@@ -633,33 +511,24 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	if interruptErr := interrupted(ctx, "report render"); interruptErr != nil {
 		return interruptErr
 	}
-	// Render from a credential-redacted copy: report rows carry ArrURLs from
-	// the raw library snapshot, so a credentialed public_url (userinfo, query
-	// token) would otherwise persist verbatim into the report pair even
-	// though the state and slog paths strip the same values. Redacting at the
-	// persistence sink covers every caller.
+	// Render from a credential-redacted copy: report rows carry ArrURLs from the
+	// raw library snapshot, so a credentialed public_url would otherwise persist
+	// verbatim into the report pair.
 	safe := redactReportURLs(r)
-	// The JSON half is written FIRST, deliberately: whatever goes wrong from
-	// here, the failure modes leave a .json without its .md - never a dangling
-	// .md without its machine-readable pair.
+	// The JSON half is written FIRST, deliberately: every failure mode from here
+	// leaves a .json without its .md, never a .md without its readable pair.
 	data, err := renderJSON(safe)
 	if err != nil {
 		return fmt.Errorf("audit: encode json: %w", err)
 	}
-	// BOTH halves are rendered here, before either is published: rendering is
-	// the only CPU-bound work the Markdown half has, and it must stay behind
-	// the report-wide gate above (that gate exists so a shutdown does not
-	// spend its grace period rendering). Once the JSON rename commits, the
-	// pair's completeness depends on the Markdown WRITE alone, which then runs
-	// on a detached budget - so nothing expensive may be left for it (l-f190).
+	// BOTH halves are rendered here, before either is published: once the JSON
+	// rename commits, the pair's completeness depends on the Markdown WRITE alone,
+	// which runs on a detached budget, so nothing expensive may be left for it.
 	markdown := []byte(renderMarkdown(safe))
 	// The pair ordering only holds when the JSON half's directory entry is
-	// crash-durable: atomicfile reports a successful rename whose parent-dir
-	// fsync failed as Durable=false with a NIL error, so publishing the
-	// Markdown half on that result could leave a recovered .md without its
-	// machine-readable pair. Stop with the JSON half only instead - but as a
-	// degradation, not a failure: both the bytes and the operator's next action
-	// are unaffected by an fsync that did not land, so this returns nil.
+	// crash-durable: atomicfile reports a rename whose parent-dir fsync failed as
+	// Durable=false with a NIL error, so stop with the JSON half only - as a
+	// degradation, not a failure, since the bytes and the next action are the same.
 	jsonDurable, err := writeReportHalf(ctx, "json", dir, jsonPath, data, log)
 	if err != nil {
 		return err
@@ -667,34 +536,18 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	if !jsonDurable {
 		log.Warn("report json written but not crash-durable; skipping the markdown half to keep the pair ordering",
 			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", false)
-		// The run published an artifact and returns success, so it still emits
-		// the success record: alerts.yaml's SeadexScoutReportWritten rule keys
-		// on this message, and staying silent here blinded it on a run whose
-		// machine-readable half IS on disk (l-f188). The empty markdown name is
-		// what tells the operator only one half landed - the same reason the
-		// non-durable MARKDOWN path below emits it too rather than going quiet.
+		// The run published an artifact and returns success, so it still emits the
+		// success record alerts.yaml's SeadexScoutReportWritten rule keys on. The
+		// empty markdown name is what tells the operator only one half landed.
 		reportWritten(log, "", jsonPath, len(r.Rows), false)
 		return nil
 	}
-	// The Markdown half rides a detached context: the JSON rename has
-	// committed, so from here a cancellation (a SIGTERM, or the composition
-	// root's cycle.detachedWriteGrace expiring on a slow fsync) would
-	// half-publish permanently - the next run probes a fresh stem
-	// (reportPairStem needs BOTH halves free), leaving the orphaned .json
-	// without its .md forever. The human-readable half is the product of a
-	// ~25-minute generation and finishing it is milliseconds of I/O on bytes
-	// already rendered above, so the ordering guarantee must not be satisfied
-	// by losing half the artifact. atomicfile re-checks the context itself, so
-	// detaching here is what actually lets the write proceed.
-	//
-	// The extra grace is armed ONLY once a shutdown has landed, mirroring
-	// cycle.DetachedWriteContext, which starts its own timer on parent-done
-	// rather than up front. An unconditional ceiling here would cap the SECOND
-	// half of the pair below the budget the FIRST half just had (the caller's
-	// context carries no deadline until a signal lands), so on any mount where
-	// one write+fsync can exceed markdownWriteGrace - a network-backed or
-	// loaded /config - every report would half-publish permanently, which is
-	// the exact outcome the paragraph above exists to prevent.
+	// The Markdown half rides a detached context: the JSON rename has committed, so
+	// from here a cancellation would half-publish permanently - the next run probes
+	// a fresh stem (reportPairStem needs BOTH halves free), orphaning the .json.
+	// The extra grace is armed ONLY once a shutdown has landed: an unconditional
+	// ceiling would cap the SECOND half of the pair below the budget the FIRST half
+	// just had, so on a slow mount every report would half-publish permanently.
 	mdCtx := context.WithoutCancel(ctx)
 	if ctx.Err() != nil {
 		var cancel context.CancelFunc
@@ -702,16 +555,12 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 		defer cancel()
 	}
 	// A non-durable Markdown half cannot create a dangling .md (the .json is
-	// already durably committed above), so the pair is complete and the success
-	// record must still be emitted - the alert that watches for it would
-	// otherwise go silent on a run whose files are both on disk. The durable
-	// attribute keeps the line honest about what may not survive a power loss.
+	// already durably committed), so the pair is complete and the success record
+	// must still be emitted; the durable attribute keeps the line honest.
 	mdDurable, err := writeReportHalf(mdCtx, "markdown", dir, mdPath, markdown, log)
 	if err != nil {
-		// The JSON half is already durably committed, so this failure publishes
-		// half a pair: name the surviving basename, or the operator reading the
-		// markdown error cannot tell the machine-readable half landed and is now
-		// a pair-less file the app never deletes (reports are pruned by hand).
+		// The JSON half is already durably committed, so this failure publishes half a
+		// pair: name the surviving basename.
 		log.Warn("report markdown half failed; the json half is published without it",
 			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "error", err)
 		return err
@@ -721,25 +570,19 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 }
 
 // markdownWriteGrace bounds the detached Markdown write AFTER A SHUTDOWN, and
-// only then: with no signal pending the caller's context carries no deadline
-// (cycle.DetachedWriteContext arms its own timer on parent-done), and the JSON
-// half is written under exactly that context - so imposing a ceiling on the
-// markdown half alone could only lose the pair, never protect it.
-//
-// It is deliberately short because it is spent ON TOP of a budget that has
-// already run out: the bytes are rendered, so it covers one atomic
-// write+rename+fsync, and cycle.detachedWriteGrace (5s) plus this stays inside
-// Docker's default 10s stop grace, so the pair lands before SIGKILL.
+// only then: with no signal pending the caller's context carries no deadline and
+// the JSON half is written under exactly that context, so a ceiling on the
+// markdown half alone could only lose the pair. It is deliberately short because
+// it is spent ON TOP of a budget that has already run out - the bytes are
+// rendered, so it covers one atomic write+rename+fsync inside Docker's 10s stop
+// grace.
 const markdownWriteGrace = 2 * time.Second
 
 // reportWritten emits the report pair's success record. It is the ONE call site
-// of the alert-keyed "report written" message, so every path that publishes an
-// artifact and returns nil announces itself the same way: markdown is the empty
-// string when only the JSON half landed (the json-only degradation), and
-// durable reports whether the LAST published half's directory entry is
-// crash-durable. Basenames only: the stem is timestamp-derived (never
-// dir-derived), so the record stays useful without shipping the secret-capable
-// report.dir value.
+// of the alert-keyed "report written" message: markdown is the empty string when
+// only the JSON half landed, and durable reports whether the last published
+// half's directory entry is crash-durable. Basenames only, so the record never
+// ships the secret-capable report.dir value.
 func reportWritten(log *slog.Logger, mdPath, jsonPath string, anime int, durable bool) {
 	markdown := ""
 	if mdPath != "" {
@@ -749,10 +592,8 @@ func reportWritten(log *slog.Logger, mdPath, jsonPath string, anime int, durable
 }
 
 // redactReportURLs returns a shallow copy of the report whose rows carry
-// credential-free ArrURLs (library.SafeLogURL strips userinfo, query, and
-// fragment), so a credentialed arr public_url never lands in the persisted
-// report files. The canonical Report is never mutated: the row slice is
-// cloned before the URLs are replaced.
+// credential-free ArrURLs, so a credentialed arr public_url never lands in the
+// persisted report files. The canonical Report is never mutated.
 func redactReportURLs(r *Report) *Report {
 	out := *r
 	out.Rows = slices.Clone(r.Rows)
@@ -762,18 +603,12 @@ func redactReportURLs(r *Report) *Report {
 	return &out
 }
 
-// reportPairStem selects a collision-free filename stem for the report pair:
-// the second-precision GeneratedAt stem when neither half exists, otherwise
-// the first deterministic "-N" suffix (N >= 2) where both the .json and .md
-// halves are free. A non-NotExist stat error is surfaced rather than risking
-// an overwrite. The caller holds report.lock for the whole generate+write, so
-// the probe cannot race a concurrent writer; a strictly-sequential same-second
-// rerun therefore gets a suffixed pair instead of silently overwriting the
-// earlier report (each run re-walks mutable upstream and library state, so a
-// same-second timestamp does not mean the same content). The loop terminates
-// because every probed stem must be occupied on disk to advance; each probe
-// round observes the report-wide context so a shutdown stops the directory
-// scan instead of starting new stat work after cancellation.
+// reportPairStem selects a collision-free filename stem for the report pair: the
+// second-precision GeneratedAt stem when neither half exists, otherwise the
+// first deterministic "-N" suffix (N >= 2) where both halves are free. A
+// non-NotExist stat error is surfaced rather than risking an overwrite. The loop
+// terminates because every probed stem must be occupied on disk to advance, and
+// each round observes the report-wide context.
 func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (string, error) {
 	base := filepath.Join(dir, "report-"+generatedAt.UTC().Format(reportStampLayout))
 	stem := base
@@ -787,8 +622,7 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 				free = false
 				break
 			} else if !errors.Is(err, os.ErrNotExist) {
-				// Basename plus redacted cause only: this error reaches
-				// main's log and dir is the secret-capable report.dir value.
+				// Basename plus redacted cause only: dir is secret-capable.
 				return "", fmt.Errorf("audit: probe report path %s: %w", filepath.Base(path), pathredact.Err(dir, err))
 			}
 		}
@@ -800,27 +634,19 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 }
 
 // atomicWriteFile is atomicfile.WriteFile behind a package variable so the
-// durability gates in WriteFiles can be exercised with a Durable=false
-// result; a parent-directory fsync failure cannot be induced on a test
-// filesystem. Production always uses atomicfile.WriteFile.
+// durability gates in WriteFiles can be exercised with a Durable=false result;
+// a parent-directory fsync failure cannot be induced on a test filesystem.
 var atomicWriteFile = atomicfile.WriteFile
 
 // writeAtomic writes data to path atomically under the report pair's fixed
-// option set (the report logger, the owner-only file mode) and returns
-// atomicfile's whole Result rather than just an error, because the caller gates
-// the pair ORDERING on Result.Durable. writeReportHalf owns that policy and
-// documents the Durable=false-with-a-nil-error contract it turns on.
+// option set and returns atomicfile's whole Result rather than just an error,
+// because the caller gates the pair ORDERING on Result.Durable.
 //
 // Reports enumerate the operator's library and can carry private-tracker page
-// links, so the directory and every written half are owner-only (least
-// privilege, CWE-732): another local account able to traverse the bind-mounted
-// config tree must not read the inventory. Neither MkdirAll nor an atomic
-// replacement retightens what already exists on disk - the README's upgrade
-// note covers historical reports (`chmod -R go-rwx /config/reports`).
+// links, so the directory and every written half are owner-only (CWE-732).
 func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
-	// The directory's privacy rule has one home (internal/reportfs): atomicfile's
-	// WithMkdirMode goes through MkdirAll's perm argument, which a umask or an
-	// inherited default ACL filters, so the mode is pinned here instead.
+	// The directory's privacy rule has one home (internal/reportfs): WithMkdirMode
+	// goes through MkdirAll's perm argument, which a umask or default ACL filters.
 	if err := reportfs.MakeDir(filepath.Dir(path)); err != nil {
 		return atomicfile.Result{}, err
 	}
@@ -831,20 +657,11 @@ func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger
 
 // writeReportHalf persists one report half and applies the two policies both
 // halves share: a hard write failure is wrapped with the stage and the basename
-// only (dir is the secret-capable report.dir value, so the cause is redacted)
-// and returned as an error, while a rename whose parent-directory fsync failed -
-// which atomicfile reports as Durable=false with a NIL error - is reported
-// through the durable return value, NOT as an error.
-//
-// The split is the alerting rule: a non-durable write SUCCEEDED (atomicfile's
-// contract is that a nil error means the bytes reached their final path; only
-// the directory entry may not survive a power loss), so there is nothing for the
-// operator to do and no failure to report - a re-run cannot fix an fsync. It
-// still matters for ORDERING, which is why the flag is returned rather than
-// swallowed. atomicfile itself emits the one WARN carrying the causal fsync
-// error (WithLogger keeps it on the report logger), so no second app-side
-// record is layered on top. Keeping both halves on one path is what stops the
-// json and markdown stages from drifting apart.
+// only (the cause is redacted) and returned as an error, while a rename whose
+// parent-directory fsync failed - atomicfile's Durable=false with a NIL error -
+// is reported through the durable return value, NOT as an error. A non-durable
+// write SUCCEEDED, so there is nothing for the operator to do; it still matters
+// for ORDERING, which is why the flag is returned rather than swallowed.
 func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, log *slog.Logger) (durable bool, err error) {
 	res, err := writeAtomic(ctx, path, data, log)
 	if err != nil {
@@ -853,25 +670,14 @@ func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, 
 	return res.Durable, nil
 }
 
-// --- Sanitizers + link/cell escaping ---
-
-// escapeLinkURL percent-encodes the characters in a URL that would break out
-// of a Markdown link's ](...) destination or the surrounding table cell/row.
-// The ASCII half is logattr.EscapeLinkDestination, the one home this policy
-// shares with internal/notify's alert attributes: parentheses, angle brackets,
-// pipes, backslash and backtick (the CommonMark inline metacharacters still
-// active inside a link destination), both quotes (inert in CommonMark itself,
-// but attribute-context defense for a downstream MD-to-HTML conversion emitting
-// the destination into href="..."), and every ASCII whitespace form (space,
-// tab, vertical tab, form feed, CR, LF). On top of it this function also
-// percent-encodes the above-ASCII policy runes url.Parse accepts but a
-// terminal or Markdown viewer must never receive raw — C1 controls
-// (U+0080-U+009F, terminal-escape introducers), the full Unicode Bidi_Control
-// set (visual reordering of the rendered links cell), and the U+2028/U+2029
-// line separators — classified by runesafe.IsUnsafeNonASCII (the shared
-// policy's above-ASCII subset; the escaper's ASCII replacements cover the
-// rest). Percent-encoding is semantically transparent for a URL, so an
-// ordinary destination is unchanged.
+// escapeLinkURL percent-encodes the characters in a URL that would break out of
+// a Markdown link's ](...) destination or the surrounding table cell/row. The
+// ASCII half is logattr.EscapeLinkDestination, the one home this policy shares
+// with internal/notify's alert attributes; on top of it this percent-encodes the
+// above-ASCII policy runes url.Parse accepts but a terminal or Markdown viewer
+// must never receive raw (C1 controls, the Bidi_Control set, U+2028/U+2029),
+// classified by runesafe.IsUnsafeNonASCII. Percent-encoding is semantically
+// transparent, so an ordinary destination is unchanged.
 func escapeLinkURL(u string) string {
 	u = logattr.EscapeLinkDestination(u)
 	var b strings.Builder
@@ -891,25 +697,11 @@ func escapeLinkURL(u string) string {
 // mdLink builds a Markdown link with a table-cell-safe label and a
 // metacharacter-escaped destination. It emits a link only when the destination
 // passes the app's ONE structural vouch step for a browser-destined URL
-// (internal/displaylink, shared with the tracker-link publisher, the indexer's
-// display gate and the snapshot reader): an absolute http(s) URL, free of a
-// userinfo authority and of the backslash / tab-newline smuggling shapes a
-// browser reads differently from net/url. Anything else - another scheme
-// (javascript:, data:), a hidden-host or relative form, an unparseable
-// destination - degrades to the escaped label as plain text, exactly as a
-// rejected destination already did.
-//
-// It used to apply its own gate (TrimSpace + url.Parse + an http/https scheme
-// check), which was a second, weaker vocabulary for the same knowledge: it
-// checked neither the absolute class nor userinfo nor the smuggling shapes, so a
-// hidden-host spelling a browser navigates elsewhere still rendered as an active
-// link (l-f189/h-f8). Reading the shared home means a newly refused smuggling
-// form is learned once, for every gate.
-//
-// The emitted destination is the classified form's Trimmed string - the
-// preprocessed value the vouch step actually judged - so the link a reader
-// clicks is the URL that was vouched, not an original spelling a browser would
-// silently rewrite.
+// (internal/displaylink): an absolute http(s) URL, free of a userinfo authority
+// and of the smuggling shapes a browser reads differently from net/url.
+// Anything else degrades to the escaped label as plain text. The emitted
+// destination is the classified form's Trimmed string - the value the vouch step
+// actually judged, not a spelling a browser would silently rewrite.
 func mdLink(label, rawURL string) string {
 	safeLabel := escapeCell(label)
 	f := urlform.Classify(rawURL)
@@ -930,15 +722,11 @@ var cellEscaper = strings.NewReplacer(
 	"]", "&#93;",
 )
 
-// bestGroupEscaper encodes the characters the SeaDex-best column's own
-// structure uses, on top of escapeCell's cell escapes: the comma that
-// separates the listed groups - the positional key notesCell and
-// joinBestNotesAttr bind their entries to - and the parentheses that delimit
-// the "(N best hidden: animebytes)" completeness marker. escapeCell leaves
-// all three, so without this an upstream group named "SEV, PMR" reads as two
-// listed groups (shifting every later note onto the wrong group) and one
-// named "PMR (1 best hidden: animebytes)" forges the app's own completeness
-// claim - the half of the l-f192 seam the notes split did not remove.
+// bestGroupEscaper encodes the characters the SeaDex-best column's own structure
+// uses, on top of escapeCell's cell escapes: the comma separating the listed
+// groups - the positional key notesCell and joinBestAttrs bind to - and the
+// parentheses delimiting the "(N best hidden: animebytes)" marker. Without it a
+// group named "SEV, PMR" reads as two listed groups, shifting every later note.
 var bestGroupEscaper = strings.NewReplacer(",", "&#44;", "(", "&#40;", ")", "&#41;")
 
 // escapeBestGroup renders one upstream group for the SeaDex-best column.
@@ -947,41 +735,28 @@ func escapeBestGroup(group string) string {
 }
 
 // sanitizeDisplayText makes an untrusted string safe for the machine-readable
-// outputs (the JSON report file and slog attributes): the unsafe-rune set is
-// the shared runesafe policy (C0 controls except CR/LF, which both encoders
-// escape; DEL; C1 controls, single-rune terminal-escape introducers emitted
-// raw by encoding/json and slog's JSONHandler; Unicode bidi controls; and the
-// U+2028/U+2029 line separators), each replaced with a space. Markdown output
-// has its own context-aware sanitizers (escapeCell, escapeLinkURL).
+// outputs (the JSON report file and slog attributes): the unsafe-rune set is the
+// shared runesafe policy, each replaced with a space. Markdown output has its own
+// context-aware sanitizers (escapeCell, escapeLinkURL).
 func sanitizeDisplayText(s string) string {
 	return runesafe.Sanitize(s)
 }
 
 // maxAttrBytes is the per-attribute volume budget the report's slog path
-// enforces on every untrusted value. The policy itself (the budget, the
-// truncation marker, the rune sanitization, and the cap-before-sanitize order)
-// lives in internal/logattr, shared with the daemon's notify emit path so the
-// two slog emitters cannot drift; this alias keeps the package's own bound
-// readable.
+// enforces on every untrusted value. The policy itself lives in internal/logattr,
+// shared with the daemon's notify emit path; this alias keeps the bound readable.
 const maxAttrBytes = logattr.MaxBytes
 
-// capDisplayText is sanitizeDisplayText plus a volume cap: an honest value
-// passes byte-identical, an oversized one (SeaDex admits multi-MB group and
-// URL strings, up to 512 torrents per entry) is capped on a rune boundary
-// with a "..." marker so one Loki record cannot balloon past the pipeline's
-// line limit or amplify memory. The cap is applied BEFORE the per-rune
-// sanitize (inside the shared primitive) so an oversized value is never fully
-// copied.
-//
-// A MULTI-SOURCE attribute (a joined group or link list) must never be
-// materialized and handed to capDisplayText - joining first would allocate the
-// whole untrusted aggregate before the bound applies. Those stream through a
-// logattr.Joiner instead (joinGroupsAttr / joinBestAttrs).
+// capDisplayText is sanitizeDisplayText plus a volume cap: an honest value passes
+// byte-identical, an oversized one is capped on a rune boundary with a "..."
+// marker, before the per-rune sanitize so it is never fully copied. A
+// MULTI-SOURCE attribute must never be materialized and handed to it: those
+// stream through a logattr.Joiner (joinGroupsAttr / joinBestAttrs).
 func capDisplayText(s string) string { return logattr.Cap(s) }
 
-// joinGroupsAttr renders a row's group list as the comma-separated
-// current_group attribute through the bounded joiner: the list is untrusted
-// SeaDex/arr data and must not be materialized before the cap applies.
+// joinGroupsAttr renders a row's group list as the comma-separated current_group
+// attribute through the bounded joiner: the list is untrusted and must not be
+// materialized before the cap applies.
 func joinGroupsAttr(groups []string) string {
 	j := logattr.NewJoiner()
 	for i := range groups {
@@ -996,28 +771,12 @@ func joinGroupsAttr(groups []string) string {
 }
 
 // joinBestAttrs renders the seadex_best and seadex_best_notes attributes in ONE
-// pass over selectBestGroups, under a COUPLED stop: a piece is admitted only
-// when both joiners can take it, so the two attributes always carry the same
-// number of positional slots. Two independent budgets cut at different indices -
-// a group is untrusted, possibly multi-MB upstream text while a note is one to
-// four words of this app's own vocabulary - which silently re-bound every note
-// past the group attribute's cut to a group the line did not carry, with the
-// "..." marker on the other attribute where a reader could not see it.
-//
-// It streams selectBestGroups - the shared selection rule (clean bests first,
-// case-insensitive dedupe on the original-case group) - rather than calling
-// displayBestGroups, because that helper builds the complete group slice, which
-// is exactly the untrusted aggregate the budget must bound. Group text still
-// goes through writeBestGroupAttr, so a comma inside a group cannot read as the
-// seadex_best separator the notes bind to positionally.
-//
-// groups carries ONLY upstream group text, matching the Markdown best column;
-// this app's annotations ride notes, positionally, so a forged group cannot
-// masquerade as an app annotation for anyone reading the row in Loki either.
-// notes is the empty string when no annotated best exists, rather than a row of
-// placeholders, so a Loki query can test it for emptiness. No shipped alert rule
-// reads seadex_best or seadex_best_notes (they are report-mode attributes; the
-// daemon's finding line carries neither).
+// pass over selectBestGroups, under a COUPLED stop: a piece is admitted only when
+// both joiners can take it, so the two attributes always carry the same number of
+// positional slots. Two independent budgets cut at different indices, silently
+// re-binding a note to a group the line did not carry. groups carries ONLY
+// upstream group text, and notes is the empty string when no annotated best
+// exists, so a Loki query can test it for emptiness.
 func joinBestAttrs(releases []Release) (groups, notes string) {
 	gj, nj := logattr.NewJoiner(), logattr.NewJoiner()
 	first := true
@@ -1046,11 +805,10 @@ func joinBestAttrs(releases []Release) (groups, notes string) {
 	return gj.String(), nj.String()
 }
 
-// writeBestGroupAttr streams one group into j with its commas encoded, so a
-// comma in upstream group text cannot read as the seadex_best separator that
-// seadex_best_notes binds to positionally. It cuts incrementally instead of
-// escaping the whole value first: strings.Cut returns substrings, so a
-// multi-MB group is never copied, and each full Write ends the loop.
+// writeBestGroupAttr streams one group into j with its commas encoded, so a comma
+// in upstream group text cannot read as the seadex_best separator that
+// seadex_best_notes binds to positionally. It cuts incrementally rather than
+// escaping the whole value first, so a multi-MB group is never copied.
 func writeBestGroupAttr(j *logattr.Joiner, group string) bool {
 	for {
 		before, after, found := strings.Cut(group, ",")
@@ -1067,9 +825,8 @@ func writeBestGroupAttr(j *logattr.Joiner, group string) bool {
 	}
 }
 
-// writeNotesAttr appends one annotated best's note list to j, matching
-// notesCell's comma-joined spelling, and reports whether the joiner can still
-// accept more.
+// writeNotesAttr appends one annotated best's note list to j, matching notesCell's
+// comma-joined spelling, and reports whether the joiner can still accept more.
 func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
 	for i := range notes {
 		if i > 0 && !j.WriteSep(", ") {
@@ -1083,13 +840,9 @@ func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
 }
 
 // sanitizeOutput returns a deep-enough copy of the report with every untrusted
-// string (row text, group lists, release fields, incomplete-mapping links)
-// passed through sanitizeDisplayText, for the machine-readable outputs. The
-// canonical Report is never mutated: its rows and nested slices are copied
-// before sanitizing (each helper below preserves the current nil/empty
-// shape). Verdict, Qualifier, and release Warnings are app-defined
-// vocabularies (curationWarnings returns canonical constants, never raw
-// upstream tag bytes), not upstream data, and stay as-is.
+// string passed through sanitizeDisplayText, for the machine-readable outputs.
+// The canonical Report is never mutated. Verdict, Qualifier and release Warnings
+// are app-defined vocabularies, not upstream data, and stay as-is.
 func sanitizeOutput(r *Report) *Report {
 	out := *r
 	out.Rows = sanitizedRows(r.Rows)
@@ -1097,11 +850,9 @@ func sanitizeOutput(r *Report) *Report {
 	return &out
 }
 
-// sanitizedRows returns a sanitized clone of the report rows: each row's
-// scalar strings pass through sanitizeDisplayText and its nested slices are
-// replaced by their sanitized clones. Nil rows become []Row{} to preserve
-// the pre-review empty-array JSON shape ("rows": []) for a nil-rows Report
-// (slices.Clone(nil) is nil, which would render null).
+// sanitizedRows returns a sanitized clone of the report rows. Nil rows become
+// []Row{} to preserve the empty-array JSON shape ("rows": []), since
+// slices.Clone(nil) is nil and would render null.
 func sanitizedRows(rows []Row) []Row {
 	out := slices.Clone(rows)
 	if out == nil {
@@ -1162,18 +913,13 @@ func sanitizedIncomplete(inc []IncompleteEntry) []IncompleteEntry {
 }
 
 // escapeCell makes a string safe inside a Markdown table cell. It uses HTML
-// numeric/character entities instead of backslash escapes so a pre-existing
-// backslash in the text cannot cancel an inserted escape (\] or \| could
-// otherwise break out of a link label or table cell). It neutralizes the raw
-// HTML metacharacters (& < >) so untrusted text such as <img ...> cannot
-// survive as raw Markdown HTML, and encodes the table/link delimiters (| [ ])
-// and the backslash itself. strings.NewReplacer performs a
-// single non-overlapping left-to-right pass and never re-scans its replacement
-// output, so encoding & first does not double-encode the entities it inserts.
-// A runesafe.SanitizeSingleLine pre-pass removes the C0/DEL/C1 control
-// characters, the full Unicode Bidi_Control set, the U+2028/U+2029 line
-// separators (terminal-escape, visual-reordering, and line-break smuggling)
-// AND CR/LF, which a Markdown table cell - a single-line sink - cannot carry.
+// entities instead of backslash escapes so a pre-existing backslash cannot
+// cancel an inserted escape, neutralizes the raw HTML metacharacters (& < >),
+// and encodes the table/link delimiters (| [ ]) and the backslash itself.
+// strings.NewReplacer makes one non-overlapping left-to-right pass and never
+// re-scans its output, so encoding & first does not double-encode. A
+// runesafe.SanitizeSingleLine pre-pass removes the control and bidi runes AND
+// CR/LF, which a single-line sink cannot carry.
 func escapeCell(s string) string {
 	return cellEscaper.Replace(runesafe.SanitizeSingleLine(s))
 }
@@ -1187,12 +933,9 @@ func orEmpty(s string) string {
 }
 
 // orTracker labels a link by tracker name, falling back to "link" when the
-// canonical resolution names nothing at all (no known host, no known label,
-// and no host to fall back on). The name itself comes from
-// tracker.CanonicalName, the one home the daemon's alert attributes share, so
-// a Nyaa link whose SeaDex tracker field is blank, an alias, or oddly cased is
-// labelled "Nyaa" in the report exactly as it is in the alert, and a tracker
-// table edit reaches both surfaces.
+// canonical resolution names nothing at all. The name comes from
+// tracker.CanonicalName, the one home the daemon's alert attributes share, so a
+// blank or oddly-cased SeaDex tracker field labels the same on both surfaces.
 func orTracker(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return "link"

@@ -42,19 +42,7 @@ func KeepNonTracker(r *release.Release, opts Options) bool {
 // Obtainable reports whether the operator could actually get this release: a
 // public tracker (Nyaa, AnimeTosho, RuTracker) is obtainable unless the ABVisible
 // cross-check hides it (an AnimeBytes-hosted or malformed URL with the toggle
-// off); AnimeBytes is obtainable only when the operator enables it. Every
-// other tracker (rare on SeaDex, and any unrecognized one) is treated as not
-// obtainable, so a release the operator cannot grab never becomes a finding.
-// Obtainable additionally takes the release's raw upstream URL (exactly as
-// SeaDex supplied it, BEFORE any label-trusting normalization such as
-// trackerlink.Publish) so the AnimeBytes URL-host cross-check (see
-// ABVisible) inspects unmodified evidence rather than a rewritten link; pass
-// "" when no URL is available. It ALSO requires the canonical usable URL
-// (trackerlink.Publish's output): a release whose usable URL is empty -
-// no URL at all, or one the canonicalizer rejected as malformed, foreign-host,
-// or unsafe - is never obtainable, because the operator has no link to act on,
-// so it must not count as comparison evidence (the SeaDex client already warns
-// about the unusable URL).
+// off); AnimeBytes is obtainable only when the operator enables it.
 func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) bool {
 	if usableURL == "" {
 		return false
@@ -72,18 +60,7 @@ func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) b
 // ABVisible reports whether a release may surface to the operator: the
 // animebytes toggle's fail-closed drop rule, and the single home of it.
 //
-// With the toggle ON everything surfaces. With it OFF only tracker.ABNone
-// surfaces, so ambiguous evidence is hidden alongside definite evidence: a
-// torrent that MIGHT be an AnimeBytes link must not be rendered as a clickable
-// one while the operator has said they have no AnimeBytes account. Used by the
-// daemon's obtainability filter and the audit report's verdict eligibility. The
-// audit report's row LISTING deliberately takes the other fail direction and
-// gates on tracker.ClassifyAB == tracker.ABDefinite instead, so a release with
-// no usable link is annotated unobtainable rather than erased.
-//
-// The grade itself is internal/tracker's (the single home of the untrusted
-// (label, URL) identity gates, beside tracker.CanonicalName); what lives here is
-// the operator POLICY over it.
+// With the toggle ON everything surfaces.
 func ABVisible(trackerName, rawURL string, animeBytes bool) bool {
 	return animeBytes || tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone
 }

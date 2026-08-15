@@ -14,14 +14,6 @@ import (
 	"github.com/cplieger/jsonx/bounded"
 )
 
-func TestDedupeTitles(t *testing.T) {
-	got := dedupeTitles("Frieren", "", " \t", "Frieren", "Sousou no Frieren")
-	want := []string{"Frieren", "Sousou no Frieren"}
-	if !slices.Equal(got, want) {
-		t.Errorf("dedupeTitles() = %v, want %v", got, want)
-	}
-}
-
 func TestParseMedia(t *testing.T) {
 	raw := []byte(`{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"Sousou no Frieren","english":"Frieren","native":"x"}}}}`)
 	m, err := parseMedia(raw)

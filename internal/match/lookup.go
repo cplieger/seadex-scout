@@ -38,13 +38,7 @@ const (
 )
 
 // MemoEntry is a cached AniList lookup (titles/format/year), or a negative
-// result, keyed by AniList ID in a Memo. Expiry is the instant the entry
-// stops being served (stamped at write time with a jittered TTL; see the
-// package comment): an expired entry is a lookup miss, re-fetched and
-// re-stamped on its next use, and pruned when a Match pass ends without
-// renewing it. A missing Expiry reads as expired, so an entry written by a
-// build older than the expiry policy is simply re-fetched: this app carries no
-// state migration.
+// result, keyed by AniList ID in a Memo.
 type MemoEntry struct {
 	Expiry   time.Time `json:"expiry,omitzero"`
 	Format   string    `json:"format,omitempty"`
@@ -68,14 +62,6 @@ type Memo struct {
 	// dirty records whether this pass wrote to the memo at all, so a caller can
 	// decide whether persisting is worth the cost. It is UNEXPORTED, so it never
 	// reaches the wire and a loaded memo always starts clean.
-	//
-	// It exists because state.json is one ~2.5 MB document dominated by the
-	// library snapshot, and a tick rewrites the whole thing to persist this map
-	// plus the mapping cache. On a tick that renewed nothing, that write buys
-	// nothing. Every mutation therefore goes through put/remove rather than
-	// touching Entries directly: a flag that six call sites have to remember to
-	// set is a flag that is eventually wrong, and the failure would be silent
-	// (a renewal computed, not persisted, re-fetched next pass).
 	dirty bool
 }
 
@@ -105,9 +91,7 @@ func (m *Memo) Changed() bool { return m.dirty }
 // liveEntry returns the memo entry for id when it exists and is unexpired at
 // now: the ONE liveness rule both pendingAniListIDs (skip a non-pending id)
 // and lookupAniList (serve a memo hit) consult, so the batch worklist and the
-// per-entry hit test cannot drift. An expired entry is not live and is never
-// returned here; serving one as an outage fallback is staleMedia's separate,
-// explicitly expiry-ignoring read.
+// per-entry hit test cannot drift.
 func (m *Memo) liveEntry(id int, now time.Time) (MemoEntry, bool) {
 	ent, ok := m.Entries[id]
 	if !ok || ent.expired(now) {
@@ -132,10 +116,7 @@ func (m *Memo) StaleTitle(id int) (title string, year int, ok bool) {
 // StaleFormat returns the memoized AniList media format for id under
 // StaleTitle's expiry-ignoring rule, so a consumer taking a stale title can
 // take the type that came with it. ok is false for an absent entry, a
-// not-found negative, or an entry AniList gave no format for. The value is
-// already gated to a real AniList format at the client boundary
-// (anilist.knownFormat), so an unrecognized upstream token reads as absent here
-// rather than as false typing evidence.
+// not-found negative, or an entry AniList gave no format for.
 func (m *Memo) StaleFormat(id int) (format string, ok bool) {
 	ent, cached := m.Entries[id]
 	if !cached || ent.NotFound || ent.Format == "" {
@@ -146,11 +127,7 @@ func (m *Memo) StaleFormat(id int) (format string, ok bool) {
 
 // staleMedia returns the memoized media for id ignoring expiry: the same
 // expiry-ignoring read StaleTitle and StaleFormat give the indexer feed's
-// title/type tier, widened to the whole title list a match needs. It is the
-// answer of last resort for a lookup the upstream cannot satisfy right now, so
-// ok is false for anything a match could not use: an absent entry, a not-found
-// negative (a definitive answer, not stale evidence), or a positive carrying
-// neither titles nor a format.
+// title/type tier, widened to the whole title list a match needs.
 func (m *Memo) staleMedia(id int) (anilist.Media, bool) {
 	ent, cached := m.Entries[id]
 	if !cached || ent.NotFound || (len(ent.Titles) == 0 && ent.Format == "") {
@@ -189,12 +166,6 @@ func (m *Matcher) restampSkewedExpiries(memo *Memo, now time.Time) {
 		// An expiry further out than any this policy can stamp did not
 		// come from this policy: the clock was wrong when the entry was
 		// written (a boot before NTP sync), or state.json was edited.
-		// Left alone it is live for as long as the skew - never renewed,
-		// and never reached by pruneExpired, which only considers expired
-		// entries - so a not-found negative suppresses its entry's
-		// findings permanently with no diagnostic. Re-stamp it like a
-		// fresh write, the same correction rebaseFutureFirstSeen applies
-		// to a persisted FirstSeen ahead of the clock.
 		ent.Expiry = m.freshExpiry(now)
 		restamped++
 		memo.put(id, &ent)
@@ -202,34 +173,14 @@ func (m *Matcher) restampSkewedExpiries(memo *Memo, now time.Time) {
 	if restamped > 0 {
 		// One counted line, not one per entry: the cause is a whole-file
 		// property (a skewed clock during one cycle, or an edited state.json),
-		// so the count is the signal. Same shape as the indexer feed's
-		// future-timestamp rebase WARN.
+		// so the count is the signal.
 		m.log.Warn("anilist memo: expiries beyond the policy horizon re-stamped",
 			"restamped", restamped)
 	}
 }
 
 // pruneExpired drops the expired entries that are dead cache data, and keeps
-// the ones that are still an ACTIVE consumer's fallback. Renewals were
-// re-stamped with a future expiry during the pass, and it only runs on a clean
-// (non-degraded) pass, so what remains expired was simply not consulted by the
-// MATCH this cycle — but Match is not the memo's only reader: Memo.StaleTitle
-// and Memo.StaleFormat deliberately ignore expiry to feed the indexer feed's
-// stale-title/type tier for every entry SeaDex currently curates
-// (scout/feedinfo.go), and Memo.staleMedia is the match's own outage fallback
-// over the same entries. An entry can leave the match's worklist while staying in
-// that set: an id-less Fribb record that caused an AniList memoization can gain
-// a usable arr id on a later Fribb refresh while the item is still absent from
-// the library, so aniListNeed stops consulting it on a perfectly clean pass.
-// Deleting it there would silently downgrade the next feed rebuild's title and
-// type to the file-name derivation and the default category.
-//
-// So an expired entry survives only when both halves hold: its AniList id is
-// still in the current SeaDex catalogue (entries), and it carries something the
-// stale tier can actually serve (a positive with a title or a format).
-// Everything else goes — expired negatives (StaleTitle/StaleFormat report
-// nothing for them anyway) and every entry for an id SeaDex no longer curates —
-// which is what keeps state.json from accumulating dead entries.
+// the ones that are still an ACTIVE consumer's fallback.
 func pruneExpired(memo *Memo, now time.Time, entries []seadex.Entry) {
 	active := make(map[int]struct{}, len(entries))
 	for i := range entries {
@@ -286,26 +237,7 @@ func notFoundEntry(expiry time.Time) MemoEntry {
 // consult but has no live (unexpired) entry for, so a cold cycle costs a
 // handful of batched AniList requests instead of one request per id-less entry
 // — and an expired entry renews through the same batch, since pendingAniListIDs
-// counts it as pending. Every write (positive or negative) is stamped with a
-// fresh jittered expiry. A PARTIAL batch failure is best-effort: an id a
-// partial batch does not return is left uncached and falls through to
-// matchEntry's single Fetch, so batching never changes the match result,
-// only the request count. A TOTAL batch failure (no chunk succeeded -
-// an AniList outage) instead returns the pending ids so the per-entry pass
-// fails them fast: every per-id lookup would be doomed against the same outage,
-// and the unbounded futile tail of requests would only stall the cycle.
-//
-// A partial failure that ABORTED the batch is re-batched before that fallback:
-// the ids in the abandoned chunks were never asked, so one more batched pass
-// answers them at ~1 request per 50 ids where the per-id fallback would spend
-// one rate-limited request each. Left to the per-id path, a flake in chunk 2 of
-// 9 turned a handful of batched requests into hundreds of single ones (the
-// ~1700-request, ~2h cold cycle batching was introduced to remove) and, because
-// those per-id fetches SUCCEED against a briefly-flaky upstream,
-// transientFailureCap never trips to stop them. Each pass strictly shrinks the
-// worklist (an abort implies an earlier chunk completed), so the loop is bounded
-// by the chunk count with a no-progress guard as a backstop; whatever remains
-// after it still falls through to the documented per-id Fetch.
+// counts it as pending.
 func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) map[int]struct{} {
 	if ctx.Err() != nil {
 		// Mirror the per-entry loop's cancellation guard: a batch issued on an
@@ -325,18 +257,12 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		// A CANCELLATION is not an upstream abort, and the ids no request
 		// covered would only be refused by the same done context - so
 		// re-batching buys one doomed request and its WARN would blame
-		// AniList for a routine redeploy. prefetchPass already logged the
-		// cancellation at Debug, and Match's per-entry loop flags the pass
-		// degraded on the same context, so nothing is lost by stopping here.
-		// Same contract as the arm below and as handleLookupFailure's.
+		// AniList for a routine redeploy.
 		if errors.Is(res.err, context.Canceled) {
 			return nil
 		}
 		// A shrinking worklist means the pass abandoned chunks it never asked:
-		// re-batch exactly those. A worklist that did NOT shrink means the pass
-		// asked nothing new (an aborting batch always completes at least one
-		// chunk, so this is a backstop against a looping request), and falls
-		// through to the per-id fallback below.
+		// re-batch exactly those.
 		if len(res.unrequested) > 0 && len(res.unrequested) < len(pending) {
 			m.log.Warn("anilist batch prefetch aborted; re-batching the ids no request covered",
 				"requested", len(pending), "fetched", res.fetched,
@@ -359,10 +285,7 @@ type prefetchResult struct {
 	// id in the pass fails fast instead of regressing to a doomed per-id Fetch.
 	outage map[int]struct{}
 	// unrequested are the ids the pass abandoned without asking (an aborting
-	// chunk and the ones after it), which the caller re-batches. Ids left
-	// untrustworthy by a chunk that DID answer are absent: re-asking them would
-	// re-fetch the same poisoned record, so they keep the per-id fallback that
-	// isolates it.
+	// chunk and the ones after it), which the caller re-batches.
 	unrequested []int
 	fetched     int
 }
@@ -384,14 +307,7 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 			"requested", len(pending), "fetched", len(fetched))
 	case len(res.Verdicts) == 0:
 		// TOTAL failure: not one chunk completed (a request/envelope failure
-		// before any chunk finished), so no id carries an answer at all. A
-		// COMPLETED batch that resolved nothing is NOT an outage — at least one
-		// chunk completed and simply produced no media (every id definitively
-		// not found, or every record malformed, which is record-local) — so it
-		// falls to the loop below and each absent id is memoized or left for the
-		// documented per-id Fetch fallback instead of being failed fast.
-		// Degrade fast: fail the pending ids immediately instead of
-		// regressing to one doomed per-id request each.
+		// before any chunk finished), so no id carries an answer at all.
 		m.log.Warn("anilist batch prefetch failed; skipping per-id fallback for pending ids",
 			"requested", len(pending), "error", err)
 		outage := make(map[int]struct{}, len(pending))
@@ -408,11 +324,7 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 			memo.put(id, &entry)
 		case anilist.VerdictAbsent:
 			// The batch definitively answered this id and AniList has no such
-			// media. Memoize the negative so it is not re-fetched this run; the
-			// expiry gives the negative the same lifetime policy as a positive,
-			// so a show created on AniList later is eventually seen. Memoizing
-			// these is what keeps a single malformed record from dumping the
-			// whole pending set into per-id fallbacks.
+			// media.
 			entry := notFoundEntry(m.freshExpiry(now))
 			memo.put(id, &entry)
 		case anilist.VerdictUnverified:
@@ -433,9 +345,6 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 // trigger matchEntry also consults - classifies as needing a lookup, so the
 // batch fetches no more (which would re-introduce the not-in-library lookups
 // the HasArrIdentifier gate removed) and no less than the per-entry pass needs.
-// An EXPIRED entry counts as pending — the same rule that makes it a miss in
-// lookupAniList — so renewals ride the batch instead of one per-id request
-// each.
 func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) []int {
 	seen := make(map[int]struct{})
 	var ids []int
@@ -504,28 +413,7 @@ func (g *lookupGate) recordSuccess() { g.streak = 0 }
 // lookupAniList consults the memo, then AniList. An expired memo entry is a
 // miss: it falls through to a fresh fetch and is re-stamped on renewal, so a
 // stale answer (a show created on AniList after the negative was cached, a
-// title added after the positive was) ages out. A not-found result is memoized
-// (negatively) so it is not re-fetched before its expiry; a transient error is
-// not memoized so it is retried next cycle. An id the gate reports down
-// (covered by a totally-failed batch prefetch, or the
-// consecutive-transient-failure breaker tripped) fails fast without a per-id
-// request: the same outage would doom it, and the id stays un-memoized so it
-// is retried next cycle.
-//
-// When the upstream that could renew the entry is unreachable - the gate is
-// down for this id, or its fetch just failed transiently - an EXPIRED positive
-// entry is served instead of no answer at all (staleMedia). Expiry governs
-// re-fetch cadence, so during an outage the titles that matched this entry last
-// cycle are better evidence than "unknown": preferring unknown withheld a match
-// the app was holding, which cost the compare pass any NEW finding for that
-// entry and, in the report, could claim a show catalogued through a sibling
-// Fribb record is absent from SeaDex. The stale answer does NOT clear the
-// degradation: markIncomplete still fires, so prior findings stay preserved and
-// the AniList degradation streak still escalates. The runner-up was serving it
-// as a COMPLETE answer (no markIncomplete), which would let stale evidence
-// resolve a prior finding - an operator-visible alerting decision the outage
-// itself does not justify. Same stale-on-error stance as the Fribb mapping
-// cache, and the same expiry-ignoring read the feed's title tier takes.
+// title added after the positive was) ages out.
 func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Media, bool) {
 	if ent, live := r.memo.liveEntry(aniListID, r.now); live {
 		if ent.NotFound {
@@ -559,17 +447,11 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 // a not-found, or a record whose own content makes it unmatchable
 // (ErrRecordUnusable) - is memoized negatively and resets the breaker streak;
 // anything else marks the cycle incomplete and leaves the id un-memoized so it
-// is retried next cycle. It reports whether the failure was that transient
-// class, which is the one where the caller may fall back to an expired memo
-// entry (a definitive answer supersedes the memo instead).
+// is retried next cycle.
 func (r *matchRun) handleLookupFailure(aniListID int, err error) (transient bool) {
 	// A DEFINITIVE answer, in one arm because the handling is one decision: AniList
 	// has no such media, or the record exists but its own content cannot yield a
-	// match key. Either way the answer is cacheable and the upstream is proven to be
-	// responding, so memoize the negative and reset the breaker streak. Retrying an
-	// unusable record would re-fetch the same doomed record every cycle and hold the
-	// pass degraded, escalating the AniList degradation streak into a standing ERROR
-	// that blames upstream reachability.
+	// match key.
 	unusable := errors.Is(err, anilist.ErrRecordUnusable)
 	if unusable || errors.Is(err, anilist.ErrNotFound) {
 		r.gate.recordSuccess()
@@ -585,10 +467,6 @@ func (r *matchRun) handleLookupFailure(aniListID int, err error) (transient bool
 	}
 	// A transient/upstream error (network, context cancellation, rate-limit
 	// exhaustion) means this needed fallback lookup could not be completed.
-	// Record the id as incomplete (flagging the cycle degraded) so the
-	// caller preserves the affected entry's prior findings rather than
-	// treating the missing match as a resolved finding, and leave the
-	// id un-memoized so it is retried next cycle.
 	r.markIncomplete(aniListID)
 	if errors.Is(err, context.Canceled) {
 		// A cancellation is not a fault (same contract as Scout.save):

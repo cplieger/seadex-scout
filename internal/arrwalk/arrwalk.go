@@ -2,22 +2,6 @@
 // library snapshot: per item its external IDs, tags, current release groups, and
 // a representative release fingerprint. It applies arr-side tag include/exclude
 // and owns every arr-wire concern of the ingest.
-//
-// It is the volatile half of what used to be one package: the arr API surface,
-// the tag-resolution policy, the bounded episode fan-out and its failure
-// budget all change with the arrs, while the snapshot MODEL they produce
-// (internal/library: Item, Snapshot, Diff and the diff semantics) changes with
-// this app's comparison rules. The model lives in that pure leaf so the six
-// packages that consume only the vocabulary do not reach it through this
-// package's arrapi/httpx closure; only the cycle orchestrator and the
-// composition root depend on the walker.
-//
-// A per-series episode fetch failure is logged and the series kept as a
-// library.Item placeholder with Failed set (the snapshot is partial but
-// usable); a failure of the top-level series/movie list, a tag-resolution
-// failure, a cancelled context, per-series failures hitting the walk failure
-// budget, or every kept series failing its episode fetch fail the whole walk.
-// This mirrors the "ingest succeeded == healthy" semantic the scout uses.
 package arrwalk
 
 import (
@@ -42,17 +26,7 @@ import (
 // episodeConcurrency bounds concurrent per-series episode fetches.
 const episodeConcurrency = 6
 
-// episodeFailureBudget caps per-series episode-fetch failures per walk. arrapi
-// retries every request with long timeouts, so a Sonarr outage mid-walk would
-// otherwise grind through EVERY kept series (hours) before the walk finished;
-// once this many series have failed the fault is the arr, not a per-series
-// blip, so the remaining fan-out is cancelled and the walk fails as a whole
-// (ingest failure, so the cycle is unhealthy). 5 tolerates isolated per-series
-// oddities (the partial-snapshot path) while tripping fast on an outage.
-// Because the budget is an absolute count, a library with fewer kept series
-// can never trip it - walkSonarr's companion total-failure rule (every kept
-// series failed) covers that gap, so a total episode-file-endpoint outage is
-// an ingest failure at any library size.
+// episodeFailureBudget caps per-series episode-fetch failures per walk.
 const episodeFailureBudget = 5
 
 // --- Arr client surfaces ---
@@ -131,12 +105,7 @@ type sideResult struct {
 	filteredEmpty bool
 }
 
-// Walk ingests both arr sides into a single snapshot. It returns an error when
-// a top-level list call fails, tag resolution fails (fail closed), ctx is
-// cancelled, per-series episode failures hit the walk failure budget, or
-// every kept series' episode fetch failed (a total outage is an ingest
-// failure at any library size); sub-budget, sub-total per-series failures are
-// kept as Failed placeholder items with a warning (the snapshot is partial).
+// Walk ingests both arr sides into a single snapshot.
 func (w *Walker) Walk(ctx context.Context) (library.Snapshot, error) {
 	var items []library.Item
 	partial, filteredEmpty := false, false
@@ -181,11 +150,6 @@ func (w *Walker) Walk(ctx context.Context) (library.Snapshot, error) {
 // which is the same fact Walk branches on - so the walker stays the ONE home
 // of "which arrs does this deployment have", and a consumer never re-derives
 // it from a config pair the walker was built from.
-//
-// Its consumer is the scout's per-arr library shrink guard: a side the
-// deployment does not have contributes no items, and a side the operator just
-// DISABLED legitimately loses all of its items, so neither may be judged a
-// suspicious truncation of its prior count.
 func (w *Walker) EnabledArrs() []string {
 	arrs := make([]string, 0, 2)
 	if w.sonarr != nil {
@@ -200,11 +164,7 @@ func (w *Walker) EnabledArrs() []string {
 // walkSideError wraps a per-side walk failure with the failed arr's identity.
 // Error preserves the exact "walking <arr>: <cause>" text the previous plain
 // fmt.Errorf wrapper produced (report-mode CLI output reads it unchanged) and
-// Unwrap keeps the cause chain intact for errors.Is/As. The identity rides
-// the TYPE rather than the text because the scout's production log boundaries
-// reduce the chain via httpx.LogSafeError, which collapses to a nested
-// *url.Error's underlying cause and discards every textual wrapper -
-// WalkErrArr recovers the side from the original error before that reduction.
+// Unwrap keeps the cause chain intact for errors.Is/As.
 type walkSideError struct {
 	err error
 	arr string
@@ -218,10 +178,7 @@ func (e *walkSideError) Unwrap() error { return e.err }
 
 // WalkErrArr returns the arr identity (ArrSonarr or ArrRadarr) a Walk error
 // carries for its failed side, or "" for an error that names no side (Walk's
-// final cancellation guard, or any non-walk error). Callers that log a
-// reduced form of the error (httpx.LogSafeError) must extract the side from
-// the ORIGINAL error - the reduction returns a new error that no longer
-// carries the wrapper type.
+// final cancellation guard, or any non-walk error).
 func WalkErrArr(err error) string {
 	if side, ok := errors.AsType[*walkSideError](err); ok {
 		return side.arr
@@ -242,12 +199,7 @@ func filterSeriesByTags(series []arrapi.Series, includeIDs, excludeIDs map[int]s
 }
 
 // walkSonarr lists series, applies tag filters, and builds an item per kept
-// series with its episode files fetched concurrently (bounded). A per-series
-// episode-fetch failure keeps the series' arr identity as a Failed placeholder
-// item (the snapshot is partial); once episodeFailureBudget failures
-// accumulate - or every kept series has failed, whichever a given library
-// size can reach - the walk fails as a whole (an arr outage, not per-series
-// blips), the budget additionally cancelling the remaining fan-out.
+// series with its episode files fetched concurrently (bounded).
 func (w *Walker) walkSonarr(ctx context.Context) (sideResult, error) {
 	series, err := w.sonarr.GetSeries(ctx)
 	if err != nil {
@@ -293,14 +245,7 @@ func episodeFetchError(ctx context.Context, kept, failed int) error {
 	if failed >= episodeFailureBudget {
 		return fmt.Errorf("episode fetches: %d of %d kept series failed, hitting the walk failure budget of %d", failed, kept, episodeFailureBudget)
 	}
-	// Sub-budget total failure: every kept series' episode fetch failed. The
-	// budget above is an absolute count a library with fewer kept series can
-	// never reach, and publishing a "partial" snapshot with zero usable file
-	// data would let the cycle read healthy through a total
-	// episode-file-endpoint outage - an arr ingest failure whatever the
-	// library size (a restart or config fix could recover it, the app's
-	// unhealthy semantic). The ctx check above keeps a shutdown from
-	// masquerading as a total failure.
+	// Sub-budget total failure: every kept series' episode fetch failed.
 	if kept > 0 && failed == kept {
 		return fmt.Errorf("episode fetches: all %d kept series failed", failed)
 	}
@@ -309,11 +254,7 @@ func episodeFetchError(ctx context.Context, kept, failed int) error {
 
 // fetchEpisodeItems runs the bounded episode-fetch fan-out over the kept
 // series, returning the per-series results (nil where a fetch was cancelled or
-// skipped) and the failure count. The fan-out context is cancelled once the
-// failure budget is hit, so in-flight fetches stop and queued ones skip
-// instead of spending arrapi's per-request retries against a down Sonarr,
-// series after series; the caller turns a budget-hitting count into a walk
-// failure.
+// skipped) and the failure count.
 func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (results []*library.Item, failed int) {
 	fanCtx, cancelFan := context.WithCancel(ctx)
 	defer cancelFan()
@@ -342,23 +283,13 @@ func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (r
 	return results, int(failures.Load())
 }
 
-// fetchSeriesItem fetches one series' episode files and builds its Item. When
-// the fan-out context is cancelled or expired (a shutdown/redeploy, or the walk
-// failure budget tripping) it returns (nil, false) without a warning (Walk
-// reports the cancellation or the budget); any other episode-fetch failure -
-// including a per-request timeout while the walk context is still live - is
-// logged and returns the series' identity as a Failed placeholder plus
-// failed=true, so the snapshot records WHICH items the partial walk is missing
-// and walkSonarr can count the failure against the budget.
+// fetchSeriesItem fetches one series' episode files and builds its Item.
 func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*library.Item, bool) {
 	files, err := w.sonarr.GetEpisodeFiles(ctx, s.ID)
 	if err != nil {
 		// Stay quiet only when the fan-out context itself is done (a shutdown, or
 		// the failure budget already tripped): that error is expected and Walk
-		// reports it. arrapi wraps each request in its own context.WithTimeout,
-		// so a slow GetEpisodeFiles surfaces as DeadlineExceeded while ctx is
-		// still live - a real fetch failure worth the per-series warning below,
-		// not shutdown noise.
+		// reports it.
 		if ctx.Err() != nil {
 			return nil, false
 		}
@@ -366,10 +297,6 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 		// wrapped *url.Error carries: this recoverable per-series warning sits
 		// outside the walk-level LogSafeError boundary, so a configured
 		// credential must be redacted here too before the line reaches Loki.
-		// logattr.Cap is the app's one volume policy for an upstream-controlled
-		// attribute: it bounds the WORK (cap on a rune boundary, then sanitize),
-		// so an arr-supplied title cannot allocate its way through the
-		// container's memory budget or push the record past Loki's line limit.
 		w.log.Warn("sonarr episode fetch failed; series kept as failed placeholder", "series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
 		// seriesItem with no files yields the identity fields and no file
 		// data - exactly the Failed placeholder shape.
@@ -425,25 +352,7 @@ func (w *Walker) walkRadarr(ctx context.Context) (sideResult, error) {
 		if movies[i].HasFile && movies[i].MovieFile == nil {
 			// Radarr says the movie has a file but sent no file payload, so the
 			// item carries no comparable file state (movieItem's HasFile AND is
-			// false and it has no groups). Mark it as the placeholder it is:
-			// without Failed every consumer reads the missing data as a real
-			// no-file library state - the daemon compares it as unmet and
-			// RESOLVES the movie's prior finding, and the snapshot diff counts
-			// the transition as a change. Failed is exactly the shape the
-			// Sonarr sibling gives its own missing-file-data degradation, so
-			// the compare, the diff, and the finding-preservation scope handle
-			// both identically.
-			//
-			// It does NOT make the snapshot partial. Snapshot.Partial reports a
-			// walk that could not READ part of the library (the one-shot report
-			// refuses such a snapshot outright and the cycle escalates a
-			// sustained streak), whereas this is a per-item data defect Radarr
-			// answers consistently until the operator re-scans: failing the
-			// report and alerting forever on it would punish the operator's
-			// fallback view for one movie's metadata. The aggregate WARN below
-			// carries the count; this Debug line names WHICH movie, the
-			// identification the Sonarr sibling's per-series WARN already
-			// provides (title bounded by logattr.Cap - it is arr-supplied text).
+			// false and it has no groups).
 			item.Failed = true
 			noPayload++
 			w.log.Debug("radarr movie reports a file but carries no file payload",
@@ -467,13 +376,7 @@ func (w *Walker) walkRadarr(ctx context.Context) (sideResult, error) {
 // resolveTags fetches the arr's tag list once per walk and resolves the
 // include and exclude label sets against it locally (arrapi.TagIDs /
 // UnmatchedLabels), logging any label that matched no tag. With neither set
-// configured no fetch is issued. A tag-list fetch failure aborts the walk
-// (fail closed): silently disabling the filter would admit every item past
-// the configured arr_tags scoping for the cycle - a mass-resolve /
-// report-noise blast radius from one transient tag-endpoint failure - and
-// silently emptying the library would be just as wrong. A tag fetch failure
-// is an ingest failure (the cycle is unhealthy), and a cancellation keeps its
-// existing semantics: it propagates and Walk reports the shutdown.
+// configured no fetch is issued.
 func (w *Walker) resolveTags(ctx context.Context,
 	getTags func(context.Context) ([]arrapi.Tag, error),
 ) (includeIDs, excludeIDs map[int]struct{}, err error) {
@@ -492,12 +395,7 @@ func (w *Walker) resolveTags(ctx context.Context,
 // resolveOne resolves a single label set against an already-fetched tag list,
 // logging a count-only warning for unmatched labels (values withheld: they
 // pass through ${VAR} expansion and could carry a secret - see the
-// credential-safety test). It returns nil for an unconfigured set (keepByTags
-// reads nil as "filter off") and a non-nil - possibly empty - set for a
-// configured one, so a configured include list matching no tag still drops
-// everything rather than admitting everything. A configured set whose every
-// label missed logs a second, distinct warning, since an include set that
-// resolves to zero ids empties the side entirely.
+// credential-safety test).
 func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
 		return nil
@@ -509,19 +407,11 @@ func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) ma
 	if ids == nil {
 		// Fail closed independently of arrapi's zero-match return shape: the
 		// non-nil EMPTY set is what keepByTags reads as "filter on, nothing
-		// matches". arrapi.TagIDs documents a nil return only for "no labels
-		// supplied", so a nil here (a future library change collapsing an
-		// empty result to nil) would silently turn a configured include list
-		// into no filter at all and admit the whole library.
+		// matches".
 		ids = map[int]struct{}{}
 	}
 	if len(ids) == 0 {
-		// Every configured label missed. For an include set that is not a
-		// partial miss but a dead filter: keepByTags reads the non-nil empty
-		// set as "filter on, nothing matches", so the side contributes ZERO
-		// items and the cycle still reads healthy. Say so explicitly, so the
-		// operator (and a Loki rule) can tell a dead filter apart from one
-		// stray label.
+		// Every configured label missed.
 		w.log.Warn("no configured tag resolved to an arr tag; an include set therefore admits nothing, an exclude set drops nothing",
 			"which", which, "configured_count", len(labels))
 	}
@@ -541,17 +431,7 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 }
 
 // warnEmptyArrList warns when an enabled arr's own list call succeeded but
-// returned nothing at all. A zero-item list is not a walk failure, so on a
-// FIRST walk no other signal reports it: warnFilteredEmpty deliberately
-// returns early when listed == 0 (filtering is not the cause), and the
-// scout's shrink guard is per-arr but needs a PRIOR count for that arr
-// (scout.mergeShrunkSides skips a side whose prior[arr] is 0), so a first
-// boot, a wiped state.json, or a newly enabled arr has no baseline to be
-// suspicious of. Once a prior count exists that guard owns the case: it
-// carries the side's prior items, escalates to ERROR, and accepts only after
-// degradation.ShrunkWalkAcceptThreshold reconciles, loudly. Counts only,
-// never a URL: an arr pointed at a fresh or migrated instance, or one whose
-// database was restored empty, is the usual cause.
+// returned nothing at all.
 func (w *Walker) warnEmptyArrList(arr string, listed int) {
 	if listed > 0 {
 		return
@@ -561,29 +441,7 @@ func (w *Walker) warnEmptyArrList(arr string, listed int) {
 }
 
 // warnFilteredEmpty warns when tag filtering kept nothing out of a non-empty
-// arr list, and reports whether it did. A dead-but-resolving filter - every
-// configured label resolves to a
-// real tag id, but no item carries it because the tag was renamed or unassigned
-// on the arr side - leaves the side contributing zero items with no other
-// diagnostic anywhere: resolveOne warns only when a LABEL missed, and the
-// scout's below-half shrink gate cannot fire on a first cycle (it needs a prior
-// snapshot), so an empty baseline and an empty report would otherwise be
-// indistinguishable from a genuinely empty library. This walk is the only place
-// that holds the discriminating fact (listed vs kept). Counts only, never label
-// values: arr_tags values pass through ${VAR} expansion and could carry a
-// secret (see the credential-safety test).
-//
-// The returned flag rides the snapshot (library.Snapshot.FilteredEmpty) so the
-// cycle closes DEGRADED rather than clean: a WARN alone left a daemon watching
-// nothing while every completion line still read "cycle complete", and the
-// scout's per-arr shrink guard cannot see this at all on a first-ever boot
-// (scout.mergeShrunkSides skips a side whose prior[arr] is 0). Where a prior
-// count DOES exist that guard now carries the side's prior items and keeps
-// re-testing it until degradation.ShrunkWalkAcceptThreshold reconciles -
-// there is no one-cycle ratchet - so this flag's own job is the baseline case
-// plus naming tag filtering as the CAUSE, which no count can. An EMPTY arr
-// list is deliberately not this signal - a legitimately empty Radarr would
-// then degrade every cycle forever; warnEmptyArrList owns that case.
+// arr list, and reports whether it did.
 func (w *Walker) warnFilteredEmpty(arr string, listed, kept int, filtered bool) bool {
 	if !filtered || listed == 0 || kept > 0 {
 		return false
@@ -598,9 +456,7 @@ func (w *Walker) warnFilteredEmpty(arr string, listed, kept int, filtered bool) 
 // seriesItem builds a library Item from a series and its episode files (as
 // listed by GetEpisodeFiles: exactly the episodes with a file on disk, each
 // carrying its own SeasonNumber), aggregating the distinct release groups
-// present and a representative fingerprint. A series with no episode files
-// keeps the zero fingerprint (Current.Group ""), matching the fileless-movie
-// shape.
+// present and a representative fingerprint.
 func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) library.Item {
 	files := make([]fileInfo, 0, len(epFiles))
 	groupCounts := make(map[string]int)
@@ -631,9 +487,7 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 	if item.HasFile {
 		// A genuinely fileless series carries no comparable fingerprint: the
 		// zero Current (Group "") mirrors the fileless-movie shape, and the
-		// compare/audit paths read file presence before any group. Only a
-		// PRESENT file with an unparseable group falls back to the lowercased
-		// NOGRP sentinel ("nogrp", via release.NormalizeGroup in fileInfoFrom).
+		// compare/audit paths read file presence before any group.
 		rep := representative(files, groupCounts)
 		item.Current = fingerprint(&rep)
 	}
@@ -732,8 +586,6 @@ func isDualAudio(langs string) bool {
 	// arr-supplied and arrapi admits a 64 MiB list body, so the slice of
 	// substring headers plus a map pre-sized to that token count amplifies one
 	// hostile MediaInfo field far past the 256 MiB container budget (CWE-400).
-	// Two distinct languages already settle the answer, so the walk also stops
-	// early on the honest input.
 	distinct := make(map[string]struct{}, 2)
 	for f := range strings.FieldsFuncSeq(langs, func(r rune) bool { return r == '/' || r == ',' }) {
 		if f = strings.TrimSpace(strings.ToLower(f)); f != "" {

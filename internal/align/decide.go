@@ -11,12 +11,7 @@ import (
 // Standing is the file-first group-ladder state of the scoped on-disk unit
 // against the SeaDex best and alt group sets: file presence is decided before
 // anything else, then proven-best, then unverifiable evidence, then alt, then
-// unlisted. Best and alt require PROVEN membership (a known on-disk group
-// matching a known recommended group, release.OverlapKnown); when the group
-// evidence on either side is unknown (the release.NoGroup sentinel) and could
-// hide such a match, the unit is unverified rather than confidently placed.
-// The audit report renders the standing 1:1 as the row verdict; the daemon's
-// compare pass branches on the linearized Outcome instead.
+// unlisted.
 type Standing int
 
 const (
@@ -32,7 +27,7 @@ const (
 	// group list at all.
 	//
 	// One sub-case is narrower than that sentence suggests, and is
-	// deliberately still filed here (l-f30): a unit whose BEST comparison is
+	// deliberately still filed here: a unit whose BEST comparison is
 	// provenly divergent (all evidence known, no overlap) but whose ALT
 	// comparison is indeterminate - SeaDex's alt releases all untagged. There
 	// "you do not have a best release" IS proven; only the placement between
@@ -76,29 +71,18 @@ const (
 	// group comparison to act on; the entry state (classify.Fallback) decides
 	// the nudge each consumer emits.
 	OutcomeNoBest
-	// OutcomeAligned means a known best group is proven present. Alignment
-	// wins no matter how many groups the unit spans or what unknown members
-	// ride along: the daemon stays silent and the audit row is unqualified.
+	// OutcomeAligned means a known best group is proven present.
 	OutcomeAligned
-	// OutcomeUnverifiable means the comparison is indeterminate
-	// (StandingUnverified): unknown group evidence on either side could hide
-	// an alignment, so the daemon emits an informational unverifiable finding
-	// instead of a confident aligned silence or a better-release warning, and
-	// the audit records unverified. It also covers the narrower sub-case
-	// StandingUnverified documents, where best-divergence IS proven but the
-	// alt placement is not - the VERDICT is what cannot be determined, which
-	// is why both land here.
+	// OutcomeUnverifiable means the comparison is indeterminate: unknown group
+	// evidence on either side could hide an alignment, so the daemon emits an
+	// informational finding and the audit records unverified.
 	OutcomeUnverifiable
-	// OutcomeMixed means the unit is not aligned and its group evidence spans
-	// more than one member (in a whole-series aggregate the unknown-evidence
-	// sentinel counts: an unknown season beside a proven divergence still
-	// prevents attributing a single current group), so no single current group
-	// can be attributed - a manual-review nudge rather than a false divergence.
+	// OutcomeMixed means the unit is not aligned and its group evidence spans more
+	// than one member, so no single current group can be attributed - a
+	// manual-review nudge rather than a false divergence.
 	OutcomeMixed
 	// OutcomeDiverged means the unit is provenly not aligned with a single
-	// attributable group state: the actionable divergence (the daemon's
-	// better_release, downgraded by both consumers when the entry is
-	// incomplete).
+	// attributable group state: the actionable divergence.
 	OutcomeDiverged
 )
 
@@ -106,9 +90,7 @@ const (
 // the resolved scope kind, the groups the unit was judged against (the scoped
 // set, or the whole-series union), the file-first group-ladder Standing, the
 // linearized Outcome, whether the comparison is approximate, and whether the
-// prepared best set was empty. NoBest is exposed independently of Outcome
-// because the audit annotates the entry state even on a no-file row the
-// daemon silences (file presence wins the Outcome linearization).
+// prepared best set was empty.
 type Decision struct {
 	// Groups is the group set the unit was judged against - the scoped set or
 	// the whole-series union - and is always owned by the caller: Decide never
@@ -117,14 +99,8 @@ type Decision struct {
 	Kind     ScopeKind
 	Standing Standing
 	Outcome  Outcome
-	// Season is the shared non-negative TVDB season label both consumers
-	// stamp on their output: Record.SeasonTvdb for a ScopeSeason comparison
-	// (positive by construction - that scope is exactly
-	// Record.HasMappedSeason()), and 0 for every other scope. An ordinary
-	// movie, a season-0 special, and a whole-series comparison carry 0
-	// whatever the record's season field holds, so a scope that has no
-	// season number cannot stamp a stale one, and a negative Fribb mapping
-	// (-1 for an absolute-numbered run) never reaches the season branch.
+	// Season is the shared non-negative TVDB season label both consumers stamp on
+	// their output: Record.SeasonTvdb for a ScopeSeason comparison, else 0.
 	Season int
 	Approx bool
 	NoBest bool
@@ -133,15 +109,7 @@ type Decision struct {
 // Decide resolves the one comparison decision both align consumers project
 // their vocabulary from: the daemon's compare pass maps it to Finding/Status
 // (internal/compare) and the audit report to Row/Verdict/Qualifier
-// (internal/audit). The callers deliberately prepare DIFFERENT inputs - the
-// daemon feeds its filtered obtainable recommendations as best with a nil alt
-// (so a unit lacking a recommended group reads unlisted), while the report
-// feeds the SeaDex best set minus curation-warned and unobtainable releases
-// plus its full alt set (an annotation changes whether a release should be
-// wanted, not whether SeaDex lists what is already on disk)
-// - and Decide unifies the branch
-// order and decision rules over those inputs, so the two flows cannot drift
-// apart on the same title.
+// (internal/audit).
 func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {
 	scoped := scope(item, rec)
 	d := Decision{Kind: scoped.Kind, NoBest: len(best) == 0}
@@ -155,31 +123,19 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 	case !item.Comparable():
 		// A placeholder's file state is MISSING, not empty (library.Item.Failed: a
 		// series whose episode fetch failed, or a movie Radarr reports a file for
-		// while sending no MovieFile payload). No groups were read, so no group
-		// comparison exists: the standing is unverified - "the verdict cannot be
-		// determined" - never StandingNoFile, which asserts the unit has nothing on
-		// disk and is exactly the false claim library.Item.Comparable exists to stop.
-		// Decision.Groups stays nil for the same reason. The daemon's compare pass
-		// drops these matches before Decide (scout.splitFailedMatches), so in
-		// practice this arm is the audit report's: it enumerates everything and must
-		// render a degraded item as degraded rather than as an on-disk fact.
+		// while sending no MovieFile payload).
 		d.Standing = StandingUnverified
 	case scoped.Kind == ScopeWholeSeries:
-		// An absolute-numbered run / title-only match has no per-season Fribb
-		// mapping: its single whole-series recommendation is judged against
-		// every real season on disk, conservatively - best only when every
-		// filed season provenly carries a best group - so a later season that
-		// needs a better release is not masked by an earlier season that has
-		// it, and a season with unknown evidence cannot make the whole series
-		// read best.
+		// An absolute-numbered run has no per-season Fribb mapping, so its single
+		// whole-series recommendation is judged against every real season on disk,
+		// conservatively: best only when every filed season provenly carries a best group.
 		s := summarizeWholeSeries(item, best, alt)
 		d.Groups, d.Approx = s.Groups, s.Approx
 		d.Standing = wholeSeriesStanding(s)
 	default:
 		// Cloned at the edge: scope() takes the single-unit groups verbatim from
 		// the library snapshot a concurrent daemon cycle owns and rebuilds, so
-		// the exported Decision must not be a window into it. The whole-series
-		// branch above already builds a fresh slice.
+		// the exported Decision must not be a window into it.
 		d.Groups, d.Approx = slices.Clone(scoped.Groups), scoped.Approx
 		d.Standing = unitStanding(scoped.HasFile, scoped.Groups, best, alt)
 	}
@@ -190,12 +146,7 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 // unitStanding derives the group-ladder standing of a single-unit scope (a
 // movie, a mapped season, or the season-0 specials bucket): file presence
 // first, then the current groups matched against the best then the alt sets
-// under the three-valued release.GroupsOverlap. A proven best match wins; an
-// unverifiable best comparison short-circuits to unverified BEFORE the alt
-// rung (when "do you have the best?" is unanswerable, no alt placement may
-// imply you lack it); a proven-divergent best comparison falls to the alt
-// rung under the same rules; and only an all-known, matchless unit is
-// unlisted. A filed unit with no group list at all is unverified defensively.
+// under the three-valued release.GroupsOverlap.
 func unitStanding(hasFile bool, current, best, alt []string) Standing {
 	switch {
 	case !hasFile:
@@ -210,8 +161,7 @@ func unitStanding(hasFile bool, current, best, alt []string) Standing {
 // unit's current groups: the best rung first (a proven match wins, an
 // unverifiable comparison short-circuits before the alt rung), then the alt
 // rung under the same rules, and only an all-known matchless unit is
-// unlisted. Consumed by unitStanding and, per real season, by
-// summarizeWholeSeries, so the two paths cannot drift.
+// unlisted.
 func groupStanding(current, best, alt []string) Standing {
 	switch release.GroupsOverlap(current, best) {
 	case release.OverlapKnown:
@@ -229,17 +179,7 @@ func groupStanding(current, best, alt []string) Standing {
 }
 
 // wholeSeriesStanding collapses the per-real-season aggregate to the most
-// conservative standing. The aggregation rule, in order: no filed real season
-// is no-file; any provenly-unlisted season downgrades the whole series to
-// unlisted and any proven alt-only season to alt (a proven divergence
-// somewhere stands regardless of unknown evidence elsewhere - the
-// recommendation is actionable either way); otherwise any season with
-// unverifiable evidence makes the series unverified (an unknown season could
-// hide a divergence, so it blocks the best claim without being able to prove
-// a downgrade); and best requires every filed season to provenly carry a
-// best group. (With a nil alt - the daemon's inputs - a season lacking a
-// best group reads unlisted, so "aligned" is exactly "no season is unlisted
-// or unverifiable".)
+// conservative standing.
 func wholeSeriesStanding(s summary) Standing {
 	switch {
 	case s.Seasons == 0:
@@ -277,11 +217,7 @@ func outcomeOf(st Standing, groupCount int, noBest bool) Outcome {
 	case st == StandingAlt || st == StandingUnlisted:
 		return OutcomeDiverged
 	default:
-		// Every Standing the ladder produces is handled above. A Standing
-		// added later must not fall into the STRONGEST claim in the
-		// linearization (the daemon's better_release warning) on evidence no
-		// rung produced; the unverifiable reading is the conservative one and
-		// matches summarizeWholeSeries's exhaustive switch over the same enum.
+		// Every Standing the ladder produces is handled above.
 		return OutcomeUnverifiable
 	}
 }

@@ -10,54 +10,15 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// This file owns the finding-set IDENTITY policy: what makes two findings the
-// same standing condition is a notification concern, so the key is derived
-// here - in report, before a row enters the in-memory set - from the semantic
-// Finding the compare package produces. It is the key of that set, not a
-// fire-once token: a row present in a pass is emitted, and a row absent from a
-// pass with authority over its owner resolves. The key format is pinned
-// byte-for-byte by TestDedupeKey: any format change retires every current row
-// and re-announces its replacement as new, a one-time burst, so change it only
-// deliberately (the 2026-07 validated-identity/link-set hardening accepted
-// exactly that burst).
+// This file owns the finding-set IDENTITY policy: what makes two findings the same
+// standing condition is a notification concern, so the key is derived here.
 
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
 // group, release identity, and the full obtainable-source link set, so a
 // same-group quality swap (new identity), a changed library state, or ANY
 // change to the recommended sources becomes a DIFFERENT row - the old one
 // resolves and the new one is announced - while an unchanged finding keeps
-// its row and is re-emitted unchanged. The link-set component covers what the
-// headline identity alone cannot: a NON-headline candidate's torrent
-// replacement (a new tracker page URL) and an AnimeBytes toggle flip (AB links
-// joining or leaving the set) both change the key, where previously only the
-// headline candidate and the AB subset were keyed and a replaced secondary
-// public source stayed suppressed forever.
-//
-// Every level of the key - the outer component list, the group sets nested
-// inside it, and the link set - is assembled with keyenc, so no component's
-// content can forge a different component split and collide two distinct
-// findings onto one key. A collision is not a suppression, it is a LOSS:
-// report's map write is last-payload-wins, so one of the two still-true
-// conditions stops being reported altogether and the surviving row's later
-// resolution is attributed to whichever payload won.
-// The untrusted components are group names, the current group, the release
-// identity and the link URLs, all parsed from SeaDex data or library file
-// names. Nesting is composition: an inner keyenc value is escaped again as it
-// becomes an outer component, so a separator inside a group name cannot be read
-// as an outer field boundary.
-//
-// The key is also size-bounded by construction. keyenc reduces a component set
-// whose raw size exceeds keyenc.MaxComponentBytes to a fixed-size SHA-256
-// identity, and because the OUTER assembly goes through keyenc too, that bound
-// applies to the assembled key rather than only to each component: hostile bulk
-// SeaDex data (hundreds of oversized URLs per entry) cannot amplify key
-// construction into an out-of-memory failure, and the in-memory finding set
-// these keys index stays bounded across N findings.
-//
-// It returns ONE key, and there is no second "legacy" form: nothing persists a
-// key any more (findings are reported as state and held in memory), so a key
-// format change costs one duplicate report on the pass after an upgrade rather
-// than needing a conversion path.
+// its row and is re-emitted unchanged.
 func dedupeKey(f *compare.Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
@@ -75,17 +36,11 @@ func dedupeKey(f *compare.Finding) string {
 }
 
 // currentGroupKey encodes the finding's current-group component for the dedupe
-// key. Both branches produce a keyenc value rather than one encoded set and one
-// bare string, which is what keeps them distinguishable: a production finding
-// carrying the group set ["a", "b"] and a manually constructed one whose
-// flattened CurrentGroup is the literal "a:b" would otherwise encode
-// identically once the outer assembly escaped them.
+// key.
 func currentGroupKey(f *compare.Finding) string {
 	if f.CurrentGroups != nil {
-		// Sorted for the same reason dedupeKey sorts the recommended set: the
-		// on-disk group set is a SET, so its key contribution must not depend on
-		// producer order (every current producer already sorts, so honest keys are
-		// byte-identical and suppression survives).
+		// Sorted for the same reason dedupeKey sorts the recommended set: the on-disk
+		// group set is a SET, so its key must not depend on producer order.
 		groups := slices.Clone(f.CurrentGroups)
 		slices.Sort(groups)
 		return keyenc.Join(groups...)
@@ -98,12 +53,6 @@ func currentGroupKey(f *compare.Finding) string {
 // VALIDATED 40-hex info hash, else the release page URL. The tag is a keyenc
 // component rather than a string prefix, so the two domains are kept apart by
 // the encoding instead of by the tag happening not to occur in the value.
-// The InfoHash is untrusted SeaDex data, so a crafted or garbled hash field
-// must not key a finding unvalidated: it passes the same seadex.ValidInfoHash
-// gate the indexer feed applies. SeaDex redacts AnimeBytes info hashes
-// (ValidInfoHash rejects the redaction marker along with everything else
-// non-hex), so every same-group AB replacement keys on its unique torrent page
-// URL, as before.
 func releaseIdentity(f *compare.Finding) string {
 	if h := seadex.ValidInfoHash(f.InfoHash); h != "" {
 		return keyenc.Join("hash", h)
@@ -113,18 +62,7 @@ func releaseIdentity(f *compare.Finding) string {
 
 // obtainableLinkKey returns a finding's full obtainable-source URL set
 // (deduplicated by trimmed URL, sorted, bounded) as a single key component,
-// or "" when the finding carries no links. Folding EVERY obtainable source
-// into the key - not just the headline candidate's identity - re-surfaces a
-// finding when any recommended source changes: a non-headline public-tracker
-// torrent replacement (a new page URL) and an AnimeBytes toggle flip both
-// change the set, where keying the headline identity alone left the first
-// suppressed forever. Deduplicating by URL keeps the key label-insensitive:
-// one source arriving twice (once mislabeled) keys once, so correcting the
-// label later never re-alerts an unchanged source. The sorted raw set goes
-// through keyenc, matching dedupeKey's collision-proofing and size-bounding: a
-// SeaDex-supplied URL containing the separator cannot collide two link sets,
-// and an oversized set (SeaDex admits up to 512 arbitrarily long URLs per
-// entry) reduces to a fixed-size hash instead of one huge joined allocation.
+// or "" when the finding carries no links.
 func obtainableLinkKey(links []compare.ReleaseLink) string {
 	seen := make(map[string]struct{}, len(links))
 	var urls []string

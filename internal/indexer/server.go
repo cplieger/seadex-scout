@@ -22,127 +22,83 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
-	// maxHeaderBytes bounds the request line plus headers, the pre-auth
-	// allocation gate this endpoint's shape allows and webhttp deliberately
-	// leaves to the app (its defaultMaxHeaderBytes restates net/http's 1 MiB
-	// because a browser-facing consumer may need it; this one is machine-only).
-	// A Torznab GET is a short path, a handful of query params (t, q, season,
-	// ep, cat, apikey) and the arr's own headers - well under 1 KiB - so 16 KiB
-	// is ~30x margin while refusing the megabyte-query shape at the network
-	// boundary, before net/http buffers it and before the two url.Values parses
-	// on the pre-auth path (authFailureLimiter's predicate, then serve) turn it
-	// into a map with hundreds of thousands of entries. Over-cap requests get
-	// net/http's own 431 and never reach a handler.
+	// maxHeaderBytes bounds the request line plus headers, the pre-auth allocation gate
+	// this endpoint's shape allows and webhttp leaves to the app.
 	maxHeaderBytes = 16 << 10
 )
 
 // writeTimeout bounds a stalled response consumer. net/http arms it when the
 // request headers are read, so it must cover EVERYTHING the handler can spend
-// before the body is written: the complete bounded Prowlarr retry budget -
-// upstreamMaxAttempts full-timeout attempts plus the capped Retry-After waits
-// between them - plus a one-minute render margin. Deriving it from the budget's
-// own constants keeps the deadline valid when the retry policy or the
-// per-attempt timeout changes.
-//
-// It is a complete bound, and that is the point of the snapshot never being
-// loaded on the request path: a handler's snapshot access is one lock-free read
-// of the published pointer (see snapshotCache), so no filesystem wait can
-// outlive this deadline and have a rendered feed cut mid-write.
-//
-// A var so a test can shorten it; it is evaluated once at init.
+// before the body is written: the complete bounded Prowlarr retry budget plus a
+// one-minute render margin. Deriving it from the budget's own constants keeps the
+// deadline valid when the retry policy changes. It is a complete bound, and that
+// is the point of the snapshot never being loaded on the request path: a
+// handler's snapshot access is one lock-free read, so no filesystem wait can
+// outlive it. A var so a test can shorten it.
 var writeTimeout = upstreamMaxAttempts*upstreamAttemptTimeout +
 	(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
 
-// listenAddr is the fixed LAN bind address for the Torznab feed server. The
-// port is an internal detail (the container/compose port mapping publishes
-// it), not an operator-tuned setting, so it is hardcoded rather than a key.
-// A var rather than a const purely as a test seam: the server lifecycle
-// tests point it at an ephemeral 127.0.0.1 port so they never collide with a
-// real deployment's :9118.
+// listenAddr is the fixed LAN bind address for the Torznab feed server. The port
+// is an internal detail (the compose port mapping publishes it), not an
+// operator-tuned setting. A var purely as a test seam: the lifecycle tests point
+// it at an ephemeral port so they never collide with a real deployment's :9118.
 var listenAddr = ":9118"
 
-// unusableFeedKey reports whether the configured feed_api_key cannot be trusted
-// as the feed's authentication gate: it is absent, or it still holds an
-// unexpanded environment-variable reference in EITHER spelling. The second case
-// matters because this key IS the gate - an unexpanded placeholder is a
-// credential guessable from the public config.example, and the /ab RSS body's
-// download links carry the operator's AnimeBytes passkey. config's
-// validateIndexerEndpoints rejects both on the daemon path; these guards keep
-// any other construction of Indexer from binding or serving behind them.
-//
-// The reference test is internal/secretref's, shared with internal/config, so
-// the two cannot disagree about which spellings count. They used to: this
-// package tested only for a brace, so an unbraced $NAME read as usable while
-// config warned about it (see that package's doc).
+// unusableFeedKey reports whether the configured feed_api_key cannot be trusted as
+// the feed's authentication gate: it is absent, or it still holds an unexpanded
+// environment-variable reference in EITHER spelling. The second case matters
+// because this key IS the gate - a placeholder is guessable from the public
+// config.example, and the /ab RSS body's download links carry the operator's
+// AnimeBytes passkey. The reference test is internal/secretref's, shared with
+// internal/config, so the two cannot disagree about which spellings count.
 func unusableFeedKey(key string) bool { return secretref.Unusable(key) }
 
 // unusableABPasskey reports whether indexer.ab_passkey can build a grabbable
 // AnimeBytes link: it cannot when absent, and it cannot when it still holds an
-// environment-variable reference - url.PathEscape would mint that placeholder
-// into every AB download link, so every arr grab fails at the tracker while the
-// feed reports success. Both cases take the documented empty-passkey path
-// instead: the AB journal is cleared at load (rebuildABDownloadURLs) and an /ab
-// RSS check answers the Torznab <error> that names the passkey.
+// environment-variable reference - url.PathEscape would mint that placeholder into
+// every AB download link, so every arr grab fails at the tracker while the feed
+// reports success. Both take the documented empty-passkey path instead.
 func unusableABPasskey(passkey string) bool { return secretref.Unusable(passkey) }
 
 // Run serves the Torznab endpoint from the current feed snapshot until ctx is
-// cancelled. It first starts the snapshot cache's own reload clock
-// (cache.start) - the one piece of startup work, owned by this lifecycle method
-// rather than by New - which loads the last persisted snapshot and thereafter
-// re-stats it on its own clock. The endpoint then listens immediately (so an
-// arr's caps Test succeeds right away); it serves whatever feed the last compare
-// cycle produced (empty until the first cycle on a fresh install), taking this
-// process's cycles in-process (see FeedWriter.publishSnapshot) and a `poll`
-// cycle's from the file. It owns no health marker - the daemon that runs it does
-// - so a feed failure never flips container health.
+// cancelled. It first starts the snapshot cache's own reload clock - the one piece
+// of startup work, owned by this lifecycle method rather than by New - then listens
+// immediately, so an arr's caps Test succeeds right away. It serves whatever feed
+// the last compare cycle produced, taking this process's cycles in-process and a
+// `poll` cycle's from the file. It owns no health marker, so a feed failure never
+// flips container health.
 func (ix *Indexer) Run(ctx context.Context) error {
-	// Fail closed at the network boundary: config.Validate (validateIndexer)
-	// already rejects a configured feed with an empty or still-unresolved
-	// feed_api_key on the daemon path, but any alternate construction of the
-	// exported Indexer must never bind and serve the feed with a guessable or
-	// absent gate - the AnimeBytes RSS feed embeds ab_passkey in its download
-	// links. Field-name-only: the rejected value is a credential.
+	// Fail closed at the network boundary: config.Validate already rejects an empty
+	// or unresolved feed_api_key on the daemon path, but any alternate construction
+	// must never bind and serve the passkey-bearing feed behind a guessable or
+	// absent gate. Field-name-only: the rejected value is a credential.
 	if ix.keyUnusable {
 		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference; refusing to serve the Torznab feed")
 	}
-	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so a feed
-	// with AnimeBytes ON takes the empty-passkey path (cleared AB journal,
-	// Torznab <error> on the /ab RSS check). Say why once at startup: config only
-	// rejects the unresolved form for feed_api_key, and a non-allowlisted
-	// variable name produces no load-time diagnostic at all. Gated on the
-	// tracker being enabled: with ab_torznab_url blank (the README's off switch)
-	// nothing is served for /ab and no error is rendered, so warning there would
-	// be the parked-passkey noise config's INFO policy exists to avoid (l-f13).
-	// Field-name-only: the value is a credential.
+	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so a feed with
+	// AnimeBytes ON takes the empty-passkey path. Say why once at startup: config
+	// only rejects the unresolved form for feed_api_key. Gated on the tracker being
+	// enabled, so a blank ab_torznab_url is not nudged about a parked passkey.
 	if ix.enablement.enabled(upstreamAB) && secretref.Unexpanded(ix.enablement.ABPasskey) {
 		ix.log.Warn("indexer.ab_passkey still holds an unexpanded environment-variable reference " +
 			"(${VAR} or $VAR); the variable is unset or not allowlisted " +
 			"(SONARR_/RADARR_/SEADEX_SCOUT_), so no grabbable AnimeBytes link can be derived - " +
 			"the /ab RSS feed answers a Torznab error until it is set")
 	}
-	// The one piece of startup work, deliberately here and not in New: all
-	// background work begins under the explicit lifecycle method. The cache's
+	// The one piece of startup work, deliberately here and not in New. The cache's
 	// loader goroutine lives for ctx, so it stops with the server.
 	ix.cache.start(ctx)
-	// Bind up front so a port-in-use error surfaces synchronously here and is
-	// returned to the daemon's startIndexer, which logs it. The feed owns no
-	// health marker (the compare loop does), so a bind failure never flips
-	// container health.
+	// Bind up front so a port-in-use error surfaces synchronously and is returned to
+	// the daemon's startIndexer. The feed owns no health marker, so a bind failure
+	// never flips container health.
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("indexer listen on %s: %w", listenAddr, err)
 	}
 
-	// The HTTP surface rides the shared webhttp plumbing: server bootstrap +
-	// graceful shutdown here, the middleware stack in chain. WriteTimeout is
-	// set (see writeTimeout): this endpoint only emits finite XML and the
-	// upstream Prowlarr retry tree has a calculable upper bound, so the
-	// deadline bounds stalled response consumers while leaving the bounded
-	// retry budget intact. MaxHeaderBytes is the fifth limit of the same set
-	// (see maxHeaderBytes): a size bound beside the four deadlines, refusing an
-	// oversized request line or header block before any handler - and before
-	// the pre-auth query parses - can allocate against it.
+	// The HTTP surface rides the shared webhttp plumbing: bootstrap plus graceful
+	// shutdown here, the middleware stack in chain.
 	srv := webhttp.NewServer(ix.chain(),
 		webhttp.WithReadHeaderTimeout(readHeaderTimeout),
 		webhttp.WithReadTimeout(readTimeout),
@@ -162,10 +118,9 @@ func (ix *Indexer) Run(ctx context.Context) error {
 }
 
 // torznabErrorResponder is the webhttp Recoverer ErrorResponder for the Torznab
-// feed: it renders a recovered panic's 500 as a Torznab <error> document on the
-// XML content type the arrs expect, in place of webhttp's default JSON envelope.
-// Recoverer already logged the panic and only calls this when the response has
-// not been committed; this just writes the body.
+// feed: it renders a recovered panic's 500 as a Torznab <error> document on the XML
+// content type the arrs expect. Recoverer already logged the panic and only calls
+// this when the response has not been committed.
 func torznabErrorResponder(w http.ResponseWriter, _ *http.Request, status int, _, msg string) {
 	noCacheHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
@@ -181,30 +136,21 @@ func noCacheHeaders(h http.Header) {
 	h.Set("Pragma", "no-cache")
 }
 
-// rejectTorznab renders a Torznab <error> rejection and logs one INFO line
-// naming the reason. noCacheHeaders was already set by serve for every
-// authenticated response. The implicit HTTP 200 is deliberate: Newznab/
-// Torznab error documents ride 200 and the arrs/Prowlarr classify by the
-// <error> body (that is what surfaces the description on Prowlarr's
-// save-test); only torznabErrorResponder, which answers a recovered
-// panic, writes a real 5xx status.
+// rejectTorznab renders a Torznab <error> rejection and logs one INFO line naming
+// the reason. The implicit HTTP 200 is deliberate: Torznab error documents ride
+// 200 and the arrs classify by the <error> body, which is what surfaces the
+// description on Prowlarr's save-test. Only a recovered panic writes a real 5xx.
 func (ix *Indexer) rejectTorznab(w http.ResponseWriter, scope, reason string, code int, msg string) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	_, _ = io.WriteString(w, renderError(code, msg))
 	ix.log.Info("indexer request rejected", "scope", scope, "reason", reason)
 }
 
-// logParam bounds and cleans a request-controlled string (URL path, Host,
-// Torznab query params) before it reaches a log line - the same emit-boundary
-// policy sanitizeUpstreamText applies to untrusted upstream text: single-line
-// rune safety (runesafe.SanitizeSingleLine), then a 256-byte cap on a rune
-// boundary (truncated output appends "..."), so a caller holding the feed key
-// cannot turn one request into oversized Loki records. maxHeaderBytes already
-// refuses the megabyte shape at the network boundary, so this is the SECOND
-// bound, not the only one: it cuts a param that is legal at 16 KiB down to a
-// legible log field. Structured JSON already prevents line injection; this
-// bounds volume. The apikey is never passed through this helper or into any
-// log.
+// logParam bounds and cleans a request-controlled string (URL path, Host, Torznab
+// query params) before it reaches a log line - the same emit-boundary policy
+// sanitizeUpstreamText applies: single-line rune safety, then a 256-byte cap on a
+// rune boundary. maxHeaderBytes already refuses the megabyte shape, so this is the
+// SECOND bound: it cuts a param that is legal at 16 KiB down to a legible field.
 func logParam(s string) string { return capLogText(s, 256) }
 
 // handler builds the HTTP mux (a single Torznab endpoint).
@@ -214,49 +160,17 @@ func (ix *Indexer) handler() http.Handler {
 	return mux
 }
 
-// chain assembles the middleware stack Run serves. Order (outermost first):
-//
-//   - SecurityHeaders: the OUTERMOST baseline (nosniff, X-Frame-Options:
-//     DENY, Referrer-Policy, Content-Security-Policy), set before anything
-//     else runs so every response carries it - a recovered panic's 500 AND
-//     authFailureLimiter's 429, which short-circuits its own response and
-//     would skip the headers entirely from any inner position. Defense in
-//     depth for the credential-bearing /ab feed opened in a browser; the arrs
-//     ignore all of them.
-//   - authFailureLimiter: rejects over-budget bad-apikey requests BEFORE the
-//     access logger, so a flooding or brute-forcing LAN client cannot fill
-//     the slog/Loki stream at wire speed - suppressing that flood is the
-//     throttle's whole point, so it must sit outside Logging. Admitted
-//     wrong-key requests still fall through to serve's 401 + domain line,
-//     now bounded by the bucket's rate.
-//   - Logging: the standard access line (method, PATH only, status,
-//     duration, request id, client_ip) - webhttp's RequestLogger logs
-//     r.URL.Path and
-//     never the query string, so the Torznab apikey (which arrives as a
-//     query parameter) cannot leak into the access log. serve's own domain
-//     line (scope/params/result counts) complements it - that line
-//     whitelists the params it logs and likewise never logs apikey.
-//     WithClientIP is passed with NO trusted ranges, the spoof-proof default:
-//     it logs the immediate socket peer, which is the real client in the
-//     supported deployment (the arrs and Prowlarr reach this port directly on
-//     the container network; nothing publishes it through a reverse proxy).
-//     Behind a proxy the operator would pass that proxy's CIDRs
-//     (webhttp.ParseCIDRs) so a trusted X-Forwarded-For resolves the real
-//     client - deliberately NOT done speculatively, since trusting a
-//     forwarded header with no proxy in front of it is how the field becomes
-//     spoofable. The attribute name is the fleet's `client_ip`, so a shared
-//     Loki query over every webhttp consumer's access lines includes this app.
-//   - Recoverer: turns a handler panic into a logged 500 rendered as a
-//     Torznab <error> via torznabErrorResponder - not net/http's bare
-//     connection close, and not webhttp's default JSON envelope, which is
-//     the wrong wire shape for this XML endpoint. It sits inside Logging so
-//     a recovered panic logs as its 500.
+// chain assembles the middleware stack Run serves. Order (outermost first): -
+// SecurityHeaders: the OUTERMOST baseline (nosniff, X-Frame-Options: DENY,
+// Referrer-Policy, Content-Security-Policy), set before anything else runs so every
+// response carries it - a recovered panic's 500 AND authFailureLimiter's 429, which
+// short-circuits its own response and would skip the headers entirely from any inner
+// position.
 func (ix *Indexer) chain() http.Handler {
 	return webhttp.Chain(ix.handler(),
-		// default-src 'none' is the whole policy this endpoint needs: every
-		// response is a self-contained XML or plain-text document with no
-		// subresources, so an inert document is the correct browser reading of
-		// the credential-bearing /ab feed. The arrs ignore the header.
+		// default-src 'none' is the whole policy this endpoint needs: every response is
+		// a self-contained document with no subresources, so an inert document is the
+		// correct browser reading of the credential-bearing /ab feed.
 		webhttp.SecurityHeaders(webhttp.WithCSP("default-src 'none'")),
 		ix.authFailureLimiter(),
 		webhttp.Logging(webhttp.WithLogger(ix.log), webhttp.WithClientIP()),
@@ -267,53 +181,29 @@ func (ix *Indexer) chain() http.Handler {
 	)
 }
 
-// authFailureLimiter rate-limits bad-apikey requests through webhttp's
-// failed-auth preset (webhttp.FailedAuthRateLimit), which owns the tuning: a
-// shared token bucket of burst 10 with one token accrued every 6s, and a 429
-// envelope of code "too_many_auth_failures". Those numbers used to be local
-// constants here, hand-copied byte-identically by the sibling services guarding
-// the same shape; one home is what stops them drifting apart. The human message
-// stays caller-owned, because the credential differs per service and naming it
-// (an apikey here) is what makes the refusal legible to whoever configured it.
-//
-// The predicate is passed THROUGH the limiter, so the middleware sees every
-// request and only a failed credential draws a token - it verifies with the same
-// pre-hashed constant-time verifier serve uses - so the arrs' happy path can
-// never be throttled, not even mid-flood; over-budget bad-key requests get a
-// 429 (with a computed Retry-After hint) before reaching the logger or the
-// handler. The empty-configured-key guard keeps serve's fail-closed 503
-// diagnostic reachable for alternate constructions (Run refuses to bind in that
-// state, so it is test-only).
-//
-// Wire-speed key guessing remains answerable in principle (a correct guess
-// is never throttled, so 200-vs-429 is an oracle); that residue is an
-// accepted trade: feed_api_key is a high-entropy operator secret on a
-// LAN-only bind, and the alternative - throttling verification itself -
-// would let any flooding client lock out the legitimate arr. The realistic
-// threats are the log flood and misconfigured-client spam, both bounded
-// here.
+// authFailureLimiter rate-limits bad-apikey requests through webhttp's failed-auth
+// preset, which owns the tuning: a shared token bucket of burst 10 with one token
+// every 6s, and a 429 envelope of code "too_many_auth_failures". Those numbers used
+// to be local constants hand-copied by sibling services. The human message stays
+// caller-owned, because naming the credential is what makes the refusal legible.
 func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
 	return webhttp.FailedAuthRateLimit(func(r *http.Request) bool {
 		return !ix.keyUnusable && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
 	}, "too many failed apikey attempts")
 }
 
-// serve handles the Torznab endpoint. Every request must address a specific
-// tracker feed - /nyaa or /ab by path, or a nyaa.*/ab.* host; an unscoped
-// request is 404 (there is no combined feed). t=caps returns capabilities,
-// everything else proxies that tracker's Prowlarr endpoint filtered to SeaDex's
-// curation. serve is the top-down dispatcher reading in protocol order; each
-// response policy lives in its own helper.
+// serve handles the Torznab endpoint. Every request must address a specific tracker
+// feed - /nyaa or /ab by path, or a nyaa.*/ab.* host; an unscoped request is 404.
+// t=caps returns capabilities, everything else proxies that tracker's Prowlarr
+// endpoint filtered to SeaDex's curation. Each response policy lives in a helper.
 func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if !ix.authorizeRequest(w, r, q) {
 		return
 	}
-	// Every authenticated caps/error/feed response is marked non-cacheable up
-	// front: the /ab RSS body embeds the operator's AnimeBytes passkey in its
-	// download links, and a browser, intermediary, or explicitly configured
-	// reverse-proxy cache must never retain that credential-bearing body
-	// beyond the request.
+	// Every authenticated caps/error/feed response is marked non-cacheable up front:
+	// the /ab RSS body embeds the operator's AnimeBytes passkey in its download
+	// links, and no cache may retain that body beyond the request.
 	noCacheHeaders(w.Header())
 	scope, ok := ix.requireScope(w, r)
 	if !ok {
@@ -332,29 +222,21 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 // the request may proceed; on rejection the response has been written.
 func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q url.Values) bool {
 	if ix.keyUnusable {
-		// Fail closed at the handler too: Run already refuses to bind with an
-		// empty or unresolved feed_api_key, so this branch is unreachable in
-		// production, but a second independent guard keeps any future
-		// construction path from serving the passkey-bearing feed behind an
-		// absent or guessable gate - and it is what
-		// distinguishes "auth not configured" (this 503, an operator problem)
-		// from "wrong key" (the 401 below). The static-token verifier itself
-		// fails CLOSED on an empty configured key, so skipping this guard
-		// could never open the gate; it would just misreport the unconfigured
-		// state as an unauthorized caller - and for an unresolved ${VAR} it
-		// would accept the guessable placeholder as a valid key.
+		// Fail closed at the handler too: Run already refuses to bind with an empty or
+		// unresolved feed_api_key, but a second independent guard keeps a future
+		// construction path from serving the passkey-bearing feed behind an absent or
+		// guessable gate - and it distinguishes "auth not configured" (this 503) from
+		// "wrong key" (the 401 below).
 		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", logParam(r.URL.Path))
 		http.Error(w, "service unavailable: feed_api_key not configured", http.StatusServiceUnavailable)
 		return false
 	}
-	// Constant-time verification, with the length side-channel (CWE-208)
-	// closed by comparing fixed-length SHA-256 digests rather than the raw
-	// strings, lives in the shared library; the verifier is built once in New
-	// (pre-hashed configured key): see webhttp.NewStaticTokenVerifier.
+	// Constant-time verification, with the length side-channel (CWE-208) closed by
+	// comparing fixed-length SHA-256 digests rather than raw strings, lives in the
+	// shared library; the verifier is built once in New.
 	if !ix.verifyKey.Verify(q.Get("apikey")) {
-		// Volume is bounded upstream: authFailureLimiter (see chain) 429s
-		// over-budget bad-key requests before the access logger, so this
-		// domain line and its 401 are capped at the bucket's rate.
+		// Volume is bounded upstream: authFailureLimiter 429s over-budget bad-key
+		// requests before the access logger, so this line is capped at its rate.
 		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "client_ip", webhttp.ClientIP(r))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
@@ -386,16 +268,12 @@ func (ix *Indexer) serveCaps(w http.ResponseWriter, q url.Values, scope string) 
 	return true
 }
 
-// rejectMissingABPasskey applies serve's AB configuration guard, reporting
-// whether it rejected the request. The AnimeBytes RSS feed needs the
-// operator's passkey to build grabbable links, so without it a configured
-// /ab feed has nothing to serve a periodic RSS check (an empty-q request).
-// Answer that with a Torznab error rather than an empty feed, so Prowlarr's
-// save-test fails with a clear reason and the operator sets the passkey. An
-// AB search (non-empty q) is unaffected: it proxies Prowlarr, whose own link
-// needs no passkey. An UNCONFIGURED AB tracker (empty ab_torznab_url, the
-// README's off switch) is not nudged: it falls through to the empty feed
-// (see serveQuery), the same shape as a tracker with no data.
+// rejectMissingABPasskey applies serve's AB configuration guard, reporting whether
+// it rejected the request. The AnimeBytes RSS feed needs the operator's passkey to
+// build grabbable links, so without it a configured /ab feed has nothing to serve
+// an RSS check. Answer with a Torznab error rather than an empty feed, so
+// Prowlarr's save-test fails with a reason. An AB search is unaffected (it proxies
+// Prowlarr), and an UNCONFIGURED AB tracker is not nudged at all.
 func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, scope string) bool {
 	if scope != upstreamAB || !ix.enablement.enabled(upstreamAB) || !unusableABPasskey(ix.enablement.ABPasskey) || !isFeedRequest(q) {
 		return false
@@ -405,31 +283,15 @@ func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, s
 	return true
 }
 
-// serveQuery runs the tracker query and renders the feed, translating the
-// two local-fault outcomes (snapshot unavailable, total upstream failure)
-// into Torznab errors, then logs the one INFO line per request.
-//
-// There is deliberately no in-flight admission gate here. What bounds a
-// request's cost is the cost itself: upstreamMaxBytes caps each proxied
-// Prowlarr body, a synthesized-RSS render reads the SHARED snapshot slice
-// under a read lock and only allocates its own builder, and the api key gates
-// who may ask at all. A concurrency ceiling on top of that bounded only the
-// COUNT of requests, and the count was never the risk - measured against the
-// live catalogue a real Torznab response is ~150 KiB against an 8 MiB cap, so
-// the former four-slot ceiling saved about a megabyte, while the reconcile
-// sharing this process is the actual memory consumer and no gate here touched
-// it. Meanwhile the ceiling could answer a legitimate request busy, and an
-// <error> is a FAILED search to the arr (it counts toward the indexer-failure
-// escalation that disables the indexer, RSS included), so the gate's own worst
-// case was worse than the exhaustion it guarded.
+// serveQuery runs the tracker query and renders the feed, translating the two
+// local-fault outcomes (snapshot unavailable, total upstream failure) into Torznab
+// errors, then logs the one INFO line per request.
 func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Values, scope string) {
 	items, stats, fault := ix.query(r.Context(), q, scope)
-	// A request query could not answer with a feed at all (the persisted
-	// snapshot failed to load before any snapshot was installed, or every
-	// queried Prowlarr upstream failed) arrives as a fault carrying its own
-	// Torznab error text: an empty 200 feed would read as a clean no-match to
-	// the arr, silently recording the fault as a successful search. One arm
-	// here means a new fault cannot be forgotten into a false-empty feed.
+	// A request that could not answer with a feed at all arrives as a fault carrying
+	// its own Torznab error text: an empty 200 feed would read as a clean no-match,
+	// silently recording the fault as a successful search. One arm here means a new
+	// fault cannot be forgotten into a false-empty feed.
 	if fault != nil {
 		ix.rejectTorznab(w, scope, fault.summary, fault.code, fault.detail)
 		return
@@ -437,18 +299,8 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	doc, rendered := renderFeed(items)
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
 	if _, err := io.WriteString(w, doc); err != nil {
-		// The client went away or the write deadline fired mid-body: the
-		// request log's `returned` count below describes what was RENDERED,
-		// not what the arr received, so record the partial delivery. Debug,
-		// not Warn - an arr cancelling a slow search is routine.
-		//
-		// os.ErrDeadlineExceeded is this server's OWN WriteTimeout firing
-		// mid-body (see writeTimeout's residual-window note): a local fault
-		// the operator can act on - a slow /config mount delaying the first
-		// snapshot, or a deadline too tight for the retry tree - not the
-		// routine client cancellation the Debug line describes. The arr sees
-		// an unparseable body either way, so the level is what tells the two
-		// apart in Loki.
+		// The client went away or the write deadline fired mid-body: the request log's
+		// `returned` count describes what was RENDERED, not what the arr received.
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			ix.log.Warn("indexer feed write deadline expired mid-body; the arr received a partial feed",
 				"scope", scope, "rendered_items", rendered,
@@ -459,29 +311,16 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		}
 	}
 	if rendered < len(items) {
-		// renderFeed degraded to a truncated-but-valid document (the byte
-		// budget); without this WARN the only request log would falsely
-		// report the full result count while the arr silently received a
-		// partial feed. Counts only - no item fields or URLs.
+		// renderFeed degraded to a truncated-but-valid document (the byte budget);
+		// without this WARN the request log would falsely report the full result count
+		// while the arr received a partial feed. Counts only.
 		ix.log.Warn("indexer feed truncated by the render byte budget",
 			"scope", scope,
 			"requested_items", len(items),
 			"rendered_items", rendered,
 			"max_bytes", maxRenderedFeedBytes)
 	}
-	// One INFO line per request: the incoming Torznab params plus a result
-	// summary. `answered` is false when the feed deliberately skips a per-episode
-	// query (so an empty result reads as a skip, not a no-match); `feed` is true
-	// for an empty-q RSS check served from the synthesized SeaDex feed;
-	// `upstream_fetched` is how many results the upstream page carried BEFORE the
-	// Prowlarr fetch's download-URL origin filter and `upstream` how many survived
-	// it (a gap between them is that filter dropping items) for a search,
-	// `curated` how many items survived curation/synthesis (pre cat-filter/paging), `returned`
-	// the count actually EMITTED into the rendered document (the render byte
-	// budget can truncate below the post-category-filter count), and
-	// `identity_conflicts` how many search results were dropped because their
-	// identity signals contradicted each other (an untrusted-response shape,
-	// distinct from the ordinary not-curated drop).
+	// One INFO line per request: the incoming Torznab params plus a result summary.
 	ix.log.Info("indexer request",
 		"scope", scope,
 		"t", logParam(q.Get("t")),
@@ -498,17 +337,12 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		"returned", rendered)
 }
 
-// scopeFor resolves which tracker's results a request targets: the URL path
-// first (scopeFromPath), the Host subdomain as a fallback (scopeFromHost), or ""
-// when neither names a tracker - which serve treats as 404, since there is no
-// combined feed. Serving per-tracker lets an arr treat the feed as two indexers
-// and gate each tracker's RSS/automatic/interactive use with that indexer's own
-// flags - the arr is the only component that knows the search type (it is never
-// carried in the Torznab request), so it owns that decision. Two
-// addressing styles are supported so it works whether seadex-scout shares a host
-// with the arrs or sits behind a reverse proxy: a path (.../nyaa, .../ab) for
-// direct use, or a subdomain (nyaa.example.com, ab.example.com) a proxy can map
-// to the single port without rewriting the path.
+// scopeFor resolves which tracker's results a request targets: the URL path first,
+// the Host subdomain as a fallback, or "" when neither names a tracker - which
+// serve treats as 404, since there is no combined feed. Serving per-tracker lets an
+// arr treat the feed as two indexers and gate each tracker's RSS/search use with
+// that indexer's own flags. Two addressing styles are supported so it works
+// whether seadex-scout shares a host with the arrs or sits behind a proxy.
 func scopeFor(host, path string) string {
 	if s := scopeFromPath(path); s != "" {
 		return s
@@ -522,22 +356,9 @@ func scopeFor(host, path string) string {
 func scopeFromPath(p string) string { return scopeFromToken(firstSegment(p)) }
 
 // scopeFromHost maps a request Host to a tracker via its leading DNS label:
-// nyaa.example.com -> nyaa, ab.example.com -> ab, anything else (a bare internal
-// name like seadex-scout:9118, or any non-tracker host) -> "". This lets a
-// reverse proxy route per-tracker subdomains to the one port with no path
-// rewrite; the Host must reach the app unmodified (the default for a Caddy/nginx
-// reverse proxy).
-//
-// The authority is canonicalized through webhttp.CanonicalHost - the shared
-// strict parser the rest of the app's HTTP stack already uses - rather than by
-// splitting the raw Host on its first dot. The raw split does not actually parse
-// an authority: it admitted malformed values ("ab..example", "ab.example.com:")
-// as the AB scope, and, worse, a bare tracker host carrying a port ("ab:9118" -
-// the shape a direct LAN client uses) failed to select any scope because the port
-// rode along in the label. CanonicalHost lowercases, strips the port and IPv6
-// brackets, allows at most one trailing FQDN dot, and returns "" for anything
-// outside the RFC 3986 authority grammar, so a second divergent Host
-// interpretation no longer sits beside the shared stack's (l-f25).
+// nyaa.example.com -> nyaa, ab.example.com -> ab, anything else -> "". This lets a
+// reverse proxy route per-tracker subdomains to the one port with no path rewrite;
+// the Host must reach the app unmodified.
 func scopeFromHost(host string) string {
 	canonical := webhttp.CanonicalHost(host)
 	if canonical == "" {

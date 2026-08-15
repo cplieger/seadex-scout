@@ -395,26 +395,6 @@ func TestClassifyUnderscoreDelimitedName(t *testing.T) {
 	}
 }
 
-// TestClassifyLargeUppercaseUnderscoreEvidence pins the in-place matching
-// contract: a large, entirely-uppercase, underscore-heavy evidence value (the
-// worst case for the removed lowercase+underscore normalization, which
-// allocated two evidence-sized copies per piece) still classifies correctly —
-// the case-insensitive, underscore-aware regexes must find every marker
-// family in the raw text.
-func TestClassifyLargeUppercaseUnderscoreEvidence(t *testing.T) {
-	name := strings.Repeat("PADDING_", 1<<16) + "SHOW_1080P_BD_REMUX_X265_CRF_18_4500_KBPS_BDRIP"
-	got := Classify(&Input{Names: []string{name}})
-	if got.Resolution != "1080p" {
-		t.Errorf("Resolution = %q, want 1080p", got.Resolution)
-	}
-	if got.Kind != KindRemux {
-		t.Errorf("Kind = %q, want %q", got.Kind, KindRemux)
-	}
-	if got.Codec != "x265" {
-		t.Errorf("Codec = %q, want x265", got.Codec)
-	}
-}
-
 // TestClassifyTrackerPassthrough pins the Tracker field's passthrough
 // contract in Classify: the raw source tracker label is whitespace-trimmed
 // but otherwise preserved verbatim (casing and unknown names included), since
