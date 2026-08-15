@@ -2,7 +2,6 @@ package state
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -127,13 +126,13 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 			t.Fatalf("write fuzz state: %v", err)
 		}
 		store := NewStore(path, testLogger())
-		st, err := store.Load(context.Background())
+		st, err := store.Load(t.Context())
 		if err != nil {
 			if newerSchemaState(data) {
 				if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, fs.ErrNotExist) {
 					t.Errorf("newer-schema state %q quarantined (stat err = %v), want preserved at the live path", data, statErr)
 				}
-				if saveErr := store.Save(context.Background(), &State{}); saveErr == nil {
+				if saveErr := store.Save(t.Context(), &State{}); saveErr == nil {
 					t.Error("Save after loading newer-schema state returned nil error, want refusal")
 				}
 				live, readErr := os.ReadFile(path)
@@ -157,7 +156,7 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 		if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, fs.ErrNotExist) {
 			t.Errorf("accepted input was quarantined (stat err = %v)", statErr)
 		}
-		if saveErr := store.Save(context.Background(), &st); saveErr != nil {
+		if saveErr := store.Save(t.Context(), &st); saveErr != nil {
 			// json.Encoder HTML-escapes <, >, & (and U+2028/U+2029) into 6-byte
 			// \u-sequences, so a foreign near-cap file holding them raw can be
 			// Load-accepted yet legitimately re-encode past maxStateBytes. The
@@ -168,7 +167,7 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 			}
 			t.Fatalf("Save of a Load-accepted state failed: %v", saveErr)
 		}
-		again, loadErr := store.Load(context.Background())
+		again, loadErr := store.Load(t.Context())
 		if loadErr != nil {
 			t.Fatalf("re-Load after Save of an accepted state failed: %v", loadErr)
 		}

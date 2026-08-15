@@ -46,7 +46,7 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 		Feed:     feed,
 	})
 
-	if healthy := s.Cycle(context.Background()); healthy {
+	if healthy := s.Cycle(t.Context()); healthy {
 		t.Fatal("Cycle healthy=true, want false when the library walk fails (feed or not)")
 	}
 	if feed.calls != 1 {
@@ -87,7 +87,7 @@ func TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak(t *testing.T) {
 		Feed:     &fakeFeed{},
 	})
 
-	if healthy := s.Cycle(context.Background()); healthy {
+	if healthy := s.Cycle(t.Context()); healthy {
 		t.Fatal("Cycle healthy=true, want false when the library walk fails (feed or not)")
 	}
 	if store.st.SeadexFailures != 0 {
@@ -115,7 +115,7 @@ func TestCycleSeaDexFailureSkipsFeedRebuild(t *testing.T) {
 		Feed:     feed,
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a SeaDex failure is degraded, not unhealthy)")
 	}
 	if feed.calls != 0 {
@@ -144,7 +144,7 @@ func TestCycleUnusableMapSkipsFeedRebuild(t *testing.T) {
 		Feed:    feed,
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (an unusable map is degraded, not unhealthy)")
 	}
 	if feed.calls != 0 {
@@ -181,7 +181,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		Feed:         feed,
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when only the feed rebuild fails")
 	}
 	if feed.calls != 1 {
@@ -230,7 +230,7 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 				Feed:     feed,
 			})
 
-			if healthy := s.Cycle(context.Background()); healthy {
+			if healthy := s.Cycle(t.Context()); healthy {
 				t.Fatal("Cycle healthy=true, want false when the library walk fails")
 			}
 			if feed.calls != 0 {
@@ -298,7 +298,7 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 		Feed:     feed,
 	})
 
-	if healthy := s.Cycle(context.Background()); healthy {
+	if healthy := s.Cycle(t.Context()); healthy {
 		t.Fatal("Cycle healthy=true, want false (the walk failed; only the feed refreshes)")
 	}
 	if feed.got == nil {
@@ -321,7 +321,7 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 // misattribute a routine shutdown to an upstream outage (the genuine double
 // outage keeps its WARN via TestCycleWalkAndSeaDexBothFailWarnsFeedKept).
 func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
 	feed := &fakeFeed{}
@@ -376,7 +376,7 @@ func (c *cancellingFeed) Advance(context.Context, []seadex.Entry, indexer.EntryI
 // cycle then closes via the shutdown-during-matching WARN, healthy, with
 // prior findings preserved.
 func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
 	feed := &cancellingFeed{cancel: cancel}
@@ -440,7 +440,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 				Feed:    feed,
 			})
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (an unusable map is degraded, not unhealthy)")
 			}
 			if feed.calls != 0 {
@@ -488,7 +488,7 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 				Feed:     tc.feed,
 			})
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
 			}
 			got, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle", "feed_kept")
@@ -523,7 +523,7 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshot(t *testing.T) {
 		Feed:     &fakeFeed{},
 	})
 
-	if healthy := s.Cycle(context.Background()); healthy {
+	if healthy := s.Cycle(t.Context()); healthy {
 		t.Fatal("Cycle healthy=true, want false when the library walk fails")
 	}
 	if store.saves != 1 {

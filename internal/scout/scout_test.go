@@ -315,7 +315,7 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 	})
 
-	if healthy := s.Cycle(context.Background()); healthy {
+	if healthy := s.Cycle(t.Context()); healthy {
 		t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
 	}
 	if n := recorder.CountExact("library walk failed; cycle unhealthy"); n != 1 {
@@ -357,7 +357,7 @@ func TestCycleSeaDexFailureIsHealthyAndReportsNothing(t *testing.T) {
 		Notifier: notify.NewNotifier(logger, nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle returned healthy=false, want true for degraded SeaDex failure")
 	}
 	loaded := store.st
@@ -401,7 +401,7 @@ func TestCycleGateReemitsAStandingSetAfterReadiness(t *testing.T) {
 		Notifier: notify.NewNotifier(logger, nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("establishing cycle healthy=false, want true")
 	}
 	if !s.ready {
@@ -416,7 +416,7 @@ func TestCycleGateReemitsAStandingSetAfterReadiness(t *testing.T) {
 	// Now gate the next pass before the compare. The set stands, so it must be
 	// re-stated unchanged: the same rows again plus exactly one more summary.
 	sea.err = errors.New("seadex down")
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("gated cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
 	}
 	if got, want := recorder.CountExact("findings reported"), summariesAfterReport+1; got != want {
@@ -438,7 +438,7 @@ func TestNewNilLoggerFallsBackToDefault(t *testing.T) {
 	recorder := capture.Default(t)
 	s := New(&Deps{Store: &fakeStore{loadErr: errors.New("boom")}})
 
-	s.loadState(context.Background())
+	s.loadState(t.Context())
 
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 1 {
 		t.Errorf("state-load failure logged through the default logger %d times, want 1", n)
@@ -462,7 +462,7 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	cancel()
 	s.save(ctx, &want)
 
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load() after save with canceled context: %v", err)
 	}
@@ -503,7 +503,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
 	})
 
-	if healthy := s.Cycle(context.Background()); healthy {
+	if healthy := s.Cycle(t.Context()); healthy {
 		t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
 	}
 	if n := recorder.CountExact("library walk failed; cycle unhealthy"); n != 1 {
@@ -530,7 +530,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    &fakeFeed{},
 	})
-	if healthy := sFeed.Cycle(context.Background()); healthy {
+	if healthy := sFeed.Cycle(t.Context()); healthy {
 		t.Fatal("feed-configured Cycle returned healthy=true, want false when the library walk fails")
 	}
 	if n := feedRecorder.CountExact("cycle degraded"); n != 1 {
@@ -549,7 +549,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		Store:   &fakeStore{},
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
 	})
-	_, err := reporter.Report(context.Background())
+	_, err := reporter.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want the walk failure")
 	}
@@ -627,7 +627,7 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 			Store:    &fakeStore{},
 			Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
 		})
-		if healthy := s.Cycle(context.Background()); healthy {
+		if healthy := s.Cycle(t.Context()); healthy {
 			t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
 		}
 		if arr, ok := recordAttr(recorder, "library walk failed; cycle unhealthy", "arr"); !ok || arr != library.ArrSonarr {
@@ -654,7 +654,7 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 			SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 			Feed:    &fakeFeed{},
 		})
-		if healthy := s.Cycle(context.Background()); healthy {
+		if healthy := s.Cycle(t.Context()); healthy {
 			t.Fatal("feed-configured Cycle returned healthy=true, want false when the library walk fails")
 		}
 		if arr, ok := recordAttr(recorder, "library walk failed; cycle unhealthy", "arr"); !ok || arr != library.ArrRadarr {
@@ -696,7 +696,7 @@ func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
 	store := &failOnceStore{}
 	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 
-	s.save(context.Background(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+	s.save(t.Context(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 	if store.attempts != 1 {
 		t.Errorf("Save attempts = %d, want 1 (only a cancellation takes the detached retry)", store.attempts)
@@ -719,7 +719,7 @@ func TestLoadStateDeadlineExceededIsNotAFault(t *testing.T) {
 	logger, recorder := capture.New()
 	s := New(&Deps{Logger: logger, Store: &fakeStore{loadErr: context.DeadlineExceeded}})
 
-	st := s.loadState(context.Background())
+	st := s.loadState(t.Context())
 
 	if len(st.ShrunkWalksByArr) != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("loadState on a deadline-exceeded load = %+v, want empty state", st)
@@ -803,7 +803,7 @@ func TestSaveRetryAlwaysGetsTheAnchoredGrace(t *testing.T) {
 	store := &slowCancelStore{spend: spend}
 	s := New(&Deps{Logger: slog.New(slog.DiscardHandler), Store: store})
 
-	s.save(context.Background(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+	s.save(t.Context(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 	if store.attempts != 2 {
 		t.Fatalf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)

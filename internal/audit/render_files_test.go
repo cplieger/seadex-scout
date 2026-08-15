@@ -28,7 +28,7 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 		Rows:        []Row{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
-	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 
@@ -66,7 +66,7 @@ func TestWriteFilesReportPairIsOwnerOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC)}
 
-	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err == nil {
 		t.Fatal("WriteFiles must fail when the Markdown target is a symlink")
@@ -137,7 +137,7 @@ func TestWriteFilesReportWrittenLineCarriesAlertAttributes(t *testing.T) {
 		},
 	}
 
-	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewJSONHandler(&buf, nil))); err != nil {
+	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewJSONHandler(&buf, nil))); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestWriteFilesRedactsArrURLCredentials(t *testing.T) {
 		}},
 	}
 
-	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestWriteFilesSurfacesProbePathError(t *testing.T) {
 		Totals:      map[string]int{},
 	}
 
-	err := r.WriteFiles(context.Background(), dirAsFile, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := r.WriteFiles(t.Context(), dirAsFile, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err == nil {
 		t.Fatal("WriteFiles must fail when the report dir path is an existing file")
@@ -242,7 +242,7 @@ func TestWriteFilesJSONFailureSkipsMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err == nil {
 		t.Fatal("WriteFiles must fail when the JSON target is a symlink")
@@ -271,7 +271,7 @@ func TestWriteFilesProbesSuffixWhenEitherHalfExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 
@@ -302,10 +302,10 @@ func TestWriteFilesSameSecondRerunKeepsBothPairs(t *testing.T) {
 	first := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []Row{{Title: "First", Arr: "sonarr", Verdict: VerdictBest}}}
 	second := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []Row{{Title: "Second", Arr: "sonarr", Verdict: VerdictBest}}}
 
-	if err := first.WriteFiles(context.Background(), dir, log); err != nil {
+	if err := first.WriteFiles(t.Context(), dir, log); err != nil {
 		t.Fatalf("first WriteFiles: %v", err)
 	}
-	if err := second.WriteFiles(context.Background(), dir, log); err != nil {
+	if err := second.WriteFiles(t.Context(), dir, log); err != nil {
 		t.Fatalf("second WriteFiles: %v", err)
 	}
 
@@ -425,7 +425,7 @@ func (c *pathExistsCancelCtx) Err() error {
 func TestWriteFilesCanceledAfterJSONStillWritesMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
-	ctx := &pathExistsCancelCtx{Context: context.Background(), path: base + ".json"}
+	ctx := &pathExistsCancelCtx{Context: t.Context(), path: base + ".json"}
 	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
 
 	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -468,7 +468,7 @@ func (c *countingCancelCtx) Err() error {
 // flipping at call 3 lands exactly on the report-render checkpoint.
 func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
-	ctx := &countingCancelCtx{Context: context.Background(), after: 3}
+	ctx := &countingCancelCtx{Context: t.Context(), after: 3}
 	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
 
 	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -513,7 +513,7 @@ func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
 	}
 
 	rep := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
-	err := rep.WriteFiles(context.Background(), dir, log)
+	err := rep.WriteFiles(t.Context(), dir, log)
 	if err != nil {
 		t.Fatalf("WriteFiles(non-durable json) = %v, want nil (a completed write is not a fault)", err)
 	}
@@ -567,7 +567,7 @@ func TestWriteFilesNonDurableMarkdownStillReportsWritten(t *testing.T) {
 	}
 
 	rep := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
-	err := rep.WriteFiles(context.Background(), dir, log)
+	err := rep.WriteFiles(t.Context(), dir, log)
 	if err != nil {
 		t.Fatalf("WriteFiles(non-durable markdown) = %v, want nil", err)
 	}
@@ -602,7 +602,7 @@ func TestWriteFilesSurfacesJSONEncodeError(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	r := &Report{GeneratedAt: time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC), Totals: map[string]int{}}
 
-	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err == nil {
 		t.Fatal("WriteFiles must fail when the report cannot be JSON-encoded")

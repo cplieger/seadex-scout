@@ -1,7 +1,6 @@
 package scout
 
 import (
-	"context"
 	"log/slog"
 	"slices"
 	"testing"
@@ -123,7 +122,7 @@ func (f *twoArrShrinkFixture) scout(logger *slog.Logger) *Scout {
 // "the side was carried" assertion vacuous.
 func (f *twoArrShrinkFixture) seed(t *testing.T, wantRadarr int) {
 	t.Helper()
-	if healthy := f.scout(scoutTestLogger()).Cycle(context.Background()); !healthy {
+	if healthy := f.scout(scoutTestLogger()).Cycle(t.Context()); !healthy {
 		t.Fatal("seeding Cycle healthy=false, want true")
 	}
 	if got := countItemsByArr(f.store.st.Library.Items); got[library.ArrSonarr] != 4 || got[library.ArrRadarr] != wantRadarr {
@@ -168,7 +167,7 @@ func TestCycleOneArrEmptiedKeepsThatSidesFindings(t *testing.T) {
 	f.emptyRadarr()
 
 	logger, recorder := capture.New()
-	if healthy := f.scout(logger).Cycle(context.Background()); !healthy {
+	if healthy := f.scout(logger).Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shrunken side is degraded, not an ingest failure)")
 	}
 
@@ -226,9 +225,9 @@ func TestCycleShrunkSideDoesNotRatchetPriorCount(t *testing.T) {
 	f.emptyRadarr()
 
 	firstLogger, first := capture.New()
-	f.scout(firstLogger).Cycle(context.Background())
+	f.scout(firstLogger).Cycle(t.Context())
 	secondLogger, second := capture.New()
-	f.scout(secondLogger).Cycle(context.Background())
+	f.scout(secondLogger).Cycle(t.Context())
 
 	for i, recorder := range []*capture.Recorder{first, second} {
 		if got, ok := recorder.AttrValue("library walk shrank", "prior_items"); !ok || got != "2" {
@@ -296,7 +295,7 @@ func TestCycleShrunkSideEscalatesThenAcceptsAtThreshold(t *testing.T) {
 			f.store.st.ShrunkWalksByArr = map[string]int{library.ArrRadarr: tc.priorStreak}
 
 			logger, recorder := capture.New()
-			if healthy := f.scout(logger).Cycle(context.Background()); !healthy {
+			if healthy := f.scout(logger).Cycle(t.Context()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (the shrink guard never fails the ingest)")
 			}
 
@@ -366,7 +365,7 @@ func TestCycleRecoveredSideResetsOnlyItsOwnStreak(t *testing.T) {
 	f.emptyRadarr()
 	f.store.st.ShrunkWalksByArr = map[string]int{library.ArrSonarr: 3, library.ArrRadarr: 1}
 
-	if healthy := f.scout(scoutTestLogger()).Cycle(context.Background()); !healthy {
+	if healthy := f.scout(scoutTestLogger()).Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true")
 	}
 	got := f.store.st.ShrunkWalksByArr
@@ -388,7 +387,7 @@ func TestCycleAlwaysEmptySideIsNeverSuspect(t *testing.T) {
 	f.seed(t, 0)
 
 	logger, recorder := capture.New()
-	if healthy := f.scout(logger).Cycle(context.Background()); !healthy {
+	if healthy := f.scout(logger).Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true")
 	}
 	if len(f.store.st.ShrunkWalksByArr) != 0 {
@@ -436,14 +435,14 @@ func TestCycleSingleArrDeploymentShrinksAsBefore(t *testing.T) {
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 		})
 	}
-	if healthy := newScout(scoutTestLogger()).Cycle(context.Background()); !healthy {
+	if healthy := newScout(scoutTestLogger()).Cycle(t.Context()); !healthy {
 		t.Fatal("seeding Cycle healthy=false, want true")
 	}
 
 	// One series left of four: 1*2 < 4 trips the guard.
 	sonarr.series = sonarr.series[:1]
 	logger, recorder := capture.New()
-	if healthy := newScout(logger).Cycle(context.Background()); !healthy {
+	if healthy := newScout(logger).Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shrunken walk is degraded, not unhealthy)")
 	}
 	if counts := countItemsByArr(store.st.Library.Items); counts[library.ArrSonarr] != 4 {
@@ -508,7 +507,7 @@ func TestCycleShrunkSidePersistsSeaDexStreakReset(t *testing.T) {
 	f.emptyRadarr()
 	f.store.st.SeadexFailures = 3
 
-	if healthy := f.scout(scoutTestLogger()).Cycle(context.Background()); !healthy {
+	if healthy := f.scout(scoutTestLogger()).Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true")
 	}
 	if f.store.st.SeadexFailures != 0 {

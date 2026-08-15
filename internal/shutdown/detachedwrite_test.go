@@ -20,7 +20,7 @@ type detachedCtxTestKey struct{}
 // grace-exhausted write as a routine shutdown).
 func TestDetachedWriteContext(t *testing.T) {
 	t.Run("a live context is detached and survives the shutdown that follows", func(t *testing.T) {
-		parent := context.WithValue(context.Background(), detachedCtxTestKey{}, "report")
+		parent := context.WithValue(t.Context(), detachedCtxTestKey{}, "report")
 		ctx, cancelParent := context.WithCancel(parent)
 
 		got, cancel := DetachedWriteContext(ctx)
@@ -43,7 +43,7 @@ func TestDetachedWriteContext(t *testing.T) {
 		}
 	})
 	t.Run("an already-cancelled caller still gets a live write context", func(t *testing.T) {
-		parent := context.WithValue(context.Background(), detachedCtxTestKey{}, "report")
+		parent := context.WithValue(t.Context(), detachedCtxTestKey{}, "report")
 		ctx, cancelParent := context.WithCancel(parent)
 		cancelParent()
 
@@ -57,7 +57,7 @@ func TestDetachedWriteContext(t *testing.T) {
 		}
 	})
 	t.Run("the shutdown grace bounds the write and reports the deadline as the cause", func(t *testing.T) {
-		ctx, cancelParent := context.WithCancel(context.Background())
+		ctx, cancelParent := context.WithCancel(t.Context())
 		got, cancel := detachedWriteContextGrace(ctx, time.Millisecond)
 		defer cancel()
 
@@ -72,7 +72,7 @@ func TestDetachedWriteContext(t *testing.T) {
 		}
 	})
 	t.Run("an untouched grace never cancels the write", func(t *testing.T) {
-		got, cancel := detachedWriteContextGrace(context.Background(), time.Millisecond)
+		got, cancel := detachedWriteContextGrace(t.Context(), time.Millisecond)
 		defer cancel()
 		time.Sleep(20 * time.Millisecond)
 		if got.Err() != nil {

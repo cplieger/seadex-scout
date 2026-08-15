@@ -90,7 +90,7 @@ func TestWalkSonarrPartialEpisodeFailure(t *testing.T) {
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
 	}
@@ -139,7 +139,7 @@ func TestWalkSonarrFailureBudgetFailsWalk(t *testing.T) {
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err == nil {
 		t.Fatal("Walk returned nil error, want the walk failure budget error")
 	}
@@ -175,7 +175,7 @@ func TestWalkSonarrTotalEpisodeFailureFailsWalk(t *testing.T) {
 			}
 			w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 
-			snap, err := w.Walk(context.Background())
+			snap, err := w.Walk(t.Context())
 			if err == nil {
 				t.Fatal("Walk returned nil error, want the total episode-failure error")
 			}
@@ -205,7 +205,7 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 	}
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestWalkAppliesIncludeAndExcludeTagFiltersTogether(t *testing.T) {
 		Logger:      discardLogger(),
 	})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint(t *testing.T) {
 	}
 	w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk with no tag filters: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			snap, err := w.Walk(context.Background())
+			snap, err := w.Walk(t.Context())
 			if err == nil && len(snap.Items) != seriesCount {
 				err = errors.New("walk returned the wrong item count")
 			}
@@ -458,7 +458,7 @@ func (f *cancelingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
 }
 
 func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	fs := &cancelingSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
 		cancel: cancel,
@@ -515,7 +515,7 @@ func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
 	}
 	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, RadarrURL: "https://radarr.example", Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestWalkSonarrTagResolutionCancellationIsFatal(t *testing.T) {
 		tagErr: context.Canceled,
 	}
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); !errors.Is(err, context.Canceled) {
+	if _, err := w.Walk(t.Context()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled propagated from tag resolution", err)
 	}
 }
@@ -566,7 +566,7 @@ func TestWalkRadarrTagResolutionCancellationIsFatal(t *testing.T) {
 		tagErr: context.Canceled,
 	}
 	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); !errors.Is(err, context.Canceled) {
+	if _, err := w.Walk(t.Context()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled propagated from tag resolution", err)
 	}
 }
@@ -589,7 +589,7 @@ func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
 		tagErr: boom,
 	}
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	_, err := w.Walk(context.Background())
+	_, err := w.Walk(t.Context())
 	if !errors.Is(err, boom) {
 		t.Fatalf("Walk error = %v, want the tag-resolution failure propagated (fail closed)", err)
 	}
@@ -612,7 +612,7 @@ func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
 		tagErr: context.DeadlineExceeded,
 	}
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := w.Walk(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Walk error = %v, want the live-context timeout propagated (fail closed)", err)
 	}
 }
@@ -642,7 +642,7 @@ func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T)
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -722,7 +722,7 @@ func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", sentinel}, Logger: logger})
 
-	if _, err := w.Walk(context.Background()); err != nil {
+	if _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	warnings := 0
@@ -775,7 +775,7 @@ func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
 	}
 	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -816,7 +816,7 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (a live-context per-request timeout is not fatal): %v", err)
 	}
@@ -908,7 +908,7 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
 	}
@@ -940,7 +940,7 @@ func TestWalkSonarrRepresentativeTieBreaksToFirstFile(t *testing.T) {
 		},
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -969,7 +969,7 @@ func TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup(t *testing.T) {
 		},
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1013,7 +1013,7 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 	}
 	w := NewWalker(&Config{Sonarr: fs, SonarrURL: "https://sonarr.example", Logger: discardLogger()})
 
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1051,7 +1051,7 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestWalkSonarrBudgetTripSkipsQueuedFetches(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := w.Walk(context.Background())
+			_, err := w.Walk(t.Context())
 			done <- err
 		}()
 
@@ -1155,7 +1155,7 @@ func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
 		}
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
+	snap, err := w.Walk(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "failure budget") {
 		t.Fatalf("Walk error = %v, want the walk failure budget error", err)
 	}
@@ -1174,7 +1174,7 @@ func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
 	t.Run("empty series list", func(t *testing.T) {
 		fs := &fakeSonarr{}
 		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-		snap, err := w.Walk(context.Background())
+		snap, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk with an empty Sonarr library: %v", err)
 		}
@@ -1188,7 +1188,7 @@ func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
 			tags:   []arrapi.Tag{{ID: 7, Label: "anime"}},
 		}
 		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-		snap, err := w.Walk(context.Background())
+		snap, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk with every series tag-filtered out: %v", err)
 		}
@@ -1222,7 +1222,7 @@ func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 
-	if _, err := w.Walk(context.Background()); err != nil {
+	if _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
 	}
 	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "error", "connection refused") {
@@ -1257,7 +1257,7 @@ func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 
-	if _, err := w.Walk(context.Background()); err != nil {
+	if _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
 	}
 	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "series", "Frieren [2J  gpj.exe") {
@@ -1297,7 +1297,7 @@ func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.cfg.Logger = discardLogger()
 			w := NewWalker(&tc.cfg)
-			_, err := w.Walk(context.Background())
+			_, err := w.Walk(t.Context())
 			if err == nil {
 				t.Fatal("Walk returned nil error, want the list failure")
 			}

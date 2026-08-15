@@ -1,7 +1,6 @@
 package anilist
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -514,13 +513,13 @@ func TestThrottleWaitRevalidatesReservationAfterPenalty(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		th := &throttle{interval: time.Second}
 		start := time.Now()
-		if err := th.wait(context.Background()); err != nil {
+		if err := th.wait(t.Context()); err != nil {
 			t.Fatalf("first wait: %v", err)
 		}
 		// Second waiter holds a reservation one interval out (start+1s).
 		done := make(chan time.Time, 1)
 		go func() {
-			if err := th.wait(context.Background()); err != nil {
+			if err := th.wait(t.Context()); err != nil {
 				t.Errorf("penalized wait: %v", err)
 			}
 			done <- time.Now()

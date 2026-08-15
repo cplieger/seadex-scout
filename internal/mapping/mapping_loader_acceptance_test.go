@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -27,7 +26,7 @@ func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("empty refresh returned nil error, want degraded error")
 	}
@@ -54,7 +53,7 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("refresh with no arr identifiers returned nil error, want degraded error")
 	}
@@ -85,7 +84,7 @@ func TestLoader_refreshCache_noTypeKeepsStale(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("refresh with no typed records returned nil error, want degraded error")
 	}
@@ -131,7 +130,7 @@ func TestLoader_refreshCache_typeSparsePreviousCacheAcceptsUntypedRefresh(t *tes
 		RejectedRefreshes: 3,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("type-sparse refresh over a type-sparse cache returned error %v, want accepted", err)
 	}
@@ -174,7 +173,7 @@ func TestLoader_refreshCache_additiveGrowthKeepsTypedFloor(t *testing.T) {
 		RejectedRefreshes: 3,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("additive refresh retaining all typed records returned error %v, want accepted", err)
 	}
@@ -207,7 +206,7 @@ func TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("refresh with 1/250 arr-identifier coverage returned nil error, want degraded error")
 	}
@@ -237,7 +236,7 @@ func TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor(t *testing.T) {
 	defer ts.Close()
 
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), &Cache{})
+	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err != nil {
 		t.Fatalf("refresh with exactly 1/100 arr identifiers returned error: %v", err)
 	}
@@ -281,7 +280,7 @@ func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
 			defer ts.Close()
 
 			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-			next, err := l.refreshCache(context.Background(), &Cache{})
+			next, err := l.refreshCache(t.Context(), &Cache{})
 			if tc.wantAccept {
 				if err != nil {
 					t.Fatalf("refresh with %d/%d arr identifiers returned error: %v", tc.covered, tc.total, err)
@@ -325,7 +324,7 @@ func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 		Records:   prevRecords,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("truncated refresh (1 record replacing 4) returned nil error, want degraded error")
 	}
@@ -365,7 +364,7 @@ func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
 	}
 	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: prevRecords}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	var stale *StaleMapError
 	if !errors.As(err, &stale) {
 		t.Fatalf("duplicate-collapse refresh error = %v, want a *StaleMapError", err)
@@ -418,7 +417,7 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 
 			prev := routingFloorPrevCache()
 			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-			next, err := l.refreshCache(context.Background(), prev)
+			next, err := l.refreshCache(t.Context(), prev)
 			var stale *StaleMapError
 			if !errors.As(err, &stale) {
 				t.Fatalf("routing-collapse refresh error = %v, want a *StaleMapError guard rejection", err)
@@ -451,7 +450,7 @@ func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 	prev := routingFloorPrevCache()
 	prev.RejectedRefreshes = 3
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("additive refresh growing both routing sides returned error %v, want accepted", err)
 	}
@@ -484,7 +483,7 @@ func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
 	defer ts.Close()
 
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), &Cache{})
+	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("first-boot refresh with 1/200 AniList-keyed records returned nil error, want below-minimum rejection")
 	}
@@ -514,7 +513,7 @@ func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.
 	defer ts.Close()
 
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), &Cache{})
+	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("first-boot refresh of 200 duplicates of one AniList ID returned nil error, want below-minimum rejection")
 	}
@@ -546,7 +545,7 @@ func TestLoader_refreshCache_negativeOnlyCacheNotUsable(t *testing.T) {
 		Records:   records,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
 	}
@@ -577,7 +576,7 @@ func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
 	defer ts.Close()
 
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), &Cache{})
+	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("first-boot refresh of 200 negative-ID records returned nil error, want rejection")
 	}
@@ -614,7 +613,7 @@ func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 		},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refresh with one duplicated ID returned error %v, want accepted (4 effective records against 4 stale)", err)
 	}
@@ -671,7 +670,7 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 		Records:   prevRecords,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	stale, ok := errors.AsType[*StaleMapError](err)
 	if !ok {
 		t.Fatalf("below-half refresh error = %v, want a *StaleMapError guard rejection", err)
@@ -734,7 +733,7 @@ func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
 		RejectedRefreshes: 3,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("exactly-half refresh (4 of 8) returned error %v, want accepted (the guards are strictly below-half)", err)
 	}

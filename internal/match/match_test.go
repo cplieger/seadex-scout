@@ -155,7 +155,7 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	}}
 	m := NewMatcher(fake, nil)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 20791}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 20791}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("want 1 match, got %d", len(res.Matches))
@@ -204,7 +204,7 @@ func TestMatchNoTitleFallbackWhenRecordHasArrID(t *testing.T) {
 	fake := &countingAniList{}
 	m := NewMatcher(fake, nil)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 999}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 999}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("want 1 match, got %d", len(res.Matches))
@@ -276,7 +276,7 @@ func TestMatchBatchesAniListLookups(t *testing.T) {
 	}}
 	m := NewMatcher(fake, nil)
 
-	res := m.Match(context.Background(),
+	res := m.Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
@@ -319,7 +319,7 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	idx := mapping.NewIndex(nil) // no Fribb record: the entry resolves via AniList
 	m := NewMatcher(degradedAniList{}, nil)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
 
 	if !res.Degraded {
 		t.Error("Degraded = false, want true when a needed AniList lookup fails transiently")
@@ -355,7 +355,7 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 	}}
 	m := NewMatcher(fake, nil)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 500}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 500}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("want 1 match, got %d", len(res.Matches))
@@ -381,7 +381,7 @@ func TestMatchTitleFallbackYearDisambiguatesAmbiguousTitles(t *testing.T) {
 		500: {Titles: []string{"Clannad"}, Format: "TV", Year: 2010},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 500}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 500}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -435,7 +435,7 @@ func TestMatchCancelledContextStopsBeforeEntries(t *testing.T) {
 // must not be memoized, and must not degrade the cycle.
 func TestMatchInvalidAniListIDSkipsLookupWithoutDegrading(t *testing.T) {
 	fake := &countingAniList{}
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 0}}, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 0}}, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
 	if res.Degraded {
 		t.Error("Degraded = true, want false for a non-positive AniList ID")
 	}
@@ -464,7 +464,7 @@ func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}})
 	fake := &countingAniList{}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -504,7 +504,7 @@ func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -543,7 +543,7 @@ func TestMatchAltTitleFallbackFiltersArrAndDedupes(t *testing.T) {
 		154587: {Titles: []string{"!!!", "Sousou no Frieren", "Frieren: Beyond Journey's End"}, Format: "TV", Year: 2023},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -672,7 +672,7 @@ func TestMatchEmptyFormatTitleFallbackSearchesBothArrs(t *testing.T) {
 		610: {Titles: []string{"Clannad"}, Format: "", Year: 2007},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 610}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 610}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -707,7 +707,7 @@ func TestMatchMemoizedSteadyStateSurvivesOutage(t *testing.T) {
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020, Expiry: time.Now().Add(time.Hour)},
 	}}
 
-	res := NewMatcher(degradedAniList{}, nil).Match(context.Background(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+	res := NewMatcher(degradedAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
 
 	if res.Degraded {
 		t.Error("Degraded = true, want false: the live memo served every needed lookup")
@@ -739,7 +739,7 @@ func TestMatchIncompleteIDsScope(t *testing.T) {
 			40: {Titles: []string{"Returned"}, Format: "TV"},
 		}}
 
-		res := NewMatcher(fake, nil).Match(context.Background(),
+		res := NewMatcher(fake, nil).Match(t.Context(),
 			[]seadex.Entry{{AniListID: 154587}, {AniListID: 40}, {AniListID: 41}, {AniListID: 42}},
 			snap, idx, Memo{})
 
@@ -760,7 +760,7 @@ func TestMatchIncompleteIDsScope(t *testing.T) {
 		snap := &library.Snapshot{}
 		idx := mapping.NewIndex(nil)
 
-		res := NewMatcher(degradedAniList{}, nil).Match(context.Background(),
+		res := NewMatcher(degradedAniList{}, nil).Match(t.Context(),
 			[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
 
 		if !res.Degraded {
@@ -838,7 +838,7 @@ func TestMatchTitleFallbackKeepsUnknownYearItem(t *testing.T) {
 		620: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 620}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 620}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -888,7 +888,7 @@ func TestMatchIDLessUntypedRecordRoutesByAniListFormat(t *testing.T) {
 		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -927,7 +927,7 @@ func TestMatchIDLessUntypedRecordUnknownFormatSearchesBothArrs(t *testing.T) {
 		21403: {Titles: []string{"Kizumonogatari"}, Year: 2016},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -963,7 +963,7 @@ func TestMatchUntypedRecordWithMovieIDResolvesByID(t *testing.T) {
 		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -997,7 +997,7 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))
@@ -1072,7 +1072,7 @@ func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	}}
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 102351, Type: "SPECIAL", TmdbMovies: []int{400}}})
 
-	res := NewMatcher(fakeAniList{}, nil).Match(context.Background(), []seadex.Entry{{AniListID: 102351}}, snap, idx, Memo{})
+	res := NewMatcher(fakeAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 102351}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(res.Matches))

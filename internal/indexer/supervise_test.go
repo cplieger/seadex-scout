@@ -28,8 +28,8 @@ func TestLogStopClassifiesShutdownAndFault(t *testing.T) {
 	}{
 		{"budget expired during shutdown", canceled, context.DeadlineExceeded, "indexer shutdown budget expired; in-flight requests aborted", slog.LevelWarn},
 		{"clean stop during shutdown", canceled, context.Canceled, "indexer feed stopped during shutdown", slog.LevelWarn},
-		{"fault outside shutdown", context.Background(), errors.New("bind failed"), "indexer feed stopped", slog.LevelError},
-		{"deadline exceeded outside shutdown stays a fault", context.Background(), context.DeadlineExceeded, "indexer feed stopped", slog.LevelError},
+		{"fault outside shutdown", t.Context(), errors.New("bind failed"), "indexer feed stopped", slog.LevelError},
+		{"deadline exceeded outside shutdown stays a fault", t.Context(), context.DeadlineExceeded, "indexer feed stopped", slog.LevelError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,7 +58,7 @@ func TestLogStopClassifiesShutdownAndFault(t *testing.T) {
 // fires the cycle-error alert on a redeploy.
 func TestLogStopClassifiesCauseOnlyCancellation(t *testing.T) {
 	cause := errors.New("terminated signal received") // deliberately NOT wrapping context.Canceled
-	ctx, cancelCause := context.WithCancelCause(context.Background())
+	ctx, cancelCause := context.WithCancelCause(t.Context())
 	cancelCause(cause)
 	log, rec := capture.New()
 
@@ -87,7 +87,7 @@ func TestSupervisePanicShield(t *testing.T) {
 	done := make(chan struct{})
 	cleaned := make(chan struct{})
 
-	supervise(context.Background(), done,
+	supervise(t.Context(), done,
 		func(context.Context) error { panic("boom") },
 		func() { close(cleaned) },
 		log.With("component", "indexer"))
@@ -121,7 +121,7 @@ func TestSuperviseStopWaitsForDrain(t *testing.T) {
 	stopped := make(chan struct{})
 	cleaned := make(chan struct{})
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	supervise(ctx, done, func(rctx context.Context) error {
 		<-rctx.Done()
 		close(stopped)
@@ -156,9 +156,9 @@ func TestSuperviseStopForcesTheFeedDownUnderALiveParent(t *testing.T) {
 	log, rec := capture.New()
 	cleaned := make(chan struct{})
 
-	// context.Background() is never cancelled, so only the child context
+	// The parent stays live for the whole test body, so only the child context
 	// Supervise derives can stop the feed.
-	stop := New(&Config{APIKey: "k"}, log, nil).Supervise(context.Background(), func() { close(cleaned) })
+	stop := New(&Config{APIKey: "k"}, log, nil).Supervise(t.Context(), func() { close(cleaned) })
 	stop()
 
 	select {

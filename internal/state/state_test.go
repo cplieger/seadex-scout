@@ -54,7 +54,7 @@ func TestStoreLoadDoesNotBlockOnFifoStatePath(t *testing.T) {
 	}
 	loaded := make(chan error, 1)
 	go func() {
-		_, err := NewStore(path, testLogger()).Load(context.Background())
+		_, err := NewStore(path, testLogger()).Load(t.Context())
 		loaded <- err
 	}()
 	// The watchdog is only reached if the confined open regresses to a
@@ -71,7 +71,7 @@ func TestStoreLoadDoesNotBlockOnFifoStatePath(t *testing.T) {
 
 func TestStoreLoadMissingReturnsEmptyState(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
-	st, err := store.Load(context.Background())
+	st, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load missing state returned error: %v", err)
 	}
@@ -111,10 +111,10 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 		AniListDegraded:  7,
 	}
 
-	if err := store.Save(context.Background(), want); err != nil {
+	if err := store.Save(t.Context(), want); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
@@ -154,10 +154,10 @@ func TestStoreSaveSanitizesLibrarySnapshot(t *testing.T) {
 		ArrURL: "https://user:pass@sonarr.example/series/frieren",
 	}}}}
 
-	if err := store.Save(context.Background(), st); err != nil {
+	if err := store.Save(t.Context(), st); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestStoreLoadCorruptReturnsDecodeError(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
 		t.Fatalf("write corrupt state: %v", err)
 	}
-	_, err := NewStore(path, testLogger()).Load(context.Background())
+	_, err := NewStore(path, testLogger()).Load(t.Context())
 	if err == nil {
 		t.Fatal("Load corrupt state returned nil error, want decode error")
 	}
@@ -198,11 +198,11 @@ func TestStoreLoadInvalidUTF8Quarantines(t *testing.T) {
 		t.Fatalf("write invalid UTF-8 state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(t.Context()); err == nil {
 		t.Fatal("Load returned nil error, want invalid UTF-8 decode error")
 	}
 	assertQuarantined(t, path, string(body))
-	if err := store.Save(context.Background(), &State{}); err != nil {
+	if err := store.Save(t.Context(), &State{}); err != nil {
 		t.Errorf("Save after quarantining invalid UTF-8 remained blocked: %v", err)
 	}
 }
@@ -217,7 +217,7 @@ func TestReadOnlyStoreLoadCorruptLeavesFileInPlace(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
 		t.Fatalf("write corrupt state: %v", err)
 	}
-	_, err := NewReadOnlyStore(path, testLogger()).Load(context.Background())
+	_, err := NewReadOnlyStore(path, testLogger()).Load(t.Context())
 	if err == nil {
 		t.Fatal("Load corrupt state returned nil error, want decode error")
 	}
@@ -238,7 +238,7 @@ func TestReadOnlyStoreLoadCorruptLeavesFileInPlace(t *testing.T) {
 // on a NewReadOnlyStore must refuse and leave no file behind.
 func TestReadOnlyStoreSaveRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	err := NewReadOnlyStore(path, testLogger()).Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+	err := NewReadOnlyStore(path, testLogger()).Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 	if err == nil {
 		t.Fatal("Save on a read-only store returned nil error, want refusal")
 	}
@@ -282,7 +282,7 @@ func TestStoreLoadDuplicateVersionKeyQuarantines(t *testing.T) {
 		t.Fatalf("write state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	_, err := store.Load(context.Background())
+	_, err := store.Load(t.Context())
 	if err == nil {
 		t.Fatal("Load returned nil error, want decode error for a duplicate-version-key payload")
 	}
@@ -290,7 +290,7 @@ func TestStoreLoadDuplicateVersionKeyQuarantines(t *testing.T) {
 		t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
 	}
 	assertQuarantined(t, path, body)
-	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 		t.Errorf("Save after quarantining a duplicate-version-key file failed: %v", saveErr)
 	}
 }
@@ -317,7 +317,7 @@ func TestStoreLoadTrailingGarbageAfterValidVersionQuarantines(t *testing.T) {
 				t.Fatalf("write state: %v", err)
 			}
 			store := NewStore(path, testLogger())
-			_, err := store.Load(context.Background())
+			_, err := store.Load(t.Context())
 			if err == nil {
 				t.Fatal("Load returned nil error, want decode error for trailing data")
 			}
@@ -325,7 +325,7 @@ func TestStoreLoadTrailingGarbageAfterValidVersionQuarantines(t *testing.T) {
 				t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
 			}
 			assertQuarantined(t, path, tt.body)
-			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+			if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 				t.Errorf("Save after quarantining a trailing-garbage file failed: %v", saveErr)
 			}
 		})
@@ -347,7 +347,7 @@ func TestStoreLoadEarlierInvalidDuplicateVersionQuarantines(t *testing.T) {
 		t.Fatalf("write state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	_, err := store.Load(context.Background())
+	_, err := store.Load(t.Context())
 	if err == nil {
 		t.Fatal("Load returned nil error, want duplicate-version decode error")
 	}
@@ -355,7 +355,7 @@ func TestStoreLoadEarlierInvalidDuplicateVersionQuarantines(t *testing.T) {
 		t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
 	}
 	assertQuarantined(t, path, body)
-	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 		t.Errorf("Save after quarantining malformed duplicate version remained blocked: %v", saveErr)
 	}
 }
@@ -371,7 +371,7 @@ func TestStoreLoadNegativeVersionQuarantines(t *testing.T) {
 		t.Fatalf("write state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	_, err := store.Load(context.Background())
+	_, err := store.Load(t.Context())
 	if err == nil {
 		t.Fatal("Load returned nil error, want error for a negative schema version")
 	}
@@ -379,7 +379,7 @@ func TestStoreLoadNegativeVersionQuarantines(t *testing.T) {
 		t.Errorf("error = %q, want negative-schema-version context", err.Error())
 	}
 	assertQuarantined(t, path, body)
-	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 		t.Errorf("Save after quarantining a negative-version file failed: %v", saveErr)
 	}
 }
@@ -398,7 +398,7 @@ func TestStoreLoadNegativeDuplicateVersionQuarantines(t *testing.T) {
 		t.Fatalf("write state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	_, err := store.Load(context.Background())
+	_, err := store.Load(t.Context())
 	if err == nil {
 		t.Fatal("Load returned nil error, want error for a negative duplicate schema version")
 	}
@@ -409,7 +409,7 @@ func TestStoreLoadNegativeDuplicateVersionQuarantines(t *testing.T) {
 		t.Errorf("error = %q, want corruption classification, not the newer-schema preservation", err.Error())
 	}
 	assertQuarantined(t, path, body)
-	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 		t.Errorf("Save after quarantining a negative-duplicate-version file remained blocked: %v", saveErr)
 	}
 }
@@ -437,7 +437,7 @@ func TestStoreLoadNullVersionQuarantines(t *testing.T) {
 				t.Fatalf("write state: %v", err)
 			}
 			store := NewStore(path, testLogger())
-			_, err := store.Load(context.Background())
+			_, err := store.Load(t.Context())
 			if err == nil {
 				t.Fatal("Load returned nil error, want decode error for a null version discriminator")
 			}
@@ -445,7 +445,7 @@ func TestStoreLoadNullVersionQuarantines(t *testing.T) {
 				t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
 			}
 			assertQuarantined(t, path, tt.body)
-			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+			if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 				t.Errorf("Save after quarantining a null-version file failed: %v", saveErr)
 			}
 		})
@@ -472,7 +472,7 @@ func TestStoreLoadNullReturnsDecodeError(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.body), 0o644); err != nil {
 				t.Fatalf("write state: %v", err)
 			}
-			_, err := NewStore(path, testLogger()).Load(context.Background())
+			_, err := NewStore(path, testLogger()).Load(t.Context())
 			if err == nil {
 				t.Fatal("Load returned nil error, want decode error for a non-object state file")
 			}
@@ -507,7 +507,7 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	if _, cancelErr := store.Load(canceled); !errors.Is(cancelErr, context.Canceled) {
 		t.Fatalf("Load with a canceled context error = %v, want context.Canceled to arm the preservation block", cancelErr)
 	}
-	_, err = store.Load(context.Background())
+	_, err = store.Load(t.Context())
 	if err == nil {
 		t.Fatal("Load oversized state returned nil error, want bounded-read error")
 	}
@@ -521,7 +521,7 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("live state path still present after quarantine (stat err = %v), want renamed away", statErr)
 	}
-	if saveErr := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); saveErr != nil {
 		t.Errorf("Save after quarantining an oversized file failed: %v (the over-cap classification must clear the unclassified-read-failure block)", saveErr)
 	}
 }
@@ -541,7 +541,7 @@ func TestStoreLoadNonRegularPathIsClassifiedCorruption(t *testing.T) {
 	}
 	store := NewStore(path, testLogger())
 
-	_, err := store.Load(context.Background())
+	_, err := store.Load(t.Context())
 	if err == nil {
 		t.Fatal("Load of a non-regular state path returned nil error, want the corruption reported")
 	}
@@ -551,10 +551,10 @@ func TestStoreLoadNonRegularPathIsClassifiedCorruption(t *testing.T) {
 	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
 		t.Errorf("non-regular state path was not quarantined (stat err = %v), want %s.corrupt preserved", statErr, path)
 	}
-	if saveErr := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); saveErr != nil {
 		t.Fatalf("Save after quarantining a non-regular path failed: %v (deterministic corruption must not arm the preservation block)", saveErr)
 	}
-	if got, loadErr := store.Load(context.Background()); loadErr != nil || got.ShrunkWalksByArr[library.ArrSonarr] != 1 {
+	if got, loadErr := store.Load(t.Context()); loadErr != nil || got.ShrunkWalksByArr[library.ArrSonarr] != 1 {
 		t.Errorf("Load after the recovering Save = (%+v, %v), want the freshly saved state at the live path", got, loadErr)
 	}
 }
@@ -581,10 +581,10 @@ func TestStoreLoadUnpreservableCorruptionBlocksSave(t *testing.T) {
 	}
 	store := NewStore(path, testLogger())
 
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(t.Context()); err == nil {
 		t.Fatal("Load of a corrupt state returned nil error, want the decode failure reported")
 	}
-	saveErr := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+	saveErr := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 	if !errors.Is(saveErr, ErrSavePreserved) {
 		t.Fatalf("Save after a FAILED quarantine = %v, want ErrSavePreserved (the corrupt bytes are still the only copy)", saveErr)
 	}
@@ -605,12 +605,12 @@ func TestStoreLoadUnpreservableCorruptionBlocksSave(t *testing.T) {
 func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("seed valid state: %v", err)
 	}
 
 	huge := &State{Memo: paddedMemo(maxStateBytes + 1)}
-	err := store.Save(context.Background(), huge)
+	err := store.Save(t.Context(), huge)
 	if err == nil {
 		t.Fatal("Save returned nil error, want over-cap rejection")
 	}
@@ -618,7 +618,7 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 		t.Errorf("error = %q, want size-cap context", err.Error())
 	}
 
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after rejected Save returned error: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("seed valid state: %v", err)
 	}
 
@@ -651,7 +651,7 @@ func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	}
 	exact := padded(maxStateBytes - len(base))
 
-	if err := store.Save(context.Background(), exact); err != nil {
+	if err := store.Save(t.Context(), exact); err != nil {
 		t.Fatalf("Save of an exactly-maxStateBytes state was rejected: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -661,7 +661,7 @@ func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	if info.Size() != maxStateBytes {
 		t.Errorf("saved file is %d bytes, want exactly %d (encoder newline must be truncated away)", info.Size(), maxStateBytes)
 	}
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load of the boundary-sized state: %v", err)
 	}
@@ -681,7 +681,7 @@ func TestStoreSaveWriteFailureReturnsError(t *testing.T) {
 	}
 	store := NewStore(filepath.Join(blocker, "state.json"), testLogger())
 
-	err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+	err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 	if err == nil {
 		t.Fatal("Save returned nil error, want write failure")
 	}
@@ -695,14 +695,14 @@ func TestStoreSaveWriteFailureReturnsError(t *testing.T) {
 // logs the cold start) and Save work without panicking on a nil *slog.Logger.
 func TestNewStoreNilLoggerDefaults(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "state.json"), nil)
-	st, err := store.Load(context.Background())
+	st, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load with nil logger returned error: %v", err)
 	}
 	if len(st.ShrunkWalksByArr) != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("Load = %+v, want zero state", st)
 	}
-	if err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("Save with nil logger returned error: %v", err)
 	}
 }
@@ -724,7 +724,7 @@ func TestStoreQuarantineRenameFailureWarnsAndKeepsFile(t *testing.T) {
 		t.Fatalf("create rename blocker: %v", err)
 	}
 	logger, recorder := capture.New()
-	_, err := NewStore(path, logger).Load(context.Background())
+	_, err := NewStore(path, logger).Load(t.Context())
 	if err == nil {
 		t.Fatal("Load corrupt state returned nil error, want decode error")
 	}
@@ -745,7 +745,7 @@ func TestStoreQuarantineRenameFailureWarnsAndKeepsFile(t *testing.T) {
 // cache), so Save(nil) must reject and leave no file behind.
 func TestStoreSaveNilReturnsErrorWithoutWriting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	err := NewStore(path, testLogger()).Save(context.Background(), nil)
+	err := NewStore(path, testLogger()).Save(t.Context(), nil)
 	if err == nil {
 		t.Fatal("Save(nil) returned nil error, want rejection")
 	}
@@ -763,14 +763,14 @@ func TestStoreSaveNilReturnsErrorWithoutWriting(t *testing.T) {
 func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
 	const wantShrunk, wantSeadex, wantAniList = 7, 5, 6
-	if err := store.Save(context.Background(), &State{
+	if err := store.Save(t.Context(), &State{
 		ShrunkWalksByArr: map[string]int{library.ArrSonarr: wantShrunk},
 		SeadexFailures:   wantSeadex,
 		AniListDegraded:  wantAniList,
 	}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
@@ -798,14 +798,14 @@ func TestStorePartialWalkStreakPersistsUnderStableWireKey(t *testing.T) {
 		t.Fatalf("write persisted state fixture: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
 	if got.PartialWalks != 7 {
 		t.Errorf("PartialWalks from persisted envelope = %d, want 7", got.PartialWalks)
 	}
-	if err := store.Save(context.Background(), &got); err != nil {
+	if err := store.Save(t.Context(), &got); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	persisted, err := os.ReadFile(path)
@@ -878,7 +878,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 			Partial: true,
 		},
 	}
-	if err := store.Save(context.Background(), st); err != nil {
+	if err := store.Save(t.Context(), st); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	persisted, err := os.ReadFile(path)
@@ -961,7 +961,7 @@ func TestStoreLoadIgnoresRetiredScalarShrunkWalks(t *testing.T) {
 		t.Fatalf("write legacy state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load of a file carrying the retired scalar shrunk_walks returned error: %v (an old file must never be quarantined over a retired key)", err)
 	}
@@ -990,10 +990,10 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
 	st := &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}
-	if err := store.Save(context.Background(), st); err != nil {
+	if err := store.Save(t.Context(), st); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
@@ -1009,7 +1009,7 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"shrunk_walks_by_arr":{"sonarr":3}}`), 0o644); err != nil {
 		t.Fatalf("write legacy state: %v", err)
 	}
-	legacy, err := store.Load(context.Background())
+	legacy, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load of a legacy pre-version file returned error: %v", err)
 	}
@@ -1027,7 +1027,7 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
 		t.Fatalf("write newer-version state: %v", err)
 	}
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(t.Context()); err == nil {
 		t.Fatal("Load of a newer-schema file returned nil error, want refusal")
 	} else {
 		wantFile := fmt.Sprintf("schema version %d", SchemaVersion+1)
@@ -1044,7 +1044,7 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if readErr != nil || string(live) != newer {
 		t.Errorf("live state file after newer-schema load = %q (err %v), want the original bytes preserved", live, readErr)
 	}
-	if saveErr := store.Save(context.Background(), &State{}); saveErr == nil {
+	if saveErr := store.Save(t.Context(), &State{}); saveErr == nil {
 		t.Error("Save after loading a newer-schema file returned nil error, want refusal")
 	}
 	live, readErr = os.ReadFile(path)
@@ -1083,10 +1083,10 @@ func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
 	logger, recorder := capture.New()
 	store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
 	taken := time.Now().Add(-90 * time.Minute).UTC()
-	if err := store.Save(context.Background(), &State{Library: library.Snapshot{TakenAt: taken}}); err != nil {
+	if err := store.Save(t.Context(), &State{Library: library.Snapshot{TakenAt: taken}}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	if _, err := store.Load(context.Background()); err != nil {
+	if _, err := store.Load(t.Context()); err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
 	age, found := libraryAge(recorder)
@@ -1105,10 +1105,10 @@ func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
 	// any walk succeeded) must omit the attribute.
 	zeroLogger, zeroRecorder := capture.New()
 	zeroStore := NewStore(filepath.Join(t.TempDir(), "state.json"), zeroLogger)
-	if err := zeroStore.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := zeroStore.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	if _, err := zeroStore.Load(context.Background()); err != nil {
+	if _, err := zeroStore.Load(t.Context()); err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
 	if _, found := libraryAge(zeroRecorder); found {
@@ -1121,10 +1121,10 @@ func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
 	futureLogger, futureRecorder := capture.New()
 	futureStore := NewStore(filepath.Join(t.TempDir(), "state.json"), futureLogger)
 	future := library.Snapshot{TakenAt: time.Now().Add(time.Hour).UTC()}
-	if err := futureStore.Save(context.Background(), &State{Library: future}); err != nil {
+	if err := futureStore.Save(t.Context(), &State{Library: future}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
-	if _, err := futureStore.Load(context.Background()); err != nil {
+	if _, err := futureStore.Load(t.Context()); err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
 	futureAge, found := libraryAge(futureRecorder)
@@ -1172,7 +1172,7 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 	}
 	store := NewStore(target, testLogger())
 
-	err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+	err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 	if err == nil {
 		t.Fatal("Save returned nil error, want commit failure")
 	}
@@ -1196,7 +1196,7 @@ func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write state fixture: %v", err)
 	}
-	got, err := NewStore(path, testLogger()).Load(context.Background())
+	got, err := NewStore(path, testLogger()).Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
@@ -1217,7 +1217,7 @@ func TestStoreSaveAppliesOwnerOnlyFileMode(t *testing.T) {
 		t.Fatalf("seed permissive state file: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -1254,17 +1254,17 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 				t.Fatalf("write newer-schema state: %v", err)
 			}
 			store := NewStore(path, testLogger())
-			if _, err := store.Load(context.Background()); err == nil {
+			if _, err := store.Load(t.Context()); err == nil {
 				t.Fatal("Load of newer-schema state returned nil error, want refusal")
 			}
-			if err := store.Save(context.Background(), &State{}); err == nil {
+			if err := store.Save(t.Context(), &State{}); err == nil {
 				t.Fatal("Save while blocked returned nil error, want refusal")
 			}
 			tt.recover(t, path)
-			if _, err := store.Load(context.Background()); err != nil {
+			if _, err := store.Load(t.Context()); err != nil {
 				t.Fatalf("Load after recovery returned error: %v", err)
 			}
-			if err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+			if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 				t.Errorf("Save after a recovered Load still blocked: %v (the block must clear once a supported or missing state loads)", err)
 			}
 		})
@@ -1287,7 +1287,7 @@ func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal size probe: %v", err)
 	}
-	saveErr := store.Save(context.Background(), huge)
+	saveErr := store.Save(t.Context(), huge)
 	if saveErr == nil {
 		t.Fatal("Save returned nil error, want over-cap rejection")
 	}
@@ -1311,10 +1311,10 @@ func TestStoreLoadCorruptClearsNewerSchemaSaveBlock(t *testing.T) {
 		t.Fatalf("write newer-schema state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(t.Context()); err == nil {
 		t.Fatal("Load of newer-schema state returned nil error, want refusal")
 	}
-	if err := store.Save(context.Background(), &State{}); err == nil {
+	if err := store.Save(t.Context(), &State{}); err == nil {
 		t.Fatal("Save while blocked returned nil error, want refusal")
 	}
 
@@ -1325,14 +1325,14 @@ func TestStoreLoadCorruptClearsNewerSchemaSaveBlock(t *testing.T) {
 	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
 		t.Fatalf("write corrupt state: %v", err)
 	}
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(t.Context()); err == nil {
 		t.Fatal("Load of corrupt state returned nil error, want decode error")
 	}
 	assertQuarantined(t, path, "null")
-	if err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Errorf("Save after a corrupt Load still blocked: %v (maybeQuarantine must clear the newer-schema block once the live file is positively classified corrupt)", err)
 	}
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after unblocked Save returned error: %v", err)
 	}
@@ -1358,7 +1358,7 @@ func TestStoreLoadReapsStaleTempsAndReadOnlySkips(t *testing.T) {
 		dir := t.TempDir()
 		stale := writeTemp(t, dir, ".atomicfile-11111.tmp", time.Now().Add(-2*time.Hour))
 		fresh := writeTemp(t, dir, ".atomicfile-22222.tmp", time.Now())
-		if _, err := NewStore(filepath.Join(dir, "state.json"), testLogger()).Load(context.Background()); err != nil {
+		if _, err := NewStore(filepath.Join(dir, "state.json"), testLogger()).Load(t.Context()); err != nil {
 			t.Fatalf("Load returned error: %v", err)
 		}
 		if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
@@ -1372,7 +1372,7 @@ func TestStoreLoadReapsStaleTempsAndReadOnlySkips(t *testing.T) {
 	t.Run("read-only store leaves even a stale temp", func(t *testing.T) {
 		dir := t.TempDir()
 		stale := writeTemp(t, dir, ".atomicfile-33333.tmp", time.Now().Add(-2*time.Hour))
-		if _, err := NewReadOnlyStore(filepath.Join(dir, "state.json"), testLogger()).Load(context.Background()); err != nil {
+		if _, err := NewReadOnlyStore(filepath.Join(dir, "state.json"), testLogger()).Load(t.Context()); err != nil {
 			t.Fatalf("Load returned error: %v", err)
 		}
 		if _, err := os.Stat(stale); err != nil {
@@ -1398,7 +1398,7 @@ func TestStoreLoadNonDirectoryStateDirSurfacesAsReadError(t *testing.T) {
 		t.Fatalf("create blocker file: %v", err)
 	}
 	logger, recorder := capture.New()
-	_, err := NewStore(filepath.Join(blocker, "state.json"), logger).Load(context.Background())
+	_, err := NewStore(filepath.Join(blocker, "state.json"), logger).Load(t.Context())
 	if err == nil {
 		t.Fatal("Load with an unreadable state dir returned nil error, want read error")
 	}
@@ -1416,7 +1416,7 @@ func TestStoreLoadNonDirectoryStateDirSurfacesAsReadError(t *testing.T) {
 // "state: encode <path>", distinct from the over-cap rejection message.
 func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	pf, err := atomicfile.NewPendingFile(context.Background(), path)
+	pf, err := atomicfile.NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -1457,7 +1457,7 @@ func TestStoreLoadMalformedVersionValueQuarantines(t *testing.T) {
 				t.Fatalf("write state: %v", err)
 			}
 			store := NewStore(path, testLogger())
-			_, err := store.Load(context.Background())
+			_, err := store.Load(t.Context())
 			if err == nil {
 				t.Fatal("Load returned nil error, want decode error for a malformed version value")
 			}
@@ -1465,7 +1465,7 @@ func TestStoreLoadMalformedVersionValueQuarantines(t *testing.T) {
 				t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
 			}
 			assertQuarantined(t, path, tt.body)
-			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+			if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 				t.Errorf("Save after quarantining a malformed-version-value file failed: %v", saveErr)
 			}
 		})
@@ -1496,7 +1496,7 @@ func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
 				t.Fatalf("write state: %v", err)
 			}
 			store := NewStore(path, testLogger())
-			_, err := store.Load(context.Background())
+			_, err := store.Load(t.Context())
 			if err == nil {
 				t.Fatal("Load returned nil error, want decode error for a State field type mismatch")
 			}
@@ -1504,7 +1504,7 @@ func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
 				t.Errorf("error = %q, want decode context", err.Error())
 			}
 			assertQuarantined(t, path, tt.body)
-			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+			if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 				t.Errorf("Save after quarantining a type-mismatched file failed: %v", saveErr)
 			}
 		})
@@ -1532,7 +1532,7 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("corrupt quarantine after an unclassified read stat error = %v, want not exist (cancellation is not corruption)", statErr)
 	}
-	err := store.Save(context.Background(), &State{})
+	err := store.Save(t.Context(), &State{})
 	if err == nil {
 		t.Fatal("Save after a canceled (unclassified) read = nil error, want the preservation block")
 	}
@@ -1543,14 +1543,14 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 	if readErr != nil || string(live) != `{"shrunk_walks_by_arr":{"sonarr":1}}` {
 		t.Errorf("live state after blocked Save = %q (err %v), want the original bytes preserved", live, readErr)
 	}
-	got, loadErr := store.Load(context.Background())
+	got, loadErr := store.Load(t.Context())
 	if loadErr != nil {
 		t.Fatalf("Load after recovery returned error: %v", loadErr)
 	}
 	if got.ShrunkWalksByArr[library.ArrSonarr] != 1 {
 		t.Error("re-loaded state lost ShrunkWalksByArr, want the preserved file read back")
 	}
-	if saveErr := store.Save(context.Background(), &got); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &got); saveErr != nil {
 		t.Errorf("Save after a classifying Load = %v, want the block cleared", saveErr)
 	}
 }
@@ -1571,10 +1571,10 @@ func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 			t.Fatalf("write newer-schema state: %v", err)
 		}
 		store := NewStore(path, testLogger())
-		if _, err := store.Load(context.Background()); err == nil {
+		if _, err := store.Load(t.Context()); err == nil {
 			t.Fatal("Load of a newer-schema file returned nil error, want refusal")
 		}
-		err := store.Save(context.Background(), &State{})
+		err := store.Save(t.Context(), &State{})
 		if !errors.Is(err, ErrSavePreserved) {
 			t.Errorf("Save error = %v, want errors.Is(err, ErrSavePreserved) (scout.save logs an unmatched refusal at ERROR and fires the cycle-error alert)", err)
 		}
@@ -1591,7 +1591,7 @@ func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 		if _, err := store.Load(ctx); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Load with a canceled context error = %v, want context.Canceled", err)
 		}
-		err := store.Save(context.Background(), &State{})
+		err := store.Save(t.Context(), &State{})
 		if !errors.Is(err, ErrSavePreserved) {
 			t.Errorf("Save error = %v, want errors.Is(err, ErrSavePreserved) (this is the redeploy path that must not page the operator)", err)
 		}
@@ -1603,7 +1603,7 @@ func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 			t.Fatalf("create blocker file: %v", err)
 		}
 		store := NewStore(filepath.Join(blocker, "state.json"), testLogger())
-		err := store.Save(context.Background(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
+		err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 		if err == nil {
 			t.Fatal("Save returned nil error, want a write failure")
 		}
@@ -1634,7 +1634,7 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	t.Run("crossing the threshold warns once", func(t *testing.T) {
 		logger, recorder := capture.New()
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-		if err := store.Save(context.Background(), sized(stateSizeWarnBytes+1024)); err != nil {
+		if err := store.Save(t.Context(), sized(stateSizeWarnBytes+1024)); err != nil {
 			t.Fatalf("Save returned error: %v", err)
 		}
 		if got := recorder.CountExact(wantMsg); got != 1 {
@@ -1645,7 +1645,7 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	t.Run("an ordinary state stays quiet", func(t *testing.T) {
 		logger, recorder := capture.New()
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-		if err := store.Save(context.Background(), sized(stateSizeWarnBytes/2)); err != nil {
+		if err := store.Save(t.Context(), sized(stateSizeWarnBytes/2)); err != nil {
 			t.Fatalf("Save returned error: %v", err)
 		}
 		if got := recorder.CountExact(wantMsg); got != 0 {
@@ -1676,7 +1676,7 @@ func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
 	}
 
 	store := NewStore(path, testLogger())
-	got, err := store.Load(context.Background())
+	got, err := store.Load(t.Context())
 	if err == nil {
 		t.Fatalf("Load through an escaping symlink returned nil error and state %+v, want the confinement refusal", got)
 	}
@@ -1699,7 +1699,7 @@ func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
 	if readErr != nil || string(live) != foreign {
 		t.Errorf("symlink target after Load = %q (err %v), want the foreign file untouched", live, readErr)
 	}
-	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+	if saveErr := store.Save(t.Context(), &State{}); saveErr != nil {
 		t.Errorf("Save after a quarantined escaping path = %v, want persistence to resume", saveErr)
 	}
 	after, readErr := os.ReadFile(target)
@@ -1735,7 +1735,7 @@ func TestStoreLoadTransientFailureKeepsInDirectorySymlink(t *testing.T) {
 	if info, err := os.Lstat(path); err != nil || info.Mode()&fs.ModeSymlink == 0 {
 		t.Errorf("state path after a canceled read = %v (err %v), want the symlink intact", info, err)
 	}
-	if saveErr := store.Save(context.Background(), &State{}); !errors.Is(saveErr, ErrSavePreserved) {
+	if saveErr := store.Save(t.Context(), &State{}); !errors.Is(saveErr, ErrSavePreserved) {
 		t.Errorf("Save after a transient read failure = %v, want ErrSavePreserved", saveErr)
 	}
 }

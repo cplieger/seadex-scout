@@ -72,7 +72,7 @@ func TestCycleMappingUnusableReportsNothing(t *testing.T) {
 		Notifier: notify.NewNotifier(logger, nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when the map is unusable (degraded, not unhealthy)")
 	}
 	loaded := store.st
@@ -102,7 +102,7 @@ func TestCycleMappingUnusableReportsNothing(t *testing.T) {
 func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-	if err := store.Save(context.Background(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+	if err := store.Save(t.Context(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TitleSlug: "frieren", TvdbID: 123, Year: 2023}}}
@@ -120,10 +120,10 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 		Notifier: notify.NewNotifier(logger, nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when the map is unusable (degraded, not unhealthy)")
 	}
-	saved, err := store.Load(context.Background())
+	saved, err := store.Load(t.Context())
 	if err != nil {
 		t.Fatalf("Load after degraded cycle: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestCycleAniListDegradedComparesMajority(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when AniList is transiently degraded")
 	}
 	// The unaffected majority's finding (Frieren, resolved by ID with no
@@ -236,7 +236,7 @@ func TestCycleEmptySeaDexEntriesReportsNothing(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when SeaDex returns an anomalous empty result")
 	}
 	loaded := store.st
@@ -276,7 +276,7 @@ func TestHandlePreCompareGateEmptyArrCarriesPriorItemsInsteadOfSkipping(t *testi
 	})
 	snap := library.Snapshot{}
 
-	handled, healthy, shrunkArrs := s.handlePreCompareGate(context.Background(), &st, &snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(t.Context(), &st, &snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
 	if handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (false, true) (the compare runs on the merged snapshot)", handled, healthy)
 	}
@@ -344,7 +344,7 @@ func TestCyclePartialWalkComparesCleanSubset(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a partial walk is degraded, not unhealthy)")
 	}
 	if n := recorder.CountExact("better release available"); n != 1 {
@@ -401,7 +401,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	snap := library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 1, Title: "A"}}}
 	mapCache := mapping.Cache{}
 
-	handled, healthy, shrunkArrs := s.handlePreCompareGate(context.Background(), &st, &snap, &mapCache, nil, cycleOutcomes{seadex: errors.New("seadex down")})
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(t.Context(), &st, &snap, &mapCache, nil, cycleOutcomes{seadex: errors.New("seadex down")})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true) (the SeaDex outage closes the cycle)", handled, healthy)
 	}
@@ -458,7 +458,7 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a recovered walk")
 	}
 	if len(store.st.ShrunkWalksByArr) != 0 {
@@ -500,7 +500,7 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 				SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
 			})
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
 			}
 			if got := store.st.SeadexFailures; got != tc.priorStreak+1 {
@@ -547,7 +547,7 @@ func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.
 	mapCache := mapping.Cache{}
 	snap := library.Snapshot{}
 
-	handled, healthy, shrunkArrs := s.handlePreCompareGate(context.Background(), &st, &snap, &mapCache, nil,
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(t.Context(), &st, &snap, &mapCache, nil,
 		cycleOutcomes{mapping: errors.New("fribb down"), seadex: errors.New("seadex down")})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
@@ -595,7 +595,7 @@ func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a successful cycle")
 	}
 	if store.st.SeadexFailures != 0 {
@@ -626,7 +626,7 @@ func TestCycleZeroEntriesFetchResetsSeaDexFailureStreak(t *testing.T) {
 		SeaDex:   &fakeSeaDex{},
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a zero-entries fetch is degraded, not unhealthy)")
 	}
 	if store.st.SeadexFailures != 0 {
@@ -659,7 +659,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
 	}
 	if n := recorder.CountExact("findings reported"); n != 1 {
@@ -704,7 +704,7 @@ func TestCycleCompletedCyclePersistsAniListMemo(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
 	}
 	if _, ok := store.st.Memo.Entries[999]; !ok {
@@ -720,7 +720,7 @@ func TestLoadStateCorruptFileStartsCold(t *testing.T) {
 	logger := scoutTestLogger()
 	s := New(&Deps{Logger: logger, Store: &fakeStore{loadErr: errors.New("state: decode state.json: unexpected end of JSON input")}})
 
-	st := s.loadState(context.Background())
+	st := s.loadState(t.Context())
 
 	if len(st.Library.Items) != 0 || len(st.Mapping.Records) != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("loadState on corrupt file = %+v, want empty state", st)
@@ -753,7 +753,7 @@ func (c *cancellingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
 // daemon's health marker is not flipped by a routine stop.
 func TestCycleShutdownDuringWalkWarnsNotErrors(t *testing.T) {
 	logger, recorder := capture.New()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	store := &fakeStore{}
 	s := New(&Deps{
@@ -800,7 +800,7 @@ func (c *ctxCancellingAniList) FetchMany(context.Context, []int) (anilist.BatchR
 // interrupted cycle as completed - stay healthy, and preserve prior findings.
 func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 	logger, recorder := capture.New()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	store := &fakeStore{st: state.State{
 		Mapping: seasonlessMappingCache(),
@@ -874,7 +874,7 @@ func (c *cancellingEmptySeaDex) CountWindow(context.Context, time.Time) (int, er
 // shrunk-walk arms guard with their own ctx.Err() checks. The zero-entries WARN
 // itself stays, like the shrink WARN.
 func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
@@ -907,7 +907,7 @@ func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
 // interruption instead of "seadex fetch failed" (which would blame a healthy
 // upstream), stay healthy, and preserve prior findings.
 func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	logger, recorder := capture.New()
@@ -951,7 +951,7 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 // redeploys walk a healthy deployment up to the ERROR escalation, and
 // resetting would mask a real ongoing outage across a redeploy.
 func TestCycleCancelledSeaDexFetchLeavesFailureStreakUntouched(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger := scoutTestLogger()
 	store := &fakeStore{st: state.State{
@@ -1009,7 +1009,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 		Feed:         feed,
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a stale-but-usable map is degraded, not unhealthy)")
 	}
 	if feed.calls != 1 {
@@ -1099,7 +1099,7 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 				Mapping: mapping.NewLoader(ts.Client(), ts.URL, "", time.Hour, scoutTestLogger()),
 			})
 
-			mapCache, _, mapErr := s.loadMapping(context.Background(), &st)
+			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)
 			if mapErr == nil {
 				t.Fatal("loadMapping with a guard-rejected refresh returned nil error, want *StaleMapError")
 			}
@@ -1228,7 +1228,7 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 			logger, recorder := capture.New()
 			s := New(tc.deps(t, logger))
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (a degraded upstream is not an ingest failure)")
 			}
 			if n := recorder.CountExact("cycle degraded"); n != 1 {
@@ -1348,7 +1348,7 @@ func TestCycleReportCarriesForwardIncompleteEvidence(t *testing.T) {
 	}
 
 	// Cycle one: everything walks and resolves, so all three rows report.
-	if healthy := scout(titledAniList{}).Cycle(context.Background()); !healthy {
+	if healthy := scout(titledAniList{}).Cycle(t.Context()); !healthy {
 		t.Fatal("healthy cycle returned healthy=false, want true")
 	}
 	if n := recorder.CountExact("better release available"); n != 3 {
@@ -1360,7 +1360,7 @@ func TestCycleReportCarriesForwardIncompleteEvidence(t *testing.T) {
 	// cleared, so the lookup is genuinely attempted again.
 	sonarr.failEpisodes = map[int]bool{8: true}
 	store.st.Memo = match.Memo{}
-	if healthy := scout(degradedMatcherAniList{}).Cycle(context.Background()); !healthy {
+	if healthy := scout(degradedMatcherAniList{}).Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (partial walk + transient AniList degradation is degraded, not unhealthy)")
 	}
 
@@ -1437,7 +1437,7 @@ func (c cancellingMappingTransport) RoundTrip(*http.Request) (*http.Response, er
 // interruption instead of "mapping degraded" (which would blame a healthy
 // upstream), stay healthy, emit no completion line, and preserve findings.
 func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
@@ -1511,7 +1511,7 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 		AniListStats: stats,
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
 	}
 	wantAttrs := map[string]string{
@@ -1579,7 +1579,7 @@ func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
 	}
 	wantAttrs := map[string]string{
@@ -1641,7 +1641,7 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 		Mapping:         mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 222, Type: "TV"}}},
 	}}
 	s, recorder := newScout(store)
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (degraded, not failed)")
 	}
 	if got := store.st.AniListDegraded; got != degradation.ReconcileEscalationThreshold-1 {
@@ -1653,7 +1653,7 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 
 	// The threshold cycle: the ERROR fires beside the unchanged completion line.
 	s, recorder = newScout(store)
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("threshold Cycle healthy=false, want true")
 	}
 	if got := store.st.AniListDegraded; got != degradation.ReconcileEscalationThreshold {
@@ -1705,7 +1705,7 @@ func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true at exactly half the prior library")
 	}
 	if got := len(store.st.Library.Items); got != 2 {
@@ -1753,7 +1753,7 @@ func TestCycleUndegradedCycleResetsAniListDegradedStreak(t *testing.T) {
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on an undegraded completed cycle")
 	}
 	if store.st.AniListDegraded != 0 {
@@ -1789,7 +1789,7 @@ func TestCycleAniListDegradedWinsMappingStaleCompletionLine(t *testing.T) {
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (stale map + AniList degradation is degraded, not unhealthy)")
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 1 {
@@ -1810,7 +1810,7 @@ func TestCycleAniListDegradedWinsMappingStaleCompletionLine(t *testing.T) {
 // emit the "cycle degraded" completion line (an interrupted cycle did not
 // complete), mirroring the walk-failed arm's no-completion-line rule.
 func TestCycleShutdownAfterShrunkenWalkKeepsWarnOmitsCompletionLine(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
@@ -1890,7 +1890,7 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (partial walk + AniList degradation is degraded, not unhealthy)")
 	}
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
@@ -1946,7 +1946,7 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 				Mapping: mapping.NewLoader(ts.Client(), ts.URL, "", time.Hour, scoutTestLogger()),
 			})
 
-			mapCache, _, mapErr := s.loadMapping(context.Background(), &st)
+			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)
 			if mapErr == nil {
 				t.Fatal("loadMapping with a terminal non-2xx returned nil error, want the degraded stale map")
 			}

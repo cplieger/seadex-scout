@@ -489,7 +489,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// baseline and serve an empty journal).
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -514,7 +514,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// A real search (non-empty q) filters to the curation set loaded from the
 	// snapshot: the sample item matches by info hash, gets the best marker, and
 	// its real seeders pass through.
-	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
+	items, stats, _ := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -537,13 +537,13 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// forwarded to Prowlarr. Re-applying the local filter here emptied every
 	// Movies search after a successful fetch and a successful curation match.
 	movieSearch := url.Values{"t": {"search"}, "q": {"Some Anime 2011"}, "cat": {"2000"}}
-	if got, st, _ := ix.query(context.Background(), movieSearch, "nyaa"); len(got) != 1 || st.feed {
+	if got, st, _ := ix.query(t.Context(), movieSearch, "nyaa"); len(got) != 1 || st.feed {
 		t.Errorf("movie-category search returned %d items (feed=%v), want the 1 curated proxied item", len(got), st.feed)
 	}
 
 	// Per-tracker scoping (real search): the ab scope has no configured
 	// upstream, so it serves nothing (the nyaa scope is exercised above).
-	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
 		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
 	}
 
@@ -551,7 +551,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// the live search path: an empty-q request (an RSS "latest" fetch, or
 	// Prowlarr's save test) returns the curated Nyaa release, its title collapsed
 	// to the season, a directly-built .torrent link, and the best marker.
-	got, st, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	got, st, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("empty-q feed returned %d items (feed=%v), want 1 synthesized item", len(got), st.feed)
 	}
@@ -605,7 +605,7 @@ func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	if len(ups) != 1 {
 		t.Fatalf("wired %d upstreams, want 1", len(ups))
 	}
-	_, err := ups[0].fetchAndParse(context.Background(), redirector.URL)
+	_, err := ups[0].fetchAndParse(t.Context(), redirector.URL)
 	if err == nil {
 		t.Fatal("cross-host redirect returned nil, want the wired client to refuse it")
 	}
@@ -638,7 +638,7 @@ func TestNilClientProxiesNothing(t *testing.T) {
 	if len(ix.upstreams) != 0 {
 		t.Fatalf("a nil client wired %d upstreams, want 0", len(ix.upstreams))
 	}
-	items, fetched, failed := ix.fetchRaw(context.Background(), url.Values{"q": {"anything"}}, upstreamNyaa)
+	items, fetched, failed := ix.fetchRaw(t.Context(), url.Values{"q": {"anything"}}, upstreamNyaa)
 	if items != nil || fetched != 0 || failed {
 		t.Errorf("fetchRaw with no wired upstream = (%v, %d, %v), want (nil, 0, false)", items, fetched, failed)
 	}
@@ -705,7 +705,7 @@ func TestConsumerWarningsStayIndependent(t *testing.T) {
 func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
@@ -715,7 +715,7 @@ func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 
 	served := make(chan *torznabFault, 1)
 	go func() {
-		_, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+		_, _, fault := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 		served <- fault
 	}()
 	select {
@@ -728,9 +728,9 @@ func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	}
 
 	// The loader resolves: requests serve the loaded snapshot.
-	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(t.Context())
 	close(ix.cache.firstLoad)
-	items, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	items, _, fault := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if fault != nil {
 		t.Fatalf("post-load fault = %+v, want none", fault)
 	}
@@ -756,7 +756,7 @@ func TestFirstLoadWaitIsBounded(t *testing.T) {
 	c := newSnapshotCache(filepath.Join(t.TempDir(), "feed.json"), "", log)
 
 	done := make(chan struct{})
-	go func() { defer close(done); c.awaitFirstLoad(context.Background()) }()
+	go func() { defer close(done); c.awaitFirstLoad(t.Context()) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -780,7 +780,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	writer := newTestWriter(path, "", false)
-	if err := writer.Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+	if err := writer.Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -793,7 +793,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 
 	// A second process rewrote the snapshot: no request triggers the load, so the
 	// tick is what must pick it up.
-	if err := writer.Rebuild(context.Background(), nyaaTestEntries(3), nil); err != nil {
+	if err := writer.Rebuild(t.Context(), nyaaTestEntries(3), nil); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -821,7 +821,7 @@ func TestFeedWriterReload(t *testing.T) {
 	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
 
 	// No snapshot yet: the empty-q feed serves nothing.
-	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("pre-write feed = %d items, want 0", len(got))
 	}
 
@@ -838,14 +838,14 @@ func TestFeedWriterReload(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [GRP].mkv"}},
 		}},
 	}}
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("feed before the reload tick = %d items, want 0: a request must not load the snapshot itself", len(got))
 	}
 	tick(ix)
-	got, st, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	got, st, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("post-write feed = %d items (feed=%v), want 1 reloaded item", len(got), st.feed)
 	}
@@ -1570,7 +1570,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 
 	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
 
-	items, stats, fault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
+	items, stats, fault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {
 		t.Fatalf("ab search returned %d items, want 1 (the AB upstream must be wired)", len(items))
 	}
@@ -1583,7 +1583,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 
 	// The nyaa scope has no configured upstream: an empty result (a standing
 	// misconfiguration), never reported as an upstream failure.
-	nyaaItems, _, nyaaFault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
+	nyaaItems, _, nyaaFault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
 	if len(nyaaItems) != 0 || nyaaFault != nil {
 		t.Errorf("nyaa scope = %d items (fault=%+v), want 0 items and no fault", len(nyaaItems), nyaaFault)
 	}
@@ -1712,7 +1712,7 @@ func TestDisabledTrackerFeedIsNotGatedBySnapshotState(t *testing.T) {
 	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
 
 	rss := url.Values{}
-	items, stats, fault := ix.query(context.Background(), rss, upstreamAB)
+	items, stats, fault := ix.query(t.Context(), rss, upstreamAB)
 	if fault != nil {
 		t.Errorf("disabled tracker RSS fault = %+v, want none (the off switch is config, not snapshot state)", fault)
 	}
@@ -1722,7 +1722,7 @@ func TestDisabledTrackerFeedIsNotGatedBySnapshotState(t *testing.T) {
 	if !stats.answered || !stats.feed {
 		t.Errorf("disabled tracker RSS stats = %+v, want an answered feed request", stats)
 	}
-	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault == nil {
+	if _, _, fault := ix.query(t.Context(), rss, upstreamNyaa); fault == nil {
 		t.Error("configured tracker RSS fault = nil while nothing has loaded, want the snapshot-unavailable fault")
 	}
 }

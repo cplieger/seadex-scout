@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,7 +27,7 @@ func TestLoader_refreshCache_notModifiedLogsEndedRejectionStreak(t *testing.T) {
 	}
 	logger, logs := capture.New()
 	loader := NewLoader(server.Client(), server.URL, "", time.Hour, logger)
-	if _, err := loader.refreshCache(context.Background(), previous); err != nil {
+	if _, err := loader.refreshCache(t.Context(), previous); err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
 	if logs.CountExact("mapping: rejection streak ended by 304 revalidation") != 1 {
@@ -58,7 +57,7 @@ func TestLoader_refreshCache_acceptedRefreshLogsEndedRejectionStreak(t *testing.
 	}
 	logger, logs := capture.New()
 	loader := NewLoader(server.Client(), server.URL, "", time.Hour, logger)
-	if _, err := loader.refreshCache(context.Background(), previous); err != nil {
+	if _, err := loader.refreshCache(t.Context(), previous); err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
 	if logs.CountExact("mapping: refreshed") != 1 {
@@ -92,7 +91,7 @@ func TestLoader_refreshCache_noRejectionStreakLogsNoRecoverySignal(t *testing.T)
 			ETag:      "v1",
 			Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 		}
-		if _, err := loader.refreshCache(context.Background(), previous); err != nil {
+		if _, err := loader.refreshCache(t.Context(), previous); err != nil {
 			t.Fatalf("refreshCache error: %v", err)
 		}
 		if n := logs.CountExact("mapping: rejection streak ended by 304 revalidation"); n != 0 {
@@ -111,7 +110,7 @@ func TestLoader_refreshCache_noRejectionStreakLogsNoRecoverySignal(t *testing.T)
 			FetchedAt: time.Now().Add(-2 * time.Hour),
 			Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 		}
-		if _, err := loader.refreshCache(context.Background(), previous); err != nil {
+		if _, err := loader.refreshCache(t.Context(), previous); err != nil {
 			t.Fatalf("refreshCache error: %v", err)
 		}
 		if logs.CountExact("mapping: refreshed") != 1 {

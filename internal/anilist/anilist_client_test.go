@@ -56,7 +56,7 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
@@ -86,7 +86,7 @@ func TestDo429WithoutRetryAfterUsesDefault(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
@@ -112,7 +112,7 @@ func TestDoHonorsValidRetryAfterHeader(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
@@ -136,7 +136,7 @@ func TestDo429WithoutRetryAfterUsesResetHeader(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
@@ -159,7 +159,7 @@ func TestDo429WithPastResetFallsBackToDefault(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
@@ -180,7 +180,7 @@ func TestFetchReturnsMediaAndCountsCalls(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	m, err := c.Fetch(context.Background(), 154587)
+	m, err := c.Fetch(t.Context(), 154587)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestFetchRejectsMismatchedMediaID(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	if _, err := c.Fetch(context.Background(), 600); err == nil || !strings.Contains(err.Error(), "does not match requested id") {
+	if _, err := c.Fetch(t.Context(), 600); err == nil || !strings.Contains(err.Error(), "does not match requested id") {
 		t.Fatalf("Fetch mismatched identity error = %v, want identity rejection", err)
 	}
 }
@@ -241,7 +241,7 @@ func TestFetchManyChunksBatchesAndMergesResults(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err != nil {
 		t.Fatalf("FetchMany: %v", err)
@@ -291,7 +291,7 @@ func TestFetchManyReturnsPartialResultsOnError(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's GraphQL error")
@@ -313,7 +313,7 @@ func TestFetchManyPreservesValidRecordsOnRecordError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), []int{1, 2})
+	res, err := c.FetchMany(t.Context(), []int{1, 2})
 	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the invalid record")
@@ -353,7 +353,7 @@ func TestFetchManyContinuesAfterRecordError(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the first chunk's record error")
@@ -381,7 +381,7 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), []int{1, 2})
+	res, err := c.FetchMany(t.Context(), []int{1, 2})
 	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the unsolicited id as a record error")
@@ -486,7 +486,7 @@ func TestFetchCountsEveryHTTPAttempt(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	if _, err := c.Fetch(context.Background(), 1); err != nil {
+	if _, err := c.Fetch(t.Context(), 1); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	got := c.Stats()
@@ -511,7 +511,7 @@ func TestDoBoundsOversizedResponse(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	got, err := c.do(context.Background(), []byte(`{}`))
+	got, err := c.do(t.Context(), []byte(`{}`))
 	var tooLarge *httpx.ResponseTooLargeError
 	if !errors.As(err, &tooLarge) {
 		t.Fatalf("do() err = %v, want *httpx.ResponseTooLargeError for an over-cap body", err)
@@ -580,7 +580,7 @@ func TestFetchNotFound404ReturnsErrNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	_, err := c.Fetch(context.Background(), 999999999)
+	_, err := c.Fetch(t.Context(), 999999999)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Fetch() error = %v, want ErrNotFound (AniList mirrors not-found into HTTP 404)", err)
 	}
@@ -614,7 +614,7 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := NewClient(srv.Client(), srv.URL, 100000, nil)
-			_, err := c.Fetch(context.Background(), 1)
+			_, err := c.Fetch(t.Context(), 1)
 			if err == nil {
 				t.Fatalf("Fetch() on status %d = nil error, want typed error", tt.status)
 			}
@@ -669,7 +669,7 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
@@ -703,7 +703,7 @@ func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
 	srv.Close() // connection refused from here on
 
 	c := NewClient(client, srv.URL, 100000, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 	if err == nil {
 		t.Fatal("do() against a closed server = nil error, want a transport error")
 	}
@@ -720,7 +720,7 @@ func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
 // and a nil error.
 func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
 	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
-	res, err := c.FetchMany(context.Background(), nil)
+	res, err := c.FetchMany(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("FetchMany(nil): %v", err)
 	}
@@ -740,7 +740,7 @@ func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
 // Stats().Calls stays 0 (the attempt counter tracks outbound HTTP attempts).
 func TestDoRejectsUnparseableURL(t *testing.T) {
 	c := NewClient(http.DefaultClient, "://missing-scheme", 60, nil)
-	_, err := c.do(context.Background(), []byte(`{}`))
+	_, err := c.do(t.Context(), []byte(`{}`))
 	if err == nil {
 		t.Fatal("do() with an unparseable URL = nil error, want a request-construction error")
 	}
@@ -761,7 +761,7 @@ func TestFetchManyFirstChunkFailureReturnsIncomplete(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), []int{1, 2})
+	res, err := c.FetchMany(t.Context(), []int{1, 2})
 	if err == nil {
 		t.Fatal("FetchMany must surface the first chunk's envelope error")
 	}
@@ -802,7 +802,7 @@ func TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's envelope error")
 	}
@@ -848,7 +848,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's HTTP failure")
 	}
@@ -887,7 +887,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 // TestDoRejectsUnparseableURL pins for the URL-construction branch).
 func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
 	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
-	_, err := c.request(context.Background(), query, map[string]any{"bad": make(chan int)})
+	_, err := c.request(t.Context(), query, map[string]any{"bad": make(chan int)})
 	if err == nil {
 		t.Fatal("request() with unmarshalable variables = nil error, want a marshal error")
 	}
@@ -932,7 +932,7 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface a record error")
@@ -972,10 +972,10 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 func TestFetchRejectsNonPositiveIDWithoutRequest(t *testing.T) {
 	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
 
-	if _, err := c.Fetch(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "invalid media id 0") {
+	if _, err := c.Fetch(t.Context(), 0); err == nil || !strings.Contains(err.Error(), "invalid media id 0") {
 		t.Errorf("Fetch(0) error = %v, want invalid-media-id rejection", err)
 	}
-	if _, err := c.Fetch(context.Background(), -1); err == nil || !strings.Contains(err.Error(), "invalid media id -1") {
+	if _, err := c.Fetch(t.Context(), -1); err == nil || !strings.Contains(err.Error(), "invalid media id -1") {
 		t.Errorf("Fetch(-1) error = %v, want invalid-media-id rejection", err)
 	}
 	if got := c.Stats().Calls; got != 0 {
@@ -1002,7 +1002,7 @@ func TestDoSendsRequiredHeaders(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	if _, err := c.Fetch(context.Background(), 1); err != nil {
+	if _, err := c.Fetch(t.Context(), 1); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	mu.Lock()
@@ -1052,7 +1052,7 @@ func TestTransientEnvelopeStatusRetries(t *testing.T) {
 			defer srv.Close()
 
 			c := NewClient(srv.Client(), srv.URL, 100000, nil)
-			_, err := c.Fetch(context.Background(), 1)
+			_, err := c.Fetch(t.Context(), 1)
 
 			if err == nil {
 				t.Fatal("Fetch() = nil error, want an error")
@@ -1093,7 +1093,7 @@ func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 
 	if err == nil {
 		t.Fatal("FetchMany() error = nil, want the record-local failure")
@@ -1127,7 +1127,7 @@ func TestFetchDoesNotRetryUnparseableBody(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	_, err := c.Fetch(context.Background(), 1)
+	_, err := c.Fetch(t.Context(), 1)
 	if err == nil {
 		t.Fatal("Fetch() on an unparseable body = nil error, want a parse failure")
 	}
@@ -1166,7 +1166,7 @@ func TestEnvelopeRateLimitCountsOneWait(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	if _, err := c.Fetch(context.Background(), 1); err != nil {
+	if _, err := c.Fetch(t.Context(), 1); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	got := c.Stats()
@@ -1209,7 +1209,7 @@ func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the aborting chunk's envelope error")
 	}
@@ -1252,7 +1252,7 @@ func TestDoObservesRateHeadersOnErrorStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	if _, err := c.do(context.Background(), []byte(`{}`)); err == nil {
+	if _, err := c.do(t.Context(), []byte(`{}`)); err == nil {
 		t.Fatal("do() on a 400 = nil error, want a status error")
 	}
 	if got := c.Stats().RateLimitWaits; got != 1 {
@@ -1297,7 +1297,7 @@ func TestFetchManyScopesUnrequestedIDsToTheAbandonedTail(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	res, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the aborting chunk's envelope error")
 	}

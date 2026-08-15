@@ -1,7 +1,6 @@
 package seadexapi
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -71,7 +70,7 @@ func fetchHostilePage(t *testing.T, page, wantErr string) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries returned nil error, want %q error", wantErr)
 	}
@@ -176,7 +175,7 @@ func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
 	if !errors.Is(err, errCumulativeElements) {
 		t.Fatalf("FetchEntries error = %v, want errCumulativeElements", err)
 	}
@@ -210,7 +209,7 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want byte-cap error")
 	}
@@ -233,7 +232,7 @@ func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 	all := []seadex.Entry{{AniListID: 1}}
 	var cur cursor
 
-	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur, Options{})
+	out, done, err := c.fetchAndAppend(t.Context(), 3, all, &tot, &cur, Options{})
 	if !errors.Is(err, errCumulativeBytes) {
 		t.Fatalf("fetchAndAppend error = %v, want errCumulativeBytes without any upstream request", err)
 	}
@@ -257,7 +256,7 @@ func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
 	all := []seadex.Entry{{AniListID: 1}}
 	var cur cursor
 
-	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur, Options{})
+	out, done, err := c.fetchAndAppend(t.Context(), 3, all, &tot, &cur, Options{})
 	if !errors.Is(err, errCumulativeElements) {
 		t.Fatalf("fetchAndAppend error = %v, want errCumulativeElements without any upstream request", err)
 	}
@@ -286,7 +285,7 @@ func TestFetchEntriesPerPageByteCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want per-page byte-cap error")
 	}
@@ -320,7 +319,7 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want per-page element-budget error")
 	}
@@ -375,7 +374,7 @@ func TestFetchEntriesBoundsDecodeFailureDiagnostic(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want a page-decode error", len(entries))
 	}

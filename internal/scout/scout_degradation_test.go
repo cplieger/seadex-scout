@@ -1,7 +1,6 @@
 package scout
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -97,7 +96,7 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 				AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 			})
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("partial-walk cycle healthy=false, want true (a partial walk is degraded, not unhealthy)")
 			}
 			if got := store.st.PartialWalks; got != tc.priorStreak+1 {
@@ -121,7 +120,7 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 			// A completed WHOLE walk ends the streak: the failing series
 			// recovers, so the next blip starts counting from zero.
 			sonarr.failEpisodes = nil
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("recovered cycle healthy=false, want true on a complete walk")
 			}
 			if got := store.st.PartialWalks; got != 0 {
@@ -158,7 +157,7 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 		SeaDex:   &fakeSeaDex{err: errors.New(hostile)},
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
 	}
 	sites := []struct {
@@ -224,7 +223,7 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	}
 
 	logger, recorder := capture.New()
-	if healthy := newScout(logger, sonarr(), []string{"anime"}).Cycle(context.Background()); !healthy {
+	if healthy := newScout(logger, sonarr(), []string{"anime"}).Cycle(t.Context()); !healthy {
 		t.Fatal("emptied-side cycle healthy=false, want true (the walk succeeded; a dead filter must not restart-loop the container)")
 	}
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "tags-emptied-side" {
@@ -235,7 +234,7 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	}
 
 	cleanLogger, cleanRecorder := capture.New()
-	if healthy := newScout(cleanLogger, sonarr(), nil).Cycle(context.Background()); !healthy {
+	if healthy := newScout(cleanLogger, sonarr(), nil).Cycle(t.Context()); !healthy {
 		t.Fatal("unfiltered cycle healthy=false, want true")
 	}
 	if n := cleanRecorder.CountExact("cycle complete"); n != 1 {

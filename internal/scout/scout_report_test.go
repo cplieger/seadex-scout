@@ -50,7 +50,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
-	rep, err := s.Report(context.Background())
+	rep, err := s.Report(t.Context())
 	if err != nil {
 		t.Fatalf("Report returned error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
-	if _, err := s.Report(context.Background()); err != nil {
+	if _, err := s.Report(t.Context()); err != nil {
 		t.Fatalf("Report returned error: %v", err)
 	}
 	wantAttrs := map[string]string{
@@ -144,7 +144,7 @@ func TestReportPartialSnapshotErrors(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a partial-snapshot error")
 	}
@@ -164,7 +164,7 @@ func TestReportLibraryWalkFailureErrors(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a library-walk error")
 	}
@@ -192,7 +192,7 @@ func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 		SeaDex:  &fakeSeaDex{},
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a zero-entries error")
 	}
@@ -219,7 +219,7 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a seadex fetch error")
 	}
@@ -254,7 +254,7 @@ func (c *cancelingSeaDex) CountWindow(context.Context, time.Time) (int, error) {
 func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	oversized := strings.Repeat("A", 4*maxLoggedErrorBytes) + "\nsecond line"
@@ -308,7 +308,7 @@ func TestReportMappingUnusableErrors(t *testing.T) {
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a mapping-unusable error")
 	}
@@ -346,7 +346,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
-	rep, err := s.Report(context.Background())
+	rep, err := s.Report(t.Context())
 	if err != nil {
 		t.Fatalf("Report with a stale-but-usable map returned error: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Auditor: audit.NewAuditor(audit.Config{}),
 		})
 
-		rep, err := s.Report(context.Background())
+		rep, err := s.Report(t.Context())
 		if err != nil {
 			t.Fatalf("Report with a transient AniList failure returned error %v, want a rendered report with the incomplete section", err)
 		}
@@ -402,7 +402,7 @@ func TestReportDegradedMatching(t *testing.T) {
 		}
 	})
 	t.Run("shutdown during matching still errors", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		logger := scoutTestLogger()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -432,7 +432,7 @@ func TestReportDegradedMatching(t *testing.T) {
 // the report proceeds on the cached map and the cancellation surfaces from the
 // SeaDex fetch instead.
 func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
@@ -521,7 +521,7 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
-	if _, err := s.Report(context.Background()); err != nil {
+	if _, err := s.Report(t.Context()); err != nil {
 		t.Fatalf("Report returned error: %v (neither a refused overrides file nor a stale map blocks the report)", err)
 	}
 	if n := recorder.CountLevel(slog.LevelError, "overrides.json unreadable"); n != 1 {
@@ -587,7 +587,7 @@ func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
 				Auditor: audit.NewAuditor(audit.Config{}),
 			})
 
-			rep, err := s.Report(context.Background())
+			rep, err := s.Report(t.Context())
 			if err != nil {
 				t.Fatalf("Report returned error: %v", err)
 			}

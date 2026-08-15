@@ -36,7 +36,7 @@ func TestMatchCancelledLookupsLogDebugNotWarn(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(nil) // no record: the entry needs the AniList lookup
 
-	res := NewMatcher(cancelledAniList{}, logger).Match(context.Background(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
+	res := NewMatcher(cancelledAniList{}, logger).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
 
 	if !res.Degraded {
 		t.Error("Degraded = false, want true: a cancelled needed lookup must preserve findings")
@@ -86,7 +86,7 @@ func (c *cancelOnFetchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 // of IncompleteIDs (a shutdown is a whole-cycle event per the Result
 // contract).
 func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
@@ -121,7 +121,7 @@ func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
 // next cycle's batch. The completed final match is retained, and the shutdown
 // stays a whole-cycle event (no per-id IncompleteIDs entry).
 func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},

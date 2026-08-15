@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,7 +27,7 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if rec.CountExact("mapping: overrides with missing or invalid anilist_id skipped") != 1 {
@@ -57,7 +56,7 @@ func TestLoader_Load_skipsOversizedOverrideIDArrays(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	_, idx, err := l.Load(context.Background(), freshCache())
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -84,7 +83,7 @@ func TestLoader_Load_warnsOnUnknownOverrideKeys(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
@@ -120,7 +119,7 @@ func TestLoader_Load_unknownOverrideKeysLogBounded(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
@@ -160,7 +159,7 @@ func TestLoader_Load_unknownOverrideKeyNameTruncated(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
@@ -195,7 +194,7 @@ func TestLoader_Load_warnsOnDuplicateOverrideIDs(t *testing.T) {
 	}
 	logger, logs := capture.New()
 	loader := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	_, idx, err := loader.Load(context.Background(), freshCache())
+	_, idx, err := loader.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -237,7 +236,7 @@ func TestLoader_Load_duplicateOverrideIDsLogBounded(t *testing.T) {
 	}
 	logger, logs := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if logs.CountExact("mapping: duplicate override anilist_ids, last record wins") != 1 {
@@ -275,7 +274,7 @@ func TestLoader_Load_unknownOverrideKeyBoundsAtLimit(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
@@ -314,7 +313,7 @@ func TestLoader_Load_cleanOverridesEmitNoDiagnostics(t *testing.T) {
 	}
 	logger, logs := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	for _, msg := range []string{
@@ -347,7 +346,7 @@ func TestLoader_Load_emptyOverridesEmitNoAppliedLog(t *testing.T) {
 	}
 	logger, logs := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if n := logs.CountExact("mapping: applied overrides"); n != 0 {
@@ -379,7 +378,7 @@ func TestLoader_Load_sanitizesUnknownOverrideKeyControlChars(t *testing.T) {
 	}
 	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
@@ -414,7 +413,7 @@ func TestLoader_Load_oversizedOverrideIDsLogBounded(t *testing.T) {
 	}
 	logger, logs := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
-	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if logs.CountExact("mapping: overrides with oversized id arrays skipped") != 1 {
@@ -507,7 +506,7 @@ func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 			logger, logs := capture.New()
 			l := NewLoader(nil, "http://unused.invalid", path, time.Hour, logger)
 			prev := freshCache()
-			next, idx, err := l.Load(context.Background(), prev)
+			next, idx, err := l.Load(t.Context(), prev)
 			if err != nil {
 				t.Fatalf("Load error: %v (a refused overrides file must never block a cycle)", err)
 			}

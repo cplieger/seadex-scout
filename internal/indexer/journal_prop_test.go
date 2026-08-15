@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -137,7 +136,7 @@ func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
 				}
 			}
 
-			if err := w.Rebuild(context.Background(), catalogue, nil); err != nil {
+			if err := w.Rebuild(t.Context(), catalogue, nil); err != nil {
 				rt.Fatalf("Rebuild round %d: %v", r, err)
 			}
 			data, err := os.ReadFile(path)

@@ -369,7 +369,7 @@ func TestConfigureLoggerAppliesLevel(t *testing.T) {
 	defer slog.SetDefault(prev)
 
 	configureLogger(slog.LevelWarn, slogx.JSON)
-	ctx := context.Background()
+	ctx := t.Context()
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		t.Error("Debug enabled at level=warn, want disabled")
 	}
@@ -393,7 +393,7 @@ func TestInstallLoggerInitialLevel(t *testing.T) {
 	defer slog.SetDefault(prev)
 
 	installLogger()
-	ctx := context.Background()
+	ctx := t.Context()
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		t.Error("Debug enabled before config is read, want the documented Info floor")
 	}
@@ -593,7 +593,7 @@ func TestWriteStarterConfigError(t *testing.T) {
 // propagates as a build error instead of being swallowed.
 func TestBuildScout(t *testing.T) {
 	t.Run("disabled arrs build hermetically", func(t *testing.T) {
-		b, err := buildScout(context.Background(), &config.Config{}, nil)
+		b, err := buildScout(t.Context(), &config.Config{}, nil)
 		if err != nil {
 			t.Fatalf("buildScout(zero config) = %v, want nil", err)
 		}
@@ -603,7 +603,7 @@ func TestBuildScout(t *testing.T) {
 		b.cleanup()
 	})
 	t.Run("reporter role builds hermetically", func(t *testing.T) {
-		b, err := buildReporter(context.Background(), &config.Config{})
+		b, err := buildReporter(t.Context(), &config.Config{})
 		if err != nil {
 			t.Fatalf("buildReporter(zero config) = %v, want nil", err)
 		}
@@ -614,10 +614,10 @@ func TestBuildScout(t *testing.T) {
 	})
 	t.Run("invalid sonarr URL propagates", func(t *testing.T) {
 		cfg := &config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"}
-		if _, err := buildScout(context.Background(), cfg, nil); err == nil {
+		if _, err := buildScout(t.Context(), cfg, nil); err == nil {
 			t.Fatal("buildScout(invalid sonarr URL) = nil, want error")
 		}
-		if _, err := buildReporter(context.Background(), cfg); err == nil {
+		if _, err := buildReporter(t.Context(), cfg); err == nil {
 			t.Fatal("buildReporter(invalid sonarr URL) = nil, want error")
 		}
 	})
@@ -651,7 +651,7 @@ func TestPingArrs(t *testing.T) {
 	}
 	defer r.Close()
 
-	pingArrs(context.Background(), s, r)
+	pingArrs(t.Context(), s, r)
 
 	if !rec.Contains("sonarr reachable") {
 		t.Errorf("missing sonarr reachable info line: %v", rec.Messages())
@@ -1031,7 +1031,7 @@ func TestDetachedWriteError(t *testing.T) {
 	})
 	t.Run("a live context never reclassifies", func(t *testing.T) {
 		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
-		if got := shutdown.DetachedWriteError(context.Background(), werr); got != werr {
+		if got := shutdown.DetachedWriteError(t.Context(), werr); got != werr {
 			t.Errorf("shutdown.DetachedWriteError(live, timeout) = %v, want the error unchanged", got)
 		}
 	})

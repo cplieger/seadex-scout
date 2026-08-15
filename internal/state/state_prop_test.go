@@ -1,7 +1,6 @@
 package state
 
 import (
-	"context"
 	"maps"
 	"path/filepath"
 	"testing"
@@ -51,10 +50,10 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 		}
 
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
-		if err := store.Save(context.Background(), want); err != nil {
+		if err := store.Save(t.Context(), want); err != nil {
 			rt.Fatalf("Save returned error: %v", err)
 		}
-		got, err := store.Load(context.Background())
+		got, err := store.Load(t.Context())
 		if err != nil {
 			rt.Fatalf("Load after Save returned error: %v", err)
 		}

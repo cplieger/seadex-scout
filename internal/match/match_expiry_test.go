@@ -51,7 +51,7 @@ func TestMemoStampsJitteredExpiryOnNewEntries(t *testing.T) {
 	}}
 	m := expiryMatcher(fake, 0, 0.5)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	// Prefetch stamps in pending-id (entry) order: id 11 draws 0 (the window
 	// floor), id 22 draws 0.5 (the 14-day mean).
@@ -83,7 +83,7 @@ func TestMemoStampsExpiryOnSingleFetchWrites(t *testing.T) {
 	}
 	m := expiryMatcher(fake, 0.5)
 
-	res := m.Match(context.Background(),
+	res := m.Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}}, snap, idx, Memo{})
 
 	for _, id := range []int{11, 22, 33} {
@@ -129,7 +129,7 @@ func TestMemoExpiredEntryRefetchedAndRestamped(t *testing.T) {
 		22: {Titles: []string{"Old Title"}, Format: "MOVIE", Year: 2021, Expiry: memoTestClock},
 	}}
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, memo)
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, memo)
 
 	if fake.batchCalls != 1 || fake.fetchCalls != 0 {
 		t.Errorf("calls = batch %d / fetch %d, want 1 / 0 (expired entries renew through the batch prefetch)", fake.batchCalls, fake.fetchCalls)
@@ -171,7 +171,7 @@ func TestMemoUnexpiredEntryServedWithoutRefetch(t *testing.T) {
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020, Expiry: expiry},
 	}}
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
 
 	if fake.calls != 0 {
 		t.Errorf("AniList calls = %d, want 0 (a live entry is served from the memo)", fake.calls)
@@ -205,7 +205,7 @@ func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 		903: {Titles: []string{"Gone"}, Format: "TV", Year: 2021, Expiry: memoTestClock}, // boundary: expired, pruned
 	}}
 
-	res := m.Match(context.Background(), nil, &library.Snapshot{}, mapping.NewIndex(nil), memo)
+	res := m.Match(t.Context(), nil, &library.Snapshot{}, mapping.NewIndex(nil), memo)
 	m.PruneMemo(&res, nil)
 
 	if _, ok := res.Memo.Entries[901]; ok {
@@ -287,7 +287,7 @@ func TestMemoEntryWithoutAnExpiryIsRefetchedNotServed(t *testing.T) {
 	}}
 
 	entries := []seadex.Entry{{AniListID: 11}}
-	res := m.Match(context.Background(), entries, snap, idx, memo)
+	res := m.Match(t.Context(), entries, snap, idx, memo)
 	m.PruneMemo(&res, entries)
 
 	if fake.calls == 0 {
@@ -364,7 +364,7 @@ func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
 	}}
 	catalogue := []seadex.Entry{{AniListID: 11}}
 
-	res := m.Match(context.Background(), catalogue, &library.Snapshot{}, idx, memo)
+	res := m.Match(t.Context(), catalogue, &library.Snapshot{}, idx, memo)
 	// The guard under test lives in PruneMemo, which Match never calls: the
 	// reconcile calls it explicitly (scout/scout.go:450), so the test must too.
 	m.PruneMemo(&res, catalogue)
@@ -419,7 +419,7 @@ func TestMemoChangedTracksEveryWriteAndNothingElse(t *testing.T) {
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}})
-	served := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}},
+	served := m.Match(t.Context(), []seadex.Entry{{AniListID: 11}},
 		&library.Snapshot{}, idx, Memo{Entries: map[int]MemoEntry{11: live}})
 	if served.Memo.Changed() {
 		t.Error("a pass served entirely from live memo hits reports Changed() = true, want false")
@@ -428,7 +428,7 @@ func TestMemoChangedTracksEveryWriteAndNothingElse(t *testing.T) {
 		t.Errorf("AniList calls = %d, want 0 (a live memo hit must not fetch)", fake.calls)
 	}
 
-	renewed := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}},
+	renewed := m.Match(t.Context(), []seadex.Entry{{AniListID: 11}},
 		&library.Snapshot{}, idx, Memo{Entries: map[int]MemoEntry{11: {NotFound: true, Expiry: memoTestClock.Add(-time.Hour)}}})
 	if !renewed.Memo.Changed() {
 		t.Error("a pass that renewed an expired entry reports Changed() = false, want true")
@@ -531,7 +531,7 @@ func TestMemoExpiryBeyondHorizonRestamped(t *testing.T) {
 		2: {Titles: []string{"Kept"}, Format: "TV", Year: 2020, Expiry: inPolicy},
 	}}
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 1}, {AniListID: 2}},
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 1}, {AniListID: 2}},
 		&library.Snapshot{}, mapping.NewIndex(nil), memo)
 
 	if fake.calls != 0 {
@@ -606,7 +606,7 @@ func TestLookupServesExpiredMemoDuringOutage(t *testing.T) {
 			600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007, Expiry: expired},
 		}}
 
-		res := expiryMatcher(fake, 0.5).Match(context.Background(),
+		res := expiryMatcher(fake, 0.5).Match(t.Context(),
 			[]seadex.Entry{{AniListID: 600}}, snap, idx, memo)
 
 		if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
@@ -627,7 +627,7 @@ func TestLookupServesExpiredMemoDuringOutage(t *testing.T) {
 		fake := &outageAniList{}
 		memo := Memo{Entries: map[int]MemoEntry{600: {NotFound: true, Expiry: expired}}}
 
-		res := expiryMatcher(fake, 0.5).Match(context.Background(),
+		res := expiryMatcher(fake, 0.5).Match(t.Context(),
 			[]seadex.Entry{{AniListID: 600}}, snap, idx, memo)
 
 		if len(res.Matches) != 1 || res.Matches[0].InLibrary() {

@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +21,7 @@ func freshCache() *Cache {
 
 func TestLoader_refreshCache_reusesFreshCache(t *testing.T) {
 	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), freshCache())
+	next, err := l.refreshCache(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
@@ -38,7 +37,7 @@ func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
 	}))
 	defer ts.Close()
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), &Cache{})
+	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
@@ -65,7 +64,7 @@ func TestLoader_refreshCache_notModifiedBumpsTimestamp(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
@@ -87,7 +86,7 @@ func TestLoader_refreshCache_parseFailKeepsStale(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("parse failure returned nil error, want degraded error")
 	}
@@ -106,7 +105,7 @@ func TestLoader_Load_nilCacheFetches(t *testing.T) {
 	}))
 	defer ts.Close()
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, idx, err := l.Load(context.Background(), nil)
+	next, idx, err := l.Load(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("Load(nil) error: %v", err)
 	}
@@ -145,7 +144,7 @@ func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *test
 		Records:      []Record{{AniListID: 7, Type: "MOVIE", TmdbMovies: []int{0}, IMDbIDs: []string{"  "}}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, idx, err := l.Load(context.Background(), prev)
+	next, idx, err := l.Load(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -173,7 +172,7 @@ func TestLoader_Load_overrideWinsOverFribb(t *testing.T) {
 		t.Fatalf("write overrides: %v", err)
 	}
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -190,7 +189,7 @@ func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "nope.json")
 	l := NewLoader(nil, "http://unused.invalid", missing, time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with missing overrides error: %v", err)
 	}
@@ -203,7 +202,7 @@ func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 		t.Fatalf("write bad overrides: %v", err)
 	}
 	l2 := NewLoader(nil, "http://unused.invalid", bad, time.Hour, discardLogger())
-	if _, _, err := l2.Load(context.Background(), freshCache()); err != nil {
+	if _, _, err := l2.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load with malformed overrides returned error, want ignored: %v", err)
 	}
 }
@@ -228,7 +227,7 @@ func TestLoader_refreshCache_httpErrorKeepsStale(t *testing.T) {
 		Records:      []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("HTTP error refresh returned nil error, want degraded error")
 	}
@@ -256,7 +255,7 @@ func TestLoader_refreshCache_notModifiedEmptyCacheErrors(t *testing.T) {
 
 	prev := &Cache{ETag: "v1", LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("304 with a record-less cache returned nil error, want a no-cache-available error")
 	}
@@ -292,7 +291,7 @@ func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
 			ts := httptest.NewServer(tc.handler)
 			defer ts.Close()
 			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-			next, err := l.refreshCache(context.Background(), &Cache{})
+			next, err := l.refreshCache(t.Context(), &Cache{})
 			if err == nil {
 				t.Fatalf("%s with no prior cache returned nil error, want a degraded no-cache-available error", tc.name)
 			}
@@ -321,7 +320,7 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, overrides, time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), prev)
+	_, idx, err := l.Load(t.Context(), prev)
 	if err == nil {
 		t.Fatal("Load with a failed refresh returned nil error, want a degraded error")
 	}
@@ -339,7 +338,7 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 // configured serves the Fribb map untouched (no read attempt, no overlay).
 func TestLoader_Load_noOverridesPathServesFribbUnmodified(t *testing.T) {
 	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with no overrides path error: %v", err)
 	}
@@ -366,7 +365,7 @@ func TestLoader_refreshCache_futureFetchedAtForcesFetch(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with future FetchedAt error: %v", err)
 	}
@@ -386,7 +385,7 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if len(next.Records) != 1 {
 		t.Fatalf("future-FetchedAt failed refresh records = %+v, want stale record kept", next.Records)
 	}
@@ -432,7 +431,7 @@ func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", 0, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("zero-refresh revalidation error: %v", err)
 	}
@@ -462,7 +461,7 @@ func TestLoader_refreshCache_unusableCacheFetchFailureErrors(t *testing.T) {
 		Records:   []Record{{}}, // non-empty slice, zero effective index
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	_, err := l.refreshCache(context.Background(), prev)
+	_, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("fetch failure over an unusable cache returned nil error, want a no-cache-available error")
 	}
@@ -494,7 +493,7 @@ func TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304(t *tes
 		Records:      []Record{{}}, // non-empty slice, zero effective index
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	_, err := l.refreshCache(context.Background(), prev)
+	_, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("304 over an unusable cache returned nil error, want an error instead of reusing an empty effective map")
 	}
@@ -536,7 +535,7 @@ func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
 		Records:   []Record{{}}, // non-empty slice, zero effective index
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
 	}
@@ -569,7 +568,7 @@ func TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable(t *testing.T)
 		Records:   records,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
 	}
@@ -711,7 +710,7 @@ func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV"}}, // keyed, but zero arr-identifier coverage
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with a fresh-but-unmappable cache error: %v", err)
 	}

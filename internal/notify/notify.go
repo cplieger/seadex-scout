@@ -11,7 +11,6 @@ import (
 	"context"
 	"log/slog"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/cplieger/runesafe"
@@ -314,7 +313,7 @@ func (n *Notifier) emitAll(preserved, carried, resolved int) {
 	for key := range n.current {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	emitted, suppressed := 0, 0
 	for _, key := range keys {

@@ -32,7 +32,7 @@ func (b boolCycler) Cycle(context.Context) bool { return bool(b) }
 // recovered and reported unhealthy instead of crashing the long-lived daemon,
 // and a normal cycle outcome passes through unchanged.
 func TestRunCyclePanicShield(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	if healthy, _ := runCycle(ctx, panicCycler{}); healthy {
 		t.Error("runCycle(panicking cycle) = healthy, want unhealthy")
 	}
@@ -55,7 +55,7 @@ func TestRunCyclePanicShield(t *testing.T) {
 func TestRunCyclePanicIsLoggedAtError(t *testing.T) {
 	rec := capture.Default(t)
 
-	if healthy, _ := runCycle(context.Background(), panicCycler{}); healthy {
+	if healthy, _ := runCycle(t.Context(), panicCycler{}); healthy {
 		t.Error("runCycle(panicking cycle) = healthy, want unhealthy")
 	}
 
@@ -76,7 +76,7 @@ func TestRunCyclePanicIsLoggedAtError(t *testing.T) {
 // operator to the arr config to check. The ingest wording stays pinned beside
 // it so the two producers of healthy=false cannot collapse back into one.
 func TestRunOncePanicIsNotAnIngestFault(t *testing.T) {
-	healthy, err := runOnce(context.Background(), panicCycler{})
+	healthy, err := runOnce(t.Context(), panicCycler{})
 
 	if healthy {
 		t.Error("runOnce(panicking cycle) = healthy, want unhealthy")
@@ -88,7 +88,7 @@ func TestRunOncePanicIsNotAnIngestFault(t *testing.T) {
 		t.Errorf("err = %q, want %q: a code fault must not name the library ingest", got, "compare cycle panicked")
 	}
 
-	healthy, err = runOnce(context.Background(), boolCycler(false))
+	healthy, err = runOnce(t.Context(), boolCycler(false))
 	if healthy {
 		t.Error("runOnce(unhealthy cycle) = healthy, want unhealthy")
 	}
@@ -197,7 +197,7 @@ func TestRunOnceUniformInterruption(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			ex := testExclusive(t, ctx)
 			if tt.preCancel {
@@ -260,7 +260,7 @@ func TestRunOnceBusyLockPreCancelled(t *testing.T) {
 // exits non-zero), and the health marker is left at the daemon's last real
 // state.
 func TestRunOnceGatedRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	ex := scheduler.NewExclusive(t.TempDir(), slog.Default(),
 		scheduler.WithGate(func() bool {
@@ -289,7 +289,7 @@ func TestRunOnceGatedRun(t *testing.T) {
 func TestRunOnceUninterrupted(t *testing.T) {
 	t.Run("healthy cycle sets the marker", func(t *testing.T) {
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		if err := RunOnce(context.Background(), testExclusive(t, context.Background()), boolCycler(true), marker); err != nil {
+		if err := RunOnce(t.Context(), testExclusive(t, t.Context()), boolCycler(true), marker); err != nil {
 			t.Fatalf("RunOnce(healthy) = %v, want nil", err)
 		}
 		if !marker.Healthy() {
@@ -298,7 +298,7 @@ func TestRunOnceUninterrupted(t *testing.T) {
 	})
 	t.Run("unhealthy cycle sets the marker and errors", func(t *testing.T) {
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		err := RunOnce(context.Background(), testExclusive(t, context.Background()), boolCycler(false), marker)
+		err := RunOnce(t.Context(), testExclusive(t, t.Context()), boolCycler(false), marker)
 		if err == nil {
 			t.Fatal("RunOnce(unhealthy) = nil, want the ingest error")
 		}
@@ -333,6 +333,9 @@ func (c queueThenCancelCycler) Cycle(context.Context) bool {
 		// Another process requests a poll while this one holds the lock: it
 		// must observe OutcomeQueued (its cycle never runs) and report
 		// success — the demand is recorded for the active runner.
+		// A separate process's poll: these stay on context.Background() because
+		// c.t.Context() would tie the simulated requester to this test's
+		// lifecycle, and this body runs as a Cycle callback, not as the test.
 		exB := testExclusiveIn(c.t, context.Background(), c.dir)
 		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
 		*c.queuedErr = RunOnce(context.Background(), exB, mustNotRunCycler{t: c.t}, marker)
@@ -358,6 +361,9 @@ type queuedRerunMarkerCycler struct {
 func (c queuedRerunMarkerCycler) Cycle(context.Context) bool {
 	*c.calls++
 	if *c.calls == 1 {
+		// A separate process's poll: these stay on context.Background() because
+		// c.t.Context() would tie the simulated requester to this test's
+		// lifecycle, and this body runs as a Cycle callback, not as the test.
 		exB := testExclusiveIn(c.t, context.Background(), c.dir)
 		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
 		if err := RunOnce(context.Background(), exB, mustNotRunCycler{t: c.t}, marker); err != nil {
@@ -432,7 +438,7 @@ func TestHealthPublishedInsideCycleLock(t *testing.T) {
 // marker; a later shutdown does not withdraw a completed cycle's health. The
 // interrupted RERUN publishes nothing.
 func TestRunOnceRanQueuedThenCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
@@ -468,7 +474,7 @@ func TestRunOnceRanQueuedThenCancelled(t *testing.T) {
 // claiming health the cycle disproved. Serial (capture swaps slog.Default).
 func TestRunOnceLogsOwnErrorBeforeShutdown(t *testing.T) {
 	rec := capture.Default(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
@@ -500,7 +506,7 @@ func TestRunOnceLogsOwnErrorBeforeShutdown(t *testing.T) {
 // also prove a tick executes normally under RunOrSkip.
 func TestRunLoopShutdownMidCycle(t *testing.T) {
 	t.Run("interrupted unhealthy cycle leaves the marker", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 		marker.Set(true)
@@ -510,7 +516,7 @@ func TestRunLoopShutdownMidCycle(t *testing.T) {
 		}
 	})
 	t.Run("healthy cycle finished during shutdown still records", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 		marker.Set(false)
@@ -547,7 +553,7 @@ func holdCycleLock(t *testing.T, dir string) {
 // runs, the health marker is untouched, and the library's pinned busy WARN is
 // emitted. Serial (capture swaps slog.Default).
 func TestRunLoopSkipsBusyTick(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	rec := captureAndCancelOn(t, cancel, "cycle lock busy; skipping tick")
 	defer cancel()
 	dir := t.TempDir()
@@ -618,7 +624,7 @@ func captureAndCancelOn(t *testing.T, cancel context.CancelFunc, message string)
 // the coalescing log lines. Serial (capture swaps slog.Default).
 func TestRunOnceQueuedWhenBusy(t *testing.T) {
 	rec := capture.Default(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
@@ -650,7 +656,7 @@ func TestRunOnceQueuedWhenBusy(t *testing.T) {
 // context.Canceled) with the marker untouched, while the recorded demand
 // still stands for the active runner. Serial (capture swaps slog.Default).
 func TestRunOnceQueuedThenCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	rec := captureAndCancelOn(t, cancel, "cycle lock busy; queued rerun request")
 	defer cancel()
 	dir := t.TempDir()
@@ -681,7 +687,7 @@ func TestRunOnceQueuedThenCancelled(t *testing.T) {
 // run starts after this request arrived. Serial (capture swaps slog.Default).
 func TestRunOnceDiscardedWhenQueueFull(t *testing.T) {
 	rec := capture.Default(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
@@ -726,7 +732,7 @@ func (c *signalCycler) Cycle(context.Context) bool {
 // a run that started after it arrived. Serial (capture swaps slog.Default).
 func TestRunOnceExecutesQueuedRerun(t *testing.T) {
 	rec := capture.Default(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
 	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
@@ -788,7 +794,7 @@ func (c *queuedFailureCycler) Cycle(context.Context) bool {
 // Serial (capture swaps slog.Default).
 func TestRunOnceLogsQueuedRerunFailure(t *testing.T) {
 	rec := capture.Default(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	ex := testExclusive(t, ctx)
 	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 	sc := &queuedFailureCycler{started: make(chan struct{}), release: make(chan struct{})}
@@ -820,7 +826,7 @@ func TestRunOnceLogsQueuedRerunFailure(t *testing.T) {
 // no demand was recorded, so RunOnce returns the error (exit 1) and never
 // reads as an interruption.
 func TestRunOnceCoordinationFailure(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveLockName), 0o755); err != nil {
@@ -851,7 +857,7 @@ func TestNewExclusiveMkdirError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := NewExclusive(context.Background(), filepath.Join(blocker, "sub"))
+	_, err := NewExclusive(t.Context(), filepath.Join(blocker, "sub"))
 
 	if err == nil {
 		t.Fatal("NewExclusive(uncreatable dir) = nil, want error")
@@ -917,7 +923,7 @@ func TestNewExclusiveInstallsShutdownGate(t *testing.T) {
 // - cycles have stopped - while the cycle never runs and the health marker is
 // untouched. Serial (capture swaps slog.Default).
 func TestRunLoopCoordinationFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	rec := captureAndCancelOn(t, cancel, "cycle coordination failed; tick did not run")
 	defer cancel()
 	dir := t.TempDir()
@@ -948,7 +954,7 @@ func TestRunLoopCoordinationFailure(t *testing.T) {
 // (capture swaps slog.Default).
 func TestRunOnceQueueErrorAfterRun(t *testing.T) {
 	rec := capture.Default(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveQueueName), 0o755); err != nil {
@@ -974,7 +980,7 @@ func TestRunOnceQueueErrorAfterRun(t *testing.T) {
 // cycle-error Loki alert on every tick - and the marker records the cycle's
 // health. Serial (capture swaps slog.Default).
 func TestRunLoopQueueErrorAfterRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	rec := captureAndCancelOn(t, cancel, "cycle coordination error after run")
 	defer cancel()
 	dir := t.TempDir()
@@ -1015,7 +1021,7 @@ func TestRunLoopQueueErrorAfterRun(t *testing.T) {
 // UID (root-safe, unlike a read-only-dir chmod). Serial (capture swaps
 // slog.Default).
 func TestRunLoopMarkerWriteFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	rec := captureAndCancelOn(t, cancel, "tick could not record cycle health")
 	defer cancel()
 	markerDir := filepath.Join(t.TempDir(), "marker-dir")
@@ -1055,7 +1061,7 @@ func TestRunLoopMarkerWriteFailure(t *testing.T) {
 // non-zero with the record-poll-health error - the external scheduler must
 // see the fail rather than trusting an unrecorded outcome.
 func TestRunOnceMarkerWriteFailure(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	dir := filepath.Join(t.TempDir(), "marker-dir")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -1088,7 +1094,7 @@ func TestRunOnceMarkerWriteFailure(t *testing.T) {
 // non-zero) with the marker untouched. Serial (capture swaps slog.Default).
 func TestRunOnceQueueErrorThenCancelled(t *testing.T) {
 	rec := capture.Default(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)
@@ -1168,7 +1174,7 @@ func TestNonRunResult(t *testing.T) {
 	t.Run("queued with a coordination error is still success and logs demand-stands", func(t *testing.T) {
 		rec := capture.Default(t)
 
-		handled, err := nonRunResult(context.Background(), scheduler.OutcomeQueued, errors.New("queue bookkeeping broken"))
+		handled, err := nonRunResult(t.Context(), scheduler.OutcomeQueued, errors.New("queue bookkeeping broken"))
 
 		if !handled {
 			t.Fatal("handled = false, want true (queued ends the poll)")
@@ -1186,7 +1192,7 @@ func TestNonRunResult(t *testing.T) {
 	t.Run("discarded logs the already-covered message", func(t *testing.T) {
 		rec := capture.Default(t)
 
-		handled, err := nonRunResult(context.Background(), scheduler.OutcomeDiscarded, nil)
+		handled, err := nonRunResult(t.Context(), scheduler.OutcomeDiscarded, nil)
 
 		if !handled || err != nil {
 			t.Fatalf("nonRunResult(discarded) = (handled=%v, err=%v), want (true, nil)", handled, err)
@@ -1210,7 +1216,7 @@ func TestNonRunResult(t *testing.T) {
 	})
 	t.Run("run-shaped outcomes fall through unhandled", func(t *testing.T) {
 		for _, outcome := range []scheduler.Outcome{scheduler.OutcomeNone, scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped} {
-			if handled, err := nonRunResult(context.Background(), outcome, nil); handled || err != nil {
+			if handled, err := nonRunResult(t.Context(), outcome, nil); handled || err != nil {
 				t.Errorf("nonRunResult(%v) = (handled=%v, err=%v), want (false, nil): must fall through to the ran/own accounting", outcome, handled, err)
 			}
 		}
@@ -1231,6 +1237,9 @@ type markerBreakingCycler struct {
 func (c markerBreakingCycler) Cycle(context.Context) bool {
 	*c.calls++
 	if *c.calls == 1 {
+		// A separate process's poll: these stay on context.Background() because
+		// c.t.Context() would tie the simulated requester to this test's
+		// lifecycle, and this body runs as a Cycle callback, not as the test.
 		exB := testExclusiveIn(c.t, context.Background(), c.dir)
 		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
 		if err := RunOnce(context.Background(), exB, mustNotRunCycler{t: c.t}, marker); err != nil {
@@ -1316,6 +1325,9 @@ func (c ownMarkerBreakingCycler) Cycle(context.Context) bool {
 		if err := os.WriteFile(c.markerDir, []byte("blocker"), 0o600); err != nil {
 			c.t.Errorf("block marker dir: %v", err)
 		}
+		// A separate process's poll: these stay on context.Background() because
+		// c.t.Context() would tie the simulated requester to this test's
+		// lifecycle, and this body runs as a Cycle callback, not as the test.
 		exB := testExclusiveIn(c.t, context.Background(), c.dir)
 		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
 		if err := RunOnce(context.Background(), exB, mustNotRunCycler{t: c.t}, marker); err != nil {
@@ -1336,7 +1348,7 @@ func (c ownMarkerBreakingCycler) Cycle(context.Context) bool {
 // WARN. Serial (capture swaps slog.Default).
 func TestRunOnceOwnMarkerWriteFailureBeforeShutdown(t *testing.T) {
 	rec := capture.Default(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dir := t.TempDir()
 	ex := testExclusiveIn(t, ctx, dir)

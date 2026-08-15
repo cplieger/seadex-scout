@@ -312,7 +312,7 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		}},
 	}
 
-	if err := r.Log(context.Background(), log); err != nil {
+	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 
@@ -498,7 +498,7 @@ func TestReportLogSanitizesControlAndBidiRunes(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
 	r := craftedReport()
 
-	if err := r.Log(context.Background(), log); err != nil {
+	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 
@@ -976,7 +976,7 @@ func (h *cancelAfterHandler) Handle(ctx context.Context, r slog.Record) error {
 // grace period synchronously emitting the remaining rows.
 func TestReportLogCanceledMidRowsStopsEmitting(t *testing.T) {
 	base, rec := capture.New()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	// Cancel during the FIRST row record (record 2: summary is record 1), so
 	// the per-row checkpoint fires before row 2 and the remaining rows are
@@ -1066,7 +1066,7 @@ func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
 		}},
 	}
 
-	if err := r.Log(context.Background(), log); err != nil {
+	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 
@@ -1095,7 +1095,7 @@ func TestReportLogSplitsNotesFromForgedBestGroup(t *testing.T) {
 	}
 	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Rows: []Row{{Releases: releases}}}
 
-	if err := r.Log(context.Background(), log); err != nil {
+	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 
@@ -1117,7 +1117,7 @@ func TestReportLogSplitsNotesFromForgedBestGroup(t *testing.T) {
 		Releases: []Release{{Group: "PMR", Best: true, Warnings: []string{"broken"}}},
 	}}}
 	cleanLog, cleanRec := capture.New()
-	if err := clean.Log(context.Background(), cleanLog); err != nil {
+	if err := clean.Log(t.Context(), cleanLog); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 	cleanAttrs := recordAttrs(cleanRec.Records()[1])
@@ -1163,7 +1163,7 @@ func TestReportLogCapsAggregateAttributes(t *testing.T) {
 		},
 	}
 
-	if err := r.Log(context.Background(), log); err != nil {
+	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 
@@ -1206,7 +1206,7 @@ func TestReportLogEmitsIncompleteMappings(t *testing.T) {
 		}},
 	}
 
-	if err := r.Log(context.Background(), log); err != nil {
+	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 

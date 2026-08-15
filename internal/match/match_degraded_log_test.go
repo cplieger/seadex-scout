@@ -44,7 +44,7 @@ func TestMatchTransientFailuresLogWarn(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(nil)
 
-	res := NewMatcher(partialOutageAniList{}, logger).Match(context.Background(),
+	res := NewMatcher(partialOutageAniList{}, logger).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
 
 	if !res.Degraded {
@@ -73,7 +73,7 @@ func TestMatchTotalOutageLogsSingleWarn(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(nil)
 
-	res := NewMatcher(degradedAniList{}, logger).Match(context.Background(),
+	res := NewMatcher(degradedAniList{}, logger).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
 
 	if !res.Degraded {

@@ -17,7 +17,7 @@ import (
 // for main's routine-shutdown WARN classification while the cause stays
 // errors.Is-able for diagnostics.
 func TestInterruptedClassifiesNonCanceledCause(t *testing.T) {
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, cancel := context.WithCancelCause(t.Context())
 	cause := errors.New("terminated signal received")
 	cancel(cause)
 
@@ -41,7 +41,7 @@ func TestInterruptedClassifiesNonCanceledCause(t *testing.T) {
 // was cancelled all pass through untouched, so a real fault is never hidden.
 func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
 	cause := errors.New("terminated signal received") // deliberately NOT wrapping context.Canceled
-	causeCtx, cancelCause := context.WithCancelCause(context.Background())
+	causeCtx, cancelCause := context.WithCancelCause(t.Context())
 	cancelCause(cause)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -57,7 +57,7 @@ func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
 		{"cause-only cancellation is stamped", causeCtx, fmt.Errorf("audit: %w", cause), true, false},
 		{"already-canceled error passes through", canceled, fmt.Errorf("audit: %w", context.Canceled), true, true},
 		{"unrelated fault during shutdown stays a fault", causeCtx, fault, false, true},
-		{"fault with a live context stays a fault", context.Background(), fault, false, true},
+		{"fault with a live context stays a fault", t.Context(), fault, false, true},
 		{"nil stays nil", causeCtx, nil, false, true},
 	}
 	for _, tt := range tests {

@@ -187,7 +187,7 @@ func TestQueryTotalUpstreamFailureReturnsFault(t *testing.T) {
 	log, rec := capture.New()
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, log, srv.Client())
 
-	items, stats, fault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
+	items, stats, fault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 0 {
 		t.Fatalf("got %d items from a failed upstream, want 0", len(items))
 	}
@@ -303,7 +303,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 // the request log reads as a deliberate skip rather than a no-match.
 func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 	ix := New(&Config{}, nil, nil)
-	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
+	items, stats, _ := ix.query(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
 	if len(items) != 0 {
 		t.Fatalf("skipped query returned %d items, want 0", len(items))
 	}
@@ -334,7 +334,7 @@ func seedNyaaFeed(t *testing.T, ix *Indexer, n int) {
 func TestQueryCapsResults(t *testing.T) {
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
 	seedNyaaFeed(t, ix, maxItems+5)
-	items, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
+	items, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
 	if len(items) != maxItems {
 		t.Fatalf("got %d items, want the maxItems cap %d", len(items), maxItems)
 	}
@@ -350,7 +350,7 @@ func TestQueryFeedDefaultLimit(t *testing.T) {
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
 	seedNyaaFeed(t, ix, defaultCapsLimit+50)
 
-	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	items, stats, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if !stats.feed {
 		t.Fatal("empty-q query not served from the synthesized feed")
 	}
@@ -362,7 +362,7 @@ func TestQueryFeedDefaultLimit(t *testing.T) {
 			items[0].GUID, items[defaultCapsLimit-1].GUID, defaultCapsLimit-1)
 	}
 
-	explicit, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {"7"}}, "nyaa")
+	explicit, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}, "limit": {"7"}}, "nyaa")
 	if len(explicit) != 7 {
 		t.Errorf("explicit limit=7 returned %d items, want 7 (an explicit limit wins over the default)", len(explicit))
 	}
@@ -392,7 +392,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("write oversized snapshot: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(t.Context())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after unreadable snapshot = %d items, want 1 (a bad read must not blank a live feed)", len(got))
 	}
@@ -428,7 +428,7 @@ func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 		t.Fatalf("mkdir over snapshot: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(t.Context())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after non-regular snapshot path = %d items, want 1 (a refused path must not blank a live feed)", len(got))
 	}
@@ -466,7 +466,7 @@ func TestReloadRefusesSymlinkedSnapshotPath(t *testing.T) {
 	if err := os.Symlink(other, path); err != nil {
 		t.Fatalf("symlink snapshot: %v", err)
 	}
-	ix.cache.loader.refresh(context.Background())
+	ix.cache.loader.refresh(t.Context())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after symlinked snapshot path = %d items, want 1 (the link target must never be loaded)", len(got))
 	}
@@ -500,7 +500,7 @@ func TestReloadRefusesFifoSnapshotPathWithoutBlocking(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ix.cache.loader.refresh(context.Background())
+		ix.cache.loader.refresh(t.Context())
 	}()
 	select {
 	case <-done:
@@ -669,7 +669,7 @@ func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 	orig := listenAddr
 	listenAddr = ln.Addr().String()
 	defer func() { listenAddr = orig }()
-	err = New(&Config{APIKey: "k"}, nil, nil).Run(context.Background())
+	err = New(&Config{APIKey: "k"}, nil, nil).Run(t.Context())
 	if err == nil {
 		t.Fatal("Run on an occupied port returned nil, want a bind error")
 	}
@@ -689,7 +689,7 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	listenAddr = "127.0.0.1:0"
 	defer func() { listenAddr = orig }()
 	log, rec := capture.New()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- New(&Config{APIKey: "k"}, log, nil).Run(ctx) }()

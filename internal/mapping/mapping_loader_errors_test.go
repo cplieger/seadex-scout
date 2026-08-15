@@ -16,7 +16,7 @@ import (
 // panic on the fresh-reuse path (which logs at Debug).
 func TestNewLoader_nilLoggerDefaults(t *testing.T) {
 	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, nil)
-	next, err := l.refreshCache(context.Background(), freshCache())
+	next, err := l.refreshCache(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("refreshCache with nil logger error: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestNewLoader_nilLoggerDefaults(t *testing.T) {
 // error on first boot.
 func TestLoader_refreshCache_badURLErrors(t *testing.T) {
 	l := NewLoader(&http.Client{}, "://not-a-url", "", time.Hour, discardLogger())
-	if _, err := l.refreshCache(context.Background(), &Cache{}); err == nil {
+	if _, err := l.refreshCache(t.Context(), &Cache{}); err == nil {
 		t.Fatal("refreshCache with unparseable URL = nil error, want error")
 	}
 }
@@ -50,7 +50,7 @@ func TestLoader_refreshCache_unexpectedStatusKeepsStale(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("204 refresh returned nil error, want unexpected-status degraded error")
 	}
@@ -72,7 +72,7 @@ func TestLoader_refreshCache_boundsParseErrorText(t *testing.T) {
 	}))
 	defer ts.Close()
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	_, err := l.refreshCache(context.Background(), &Cache{})
+	_, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("refreshCache with string-body upstream = nil error, want parse-failure error")
 	}
@@ -116,7 +116,7 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 // record survives unmodified.
 func TestLoader_Load_directoryOverridesIgnored(t *testing.T) {
 	l := NewLoader(nil, "http://unused.invalid", t.TempDir(), time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with directory overrides error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestLoader_Load_zeroIDOverrideIgnored(t *testing.T) {
 		t.Fatalf("write overrides: %v", err)
 	}
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}

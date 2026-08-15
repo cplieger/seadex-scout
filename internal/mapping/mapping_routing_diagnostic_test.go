@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -76,7 +75,7 @@ func TestLoader_refreshCache_firstBootSeriesOnlyBodyAcceptedWithDiagnostic(t *te
 	logger, logs := capture.New()
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, logger)
 
-	next, err := l.refreshCache(context.Background(), nil)
+	next, err := l.refreshCache(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("first-boot series-only refresh error = %v, want nil (no baseline cannot prove loss)", err)
 	}
@@ -114,7 +113,7 @@ func TestLoader_refreshCache_unusablePreviousSeriesOnlyResetsStreak(t *testing.T
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, logger)
 
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refresh onto an unusable cache error = %v, want nil", err)
 	}
@@ -137,7 +136,7 @@ func TestLoader_refreshCache_firstBootHealthyBodyLogsNoDiagnostic(t *testing.T) 
 	logger, logs := capture.New()
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, logger)
 
-	if _, err := l.refreshCache(context.Background(), nil); err != nil {
+	if _, err := l.refreshCache(t.Context(), nil); err != nil {
 		t.Fatalf("healthy first-boot refresh error = %v, want nil", err)
 	}
 	if got := logs.CountExact(absentArrMessage); got != 0 {
@@ -158,7 +157,7 @@ func TestLoader_refreshCache_usablePreviousZeroToZeroStaysSilent(t *testing.T) {
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, logger)
 
-	if _, err := l.refreshCache(context.Background(), prev); err != nil {
+	if _, err := l.refreshCache(t.Context(), prev); err != nil {
 		t.Fatalf("unchanged series-only refresh error = %v, want nil", err)
 	}
 	if got := logs.CountExact(absentArrMessage); got != 0 {
@@ -183,7 +182,7 @@ func TestLoader_refreshCache_usablePreviousExtinctionStillRejected(t *testing.T)
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, logger)
 
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("refresh that lost every movie-routed record returned nil error, want rejection")
 	}

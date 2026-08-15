@@ -46,7 +46,7 @@ func TestUpstreamSearchPreservesExistingQuery(t *testing.T) {
 		http: srv.Client(), log: slog.Default(), name: upstreamNyaa,
 		feed: srv.URL + "/api?indexer=1#client-fragment", apiKey: "prowlarr-key",
 	}
-	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestUpstreamSearchDropsForeignDownloadURLs(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL + "/api"}
-	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 	if err != nil {
 		t.Fatalf("search after one malformed response: %v (a parse failure must be retried)", err)
 	}
@@ -249,7 +249,7 @@ func TestFetchAndParseClassifiesTorznabErrorDoc(t *testing.T) {
 			defer srv.Close()
 
 			u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-			_, err := u.fetchAndParse(context.Background(), srv.URL)
+			_, err := u.fetchAndParse(t.Context(), srv.URL)
 			if err == nil {
 				t.Fatal("fetchAndParse on an undecodable feed returned nil error")
 			}
@@ -290,7 +290,7 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 		defer srv.Close()
 
 		u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-		_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+		_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 		if err == nil {
 			t.Fatal("search against a code-100 error document returned nil error")
 		}
@@ -324,7 +324,7 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 		defer srv.Close()
 
 		u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-		items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+		items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 		if err != nil {
 			t.Fatalf("search after one code-900 error document: %v (a generic upstream error must be retried)", err)
 		}
@@ -422,7 +422,7 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 
 			log, rec := capture.New()
 			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed, apiKey: key}
-			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+			_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 			if err == nil {
 				t.Fatal("search against an error document returned nil error")
 			}
@@ -474,7 +474,7 @@ func TestUpstreamSearchRedactsReflectedBasicAuthorization(t *testing.T) {
 
 			log, rec := capture.New()
 			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: parsed.String()}
-			if _, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err == nil {
+			if _, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}}); err == nil {
 				t.Fatal("search against an error document returned nil error")
 			} else if strings.Contains(err.Error(), token[:8]) {
 				t.Errorf("returned error leaks the transmitted Basic token (or a prefix): %v", err)
@@ -538,7 +538,7 @@ func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 
 			log, rec := capture.New()
 			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed, apiKey: key}
-			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+			_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 			if err == nil {
 				t.Fatal("search against a garbled <size> body returned nil error")
 			}
@@ -572,7 +572,7 @@ func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	_, err := u.fetchAndParse(context.Background(), srv.URL)
+	_, err := u.fetchAndParse(t.Context(), srv.URL)
 	if err == nil {
 		t.Fatal("fetchAndParse on a 429 returned nil error")
 	}
@@ -645,7 +645,7 @@ func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
 	} {
 		t.Run("retried/"+http.StatusText(status), func(t *testing.T) {
 			u, calls := newUpstream(t, status)
-			items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+			items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 			if err != nil {
 				t.Fatalf("search after one HTTP %d: %v (a self-healing status must be retried)", status, err)
 			}
@@ -667,7 +667,7 @@ func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
 	} {
 		t.Run("terminal/"+http.StatusText(status), func(t *testing.T) {
 			u, calls := newUpstream(t, status)
-			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+			_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 			if err == nil {
 				t.Fatalf("search against an HTTP %d returned nil error", status)
 			}
@@ -707,7 +707,7 @@ func TestUpstreamSearchRedactsUserinfoAcrossRetryLogging(t *testing.T) {
 	feed := strings.Replace(srv.URL, "http://", "http://secret-token@", 1) + "/1/api?apikey=secret-value"
 	log, rec := capture.New()
 	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed}
-	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 	if err == nil {
 		t.Fatal("search against a permanently 503 endpoint returned nil error")
 	}
@@ -748,7 +748,7 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err == nil {
 		t.Fatal("search with an oversized upstream body returned nil, want *httpx.ResponseTooLargeError")
 	}
@@ -782,14 +782,14 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
 	t.Run("unparseable configured feed URL", func(t *testing.T) {
 		u := &upstream{log: slog.Default(), name: upstreamNyaa, feed: "http://prowlarr:9696/api%zz"}
-		_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+		_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 		if err == nil || !strings.Contains(err.Error(), "invalid upstream feed URL") {
 			t.Errorf("search error = %v, want the invalid-feed-URL error before any HTTP call", err)
 		}
 	})
 	t.Run("unbuildable request URL", func(t *testing.T) {
 		u := &upstream{http: &http.Client{}, log: slog.Default(), name: upstreamNyaa}
-		if _, err := u.fetchAndParse(context.Background(), ":"); err == nil {
+		if _, err := u.fetchAndParse(t.Context(), ":"); err == nil {
 			t.Error("fetchAndParse(\":\") = nil error, want a request-build failure")
 		}
 	})
@@ -814,7 +814,7 @@ func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 	feed := strings.Replace(srv.URL, "http://", "http://secret-token@", 1) + "/1/api?apikey=secret-value"
 	log, rec := capture.New()
 	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed}
-	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err == nil {
 		t.Fatal("search against a 404 endpoint returned nil error")
 	}
@@ -898,7 +898,7 @@ func TestFilterDownloadURLsWarnsOnDroppedItems(t *testing.T) {
 
 	log, rec := capture.New()
 	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL + "/api"}
-	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestFilterDownloadURLsWarnsOnDroppedItems(t *testing.T) {
 	}))
 	defer cleanSrv.Close()
 	cu := &upstream{http: cleanSrv.Client(), log: cleanLog, name: upstreamNyaa, feed: cleanSrv.URL + "/api"}
-	if _, _, err := cu.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
+	if _, _, err := cu.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
 		t.Fatalf("clean search: %v", err)
 	}
 	if got := cleanRec.CountExact(msg); got != 0 {
@@ -967,7 +967,7 @@ func TestUpstreamSearchReportsRawPageCount(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL + "/api"}
-	items, raw, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	items, raw, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -1096,7 +1096,7 @@ func TestSearchBoundsAttemptWithoutClientTimeout(t *testing.T) {
 	client := srv.Client()
 	client.Timeout = 0 // no transport backstop: the package must bound the attempt
 	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	if _, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
+	if _, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
 		t.Fatalf("search with a package-bounded attempt = %v, want the retry to succeed", err)
 	}
 	if got := calls(); got != 2 {
@@ -1120,7 +1120,7 @@ func TestSearchRetriesAttemptTimeoutAwaitingHeaders(t *testing.T) {
 	client := srv.Client()
 	client.Timeout = 150 * time.Millisecond
 	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err != nil {
 		t.Fatalf("search after one header-phase attempt timeout = %v, want the retry to succeed", err)
 	}
@@ -1144,7 +1144,7 @@ func TestSearchRetriesAttemptTimeoutReadingBody(t *testing.T) {
 	client := srv.Client()
 	client.Timeout = 150 * time.Millisecond
 	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	if _, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
+	if _, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
 		t.Fatalf("search after one body-read attempt timeout = %v, want the retry to succeed", err)
 	}
 	if got := calls(); got != 2 {
@@ -1163,7 +1163,7 @@ func TestSearchDoesNotRetryExpiredCallerContext(t *testing.T) {
 	client := srv.Client()
 	client.Timeout = time.Minute
 	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancel()
 	_, _, err := u.search(ctx, url.Values{"t": {"search"}, "q": {"x"}})
 	if err == nil {
@@ -1390,7 +1390,7 @@ func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 			}}, log, srv.Client())
 
-			items, stats, fault := ix.query(context.Background(),
+			items, stats, fault := ix.query(t.Context(),
 				url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, upstreamNyaa)
 
 			if len(items) != 0 {

@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -44,7 +43,7 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		var stale *StaleMapError
 		if !errors.As(err, &stale) {
 			t.Fatalf("rejection %d error = %v, want a *StaleMapError", i, err)
@@ -56,7 +55,7 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 	}
 
 	accept.Store(true)
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("accepted refresh after rejections returned error: %v", err)
 	}
@@ -83,7 +82,7 @@ func TestLoader_refreshCache_notModifiedResetsRejectionStreak(t *testing.T) {
 		RejectedRefreshes: 3,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("304 refresh returned error: %v", err)
 	}
@@ -107,7 +106,7 @@ func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) 
 		RejectedRefreshes: 3,
 	}
 	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	var stale *StaleMapError
 	if !errors.As(err, &stale) {
 		t.Fatalf("transport-failure error = %v, want a *StaleMapError", err)
@@ -133,7 +132,7 @@ func TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak(t *test
 			Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 		}
 		l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		ts.Close()
 		if _, ok := errors.AsType[*StaleMapError](err); !ok {
 			t.Errorf("status %d error = %v, want a *StaleMapError", status, err)
@@ -166,7 +165,7 @@ func TestLoader_refreshCache_comeBackLaterStatusKeepsRejectionStreak(t *testing.
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		if _, ok := errors.AsType[*StaleMapError](err); !ok {
 			t.Fatalf("500 %d error = %v, want a *StaleMapError", i, err)
 		}
@@ -194,7 +193,7 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		if err == nil {
 			t.Fatalf("refresh %d returned nil error, want a degraded refresh", i)
 		}
@@ -239,7 +238,7 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 		RejectedRefreshes: degradation.TickEscalationThreshold - 1,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if _, ok := errors.AsType[*StaleMapError](err); !ok {
 		t.Fatalf("cap-breach refresh error = %v, want a *StaleMapError guard rejection", err)
 	}
@@ -272,7 +271,7 @@ func TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak(t *testin
 		RejectedRefreshes: 3,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	if _, ok := errors.AsType[*StaleMapError](err); !ok {
 		t.Fatalf("parse-failure refresh error = %v, want a *StaleMapError", err)
 	}
@@ -308,7 +307,7 @@ func TestLoader_refreshCache_overCapBodyAdvancesRejectionStreak(t *testing.T) {
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	next, err := l.refreshCache(t.Context(), prev)
 	var stale *StaleMapError
 	if !errors.As(err, &stale) {
 		t.Fatalf("over-cap body error = %v, want a *StaleMapError", err)
@@ -340,7 +339,7 @@ func TestLoader_refreshCache_nonArrayBodyAdvancesRejectionStreak(t *testing.T) {
 			Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 		}
 		l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		ts.Close()
 		var stale *StaleMapError
 		if !errors.As(err, &stale) {
@@ -367,7 +366,7 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 	prev := &Cache{} // first boot: no records, no validators
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		if err == nil {
 			t.Fatalf("refresh %d returned nil error, want the no-cache error", i)
 		}
@@ -408,7 +407,7 @@ func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *test
 	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), ETag: "v1"}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
-		next, err := l.refreshCache(context.Background(), prev)
+		next, err := l.refreshCache(t.Context(), prev)
 		if err == nil {
 			t.Fatalf("304 %d over an unusable cache returned nil error, want the no-cache error", i)
 		}

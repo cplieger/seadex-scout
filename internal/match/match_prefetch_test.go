@@ -23,7 +23,7 @@ func TestPrefetchNegativelyMemoizesOnCompleteBatch(t *testing.T) {
 	fake := &batchCountingAniList{media: map[int]anilist.Media{}}
 	m := NewMatcher(fake, nil)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 77}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 77}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
@@ -56,7 +56,7 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1 (a no-record entry must ride the batch prefetch)", fake.batchCalls)
@@ -105,7 +105,7 @@ func TestPrefetchEmptyRecordLocalBatchFallsBackPerID(t *testing.T) {
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
@@ -160,7 +160,7 @@ func TestPrefetchScopesNegativeMemoToVerifiedChunks(t *testing.T) {
 	})
 	fake := &scopedBatchRecordAniList{}
 
-	res := NewMatcher(fake, nil).Match(context.Background(),
+	res := NewMatcher(fake, nil).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 
@@ -251,7 +251,7 @@ func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 		abandoned: []int{22, 33},
 	}
 
-	res := NewMatcher(fake, nil).Match(context.Background(),
+	res := NewMatcher(fake, nil).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 
@@ -288,7 +288,7 @@ func TestPrefetchDoesNotReBatchRecordLocalIDs(t *testing.T) {
 	})
 	fake := &scopedBatchRecordAniList{}
 
-	NewMatcher(fake, nil).Match(context.Background(),
+	NewMatcher(fake, nil).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 

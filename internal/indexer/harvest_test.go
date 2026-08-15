@@ -119,7 +119,7 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
@@ -169,7 +169,7 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
@@ -216,13 +216,13 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
 		t.Fatalf("harvest queries after first rebuild = %d, want 1", mock.calls())
 	}
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
@@ -280,7 +280,7 @@ func TestHarvestTimeSliceEnforced(t *testing.T) {
 	}
 	t.Cleanup(func() { harvestWait = prevWait })
 
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 5 {
@@ -318,7 +318,7 @@ func TestHarvestRotationResumesAfterCursor(t *testing.T) {
 	seedLedgerWithCursor(t, path, "nyaa:1500")
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 2 {
@@ -351,7 +351,7 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") {
@@ -399,7 +399,7 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("indexer title harvest response malformed; show keeps its synthesized title this rebuild") {
@@ -456,7 +456,7 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("indexer title harvest request rejected; show keeps its synthesized title this rebuild") {
@@ -494,7 +494,7 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 0 {
@@ -650,7 +650,7 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -942,7 +942,7 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
 		log, countSrv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	mu.Lock()
@@ -971,7 +971,7 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 // scope-wide nor the malformed WARN fires - nothing is cached, and the item
 // stays pending for the next rebuild.
 func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		cancel()
 		<-r.Context().Done()
@@ -1717,7 +1717,7 @@ func TestHarvestPacerNextDeniedBranches(t *testing.T) {
 	base := time.Unix(1700000000, 0)
 	t.Run("spent slice admits no query at entry", func(t *testing.T) {
 		p := &harvestPacer{now: func() time.Time { return base }, deadline: base.Add(-time.Second)}
-		if p.next(context.Background()) {
+		if p.next(t.Context()) {
 			t.Error("next = true with the slice already spent, want false")
 		}
 	})
@@ -1726,7 +1726,7 @@ func TestHarvestPacerNextDeniedBranches(t *testing.T) {
 		harvestWait = func(context.Context, time.Duration) error { return context.Canceled }
 		t.Cleanup(func() { harvestWait = prev })
 		p := &harvestPacer{now: func() time.Time { return base }, deadline: base.Add(time.Hour), started: true}
-		if p.next(context.Background()) {
+		if p.next(t.Context()) {
 			t.Error("next = true when the pacing gap was cancelled, want false")
 		}
 	})

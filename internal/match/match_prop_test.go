@@ -1,7 +1,6 @@
 package match
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -87,7 +86,7 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 		draws := rapid.SliceOfN(rapid.Float64Range(0, 0.999999), 1, 4).Draw(rt, "draws")
 		m := expiryMatcher(fake, draws...)
 
-		res := m.Match(context.Background(), entries, &library.Snapshot{}, mapping.NewIndex(records), memo)
+		res := m.Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(records), memo)
 		// entries IS the whole catalogue in this model, which is the only thing
 		// PruneMemo may be handed; the property covers the pruning half of the
 		// lifecycle, so it runs the call the reconcile runs.

@@ -145,7 +145,7 @@ func TestCycleDispatchesReconcileThenTicks(t *testing.T) {
 
 	const iterations = 7
 	for i := range iterations {
-		if healthy := s.Cycle(context.Background()); !healthy {
+		if healthy := s.Cycle(t.Context()); !healthy {
 			t.Fatalf("Cycle iteration %d healthy=false, want true", i)
 		}
 	}
@@ -192,7 +192,7 @@ func TestCycleReconcilesEveryIterationWithoutAPollInterval(t *testing.T) {
 				t.Fatalf("reconcileEvery() = %d, want 1", got)
 			}
 			for range 3 {
-				if healthy := s.Cycle(context.Background()); !healthy {
+				if healthy := s.Cycle(t.Context()); !healthy {
 					t.Fatal("Cycle healthy=false, want true")
 				}
 			}
@@ -226,7 +226,7 @@ func TestReconcileCompleteIsNotEmittedByATick(t *testing.T) {
 	}
 	s, _ := newTickScout(logger, sea, nil, nil, 96)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	if n := recorder.CountExact("reconcile complete"); n != 1 {
@@ -235,7 +235,7 @@ func TestReconcileCompleteIsNotEmittedByATick(t *testing.T) {
 
 	// A PRODUCTIVE tick: it fetches, advances and reports, and still must not
 	// claim a reconcile happened.
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 	if n := recorder.CountExact("tick complete"); n != 1 {
@@ -267,12 +267,12 @@ func TestTickEmptyWindowSkipsFetch(t *testing.T) {
 	feed := &fakeFeed{}
 	s, store := newTickScout(logger, sea, feed, nil, 96)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	savesAfterReconcile := store.saves
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true (an empty window is a successful tick)")
 	}
 
@@ -331,7 +331,7 @@ func TestTickEmptyRunWarnsAtItsLatch(t *testing.T) {
 	// this long - drive the counter itself rather than the iteration index. A
 	// reconcile leaves emptyRun untouched; only a productive tick resets it.
 	s, _ := newTickScout(logger, sea, nil, nil, 96)
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
@@ -340,7 +340,7 @@ func TestTickEmptyRunWarnsAtItsLatch(t *testing.T) {
 		"if this persists, check this container's clock against the upstream, " +
 		"and that the probe is reaching releases.moe rather than something answering for it"
 	for i := 1; s.emptyRun <= latch+1; i++ {
-		if healthy := s.Cycle(context.Background()); !healthy {
+		if healthy := s.Cycle(t.Context()); !healthy {
 			t.Fatalf("iteration %d healthy=false, want true", i)
 		}
 		want := 0
@@ -381,7 +381,7 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 	// derives to 8 ticks - well inside one reconcile period, so the whole run
 	// below is ticks.
 	s, _ := newTickScout(logger, sea, feed, nil, 96)
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
@@ -389,7 +389,7 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 	const warnMsg = "SeaDex change window too large to fetch; deferring to the reconcile"
 	const errSub = "SeaDex change window has been too large to fetch repeatedly"
 	for i := 1; i <= latch; i++ {
-		if healthy := s.Cycle(context.Background()); !healthy {
+		if healthy := s.Cycle(t.Context()); !healthy {
 			t.Fatalf("oversize tick %d healthy=false, want true (it is degraded, not unhealthy)", i)
 		}
 		if s.oversizeRun != i {
@@ -446,10 +446,10 @@ func TestTickOversizeBoundIsInclusive(t *testing.T) {
 				},
 			}
 			s, _ := newTickScout(logger, sea, nil, nil, 96)
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("reconcile healthy=false, want true")
 			}
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("tick healthy=false, want true")
 			}
 
@@ -487,7 +487,7 @@ func TestTickProductiveResetsBothRuns(t *testing.T) {
 				windowEntries: []seadex.Entry{windowEntry(1001, 501)},
 			}
 			s, _ := newTickScout(logger, sea, &fakeFeed{}, nil, 96)
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("reconcile healthy=false, want true")
 			}
 			// Both counters are latched against a wall-clock tolerance
@@ -499,7 +499,7 @@ func TestTickProductiveResetsBothRuns(t *testing.T) {
 				s.oversizeRun = s.latchTicks(frozenFastPathTolerance) - 1
 			}
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("productive tick healthy=false, want true")
 			}
 
@@ -532,7 +532,7 @@ func TestTickAdvancesTheFeedAndNeverRebuilds(t *testing.T) {
 	feed := &fakeFeed{}
 	s, _ := newTickScout(logger, sea, feed, nil, 96)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	if feed.calls != 1 {
@@ -542,7 +542,7 @@ func TestTickAdvancesTheFeedAndNeverRebuilds(t *testing.T) {
 		t.Errorf("Advance calls after the reconcile = %d, want 0 (a full pass rebuilds)", feed.advanceCalls)
 	}
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 	if feed.calls != 1 {
@@ -569,10 +569,10 @@ func TestTickFeedAdvanceFailureKeepsTheTickHealthy(t *testing.T) {
 	feed := &fakeFeed{advanceErr: errors.New("advance boom")}
 	s, _ := newTickScout(logger, sea, feed, nil, 96)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true (a feed failure must not fail the tick)")
 	}
 	if !recorder.Contains("indexer feed advance failed; keeping previous feed") {
@@ -594,10 +594,10 @@ func TestTickWithNoFeedConfiguredStillReports(t *testing.T) {
 	}
 	s, _ := newTickScout(logger, sea, nil, nil, 96)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 	if n := recorder.CountExact("tick complete"); n != 1 {
@@ -650,14 +650,14 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 		windowEntries: append(seadexFrierenEntry(), windowEntry(1003, 503)),
 	}
 	s, _ := newTickScout(logger, sea, nil, notifier, 96)
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	// The reconcile re-reported with FULL authority, so re-seed the standing
 	// rows it deleted by omission before the tick runs.
 	seed()
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 
@@ -706,7 +706,7 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 // so nothing failed if the check was removed - or if it kept declining to save.
 func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) {
 	logger, recorder := capture.New()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	// The window carries an id nothing in the test library maps to, so the matcher
 	// takes the AniList title fallback - the seam the cancellation lands in. The
@@ -790,7 +790,7 @@ func TestTickNeverWritesTheLibrarySnapshot(t *testing.T) {
 	}
 	s, store := newTickScout(logger, sea, nil, nil, 96)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	if n := len(store.st.Library.Items); n != 1 {
@@ -798,7 +798,7 @@ func TestTickNeverWritesTheLibrarySnapshot(t *testing.T) {
 	}
 	savesAfterReconcile := store.saves
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 
@@ -875,7 +875,7 @@ func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 			feed := &fakeFeed{}
 			s, _ := newTickScout(logger, sea, feed, notifier, 96)
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("reconcile healthy=false, want true")
 			}
 			// The reconcile reported with full authority; re-seed the standing
@@ -883,7 +883,7 @@ func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 			notifier.Report([]compare.Finding{tickFinding(1002, 502)}, nil)
 			summariesBefore := recorder.CountExact("findings reported")
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("tick healthy=false, want true (an upstream failure is degraded, not unhealthy)")
 			}
 
@@ -940,12 +940,12 @@ func TestTickWindowIsWiderThanTheInterval(t *testing.T) {
 		countFn: func(context.Context, time.Time) (int, error) { return 0, nil },
 	}
 	s, _ := newTickScout(logger, sea, nil, nil, 96)
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
 	before := time.Now()
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 	if len(sea.countSince) != 1 {
@@ -1040,7 +1040,7 @@ func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
 			deps, _ := tickDeps(logger, tc.sea(), &fakeFeed{}, notifier, 96)
 			s := New(deps)
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("reconcile healthy=false, want true")
 			}
 			// Seed a standing row AFTER the reconcile so the tick's own
@@ -1048,7 +1048,7 @@ func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
 			notifier.Report([]compare.Finding{tickFinding(1002, 502)}, nil)
 			summariesBefore := recorder.CountExact("findings reported")
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("tick healthy=false, want true (no tick exit is unhealthy: health follows the arr walk)")
 			}
 
@@ -1101,7 +1101,7 @@ func TestCycleRetriesReconcileUntilReadyThenGivesUp(t *testing.T) {
 	s, _ := newTickScout(logger, sea, &fakeFeed{}, nil, every)
 
 	for i := 1; i <= reconcileRetryLatch; i++ {
-		if healthy := s.Cycle(context.Background()); !healthy {
+		if healthy := s.Cycle(t.Context()); !healthy {
 			t.Fatalf("iteration %d healthy=false, want true (a gated upstream is degraded, not unhealthy)", i)
 		}
 		if s.ready {
@@ -1115,7 +1115,7 @@ func TestCycleRetriesReconcileUntilReadyThenGivesUp(t *testing.T) {
 	// The budget is spent: the loop stops retrying out of cadence and ticks
 	// instead, and that tick publishes nothing.
 	summariesBefore := recorder.CountExact("findings reported")
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("post-budget iteration healthy=false, want true")
 	}
 	if full, _ := countWindowModes(sea); full != reconcileRetryLatch {
@@ -1141,7 +1141,7 @@ func TestCycleRetriesReconcileUntilReadyThenGivesUp(t *testing.T) {
 		if s.ready {
 			break
 		}
-		if healthy := s.Cycle(context.Background()); !healthy {
+		if healthy := s.Cycle(t.Context()); !healthy {
 			t.Fatal("recovering iteration healthy=false, want true")
 		}
 	}
@@ -1162,7 +1162,7 @@ func TestCycleReadyGateOpensOnlyOnAReconcileThatReported(t *testing.T) {
 	if s.ready {
 		t.Fatal("ready=true before any cycle ran, want false")
 	}
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	if !s.ready {
@@ -1227,7 +1227,7 @@ func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("partial-walk reconcile healthy=false, want true (a partial walk is degraded, not unhealthy)")
 	}
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
@@ -1271,7 +1271,7 @@ func TestReconcilePrunesTheMemoAndTickDoesNot(t *testing.T) {
 	}}
 	s := New(deps)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	if _, kept := store.st.Memo.Entries[deadID]; kept {
@@ -1283,7 +1283,7 @@ func TestReconcilePrunesTheMemoAndTickDoesNot(t *testing.T) {
 	store.st.Memo = match.Memo{Entries: map[int]match.MemoEntry{
 		deadID: {NotFound: true, Expiry: time.Now().Add(-time.Hour)},
 	}}
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true")
 	}
 	if _, kept := store.st.Memo.Entries[deadID]; !kept {
@@ -1316,7 +1316,7 @@ func TestReconcileAnnouncesItselfBeforeDoingWork(t *testing.T) {
 			logger, recorder := capture.New()
 			s, _ := newTickScout(logger, tc.sea, nil, nil, 96)
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("reconcile healthy=false, want true (an upstream gate is degraded, not unhealthy)")
 			}
 			if n := recorder.CountExact("reconcile started"); n != 1 {
@@ -1383,7 +1383,7 @@ func TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow(t *testing.T) {
 	deps.Mapping = &rejectingAfterFirstMapping{}
 	s := New(deps)
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	// Seed a standing row AFTER the reconcile's full-authority pass, so only the
@@ -1391,7 +1391,7 @@ func TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow(t *testing.T) {
 	s.notifier.Report([]compare.Finding{tickFinding(154587, 501)}, nil)
 	savesAfterSeed := store.saves
 
-	if healthy := s.Cycle(context.Background()); !healthy {
+	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("tick healthy=false, want true (a restart cannot fix a Fribb outage)")
 	}
 
@@ -1481,13 +1481,13 @@ func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 			deps.Mapping = tc.mapping
 			s := New(deps)
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("reconcile healthy=false, want true")
 			}
 			// The reconcile's own save has happened; from here the tick is on its own.
 			savesAfterReconcile := store.saves
 
-			if healthy := s.Cycle(context.Background()); !healthy {
+			if healthy := s.Cycle(t.Context()); !healthy {
 				t.Fatal("tick healthy=false, want true")
 			}
 			if _, window := countWindowModes(sea); window != 1 {
