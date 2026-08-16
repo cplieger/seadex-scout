@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
@@ -250,14 +251,47 @@ func credentialParamName(name string) bool {
 }
 
 // redactSecrets removes every credential this upstream carries from untrusted
-// upstream text. It runs on the error path only, and BEFORE the text is
-// bounded, so each exact-substring replacement always sees the intact
-// credential. An empty secret is a no-op (httpx.RedactSecretString).
+// upstream text. It runs on the error path only, and redactAndBound runs it on BOTH
+// sides of the sanitizer, so each exact-substring replacement sees the credential in
+// the form the text carries at that position. An empty secret is a no-op
+// (httpx.RedactSecretString).
 func (u *upstream) redactSecrets(s string) string {
 	for _, secret := range u.upstreamSecrets() {
 		s = httpx.RedactSecretString(s, secret)
 	}
 	return s
+}
+
+// redactAndBound is the emit-boundary composition for untrusted upstream text that
+// carries this upstream's credentials: redact, sanitize, redact again, then cap.
+// Every position earns its place, and the ORDER is the correctness argument:
+//
+//   - The PRE-pass catches a credential the sanitizer would garble. It rewrites any
+//     unsafe rune inside the value (a C0 byte, a bidi control) into a space and an
+//     invalid UTF-8 byte into U+FFFD, after which the byte-exact needle no longer
+//     matches and a near-complete fragment of the credential survives.
+//   - The POST-pass catches a credential the sanitizer CONSTRUCTS. It maps every
+//     unsafe rune to U+0020, and four of this upstream's needles carry a U+0020: a
+//     userinfo username or password configured as user%20name (url.Userinfo returns
+//     the percent-DECODED form), and a query credential whose literal '+' decodes to
+//     a space (url.QueryUnescape maps '+' to ' ', which base64 passkeys hit
+//     routinely). So an upstream echoing correct<DEL>horse defeats the pre-pass
+//     needle and the sanitizer then reassembles "correct horse" from it. DEL is the
+//     example rather than a C0 because encoding/xml rejects a C0 outright, so a DEL,
+//     a CR and an LF are the unsafe runes this boundary actually carries.
+//   - The CAP is last so a credential straddling the bound is already gone rather
+//     than sliced into a surviving prefix.
+//
+// The bound is upstreamTextMaxBytes with the marker counted INSIDE it
+// (SanitizeSingleLineCapped, not the Bounded preset), so upstreamDocError.Error()'s
+// surviving sanitize pass is a byte-for-byte no-op on this output: the text is
+// already within the cap and runesafe.SanitizeSingleLine is idempotent on it.
+func (u *upstream) redactAndBound(s string) string {
+	s = u.redactSecrets(s)
+	s = runesafe.SanitizeSingleLine(s)
+	s = u.redactSecrets(s)
+	text, _ := runesafe.SanitizeSingleLineCapped(s, upstreamTextMaxBytes, "...")
+	return text
 }
 
 // classifyParseError maps a parseTorznab failure onto the retry taxonomy.
@@ -268,8 +302,8 @@ func (u *upstream) classifyParseError(err error) error {
 		// into the error message, which httpx.Do's retry logger and the harvest WARN
 		// would then expand into the log stream (CWE-532).
 		terminal := terminalTorznabCode(docErr.codeNum)
-		docErr.code = u.redactSecrets(docErr.code)
-		docErr.description = u.redactSecrets(docErr.description)
+		docErr.code = u.redactAndBound(docErr.code)
+		docErr.description = u.redactAndBound(docErr.description)
 		if terminal {
 			return docErr
 		}
@@ -282,11 +316,12 @@ func (u *upstream) classifyParseError(err error) error {
 	// A generic decode failure can echo attacker-controlled body text verbatim
 	// (encoding/xml returns raw strconv errors quoting the full unparsed <size>/length
 	// value, up to the wire cap upstreamMaxBytes), and the request carried the Prowlarr
-	// API key: redact any reflection of the key FIRST (the exact-substring replacement
-	// must see intact text), then bound the text, before the error reaches httpx.Do's
+	// API key: redact any reflection of the key before the error reaches httpx.Do's
 	// retry logger or fetchRaw's WARN - the same emit-boundary policy the
-	// upstreamDocError path applies.
-	msg := sanitizeUpstreamText(u.redactSecrets(err.Error()))
+	// upstreamDocError path applies. The redaction runs on BOTH sides of the sanitizer
+	// (redactAndBound), because the sanitizer can both garble a credential the
+	// pre-pass would have caught and reassemble one from text no needle matches.
+	msg := u.redactAndBound(err.Error())
 	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 

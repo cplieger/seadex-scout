@@ -558,6 +558,125 @@ func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 	}
 }
 
+// TestUpstreamSearchRedactsAcrossTheSanitizer pins the ORDER of the emit-boundary
+// composition, which the two redaction sites in this file share (redactAndBound):
+// redaction runs on both sides of the sanitizer, not only before it.
+//
+// The defect it guards is that runesafe's sanitizer is a normalizing transform, and
+// the normal form it produces is a SPACE: every unsafe rune it rewrites becomes
+// U+0020. Four of this upstream's needles carry a U+0020 - a userinfo username or
+// password configured as user%20name (url.Userinfo hands back the percent-DECODED
+// form) and a query credential whose literal '+' decodes to a space (url.QueryUnescape
+// maps '+' to ' ', which base64 passkeys hit routinely). So an upstream that splits
+// the credential with an unsafe rune defeats the byte-exact needle, and a redaction
+// that ran only BEFORE the sanitizer leaves the sanitizer to REASSEMBLE the
+// credential into the error text and the log stream (CWE-532). Every row below fails
+// when the composition is reduced to redact-then-sanitize.
+//
+// Delivery is the <error>-document path, verified reachable end to end: an attribute
+// value carries a raw DEL or LF, and &#13; carries a real CR, all the way into
+// upstreamDocError's fields. Two shapes deliberately are NOT used because the real
+// boundary cannot deliver them, so a row built on either would pass under both
+// orders and prove nothing - encoding/xml rejects a C0 outright ("illegal character
+// code U+0001", raw or as a character reference, in text and in attributes), and the
+// generic <size> decode path reaches the error text through strconv.Quote, which
+// escapes a control rune into a printable \x7f sequence the sanitizer never sees.
+// The existing fixtures miss all of this because their credentials are space-free.
+func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
+	tests := map[string]struct {
+		// username and password are the RAW userinfo credential (encoded into the feed
+		// URL by url.URL.String, decoded back by url.Userinfo); rawQuery is the feed
+		// URL's raw query. code and description are the <error> document's attribute
+		// values as they ride the wire, and secret is the credential that must not be
+		// readable in any sink.
+		username    string
+		password    string
+		rawQuery    string
+		code        string
+		description string
+		secret      string
+	}{
+		// A DEL is the cheapest unsafe rune the XML boundary carries verbatim.
+		"userinfo password reassembled from DEL": {
+			username:    "alice",
+			password:    "correct horse battery",
+			code:        "100",
+			description: "auth rejected: correct\x7fhorse\x7fbattery",
+			secret:      "correct horse battery",
+		},
+		"userinfo username reassembled from DEL": {
+			username:    "svc account",
+			password:    "s3cret",
+			code:        "100",
+			description: "auth failed for user svc\x7faccount",
+			secret:      "svc account",
+		},
+		// CR and LF are unsafe only under the single-line policy (keepCRLF=false),
+		// which is the policy this site's sanitizer applies - so these two rows pin
+		// that the composition reads the strict preset and not runesafe.Sanitize.
+		"userinfo password reassembled from CR": {
+			username:    "alice",
+			password:    "correct horse battery",
+			code:        "100",
+			description: "auth rejected: correct&#13;horse&#13;battery",
+			secret:      "correct horse battery",
+		},
+		// The needle here is the DECODED query value: QueryUnescape maps the '+' a
+		// base64 credential routinely carries onto a space.
+		"decoded query value reassembled from DEL": {
+			username:    "alice",
+			password:    "s3cret",
+			rawQuery:    "passkey=Ab9+cd/efGH12345678==",
+			code:        "100",
+			description: "decode: unexpected token in &quot;Ab9\x7fcd/efGH12345678==&quot;",
+			secret:      "Ab9 cd/efGH12345678==",
+		},
+		// The code attribute is redacted at the same site as the description, so it
+		// needs its own row; a non-numeric code is also the retryable arm, which
+		// re-runs the composition on every attempt.
+		"docErr code reassembled from LF": {
+			username:    "alice",
+			password:    "correct horse battery",
+			code:        "correct\nhorse\nbattery",
+			description: "Incorrect user credentials",
+			secret:      "correct horse battery",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w,
+					`<?xml version="1.0" encoding="UTF-8"?><error code="`+tc.code+`" description="`+tc.description+`"/>`)
+			}))
+			defer srv.Close()
+
+			parsed, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse test server URL: %v", err)
+			}
+			parsed.User = url.UserPassword(tc.username, tc.password)
+			parsed.RawQuery = tc.rawQuery
+
+			log, rec := capture.New()
+			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: parsed.String()}
+			_, _, err = u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
+			if err == nil {
+				t.Fatal("search against an error document returned nil error")
+			}
+			if strings.Contains(err.Error(), tc.secret) {
+				t.Errorf("returned error leaks the credential the sanitizer reassembled: %v", err)
+			}
+			if !strings.Contains(err.Error(), "REDACTED") {
+				t.Errorf("returned error = %v, want REDACTED in place of the credential", err)
+			}
+			if rec.Contains(tc.secret) || rec.AttrContains("", "", tc.secret) {
+				t.Errorf("log records leak the credential the sanitizer reassembled: %v", rec.Records())
+			}
+		})
+	}
+}
+
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
 // single-attempt fetch: a 429 response's Retry-After survives as a positive
 // RetryAfterHint on the returned transient error (asserted directly, no
