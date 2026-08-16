@@ -13,47 +13,6 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestParseOverrides_boundsUnknownKeyRetention pins the diagnostic-state
-// bound for a many-row, all-skipped input: rows discarded for a non-positive
-// anilist_id are exempt from the effective-record and per-record ID caps, so
-// a valid sub-cap file of such rows with distinct unknown keys must not
-// amplify into unbounded retained key strings. The parser retains at most
-// maxRetainedUnknownKeys distinct keys (arrival order, per-record sorted),
-// marks the overflow, and still processes the whole file.
-func TestParseOverrides_boundsUnknownKeyRetention(t *testing.T) {
-	total := maxRetainedUnknownKeys + 50
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := range total {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"anilist_id":0,"unknown_%03d":1}`, i)
-	}
-	b.WriteByte(']')
-
-	set, err := parseOverrides([]byte(b.String()))
-	if err != nil {
-		t.Fatalf("parseOverrides error: %v", err)
-	}
-	if len(set.unknown) != maxRetainedUnknownKeys {
-		t.Errorf("retained unknown keys = %d, want the bound %d", len(set.unknown), maxRetainedUnknownKeys)
-	}
-	if !set.unknownOverflow {
-		t.Error("unknownOverflow = false, want true past the retention bound")
-	}
-	if set.skipped != total {
-		t.Errorf("skipped = %d, want %d (every row discarded, none rejected)", set.skipped, total)
-	}
-	want := make([]string, 0, maxRetainedUnknownKeys)
-	for i := range maxRetainedUnknownKeys {
-		want = append(want, fmt.Sprintf("unknown_%03d", i))
-	}
-	if !slices.Equal(set.unknown, want) {
-		t.Errorf("retained unknown keys = %v, want the first %d in arrival order", set.unknown, maxRetainedUnknownKeys)
-	}
-}
-
 func TestRecord_IsMovie(t *testing.T) {
 	if !(&Record{Type: "MOVIE"}).IsMovie() {
 		t.Error("Record{MOVIE}.IsMovie() = false, want true")
@@ -179,8 +138,8 @@ func TestParseOverrides(t *testing.T) {
 	if got := set.records[0].TmdbMovies; !slices.Equal(got, []int{42}) {
 		t.Errorf("TmdbMovies = %v, want [42] (non-positive entries dropped)", got)
 	}
-	if len(set.unknown) != 0 {
-		t.Errorf("unknown keys = %v, want none for a well-formed override", set.unknown)
+	if set.unknown != 0 {
+		t.Errorf("unknown keys = %d, want none for a well-formed override", set.unknown)
 	}
 	if _, err := parseOverrides([]byte(`{bad`)); err == nil {
 		t.Error("parseOverrides(malformed) = nil error, want error")
@@ -195,8 +154,8 @@ func TestParseOverrides(t *testing.T) {
 
 // TestParseOverridesReportsUnknownKeys pins the unknown-key detection: an
 // operator writing the upstream Fribb field names (imdb_id, themoviedb_id,
-// season) instead of the override names gets them reported (sorted, deduped)
-// while the records still parse.
+// season) instead of the override names gets them counted while the records
+// still parse.
 func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 	data := []byte(`[{"anilist_id":5,"imdb_id":"tt1","season":1},{"anilist_id":6,"imdb_id":"tt2","themoviedb_id":9}]`)
 	set, err := parseOverrides(data)
@@ -206,9 +165,8 @@ func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 	if len(set.records) != 2 {
 		t.Fatalf("records = %d, want 2 (unknown keys do not reject the record)", len(set.records))
 	}
-	want := []string{"imdb_id", "season", "themoviedb_id"}
-	if !slices.Equal(set.unknown, want) {
-		t.Errorf("unknown keys = %v, want %v (sorted, deduped)", set.unknown, want)
+	if set.unknown != 4 {
+		t.Errorf("unknown keys = %d, want 4 (every non-canonical key counted)", set.unknown)
 	}
 }
 
@@ -225,8 +183,8 @@ func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
 	if len(set.records) != 1 || set.records[0].AniListID != 5 || set.records[0].Type != "MOVIE" {
 		t.Fatalf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", set.records)
 	}
-	if len(set.unknown) != 0 {
-		t.Errorf("unknown keys = %v, want none for case-variant canonical keys (encoding/json accepts them)", set.unknown)
+	if set.unknown != 0 {
+		t.Errorf("unknown keys = %d, want none for case-variant canonical keys (encoding/json accepts them)", set.unknown)
 	}
 }
 
@@ -260,12 +218,11 @@ func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 	}
 }
 
-// TestParseOverrides_reportsEachDuplicateIDOnce pins the duplicate diagnostic
-// population: each distinct duplicated AniList ID is reported once (on its
-// first repeated occurrence), so a heavily repeated first ID cannot fill the
-// bounded log prefix and hide later duplicated IDs, while the effective set
-// keeps last-record-wins and applied still counts every keyed transport row.
-func TestParseOverrides_reportsEachDuplicateIDOnce(t *testing.T) {
+// TestParseOverrides_duplicateIDKeepsLastRecord pins the effective set's
+// duplicate rule: a repeated AniList ID replaces its earlier record during the
+// stream, so the overlay is deduplicated last-record-wins while applied still
+// counts every keyed transport row.
+func TestParseOverrides_duplicateIDKeepsLastRecord(t *testing.T) {
 	set, err := parseOverrides([]byte(`[
 		{"anilist_id":1,"type":"TV","tvdb_id":10},
 		{"anilist_id":1,"type":"TV","tvdb_id":11},
@@ -278,9 +235,6 @@ func TestParseOverrides_reportsEachDuplicateIDOnce(t *testing.T) {
 	}
 	if set.applied != 5 {
 		t.Errorf("applied = %d, want 5 (every keyed record applies)", set.applied)
-	}
-	if !slices.Equal(set.duplicates, []int{1, 2}) {
-		t.Errorf("duplicates = %v, want [1 2] (each distinct duplicated ID once)", set.duplicates)
 	}
 	if len(set.records) != 2 {
 		t.Fatalf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
@@ -313,27 +267,8 @@ func TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream(t *testing.T) 
 	if set.skipped != rows {
 		t.Errorf("skipped = %d, want the exact discarded row count %d", set.skipped, rows)
 	}
-	if set.applied != 0 || len(set.duplicates) != 0 || len(set.unknown) != 0 {
-		t.Errorf("applied=%d duplicates=%v unknown=%v, want all empty", set.applied, set.duplicates, set.unknown)
-	}
-}
-
-func TestParseOverrides_overCapArrayDrainErrorPropagates(t *testing.T) {
-	var b strings.Builder
-	b.WriteString(`[{"anilist_id":5,"tmdb_movies":[`)
-	for i := range maxOverrideIDsPerRecord {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, "%d", i+1)
-	}
-	b.WriteString(`,{`)
-	set, err := parseOverrides([]byte(b.String()))
-	if err == nil {
-		t.Fatal("parseOverrides(over-cap array with truncated tail) = nil error, want drain skip error")
-	}
-	if set.records != nil || set.unknown != nil || set.applied != 0 || set.skipped != 0 || set.oversized != 0 {
-		t.Errorf("drain-error result carried a partial result: %+v", set)
+	if set.applied != 0 || set.unknown != 0 {
+		t.Errorf("applied=%d unknown=%d, want both zero", set.applied, set.unknown)
 	}
 }
 

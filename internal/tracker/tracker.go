@@ -86,17 +86,13 @@ var byAlias = func() map[string]Tracker {
 // whitespace-insensitively) to its canonical table entry, reporting whether
 // the tracker is known. An empty or unrecognized name is not found.
 func Lookup(name string) (Tracker, bool) {
-	// The fold is urlform.EqualASCIIFold, not strings.ToLower: full Unicode simple folding has
+	// The fold is urlform.FoldHostASCII, not strings.ToLower: full Unicode simple folding has
 	// ASCII-PRODUCING mappings (U+0130 -> 'i', U+212A -> 'k'), so a pre-lookup ToLower launders a
 	// homograph label into a canonical alias key - the same class LookupByHost's ASCII gate exists
-	// to stop, on the axis that reads the same untrusted record.
-	trimmed := strings.TrimSpace(name)
-	for key, t := range byAlias {
-		if urlform.EqualASCIIFold(trimmed, key) {
-			return t, true
-		}
-	}
-	return Tracker{}, false
+	// to stop, on the axis that reads the same untrusted record. It is the same fold byAlias is
+	// keyed by, so every key is its own fold image.
+	t, known := byAlias[urlform.FoldHostASCII(strings.TrimSpace(name))]
+	return t, known
 }
 
 // CanonicalName resolves the name to LABEL a link with, for a human-facing

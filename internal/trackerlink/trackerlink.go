@@ -255,12 +255,6 @@ func httpsCanonical(trimmed, scheme string) string {
 	if !strings.EqualFold(scheme, "http") {
 		return trimmed
 	}
-	if len(trimmed) < len(scheme) || !strings.EqualFold(trimmed[:len(scheme)], scheme) {
-		// Defensive: Trimmed is the preprocessed URL and always leads with its
-		// scheme, but a rewrite anchored on an assumption that failed would
-		// corrupt the link rather than fail closed.
-		return trimmed
-	}
 	return "https" + trimmed[len(scheme):]
 }
 

@@ -2,7 +2,6 @@ package library
 
 import (
 	"net/url"
-	"slices"
 
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/urlform"
@@ -26,16 +25,4 @@ func SafeLogURL(rawURL string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
-}
-
-// SanitizedForStorage returns a copy of the snapshot whose per-item ArrURLs
-// have passed SafeLogURL, so a credentialed public_url never lands in
-// state.json. state.Store.Save applies it at the persistence boundary.
-func (s Snapshot) SanitizedForStorage() Snapshot {
-	out := s
-	out.Items = slices.Clone(s.Items)
-	for i := range out.Items {
-		out.Items[i].ArrURL = SafeLogURL(out.Items[i].ArrURL)
-	}
-	return out
 }

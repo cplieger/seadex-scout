@@ -1627,9 +1627,9 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 // invariant Item.ArrURL documents: the walker builds the deep-link THROUGH
 // SafeLogURL, so a reverse-proxy Basic Auth credential configured in
 // sonarr.url / radarr.public_url never enters an Item, a Snapshot, a Finding, or
-// an audit Row. The sink-side SafeLogURL calls (notify, audit render,
-// SanitizedForStorage) are documented as belt-and-braces, so nothing else fails
-// if a construction-side wrap is dropped. The link must also stay usable, so the
+// an audit Row. The audit render's sink-side SafeLogURL call is documented as
+// belt-and-braces, so nothing else fails if a construction-side wrap is
+// dropped. The link must also stay usable, so the
 // assertion is the exact credential-free deep-link, not merely the absence of
 // the secret.
 func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {

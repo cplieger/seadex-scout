@@ -280,28 +280,20 @@ func cacheUsable(records []Record) bool {
 // minimum 1) shared by cacheUsable and validateRefreshedRecords.
 func coverageFloor(n int) int { return max(1, (n+99)/100) }
 
-// coverageLost reports the shared loss-relative floor decision the type, scope
-// and routing floors apply: the previously accepted cache met its own floor for
-// the population AND the candidate falls below both the candidate floor and the
-// prior count - so an additive refresh that merely grows never fires it.
-func coverageLost(prevCount, count, previousMinimum, minimum int) bool {
-	return prevCount >= previousMinimum && count < minimum && count < prevCount
-}
-
 // populationExtinct is the per-population EXTINCTION guard, deliberately
-// without the significance gate its siblings carry: the previously accepted
+// without the significance gate its sibling carries: the previously accepted
 // cache had a population at all (prevCount > 0) and the candidate has none of
 // it. Going from N to exactly zero is never a sampling artifact, so this is the
-// one guard that reaches BELOW previousMinimum; its siblings stay gated on that
+// one guard that reaches BELOW previousMinimum; its sibling stays gated on that
 // share, so a sparse population's PARTIAL shrink keeps its exemption.
 func populationExtinct(prevCount, count int) bool { return prevCount > 0 && count == 0 }
 
-// populationCollapsed is the per-population shrink guard the type, scope and
-// routing validators apply beside their loss-relative floors: the previously
-// accepted cache carried a meaningful population and the candidate retains less
-// than half of it (degradation.Shrunk). The 1% floors catch total loss; this
-// catches the MID-BAND, where a corrupted refresh guts most of ONE population
-// while every floor stays green. Deliberately NO auto-accept after a streak:
+// populationCollapsed is the per-population shrink guard the routing validator
+// applies beside the extinction guard: the previously accepted cache carried a
+// meaningful population and the candidate retains less than half of it
+// (degradation.Shrunk). populationExtinct catches total loss; this catches the
+// MID-BAND, where a corrupted refresh guts most of ONE population while every
+// floor stays green. Deliberately NO auto-accept after a streak:
 // the documented remedy is removing state.json to cold-start onto the new shape.
 func populationCollapsed(prevCount, count, previousMinimum int) bool {
 	return prevCount >= previousMinimum && degradation.Shrunk(count, prevCount)
@@ -663,13 +655,10 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		}
 		return next, err
 	}
-	// A first boot (or a cache reset) onto a body that routes nothing to one arr
-	// is accepted, not refused - and reported. See logAcceptedWithoutBaseline.
-	l.logAcceptedWithoutBaseline(prev, records)
 	// previous_records is the baseline the absolute count needs: degradation.Shrunk
 	// rejects only BELOW half, so an accepted refresh may legitimately retain
 	// exactly half of the previous map and would otherwise read like any other
-	// success. The five per-population guards refuse only a below-half collapse
+	// success. The two per-population guards refuse only a below-half collapse
 	// too, so the census attributes carry that same reasoning to the populations
 	// they are defined over - a routing loss is one queryable line rather than an
 	// inference. revalidatable reports whether a validator was persisted.
@@ -701,30 +690,10 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 }
 
 // logAcceptedWithoutBaseline reports an ACCEPTED refresh that carries no
-// resolvable record for one arr while there was no usable baseline to judge it
-// against. It is a diagnostic only: it never refuses the refresh and never
-// touches the rejection streak. With no usable previous cache every
-// loss-relative guard is skipped and nothing can prove a LOSS, while an
-// unconditional zero-population refusal would make a legitimately one-sided
-// catalogue refuse to refresh to ITSELF. The harm this closes is the SILENCE.
-func (l *Loader) logAcceptedWithoutBaseline(prev *Cache, records []Record) {
-	if cacheUsable(prev.Records) {
-		return
-	}
-	absent := absentRoutingClasses(records)
-	if len(absent) == 0 {
-		return
-	}
-	l.log.Error("mapping: accepted a refresh with no records for an arr; that arr will match nothing this cycle, pin the affected entries in overrides.json",
-		"absent_routing_classes", absent,
-		"records", len(records),
-		"routed_identifiers", arrIdentifierCount(records))
-}
-
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
-// 200 body: it rejects a refresh below the AniList-key, arr-identifier or type
-// coverage floors, and one whose individual populations collapse below half of
-// the previously accepted cache's (populationCollapsed) or vanish entirely
+// 200 body: it rejects a refresh below the AniList-key or arr-identifier
+// coverage floors, and one whose routing populations collapse below half of the
+// previously accepted cache's (populationCollapsed) or vanish entirely
 // (populationExtinct). The conservative 1% floor has ~19x headroom against the
 // real body (8279/~42868 measured 2026-07). records MUST already be
 // deduplicated, and sourceElements is the body's top-level element count, so
@@ -736,7 +705,6 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 	if len(records) < keyMinimum {
 		return fmt.Errorf("AniList-key coverage %d/%d is below minimum %d", len(records), sourceElements, keyMinimum)
 	}
-	minimum := coverageFloor(len(records))
 	// Anchor the arr floor on the SOURCE element count, like the AniList-key floor
 	// above: deriving it from the already-key-filtered candidate would let the two
 	// floors compose multiplicatively (0.01% coverage reading as healthy).
@@ -753,45 +721,17 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 	// One significance gate for every population: the previously accepted cache's
 	// own 1% floor, derived once so the guards cannot drift on that basis.
 	previousMinimum := coverageFloor(len(previous))
-	floors := acceptanceFloors{total: len(records), previousMinimum: previousMinimum, minimum: minimum}
-	// One census per side, counted once: every population guard below reads it,
-	// so five separate passes over ~40k records collapse into two.
+	// One census per side, counted once: both routing guards below read it, so
+	// separate passes over ~40k records collapse into two.
 	prevPop, pop := censusOf(previous), censusOf(records)
-	if err := validateTypeCoverage(prevPop, pop, floors); err != nil {
-		return err
-	}
-	if err := validateScopeCoverage(prevPop, pop, floors); err != nil {
-		return err
-	}
-	return validateRoutingCoverage(prevPop, pop, floors)
+	return validateRoutingCoverage(prevPop, pop, previousMinimum)
 }
 
-// validateTypeCoverage rejects a candidate refresh that lost type coverage
-// relative to the previously accepted cache. A wholesale loss of the type field
-// re-routes every MOVIE record to Sonarr via its parent tvdb_id while still
-// passing the arr-identifier floor and the shrink guard - but only a LOSS is a
-// degradation, so the floor is relative: it fires only when that cache was
-// itself type-rich AND the candidate carries fewer typed records. A type-sparse
-// cache or catalogue is a valid shape, not a regression.
-func validateTypeCoverage(previous, candidate populations, f acceptanceFloors) error {
-	return validatePopulation("type", "typed", previous.typed, candidate.typed, f)
-}
-
-// acceptanceFloors carries the three per-refresh quantities every population
-// guard shares: the candidate record total the rejection messages quote, the
-// previous cache's 1% significance gate, and the candidate's own 1% floor. One
-// named value, so a transposed member cannot compile and invert a guard.
-type acceptanceFloors struct {
-	total           int
-	previousMinimum int
-	minimum         int
-}
-
-// populations is the per-refresh census of the five semantic populations every
-// acceptance guard is defined over, counted in ONE pass. Both consumers read
-// it: the guards compare candidate against previous, and the accepted-refresh
-// log line reports the candidate's census, which is what makes a loss below
-// each guard's threshold visible.
+// populations is the per-refresh census of the six semantic populations the
+// acceptance guards and the accepted-refresh log line are defined over, counted
+// in ONE pass. Both consumers read it: the routing guards compare candidate
+// against previous, and the log line reports the candidate's census, which is
+// what makes a loss below each guard's threshold visible.
 type populations struct {
 	typed          int
 	positiveSeason int
@@ -831,66 +771,29 @@ func censusOf(records []Record) populations {
 }
 
 // validatePopulation applies the shared guards every semantic population is
-// checked with: the extinction guard, the loss-relative floor and the
-// below-half shrink guard. floorNoun and collapseNoun carry each population's
-// own error vocabulary; the three floor quantities travel as one value.
-func validatePopulation(floorNoun, collapseNoun string, prevCount, count int, f acceptanceFloors) error {
+// checked with: the extinction guard and the below-half shrink guard.
+// collapseNoun carries each population's own error vocabulary.
+func validatePopulation(collapseNoun string, prevCount, count, previousMinimum int) error {
 	if populationExtinct(prevCount, count) {
 		return fmt.Errorf("%s records went extinct (previous cache carried %d)", collapseNoun, prevCount)
 	}
-	if coverageLost(prevCount, count, f.previousMinimum, f.minimum) {
-		return fmt.Errorf("%s coverage %d/%d is below minimum %d (previous cache carried %d %s records)", floorNoun, count, f.total, f.minimum, prevCount, collapseNoun)
-	}
-	if populationCollapsed(prevCount, count, f.previousMinimum) {
+	if populationCollapsed(prevCount, count, previousMinimum) {
 		return fmt.Errorf("%s records collapsed below half of previous (%d of previous %d)", collapseNoun, count, prevCount)
 	}
 	return nil
 }
 
-// validateScopeCoverage rejects a candidate refresh that wholesale lost the
-// mapping metadata controlling comparison scope. The typed and routing floors
-// cannot see it: a body whose season objects all decode to SeasonTvdb=0, or
-// whose OVA/SPECIAL labels all became the still-valid TV, keeps every other
-// population healthy while ordinary cours compare whole-series and
-// exclude_specials bucketing is bypassed. Same loss-relative shape as the rest.
-func validateScopeCoverage(previous, candidate populations, f acceptanceFloors) error {
-	if err := validatePopulation("positive-season", "season-scoped", previous.positiveSeason, candidate.positiveSeason, f); err != nil {
-		return err
-	}
-	return validatePopulation("special-type", "special", previous.special, candidate.special, f)
-}
-
 // validateRoutingCoverage rejects a candidate refresh that collapsed a routing
-// population relative to the previously accepted cache. The typed floor
-// validates syntactic presence of Type, but routing recognizes only MOVIE - so
-// a wrong-but-string schema change (every movie renamed FILM) retains 100%
-// typed coverage while routing an entire side of the catalogue to the wrong
+// population relative to the previously accepted cache. Routing recognizes only
+// MOVIE, so a wrong-but-string schema change (every movie renamed FILM) keeps
+// every record typed while routing an entire side of the catalogue to the wrong
 // arr. Guard the operational invariant instead: preservation of both routing
 // populations, so future non-movie labels stay legal.
-func validateRoutingCoverage(previous, candidate populations, f acceptanceFloors) error {
-	if err := validatePopulation("movie-routed", "movie-routed", previous.movieRouted, candidate.movieRouted, f); err != nil {
+func validateRoutingCoverage(previous, candidate populations, previousMinimum int) error {
+	if err := validatePopulation("movie-routed", previous.movieRouted, candidate.movieRouted, previousMinimum); err != nil {
 		return err
 	}
-	return validatePopulation("series-routed", "series-routed", previous.seriesRouted, candidate.seriesRouted, f)
-}
-
-// absentRoutingClasses names the routing classes a body carries no record for
-// ("movie-routed" / "series-routed"), movie side first. It reads censusOf, so a
-// class counts as present only when a record can actually RESOLVE in that arr.
-// It reports a fact and applies no threshold: zero records for a routing class
-// means one whole arr can match nothing, which needs no baseline to read.
-// Deliberately limited to the two routing classes - a legitimately small body
-// can carry zero typed, season-scoped or special records.
-func absentRoutingClasses(records []Record) []string {
-	pop := censusOf(records)
-	var absent []string
-	if pop.movieRouted == 0 {
-		absent = append(absent, "movie-routed")
-	}
-	if pop.seriesRouted == 0 {
-		absent = append(absent, "series-routed")
-	}
-	return absent
+	return validatePopulation("series-routed", previous.seriesRouted, candidate.seriesRouted, previousMinimum)
 }
 
 // arrIdentifierCount returns how many records retain an arr identifier the
@@ -951,39 +854,9 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 		httpx.WithExhaustedLevel(slog.LevelDebug))
 }
 
-// maxLoggedUnknownKeys bounds how many unknown override keys the diagnostic
-// WARN names: a malformed but accepted-size overrides file can carry enough
-// unique keys to render a multi-megabyte log record every cycle, which
-// downstream limits may truncate or reject. unknown_key_count carries the
-// retained count, keys_truncated marks a non-verbatim list, and count_capped
-// marks a count that is a lower bound.
-const maxLoggedUnknownKeys = 20
-
-// maxRetainedUnknownKeys bounds how many distinct unknown-key strings the
-// parser RETAINS, not just how many the WARN displays: a valid sub-cap file can
-// carry hundreds of thousands of skipped rows with distinct unknown keys. One
-// extra slot beyond the logged prefix keeps the keys_truncated arithmetic
-// truthful; further keys only set overrideSet.unknownOverflow.
-const maxRetainedUnknownKeys = maxLoggedUnknownKeys + 1
-
-// maxLoggedKeyBytes bounds one displayed unknown-key name - the whole rendered
-// name, keyTruncMarker included, since the marker is charged inside the budget.
-const maxLoggedKeyBytes = 64
-
-// keyTruncMarker is the suffix a byte-capped unknown-key name carries so a
-// reader can tell a truncated name from an honest one. It is charged INSIDE
-// maxLoggedKeyBytes; keys_truncated carries the truncation as a fact, which the
-// marker alone cannot prove (a key can end in "..." on its own).
-const keyTruncMarker = "..."
-
 // maxLoggedErrorBytes bounds untrusted-input-derived parse-error text before
 // it reaches a log emit boundary (the anilist sanitizeUpstreamMessage policy).
 const maxLoggedErrorBytes = 200
-
-// maxLoggedDuplicateIDs bounds how many distinct duplicated AniList IDs the
-// duplicate-override WARN names; the full distinct count still rides in
-// duplicate_count.
-const maxLoggedDuplicateIDs = 20
 
 // applyOverrides reads the operator overrides file (if present) and overlays
 // each effective record onto the index, keyed by AniList ID. A missing file is
@@ -1001,35 +874,19 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 		return
 	}
 	unroutable := 0
-	var unroutableIDs []int
 	for i := range set.records {
 		record := set.records[i]
 		if !record.HasArrIdentifier() {
 			unroutable++
-			if len(unroutableIDs) < maxLoggedDuplicateIDs {
-				unroutableIDs = append(unroutableIDs, record.AniListID)
-			}
 		}
 		idx.byAniList[record.AniListID] = record
-	}
-	if len(set.duplicates) > 0 {
-		shown := min(len(set.duplicates), maxLoggedDuplicateIDs)
-		l.log.Warn("mapping: duplicate override anilist_ids, last record wins",
-			"ids", set.duplicates[:shown],
-			"duplicate_count", len(set.duplicates),
-			"path", l.overridesPath)
 	}
 	if set.skipped > 0 {
 		l.log.Warn("mapping: overrides with missing or invalid anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
 	}
-	if set.oversized > 0 {
-		l.log.Warn("mapping: overrides with oversized id arrays skipped",
-			"skipped", set.oversized, "ids", set.oversizedIDs,
-			"max_ids", maxOverrideIDsPerRecord, "path", l.overridesPath)
-	}
 	if unroutable > 0 {
 		l.log.Warn("mapping: overrides carry no arr identifier and un-map their entry; check for a mistyped tvdb_id/tmdb_movies/imdb_ids key, and restate the ids when overriding only a type or season",
-			"count", unroutable, "ids", unroutableIDs, "path", l.overridesPath)
+			"count", unroutable, "path", l.overridesPath)
 	}
 	if set.applied > 0 {
 		l.log.Info("mapping: applied overrides", "count", set.applied)
@@ -1058,11 +915,11 @@ func (l *Loader) readOverridesFile(ctx context.Context) ([]byte, error) {
 
 // readOverrides reads and parses the overrides file, returning ok=false for
 // every ignored outcome: a cancelled read, a missing file (silently), an
-// unreadable or malformed file (logged at ERROR). Unknown keys are diagnosed
-// with a bounded WARN but never reject the file. A file-level refusal is an
-// ERROR because the file is opt-in - its existence means the operator intends
-// those mappings to apply - and the failure persists until they act. NOT wired
-// into Cache.RejectedRefreshes, which counts UPSTREAM refresh refusals.
+// unreadable or malformed file (logged at ERROR). Unknown keys are counted in a
+// WARN but never reject the file. A file-level refusal is an ERROR because the
+// file is opt-in - its existence means the operator intends those mappings to
+// apply - and the failure persists until they act. NOT wired into
+// Cache.RejectedRefreshes, which counts UPSTREAM refresh refusals.
 func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 	data, err := l.readOverridesFile(ctx)
 	if err != nil {
@@ -1080,120 +937,37 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 			"error", errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)))
 		return overrideSet{}, false
 	}
-	if len(set.unknown) > 0 {
-		l.logUnknownKeys(set.unknown, set.unknownOverflow)
+	if set.unknown > 0 {
+		l.log.Warn("mapping: overrides contain unknown keys, ignored", "unknown_key_count", set.unknown, "path", l.overridesPath)
 	}
 	return set, true
-}
-
-// logUnknownKeys emits the bounded unknown-key diagnostic. Full log-bound text
-// policy for an operator-controlled JSON key, not just a length bound:
-// SanitizeSingleLineCapped replaces unsafe control, bidi and separator runes
-// before the byte cap. It also RETURNS the truncation fact, which is what
-// keys_truncated needs, since a marker cannot prove a cut. The marker is
-// charged inside maxLoggedKeyBytes.
-func (l *Loader) logUnknownKeys(unknown []string, capped bool) {
-	shown := min(len(unknown), maxLoggedUnknownKeys)
-	logged := make([]string, 0, shown)
-	shortened := false
-	for _, k := range unknown[:shown] {
-		safe, cut := runesafe.SanitizeSingleLineCapped(k, maxLoggedKeyBytes, keyTruncMarker)
-		shortened = shortened || cut
-		logged = append(logged, safe)
-	}
-	l.log.Warn("mapping: overrides contain unknown keys, ignored",
-		"keys", logged,
-		"unknown_key_count", len(unknown),
-		"count_capped", capped,
-		"keys_truncated", capped || len(unknown) > maxLoggedUnknownKeys || shortened,
-		"path", l.overridesPath)
 }
 
 // overrideSet is parseOverrides' result: the effective overlay plus the
 // diagnostics applyOverrides logs. records holds only effective records
 // (positive AniList ID, deduplicated last-record-wins); applied counts the
-// positive-ID, non-oversized transport rows; skipped counts the non-positive-ID
-// rows; duplicates lists each distinct duplicated ID once, on its first repeat,
-// so one heavily repeated ID cannot fill the bounded log prefix; unknown is the
-// sorted, deduplicated, BOUNDED set of non-canonical keys, with unknownOverflow
-// marking further distinct keys seen but not retained.
+// positive-ID transport rows; skipped counts the non-positive-ID rows; unknown
+// counts the non-canonical keys seen.
 type overrideSet struct {
-	records    []Record
-	unknown    []string
-	duplicates []int
-	// oversizedIDs names the first maxLoggedDuplicateIDs AniList IDs whose record
-	// was skipped for an over-cap id array; oversized carries the exact total.
-	oversizedIDs    []int
-	applied         int
-	skipped         int
-	oversized       int
-	unknownOverflow bool
+	records []Record
+	applied int
+	skipped int
+	unknown int
 }
-
-// maxOverrideIDsPerRecord caps one override record's tmdb_movies and imdb_ids
-// array lengths, enforced during the token walk BEFORE the element past the cap
-// is decoded (decodeCappedArray). The 4 MiB wire bound caps the FILE, not the
-// decode amplification. One record maps ONE anime, so 64 is generous headroom;
-// an over-cap record is skipped loudly, never silently truncated.
-const maxOverrideIDsPerRecord = 64
 
 // maxOverrideRecords caps the effective records parseOverrides retains,
 // mirroring the Fribb parser's maxFribbRecords: the 4 MiB wire bound caps the
 // file, not the retained amplification of ~250k tiny distinct-ID records. An
 // over-cap file routes through readOverrides' malformed-file ERROR, refusing
-// the whole overlay - unlike an over-cap RECORD, which is skipped at WARN.
+// the whole overlay.
 const maxOverrideRecords = 1 << 16
-
-// recordUnknownKey retains one unknown override key for the diagnostic (seen
-// dedupes across records), bounded at maxRetainedUnknownKeys so a file of many
-// skipped rows cannot amplify diagnostic state; once full, further distinct keys
-// only set set.unknownOverflow. Keys arrive in document order.
-func (set *overrideSet) recordUnknownKey(key string, seen map[string]struct{}) {
-	if set.unknownOverflow {
-		return
-	}
-	if _, dup := seen[key]; dup {
-		return
-	}
-	if len(set.unknown) >= maxRetainedUnknownKeys {
-		set.unknownOverflow = true
-		return
-	}
-	seen[key] = struct{}{}
-	set.unknown = append(set.unknown, key)
-}
-
-// decodeCappedArray decodes one override id array under the
-// maxOverrideIDsPerRecord cap, preserving encoding/json's duplicate-key slice
-// semantics through bounded.Array's prior argument. An over-cap array reports
-// oversized=true after token-skipping its remaining elements and consuming the
-// closing bracket, so the record walk stays aligned.
-func decodeCappedArray[T any](dec *bounded.Decoder, target *[]T, what string) (oversized bool, err error) {
-	decoded, err := bounded.Array(dec, *target, maxOverrideIDsPerRecord, what, func(v *T) error { return dec.Decode(v) })
-	if err == nil {
-		*target = decoded
-		return false, nil
-	}
-	if !errors.Is(err, bounded.ErrArrayCap) {
-		return false, err
-	}
-	for dec.More() {
-		if skipErr := dec.Skip(); skipErr != nil {
-			return true, skipErr
-		}
-	}
-	return true, dec.Close()
-}
 
 // decodeOverrideRecord walks one override object off the token stream in a
 // single bounded pass: the six canonical keys - Record's own json tags, restated
 // here because a token walk cannot read them, so a field added to Record must be
-// added here too - decode directly into the Record, the id arrays are capped
-// BEFORE their 65th element allocates, and an unknown key retains only its name.
-// Each array's over-cap state follows the same last-wins rule as its value, and
-// the two are tracked independently.
-func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet, seenKeys map[string]struct{}) (record Record, oversized bool, err error) {
-	var tmdbOversized, imdbOversized bool
+// added here too - decode directly into the Record, and an unknown key is
+// counted and skipped.
+func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet) (record Record, err error) {
 	err = dec.Object(func(key string) error {
 		switch {
 		case strings.EqualFold(key, "anilist_id"):
@@ -1205,28 +979,24 @@ func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet, seenKeys map[s
 		case strings.EqualFold(key, "season_tvdb"):
 			return dec.Decode(&record.SeasonTvdb)
 		case strings.EqualFold(key, "tmdb_movies"):
-			var arrErr error
-			tmdbOversized, arrErr = decodeCappedArray(dec, &record.TmdbMovies, "tmdb_movies")
-			return arrErr
+			return dec.Decode(&record.TmdbMovies)
 		case strings.EqualFold(key, "imdb_ids"):
-			var arrErr error
-			imdbOversized, arrErr = decodeCappedArray(dec, &record.IMDbIDs, "imdb_ids")
-			return arrErr
+			return dec.Decode(&record.IMDbIDs)
 		default:
-			set.recordUnknownKey(key, seenKeys)
+			set.unknown++
 			return dec.Skip()
 		}
 	})
-	return record, tmdbOversized || imdbOversized, err
+	return record, err
 }
 
 // applyRecord decodes the next override record from the token stream and folds
 // it into the set: Type is normalized, IMDb ids trimmed and TMDB movie ids
 // reduced to positives - the same canonical forms the Fribb decoder produces -
-// a zero-AniList-ID record counts as skipped, an over-cap one as oversized, and
-// a duplicate ID replaces its earlier record while being reported once.
-func (set *overrideSet) applyRecord(dec *bounded.Decoder, seenKeys map[string]struct{}, position map[int]int, reported map[int]struct{}) error {
-	record, oversized, err := decodeOverrideRecord(dec, set, seenKeys)
+// a zero-AniList-ID record counts as skipped, and a duplicate ID replaces its
+// earlier record.
+func (set *overrideSet) applyRecord(dec *bounded.Decoder, position map[int]int) error {
+	record, err := decodeOverrideRecord(dec, set)
 	if err != nil {
 		return err
 	}
@@ -1239,19 +1009,8 @@ func (set *overrideSet) applyRecord(dec *bounded.Decoder, seenKeys map[string]st
 		set.skipped++
 		return nil
 	}
-	if oversized {
-		set.oversized++
-		if len(set.oversizedIDs) < maxLoggedDuplicateIDs {
-			set.oversizedIDs = append(set.oversizedIDs, record.AniListID)
-		}
-		return nil
-	}
 	set.applied++
 	if at, dup := position[record.AniListID]; dup {
-		if _, done := reported[record.AniListID]; !done {
-			reported[record.AniListID] = struct{}{}
-			set.duplicates = append(set.duplicates, record.AniListID)
-		}
 		set.records[at] = record
 		return nil
 	}
@@ -1297,11 +1056,9 @@ func parseOverrides(data []byte) (overrideSet, error) {
 		return overrideSet{}, err
 	}
 	var set overrideSet
-	seenKeys := make(map[string]struct{})
 	position := make(map[int]int) // AniList ID -> index in set.records
-	reported := make(map[int]struct{})
 	for dec.More() {
-		if err := set.applyRecord(dec, seenKeys, position, reported); err != nil {
+		if err := set.applyRecord(dec, position); err != nil {
 			return overrideSet{}, err
 		}
 	}
@@ -1311,6 +1068,5 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	if err := dec.End(); err != nil {
 		return overrideSet{}, fmt.Errorf("mapping: overrides carry data after the JSON array: %w", err)
 	}
-	slices.Sort(set.unknown)
 	return set, nil
 }

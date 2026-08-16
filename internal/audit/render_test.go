@@ -1213,10 +1213,9 @@ func TestReportLogEmitsIncompleteMappings(t *testing.T) {
 }
 
 // TestBestGroupDedupeIsBoundedAndCaseInsensitive pins the case-insensitive
-// dedupe identity both best-group renderers share (foldedGroupKey): two
-// oversized groups differing only in case must collapse to one in the Markdown
-// column AND in the slog aggregate, without either site retaining an
-// input-sized lowercase copy of the untrusted group name.
+// dedupe identity both best-group renderers share: two oversized groups
+// differing only in case must collapse to one in the Markdown column AND in the
+// slog aggregate, whose own emitted output stays bounded.
 func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 	huge := strings.Repeat("g", 4*maxAttrBytes)
 	releases := []Release{

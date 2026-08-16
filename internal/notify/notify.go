@@ -15,7 +15,6 @@ import (
 
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/tracker"
@@ -300,7 +299,7 @@ func findingKVs(f *compare.Finding) []any {
 		"alert_title", capAlertTextAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
-		"arr_url", capURLAttr(library.SafeLogURL(f.ArrURL)),
+		"arr_url", capURLAttr(f.ArrURL),
 		"season", f.Season,
 		"scope", f.Scope,
 		"approx", f.Approx,

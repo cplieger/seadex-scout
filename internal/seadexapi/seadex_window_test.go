@@ -494,8 +494,8 @@ func TestMaxWindowEntriesIsOnePage(t *testing.T) {
 // on this error (a failed probe degrades the tick and advances the fast path's
 // own unreachability streak, which is the only thing that escalates an
 // unreachable upstream between reconciles), so a swallowed transport failure
-// answers (0, nil) and reads as a QUIET window instead: emptyRun climbs, every
-// tick reports completion, and nothing escalates while SeaDex is unreachable.
+// answers (0, nil) and reads as a QUIET window instead: every tick reports
+// completion, and nothing escalates while SeaDex is unreachable.
 // Both shapes the probe must refuse are here - a non-retryable status, and a
 // body over maxProbeBytes, since the probe asks for one id and the honest
 // answer is ~88 bytes, so an oversized body is not the shape it asked for.

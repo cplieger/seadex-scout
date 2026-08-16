@@ -2,7 +2,6 @@ package audit
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/runesafe"
@@ -303,14 +300,14 @@ func links(row *Row) string {
 // best-group renderings share, and it never builds a slice, so a bounded
 // consumer still caps before any untrusted aggregate is materialized.
 func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool) bool) {
-	seen := make(map[[sha256.Size]byte]struct{}, len(releases))
+	seen := make(map[string]struct{}, len(releases))
 	for _, annotatedPass := range []bool{false, true} {
 		for i := range releases {
 			rel := &releases[i]
 			if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
 				continue
 			}
-			key := foldedGroupKey(rel.Group)
+			key := strings.ToLower(rel.Group)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -334,23 +331,6 @@ func displayBestGroups(releases []Release) []string {
 		return true
 	})
 	return out
-}
-
-// foldedGroupKey returns the case-insensitive dedupe identity of an untrusted
-// release group as a fixed-size digest. It streams unicode.ToLower rune by rune
-// into SHA-256 instead of materializing strings.ToLower's result, so a hostile
-// entry can never make a dedupe map retain input-sized copies (CWE-400). The
-// digest is a lookup identity only, never displayed.
-func foldedGroupKey(group string) [sha256.Size]byte {
-	h := sha256.New()
-	var encoded [utf8.UTFMax]byte
-	for _, r := range group {
-		n := utf8.EncodeRune(encoded[:], unicode.ToLower(r))
-		_, _ = h.Write(encoded[:n])
-	}
-	var key [sha256.Size]byte
-	copy(key[:], h.Sum(nil))
-	return key
 }
 
 // releaseNotes returns a release's display annotations: its canonical

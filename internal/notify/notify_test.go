@@ -379,23 +379,6 @@ func TestReportEmptySliceReplacesTheWholeSet(t *testing.T) {
 	}
 }
 
-// TestFindingLogSanitizesArrURL pins the logging trust boundary on the arr
-// deep-link: a base URL configured with reverse-proxy Basic Auth credentials
-// and a query token must never cross into the emitted slog attributes, while
-// an ordinary credential-free deep-link passes through unchanged.
-func TestFindingLogSanitizesArrURL(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	finding := testFinding("cred", "Frieren")
-	finding.ArrURL = "https://user:password@sonarr.example/series/frieren?token=secret#frag"
-
-	notifier.Report([]compare.Finding{finding}, nil)
-
-	got, _ := recorder.AttrValue("better release available", "arr_url")
-	if got != "https://sonarr.example/series/frieren" {
-		t.Errorf("logged arr_url = %q, want credentials, query, and fragment stripped", got)
-	}
-}
-
 // TestNotifierUnverifiableFindingIsInfoNotBetterRelease pins the alert-rule
 // safety of the unverifiable status: the SeadexScoutBetterReleaseFound Loki
 // rule counts only msg="better release available" warn lines, so an

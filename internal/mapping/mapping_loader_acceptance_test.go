@@ -68,123 +68,6 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_noTypeKeepsStale covers the type-coverage floor: a
-// refresh whose records kept their arr ids but wholesale lost the type field
-// (an upstream shape change flexString tolerantly zeroes per record) would
-// mis-route every MOVIE record to Sonarr while passing the arr-identifier
-// floor, so it must be rejected in favour of the usable stale map.
-func TestLoader_refreshCache_noTypeKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":1,"tvdb_id":100},{"anilist_id":2,"type":2,"tvdb_id":200}]`))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(t.Context(), prev)
-	if err == nil {
-		t.Fatal("refresh with no typed records returned nil error, want degraded error")
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("no-type refresh records = %+v, want stale record id 1", next.Records)
-	}
-	if next.Records[0].Type != "TV" {
-		t.Errorf("no-type refresh stale Type = %q, want %q", next.Records[0].Type, "TV")
-	}
-	if next.RejectedRefreshes != 1 {
-		t.Errorf("no-type refresh RejectedRefreshes = %d, want 1 (the type floor is an acceptance-guard rejection)", next.RejectedRefreshes)
-	}
-}
-
-// TestLoader_refreshCache_typeSparsePreviousCacheAcceptsUntypedRefresh pins
-// the type floor's relative contract: fribb.go tolerantly decodes an absent
-// type as the safe non-movie default, so when the previously accepted cache is
-// itself type-sparse (never met the floor), an equally type-sparse but
-// otherwise valid refresh is the catalogue's established shape and must be
-// accepted — not rejected on an absolute schema requirement the decoder does
-// not impose (which would keep the stale map forever and escalate to ERROR).
-func TestLoader_refreshCache_typeSparsePreviousCacheAcceptsUntypedRefresh(t *testing.T) {
-	const n = 200
-	var b strings.Builder
-	b.WriteString("[")
-	prevRecords := make([]Record, 0, n)
-	for i := 1; i <= n; i++ {
-		if i > 1 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"tvdb_id":%d}`, i, i+1000)
-		prevRecords = append(prevRecords, Record{AniListID: i, TvdbID: i + 1000})
-	}
-	b.WriteString("]")
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt:         time.Now().Add(-2 * time.Hour),
-		Records:           prevRecords,
-		RejectedRefreshes: 3,
-	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("type-sparse refresh over a type-sparse cache returned error %v, want accepted", err)
-	}
-	if len(next.Records) != n {
-		t.Fatalf("accepted refresh records = %d, want %d", len(next.Records), n)
-	}
-	if next.RejectedRefreshes != 0 {
-		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
-	}
-}
-
-// TestLoader_refreshCache_additiveGrowthKeepsTypedFloor pins the type floor's
-// loss requirement: a previous cache of 100 records with exactly one typed
-// record meets its own 1% floor (minimum 1), and a legitimate additive refresh
-// of 101 records that RETAINS that same typed record raises the ceiling-derived
-// minimum to 2 without losing any type data. The floor must not fire on growth
-// alone — rejecting it would keep the stale map every cycle, advance
-// RejectedRefreshes, and escalate to ERROR indefinitely.
-func TestLoader_refreshCache_additiveGrowthKeepsTypedFloor(t *testing.T) {
-	const prevN = 100
-	var b strings.Builder
-	b.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":1001}`)
-	prevRecords := []Record{{AniListID: 1, Type: "TV", TvdbID: 1001}}
-	for i := 2; i <= prevN; i++ {
-		fmt.Fprintf(&b, `,{"anilist_id":%d,"tvdb_id":%d}`, i, i+1000)
-		prevRecords = append(prevRecords, Record{AniListID: i, TvdbID: i + 1000})
-	}
-	// The candidate retains every previous record (including the one typed
-	// record) and adds one valid untyped record: 101 records, 1 typed.
-	fmt.Fprintf(&b, `,{"anilist_id":%d,"tvdb_id":%d}`, prevN+1, prevN+1001)
-	b.WriteString("]")
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt:         time.Now().Add(-2 * time.Hour),
-		Records:           prevRecords,
-		RejectedRefreshes: 3,
-	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("additive refresh retaining all typed records returned error %v, want accepted", err)
-	}
-	if len(next.Records) != prevN+1 {
-		t.Fatalf("accepted refresh records = %d, want %d", len(next.Records), prevN+1)
-	}
-	if next.RejectedRefreshes != 0 {
-		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
-	}
-}
-
 // TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale covers the
 // coverage floor: a refresh where only 1 of 200+ records retains an arr
 // identifier is a wholesale degradation (below the 1% floor) and must keep the
@@ -303,9 +186,9 @@ func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
 // TestLoader_refreshCache_truncatedRefreshKeepsStale covers truncated-refresh
 // rejection: a syntactically valid refresh that shrinks the map to less than
 // half the previous record count (here 1 valid mapped record replacing 4) must
-// degrade to the stale cache with an error, not replace it. For this all-typed
-// shape the typed population-collapse floor (validateTypeCoverage) fires before
-// the whole-map below-half shrink guard, which is pinned separately by
+// degrade to the stale cache with an error, not replace it. For this all-series
+// shape the series-routed population-collapse guard fires before the whole-map
+// below-half shrink guard, which is pinned separately by
 // TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale.
 func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

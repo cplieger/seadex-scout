@@ -304,11 +304,6 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
 	}
-	// Bound the structural walk below before it runs.
-	if !json.Valid(data) {
-		s.maybeQuarantine(root)
-		return State{}, fmt.Errorf("state: decode %s: not valid JSON", s.path)
-	}
 	// The wire discriminator is decoded independently BEFORE the State unmarshal, on
 	// every load: State.Version is never trusted, since Unmarshal may populate it from an
 	// earlier duplicate key and accepts null into an int silently.
@@ -414,7 +409,6 @@ func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure, or after corruption the load could not preserve (check for a blocked %s.corrupt); the on-disk state is preserved until a load can classify and preserve it: %w", s.path, s.path, ErrSavePreserved)
 	}
 	sanitized := *st
-	sanitized.Library = st.Library.SanitizedForStorage()
 	sanitized.Version = SchemaVersion
 	return sanitized, nil
 }

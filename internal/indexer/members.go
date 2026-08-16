@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"fmt"
 	"maps"
 	"strconv"
 )
@@ -20,102 +19,51 @@ import (
 const currentFeedVersion = 2
 
 // snapshotMember is one persisted top-level feed.json member. The values are the
-// on-disk JSON keys, so the decoder's vocabulary, the rule table's and the file's
-// are literally the same strings.
+// on-disk JSON keys, so the decoder's vocabulary and the file's are literally the
+// same strings. Each member names the ONE fixed write rule it is written by, and
+// the UNIT that rule's "what you evaluated" is measured in - naming the unit is
+// what lets one rule cover both an entry-scoped and an item-scoped member.
 type snapshotMember string
 
 const (
-	memberVersion       snapshotMember = "version"
-	memberOwners        snapshotMember = "owners"
-	memberPublished     snapshotMember = "published"
-	memberTitles        snapshotMember = "titles"
+	// memberVersion is the ENVELOPE, measured per snapshot: the schema version
+	// itself, stamped by the writer and never carried from the loaded file. It is
+	// not a fact about the catalogue.
+	memberVersion snapshotMember = "version"
+	// memberOwners is the PRESENT fact, measured per ENTRY: for every entry the
+	// pass EVALUATED, that entry's contribution is set to what the pass observed.
+	// Only a catalogue pass may DELETE an entry, because absence from a window
+	// proves nothing (see upsertOwners).
+	memberOwners snapshotMember = "owners"
+	// memberPublished is the PAST fact, measured per RELEASE IDENTITY: recorded
+	// when the fact occurs, never rewritten and never deleted at any scope. You
+	// cannot un-serve something (see appendPublished).
+	memberPublished snapshotMember = "published"
+	// memberTitles CARRIES VALIDATED, measured per JOURNAL KEY: the form the
+	// loader already VOUCHED rather than the raw decoded one, which is what stops
+	// a value the ingress gate refused being re-persisted by every pass that does
+	// not own it.
+	memberTitles snapshotMember = "titles"
+	// memberHarvestCursor CARRIES VALIDATED, measured per snapshot: the vouched
+	// harvest rotation position, for the same reason as memberTitles.
 	memberHarvestCursor snapshotMember = "harvest_cursor"
-	memberNyaaFeed      snapshotMember = "nyaa_feed"
-	memberABFeed        snapshotMember = "ab_feed"
+	// memberNyaaFeed is the MATERIALIZED PAST, measured per ITEM: append plus an
+	// age-out whose criterion is the item's OWN FirstSeen rather than membership
+	// of the pass's input, which is exactly why deleting from it is sound at ANY
+	// scope.
+	memberNyaaFeed snapshotMember = "nyaa_feed"
+	// memberABFeed is the MATERIALIZED PAST, measured per ITEM: append plus an
+	// age-out on the item's own FirstSeen, sound at any scope for the same reason
+	// as memberNyaaFeed.
+	memberABFeed snapshotMember = "ab_feed"
 )
 
 // allSnapshotMembers is the canonical member order: the order the decoder
-// recognizes keys in, and the order buildSnapshot applies rules in. It is the
+// recognizes keys in, and the order buildSnapshot writes them in. It is the
 // closed set the totality test compares the snapshot struct against.
 var allSnapshotMembers = [...]snapshotMember{
 	memberVersion, memberOwners, memberPublished,
 	memberTitles, memberHarvestCursor, memberNyaaFeed, memberABFeed,
-}
-
-// writeRule is the one fixed rule a persisted member is written by. There are
-// four, plus the envelope, and no member may have two.
-type writeRule int
-
-const (
-	// ruleEnvelope is the schema version itself: stamped by the writer, never
-	// carried from the loaded file. It is not a fact about the catalogue.
-	ruleEnvelope writeRule = iota + 1
-	// ruleUpsertEvaluated is the PRESENT-fact rule: for every unit the pass EVALUATED,
-	// set that unit's contribution to what the pass observed.
-	ruleUpsertEvaluated
-	// ruleAppendOnly is the PAST-fact rule: recorded when the fact occurs,
-	// never rewritten and never deleted. You cannot un-serve something.
-	ruleAppendOnly
-	// ruleAppendAndAgeOut is the MATERIALIZED PAST: append plus an age-out
-	// whose criterion is the item's OWN FirstSeen rather than membership of
-	// the pass's input, which is exactly why it is sound at ANY scope.
-	ruleAppendAndAgeOut
-	// ruleCarryValidated carries the form the loader already VOUCHED, not the
-	// raw decoded one. It is what stops a value the ingress gate refused being
-	// re-persisted by every pass that does not own it.
-	ruleCarryValidated
-)
-
-// memberRule is one member's entry in the rule table: the rule, the UNIT the
-// rule's "what you evaluated" is measured in (naming the unit is what lets ONE
-// rule cover both an entry-scoped and an item-scoped member), and whether a
-// deletion is authorized from a window. It deliberately carries no reversibility
-// column: how long a wrong write survives differs per member, and that asymmetry
-// is stated where it is read rather than as a field nothing consults.
-type memberRule struct {
-	unit        string
-	rule        writeRule
-	deleteScope passScope
-}
-
-// snapshotRules is THE rule table. Every member of snapshot must appear here.
-const (
-	unitSnapshot = "snapshot"
-	unitEntry    = "entry"
-	unitIdentity = "release identity"
-	unitItem     = "item"
-	unitKey      = "journal key"
-)
-
-var snapshotRules = map[snapshotMember]memberRule{
-	memberVersion: {
-		rule: ruleEnvelope, unit: unitSnapshot,
-		deleteScope: scopeCatalogue,
-	},
-	memberOwners: {
-		rule: ruleUpsertEvaluated, unit: unitEntry,
-		deleteScope: scopeCatalogue,
-	},
-	memberPublished: {
-		rule: ruleAppendOnly, unit: unitIdentity,
-		deleteScope: scopeNever,
-	},
-	memberNyaaFeed: {
-		rule: ruleAppendAndAgeOut, unit: unitItem,
-		deleteScope: scopeAny,
-	},
-	memberABFeed: {
-		rule: ruleAppendAndAgeOut, unit: unitItem,
-		deleteScope: scopeAny,
-	},
-	memberTitles: {
-		rule: ruleCarryValidated, unit: unitKey,
-		deleteScope: scopeCatalogue,
-	},
-	memberHarvestCursor: {
-		rule: ruleCarryValidated, unit: unitSnapshot,
-		deleteScope: scopeCatalogue,
-	},
 }
 
 // passScope is the INPUT a pass holds, and it is the only difference between the
@@ -151,21 +99,6 @@ func (s passScope) String() string {
 		return "any"
 	}
 	return "invalid"
-}
-
-// authorizesDelete reports whether a pass at scope may DELETE a unit of a member
-// whose rule grants deletion at grant. The one place the law is evaluated: a
-// window may delete only where the criterion is the item's own evidence.
-func (s passScope) authorizesDelete(grant passScope) bool {
-	switch grant {
-	case scopeAny:
-		return true
-	case scopeCatalogue:
-		return s == scopeCatalogue
-	case scopeNever, scopeWindow:
-		return false
-	}
-	return false
 }
 
 // ownedRelease is one release an AniList entry contributes to the curation index:
@@ -221,7 +154,7 @@ func projectCuration(owners map[string][]ownedRelease) curation {
 // entry is untouched, because absence from a window is not evidence.
 func upsertOwners(prev, evaluated map[string][]ownedRelease, scope passScope) map[string][]ownedRelease {
 	out := make(map[string][]ownedRelease, len(evaluated))
-	if !scope.authorizesDelete(snapshotRules[memberOwners].deleteScope) {
+	if scope != scopeCatalogue {
 		maps.Copy(out, prev)
 	}
 	for id, releases := range evaluated {
@@ -263,35 +196,15 @@ type passWrites struct {
 // buildSnapshot folds one pass's writes onto the previous state, member by member
 // in the canonical order, and is the only constructor of a persisted snapshot.
 func buildSnapshot(prev *feedState, w *passWrites) (snapshot, error) {
-	var snap snapshot
-	for _, member := range allSnapshotMembers {
-		rule, known := snapshotRules[member]
-		if !known {
-			return snapshot{}, fmt.Errorf("indexer: persisted member %q has no write rule", member)
-		}
-		switch member {
-		case memberVersion:
-			snap.Version = currentFeedVersion
-		case memberOwners:
-			snap.Owners = upsertOwners(prev.owners, w.evaluated, w.scope)
-		case memberPublished:
-			snap.Published = appendPublished(prev.published, w.published)
-		case memberNyaaFeed:
-			snap.NyaaFeed = w.nyaa
-		case memberABFeed:
-			snap.ABFeed = w.ab
-		case memberTitles:
-			snap.Titles = w.titles
-		case memberHarvestCursor:
-			snap.HarvestCursor = w.cursor
-		default:
-			// Unreachable for a member in allSnapshotMembers, and that is the point: a
-			// member in the vocabulary and the table but given no write here cannot be
-			// persisted at all.
-			return snapshot{}, fmt.Errorf("indexer: persisted member %q (rule %d) has no write", member, rule.rule)
-		}
-	}
-	return snap, nil
+	return snapshot{
+		Version:       currentFeedVersion,
+		Owners:        upsertOwners(prev.owners, w.evaluated, w.scope),
+		Published:     appendPublished(prev.published, w.published),
+		Titles:        w.titles,
+		HarvestCursor: w.cursor,
+		NyaaFeed:      w.nyaa,
+		ABFeed:        w.ab,
+	}, nil
 }
 
 // appendPublished applies the PAST-fact rule: the union of what was already

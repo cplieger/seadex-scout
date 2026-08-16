@@ -14,21 +14,13 @@ import (
 // reconcile. Cycle (scout.go) dispatches between the two; everything specific
 // to the cheap path lives here.
 
-// The tick's window and its three wedge diagnostics.
+// The tick's window and its two wedge diagnostics.
 const (
 	// changeWindow is how far back a tick looks. It is deliberately much wider
 	// than the tick interval: the window is the only thing that recovers a missed
 	// tick, a restart, or a small clock skew, and a wider window costs bytes
 	// proportional to the upstream's change RATE, not to its size.
 	changeWindow = 48 * time.Hour
-
-	// emptyRunSilence is the wall-clock run of consecutive empty ticks that WARNs.
-	// An empty 48h window already means 48h of upstream silence, so this is ~96h
-	// of total silence; measured against 90 days of history the longest genuine
-	// silence was 86.6h. It fires ONCE, at ==, where the two latches below re-fire
-	// at >=: this one is usually healthy, those two are faults whose ERROR must
-	// keep a count-based Loki rule firing for as long as the condition holds.
-	emptyRunSilence = changeWindow
 
 	// frozenFastPathTolerance is how long the fast path may stay frozen before the
 	// diagnostic ERRORs. It pages at ERROR because nothing in this stack alerts on
@@ -86,32 +78,22 @@ func (s *Scout) tick(ctx context.Context) bool {
 	}
 	switch {
 	case count == 0:
-		s.emptyRun++
 		s.oversizeRun, s.unreachableRun = 0, 0
-		if s.emptyRun == s.latchTicks(emptyRunSilence) {
-			// Usually healthy - the upstream is quiet - but a window that can NEVER
-			// hold anything looks identical: a clock running more than changeWindow
-			// ahead, or something answering the probe with a plausible 200 that is
-			// not SeaDex. A count carries no independent evidence to catch the
-			// second, so this latch is the only signal for it.
-			s.log.Warn("no SeaDex change seen for a very long run of ticks; if this persists, check this container's clock against the upstream, and that the probe is reaching releases.moe rather than something answering for it",
-				"consecutive_empty_ticks", s.emptyRun, "window", changeWindow.String())
-		}
 		// A complete tick: the probe answered, and the answer was "nothing". Nothing
 		// was compared, so the standing set is re-stated rather than replaced.
 		s.notifier.Reemit()
 		return s.tickComplete(ctx, 0, 0, nil, nil)
 	case count >= seadexapi.MaxWindowEntries:
-		// This EXIT's own evidence settles the two other counters: the probe read
-		// the upstream, and the answer was not empty.
-		s.emptyRun, s.unreachableRun = 0, 0
+		// This EXIT's own evidence settles the other counter: the probe read the
+		// upstream, and the answer was not empty.
+		s.unreachableRun = 0
 		return s.tickOversizeWindow(ctx, count)
 	}
-	// Not an exit: the tick continues into a window fetch, so only the two counters
-	// that measure upstream STATE are settled here. Reachability is not established
+	// Not an exit: the tick continues into a window fetch, so only the counter that
+	// measures upstream STATE is settled here. Reachability is not established
 	// until that fetch returns, and resetting unreachableRun here would cancel the
 	// increment the same tick's fetch failure makes.
-	s.emptyRun, s.oversizeRun = 0, 0
+	s.oversizeRun = 0
 	return s.tickChanged(ctx, since, count)
 }
 

@@ -168,13 +168,8 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 			return decodeSnapshotFeed(d, &snap.NyaaFeed, string(memberNyaaFeed))
 		case memberABFeed:
 			return decodeSnapshotFeed(d, &snap.ABFeed, string(memberABFeed))
-		default:
-			// Unreachable for a member in allSnapshotMembers, and that is the point -
-			// the read-side twin of buildSnapshot's default: a member added to the
-			// vocabulary but not given a DECODE here must not be silently claimed by
-			// another member's arm.
-			return fmt.Errorf("snapshot: persisted member %q has no decode", member)
 		}
+		return nil
 	})
 	if err != nil {
 		return snapshot{}, err
@@ -190,7 +185,7 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 // case-insensitive because json.Unmarshal matches struct FIELDS
 // case-insensitively too, so "Owners" and "owners" address the same member and
 // are equally a repeat of it. The vocabulary is allSnapshotMembers, so the
-// decoder and the rule table cannot drift.
+// decoder and the persisted members cannot drift.
 func snapshotField(key string) snapshotMember {
 	for _, member := range allSnapshotMembers {
 		if strings.EqualFold(key, string(member)) {

@@ -172,10 +172,9 @@ type Scout struct {
 	// reconcileEvery-th one reconciles. Held here rather than in the loop's timer
 	// closure, which also runs on a tick the cross-process lock skipped.
 	iterations int
-	// emptyRun, oversizeRun and unreachableRun count consecutive ticks that held
-	// nothing, were too large to fetch, or could not read the upstream at all -
-	// diagnostics for a wedged fast path; a productive tick resets all three.
-	emptyRun       int
+	// oversizeRun and unreachableRun count consecutive ticks that were too large
+	// to fetch or could not read the upstream at all - diagnostics for a wedged
+	// fast path; a productive tick resets both.
 	oversizeRun    int
 	unreachableRun int
 	// reconcileRetries bounds how hard the loop tries to establish the finding

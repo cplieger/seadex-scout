@@ -1,8 +1,6 @@
 package mapping
 
 import (
-	"slices"
-	"strings"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/mediatype"
@@ -12,9 +10,8 @@ import (
 // arbitrary file bytes. Seeds cover the accepted array form, upstream-Fribb
 // key spellings, case-variant canonical keys, the rejected null/object/scalar
 // top levels, and typed-decode failures. Invariants hold for any input: an
-// error yields nil records and nil unknown keys (never a partial result); a
-// success returns normalized types and a sorted, deduplicated unknown-key set
-// that never reports a case-variant canonical key encoding/json would accept.
+// error yields a zero result (never a partial one); a success returns
+// deduplicated, positively-keyed records with normalized types.
 func FuzzParseOverrides(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
 	f.Add([]byte(`[{"anilist_id":5,"imdb_id":"tt1","season":1},{"anilist_id":6,"themoviedb_id":9}]`))
@@ -40,7 +37,7 @@ func FuzzParseOverrides(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		set, err := parseOverrides(data)
 		if err != nil {
-			if set.records != nil || set.unknown != nil || set.duplicates != nil || set.oversizedIDs != nil || set.applied != 0 || set.skipped != 0 || set.oversized != 0 || set.unknownOverflow {
+			if set.records != nil || set.unknown != 0 || set.applied != 0 || set.skipped != 0 {
 				t.Errorf("parseOverrides error with non-empty result: %+v", set)
 			}
 			return
@@ -62,25 +59,6 @@ func FuzzParseOverrides(f *testing.F) {
 		}
 		if set.applied < len(set.records) {
 			t.Errorf("applied %d < effective records %d", set.applied, len(set.records))
-		}
-		if !slices.IsSorted(set.unknown) {
-			t.Errorf("parseOverrides unknown keys not sorted: %v", set.unknown)
-		}
-		for i := 1; i < len(set.unknown); i++ {
-			if set.unknown[i] == set.unknown[i-1] {
-				t.Errorf("parseOverrides unknown keys not deduped: %v", set.unknown)
-			}
-		}
-		// The canonical key set is spelled out here as a test-local oracle
-		// (Record's JSON tags), independent of the production dispatch in
-		// decodeOverrideRecord.
-		canonical := []string{"anilist_id", "type", "tvdb_id", "tmdb_movies", "imdb_ids", "season_tvdb"}
-		for _, k := range set.unknown {
-			for _, c := range canonical {
-				if strings.EqualFold(k, c) {
-					t.Errorf("parseOverrides reported canonical key %q as unknown", k)
-				}
-			}
 		}
 	})
 }

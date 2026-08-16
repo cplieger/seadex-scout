@@ -13,18 +13,19 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// TestEverySSnapshotMemberHasAWriteRule is the TOTALITY GATE. The persisted feed
-// contract's central promise is that a rule-less field is impossible to add, and
-// Go cannot express that at compile time for a struct field, so it is expressed
-// here instead: this test fails the build gate the moment a member is added to
-// the snapshot struct without a write rule, and the moment a rule names a member
-// the struct does not have.
+// TestEverySnapshotMemberIsInTheDecoderVocabulary is the TOTALITY GATE. The
+// persisted feed contract's central promise is that a member the decoder cannot
+// recognize is impossible to add, and Go cannot express that at compile time for
+// a struct field, so it is expressed here instead: this test fails the build gate
+// the moment a member is added to the snapshot struct without entering
+// allSnapshotMembers, and the moment that list names a member the struct does not
+// have.
 //
 // It walks the struct's JSON tags rather than a hand-written list on purpose. A
 // hand-written list is the thing that drifts, and drift is the exact failure the
-// whole rule table exists to prevent - the tick got five members wrong by
-// omission because nothing forced it to answer for each one.
-func TestEverySnapshotMemberHasAWriteRule(t *testing.T) {
+// vocabulary exists to prevent - the tick got five members wrong by omission
+// because nothing forced it to answer for each one.
+func TestEverySnapshotMemberIsInTheDecoderVocabulary(t *testing.T) {
 	structMembers := map[snapshotMember]struct{}{}
 	for field := range reflect.TypeFor[snapshot]().Fields() {
 		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
@@ -36,16 +37,8 @@ func TestEverySnapshotMemberHasAWriteRule(t *testing.T) {
 	}
 
 	for member := range structMembers {
-		if _, ok := snapshotRules[member]; !ok {
-			t.Errorf("persisted member %q has NO write rule: add it to snapshotRules (see members.go - which fact does it record?)", member)
-		}
 		if !slices.Contains(allSnapshotMembers[:], member) {
 			t.Errorf("persisted member %q is not in allSnapshotMembers, so the decoder will never recognize it", member)
-		}
-	}
-	for member := range snapshotRules {
-		if _, ok := structMembers[member]; !ok {
-			t.Errorf("snapshotRules names %q, which is not a field of snapshot", member)
 		}
 	}
 	for _, member := range allSnapshotMembers {
@@ -55,46 +48,28 @@ func TestEverySnapshotMemberHasAWriteRule(t *testing.T) {
 	}
 }
 
-// TestSnapshotRulesAreWellFormed pins the two properties the rule table's
-// meaning rests on: every member has exactly ONE rule (there is no
-// append-or-replace choice made at write time), and the deletion authority a
-// rule grants is one of the four scope values - so a member cannot silently
-// authorize a window to delete what only the catalogue may.
-func TestSnapshotRulesAreWellFormed(t *testing.T) {
-	valid := map[writeRule]bool{
-		ruleEnvelope: true, ruleUpsertEvaluated: true,
-		ruleAppendOnly: true, ruleAppendAndAgeOut: true, ruleCarryValidated: true,
-	}
-	for member, rule := range snapshotRules {
-		if !valid[rule.rule] {
-			t.Errorf("member %q has rule %d, which is not one of the five", member, rule.rule)
-		}
-		if rule.unit == "" {
-			t.Errorf("member %q names no UNIT of evaluation; naming the unit is what lets one rule cover two members", member)
-		}
-		switch rule.deleteScope {
-		case scopeCatalogue, scopeWindow, scopeNever, scopeAny:
-		default:
-			t.Errorf("member %q grants deletion at scope %d, which is not a scope", member, rule.deleteScope)
-		}
-	}
-}
-
 // TestPublicationLogIsNeverDeletable is the one rule the app's correctness under
 // a permanent record depends on: you cannot un-serve something, so nothing may
-// ever authorize deleting from the publication log - at any scope.
+// ever delete from the publication log - at any scope. appendPublished is the
+// log's only write, and it is a union.
 func TestPublicationLogIsNeverDeletable(t *testing.T) {
-	grant := snapshotRules[memberPublished].deleteScope
-	if grant != scopeNever {
-		t.Fatalf("publication log grants deletion at %v, want %v", grant, scopeNever)
+	prev := publishedSignals("nyaa:1", "ab:2")
+	want := publishedSignals("nyaa:1", "ab:2", "nyaa:3")
+	if got := appendPublished(prev, publishedSignals("nyaa:3")); !maps.Equal(got, want) {
+		t.Errorf("appendPublished(%v, {nyaa:3}) = %v, want %v", prev, got, want)
 	}
 	for _, scope := range []passScope{scopeCatalogue, scopeWindow} {
-		if scope.authorizesDelete(grant) {
-			t.Errorf("a %v pass may delete from the publication log; it must never be able to", scope)
-		}
-	}
-	if snapshotRules[memberPublished].rule != ruleAppendOnly {
-		t.Error("publication log is not append-only")
+		t.Run(scope.String(), func(t *testing.T) {
+			snap, err := buildSnapshot(&feedState{published: prev}, &passWrites{scope: scope})
+			if err != nil {
+				t.Fatalf("buildSnapshot at %v scope: %v", scope, err)
+			}
+			for id := range prev {
+				if !snap.Published[id] {
+					t.Errorf("a %v pass deleted %q from the publication log; it must never be able to", scope, id)
+				}
+			}
+		})
 	}
 }
 
@@ -144,24 +119,13 @@ func TestPublicationLogCapRefusesTheWriteAndKeepsThePast(t *testing.T) {
 // bites hardest: a window may upsert what it evaluated and may never delete on
 // absence from its own input.
 func TestOnlyCatalogueScopeDeletesAnOwner(t *testing.T) {
-	grant := snapshotRules[memberOwners].deleteScope
-	if !scopeCatalogue.authorizesDelete(grant) {
+	prev := ownsBy(10, keyed("nyaa:1", true))
+	evaluated := ownsBy(20, keyed("nyaa:2", false))
+	if _, still := upsertOwners(prev, evaluated, scopeCatalogue)[ownerKey(10)]; still {
 		t.Error("the catalogue pass cannot delete an owner; wholesale replacement depends on it")
 	}
-	if scopeWindow.authorizesDelete(grant) {
-		t.Error("a window pass may delete an owner; absence from a window is not evidence")
-	}
-}
-
-// TestJournalAgeOutIsSoundAtAnyScope: the age-out's criterion is the item's own
-// FirstSeen rather than membership of the pass's input, which is exactly why a
-// window may apply it.
-func TestJournalAgeOutIsSoundAtAnyScope(t *testing.T) {
-	for _, member := range []snapshotMember{memberNyaaFeed, memberABFeed} {
-		grant := snapshotRules[member].deleteScope
-		if !scopeWindow.authorizesDelete(grant) || !scopeCatalogue.authorizesDelete(grant) {
-			t.Errorf("%q age-out is not authorized at both scopes", member)
-		}
+	if _, still := upsertOwners(prev, evaluated, scopeWindow)[ownerKey(10)]; !still {
+		t.Error("a window pass deleted an owner; absence from a window is not evidence")
 	}
 }
 

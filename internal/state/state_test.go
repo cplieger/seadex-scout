@@ -31,10 +31,7 @@ func testLogger() *slog.Logger {
 }
 
 // paddedMemo builds an AniList memo whose encoded size grows byte-for-byte with
-// n, so a size-bound test can hit an exact on-disk length. The memo is the
-// vehicle because it is a persisted member Save copies verbatim: the library
-// snapshot is rewritten by SanitizedForStorage before encoding, so padding it
-// would measure the sanitizer rather than the bound.
+// n, so a size-bound test can hit an exact on-disk length.
 func paddedMemo(n int) match.Memo {
 	return match.Memo{Entries: map[int]match.MemoEntry{
 		1: {Titles: []string{strings.Repeat("a", n)}},
@@ -137,42 +134,6 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	if want := now.Add(300 * time.Hour); !got.Memo.Entries[154587].Expiry.Equal(want) {
 		t.Errorf("Memo expiry round trip = %s, want %s (the jittered-TTL stamp must survive restarts)",
 			got.Memo.Entries[154587].Expiry, want)
-	}
-}
-
-// TestStoreSaveSanitizesLibrarySnapshot pins Save's ownership of the
-// sanitize-on-persist invariant: a credentialed ArrURL handed to Save never
-// lands in state.json (the caller no longer sanitizes), the rest of the item
-// survives, and the caller's in-memory State is left untouched (Save works on
-// a shallow copy).
-func TestStoreSaveSanitizesLibrarySnapshot(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
-	st := &State{Library: library.Snapshot{Items: []library.Item{{
-		Arr:    library.ArrSonarr,
-		Title:  "Frieren",
-		ArrID:  7,
-		ArrURL: "https://user:pass@sonarr.example/series/frieren",
-	}}}}
-
-	if err := store.Save(t.Context(), st); err != nil {
-		t.Fatalf("Save returned error: %v", err)
-	}
-	got, err := store.Load(t.Context())
-	if err != nil {
-		t.Fatalf("Load after Save returned error: %v", err)
-	}
-	if len(got.Library.Items) != 1 {
-		t.Fatalf("loaded library items = %d, want 1", len(got.Library.Items))
-	}
-	it := got.Library.Items[0]
-	if it.ArrURL != "https://sonarr.example/series/frieren" {
-		t.Errorf("persisted ArrURL = %q, want the credential stripped by Save", it.ArrURL)
-	}
-	if it.Title != "Frieren" || it.Arr != library.ArrSonarr || it.ArrID != 7 {
-		t.Errorf("persisted item = %+v, want Title/Arr/ArrID untouched by sanitization", it)
-	}
-	if st.Library.Items[0].ArrURL != "https://user:pass@sonarr.example/series/frieren" {
-		t.Errorf("caller's State mutated by Save: ArrURL = %q, want original", st.Library.Items[0].ArrURL)
 	}
 }
 

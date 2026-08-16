@@ -279,9 +279,6 @@ func TestTickEmptyWindowSkipsFetch(t *testing.T) {
 	if _, window := countWindowModes(sea); window != 0 {
 		t.Errorf("window fetches = %d, want 0 (the probe already answered)", window)
 	}
-	if s.emptyRun != 1 {
-		t.Errorf("emptyRun = %d, want 1", s.emptyRun)
-	}
 	if s.oversizeRun != 0 {
 		t.Errorf("oversizeRun = %d, want 0", s.oversizeRun)
 	}
@@ -303,56 +300,6 @@ func TestTickEmptyWindowSkipsFetch(t *testing.T) {
 	}
 	if n := recorder.CountExact("findings reported"); n != 2 {
 		t.Errorf("'findings reported' count = %d, want 2 (the reconcile's, then the empty tick's re-statement)", n)
-	}
-}
-
-// TestTickEmptyRunWarnsAtItsLatch pins the wedge diagnostic for a permanently
-// empty window.
-//
-// An empty 48h window already means 48h of upstream silence has elapsed, so the
-// latch adds another 48h of empty probes on top - roughly 96h of total silence,
-// against a measured worst genuine silence of 86.6h. It stays a WARN because it
-// IS usually healthy; the condition it is really looking for is a container
-// clock running more than the window AHEAD, which puts every window in the
-// upstream's future and looks identical to a quiet upstream.
-//
-// It must fire ONCE, at the latch, not on every tick after it: a per-tick WARN
-// at a 15-minute cadence is 96 identical lines a day, which is how a real signal
-// gets filtered out.
-func TestTickEmptyRunWarnsAtItsLatch(t *testing.T) {
-	logger, recorder := capture.New()
-	sea := &fakeSeaDex{
-		entries: seadexFrierenEntry(),
-		countFn: func(context.Context, time.Time) (int, error) { return 0, nil },
-	}
-	// A 15-minute cadence (the default): the empty-run latch derives to 192
-	// ticks there. That tolerance is 48h of wall clock, which is TWO reconcile
-	// periods by construction, so a reconcile necessarily intervenes in a run
-	// this long - drive the counter itself rather than the iteration index. A
-	// reconcile leaves emptyRun untouched; only a productive tick resets it.
-	s, _ := newTickScout(logger, sea, nil, nil, 96)
-	if healthy := s.Cycle(t.Context()); !healthy {
-		t.Fatal("reconcile healthy=false, want true")
-	}
-
-	latch := s.latchTicks(emptyRunSilence)
-	const warn = "no SeaDex change seen for a very long run of ticks; " +
-		"if this persists, check this container's clock against the upstream, " +
-		"and that the probe is reaching releases.moe rather than something answering for it"
-	for i := 1; s.emptyRun <= latch+1; i++ {
-		if healthy := s.Cycle(t.Context()); !healthy {
-			t.Fatalf("iteration %d healthy=false, want true", i)
-		}
-		want := 0
-		if s.emptyRun >= latch {
-			want = 1
-		}
-		if got := recorder.CountExact(warn); got != want {
-			t.Fatalf("after %d consecutive empty ticks the latch WARN count = %d, want %d", s.emptyRun, got, want)
-		}
-	}
-	if got := recorder.CountLevel(slog.LevelError, "no SeaDex change seen"); got != 0 {
-		t.Errorf("empty-run ERROR count = %d, want 0 (a quiet upstream is usually healthy)", got)
 	}
 }
 
@@ -414,9 +361,6 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 	if feed.advanceCalls != 0 {
 		t.Errorf("Advance calls = %d, want 0", feed.advanceCalls)
 	}
-	if s.emptyRun != 0 {
-		t.Errorf("emptyRun = %d, want 0 (an oversize tick is not an empty one)", s.emptyRun)
-	}
 }
 
 // TestTickOversizeBoundIsInclusive pins the boundary of the oversize test,
@@ -465,54 +409,38 @@ func TestTickOversizeBoundIsInclusive(t *testing.T) {
 	}
 }
 
-// TestTickProductiveResetsBothRuns pins the reset. Both wedge counters measure a
-// CONSECUTIVE run, so a productive tick has to clear them - otherwise a single
-// long quiet spell would latch its diagnostic permanently, and the next genuine
-// wedge would be indistinguishable from the noise it left behind.
+// TestTickProductiveResetsTheOversizeRun pins the reset. The wedge counter
+// measures a CONSECUTIVE run, so a productive tick has to clear it - otherwise a
+// single long spell of oversized windows would latch its diagnostic permanently,
+// and the next genuine wedge would be indistinguishable from the noise it left
+// behind.
 //
-// Each counter is driven to just under its latch first, so the assertion is
-// about the reset and not about a counter that never moved.
-func TestTickProductiveResetsBothRuns(t *testing.T) {
-	tests := map[string]struct {
-		primeEmpty bool
-	}{
-		"after a long empty run":    {primeEmpty: true},
-		"after a long oversize run": {primeEmpty: false},
+// The counter is driven to just under its latch first, so the assertion is about
+// the reset and not about a counter that never moved.
+func TestTickProductiveResetsTheOversizeRun(t *testing.T) {
+	logger := scoutTestLogger()
+	sea := &fakeSeaDex{
+		entries:       seadexFrierenEntry(),
+		windowEntries: []seadex.Entry{windowEntry(1001, 501)},
 	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			logger := scoutTestLogger()
-			sea := &fakeSeaDex{
-				entries:       seadexFrierenEntry(),
-				windowEntries: []seadex.Entry{windowEntry(1001, 501)},
-			}
-			s, _ := newTickScout(logger, sea, &fakeFeed{}, nil, 96)
-			if healthy := s.Cycle(t.Context()); !healthy {
-				t.Fatal("reconcile healthy=false, want true")
-			}
-			// Both counters are latched against a wall-clock tolerance
-			// converted at this loop's interval, so prime from the derived
-			// value rather than a literal count.
-			if tc.primeEmpty {
-				s.emptyRun = s.latchTicks(emptyRunSilence) - 1
-			} else {
-				s.oversizeRun = s.latchTicks(frozenFastPathTolerance) - 1
-			}
+	s, _ := newTickScout(logger, sea, &fakeFeed{}, nil, 96)
+	if healthy := s.Cycle(t.Context()); !healthy {
+		t.Fatal("reconcile healthy=false, want true")
+	}
+	// The counter is latched against a wall-clock tolerance converted at this
+	// loop's interval, so prime from the derived value rather than a literal
+	// count.
+	s.oversizeRun = s.latchTicks(frozenFastPathTolerance) - 1
 
-			if healthy := s.Cycle(t.Context()); !healthy {
-				t.Fatal("productive tick healthy=false, want true")
-			}
+	if healthy := s.Cycle(t.Context()); !healthy {
+		t.Fatal("productive tick healthy=false, want true")
+	}
 
-			if s.emptyRun != 0 {
-				t.Errorf("emptyRun = %d, want 0 after a productive tick", s.emptyRun)
-			}
-			if s.oversizeRun != 0 {
-				t.Errorf("oversizeRun = %d, want 0 after a productive tick", s.oversizeRun)
-			}
-			if _, window := countWindowModes(sea); window != 1 {
-				t.Errorf("window fetches = %d, want 1 (the tick was productive)", window)
-			}
-		})
+	if s.oversizeRun != 0 {
+		t.Errorf("oversizeRun = %d, want 0 after a productive tick", s.oversizeRun)
+	}
+	if _, window := countWindowModes(sea); window != 1 {
+		t.Errorf("window fetches = %d, want 1 (the tick was productive)", window)
 	}
 }
 
@@ -887,9 +815,9 @@ func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 			if feed.advanceCalls != 0 {
 				t.Errorf("Advance calls = %d, want 0 (nothing was fetched)", feed.advanceCalls)
 			}
-			if s.emptyRun != 0 || s.oversizeRun != 0 {
-				t.Errorf("wedge counters = empty %d / oversize %d, want 0/0 (they measure upstream state, not reachability)",
-					s.emptyRun, s.oversizeRun)
+			if s.oversizeRun != 0 {
+				t.Errorf("wedge counter = oversize %d, want 0 (it measures upstream state, not reachability)",
+					s.oversizeRun)
 			}
 			if s.unreachableRun != 1 {
 				t.Errorf("unreachableRun = %d, want 1 (the fast path's own SeaDex-unreachable streak, which the reconcile-only SeadexFailures cannot see)",
