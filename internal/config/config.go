@@ -252,11 +252,10 @@ type Config struct {
 // unknown-key NAME is kept - it IS the diagnostic the operator needs - and the strict
 // probe runs on the pre-expansion bytes, so the name cannot carry an expanded secret.
 func Load(path string) (Config, error) {
-	raw, info, err := readConfigFile(path)
+	raw, err := readConfigFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	warnConfigPermissions(info)
 	fc := defaultFileConfig()
 	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
 		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho()))
@@ -277,14 +276,11 @@ func Load(path string) (Config, error) {
 // os.Open follows a symlink and blocks indefinitely on a writerless FIFO - and this
 // read runs at startup before any diagnostic, so a planted FIFO would wedge the
 // process silently.
-//
-// It returns the FileInfo of the OPEN descriptor, so the permission warning certifies
-// the inode whose bytes were loaded.
-func readConfigFile(path string) (raw []byte, info os.FileInfo, err error) {
+func readConfigFile(path string) (raw []byte, err error) {
 	dir := filepath.Dir(path)
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer func() {
 		if clErr := root.Close(); clErr != nil {
@@ -292,18 +288,18 @@ func readConfigFile(path string) (raw []byte, info os.FileInfo, err error) {
 				"field", "config dir", "error", clErr)
 		}
 	}()
-	f, info, err := atomicfile.OpenRegularInRoot(root, filepath.Base(path))
+	f, _, err := atomicfile.OpenRegularInRoot(root, filepath.Base(path))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer f.Close()
 	// Config load is a synchronous startup step with no cancellation point,
 	// so it passes context.Background(), matching writeStarterConfig.
 	raw, err = atomicfile.ReadBoundedFile(context.Background(), f, maxConfigBytes)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return raw, info, nil
+	return raw, nil
 }
 
 // --- Flattening to the runtime Config ---
@@ -331,29 +327,22 @@ func (fc *fileConfig) toConfig() Config {
 		sonarrWanted:          fc.Sonarr.Enabled,
 		radarrWanted:          fc.Radarr.Enabled,
 	}
-	c.SonarrURL, c.SonarrAPIKey, c.SonarrPublicURL = applyArr("sonarr", fc.Sonarr)
-	c.RadarrURL, c.RadarrAPIKey, c.RadarrPublicURL = applyArr("radarr", fc.Radarr)
+	c.SonarrURL, c.SonarrAPIKey, c.SonarrPublicURL = applyArr(fc.Sonarr)
+	c.RadarrURL, c.RadarrAPIKey, c.RadarrPublicURL = applyArr(fc.Radarr)
 	if c.ReportDir == "" {
 		c.ReportDir = DefaultReportDir
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
 	c.TagFilter, c.tagFilterErr = buildTagFilter(fc.Filters.ExcludeTags)
 	c.IgnoreFindings, c.ignoreErr = buildIgnoreSet(fc.Filters.Ignore)
-	warnAllBlankTagList("arr_tags.include", fc.ArrTags.Include, c.IncludeTags)
-	warnAllBlankTagList("arr_tags.exclude", fc.ArrTags.Exclude, c.ExcludeTags)
 	return c
 }
 
 // applyArr flattens one arr section: an enabled arr's trimmed connection details, or
-// empty strings plus the half-configuration Info signal (a set api_key is always
-// operator-written, so a disabled-but-keyed arr usually means a forgotten toggle).
-func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
+// empty strings.
+func applyArr(af arrFile) (arrURL, key, publicURL string) {
 	if af.Enabled {
 		return strings.TrimSpace(af.URL), strings.TrimSpace(af.APIKey), strings.TrimSpace(af.PublicURL)
-	}
-	if strings.TrimSpace(af.APIKey) != "" {
-		slog.Info("api_key is set but the arr is not enabled; it will not be scanned",
-			"field", name+".api_key")
 	}
 	return "", "", ""
 }
@@ -492,7 +481,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnArrURLCredentials()
-	c.warnIdenticalArrURLs()
 	if err := c.validateEnabledArrs(); err != nil {
 		return err
 	}
@@ -502,7 +490,6 @@ func (c *Config) Validate() error {
 	}
 	c.warnUnexpandedSecretRefs()
 	c.warnRelativeReportDir()
-	c.warnOverlappingTags()
 	return c.validateIndexer()
 }
 
@@ -602,24 +589,6 @@ func (c *Config) warnUnexpandedSecretRefs() {
 	}
 }
 
-// warnOverlappingTags warns when a tag appears in both arr_tags.include and
-// arr_tags.exclude. The library walk gives exclude precedence, so every item carrying
-// the tag is skipped and the include entry can never match - with a single
-// overlapping include tag the config silently scans nothing. Warn-only.
-func (c *Config) warnOverlappingTags() {
-	exclude := make(map[string]struct{}, len(c.ExcludeTags))
-	for _, tag := range c.ExcludeTags {
-		exclude[strings.ToLower(strings.TrimSpace(tag))] = struct{}{}
-	}
-	for _, tag := range c.IncludeTags {
-		if _, ok := exclude[strings.ToLower(strings.TrimSpace(tag))]; ok {
-			slog.Warn("a tag is listed in both arr_tags.include and arr_tags.exclude; " +
-				"exclude wins, so items carrying it are never scanned")
-			return
-		}
-	}
-}
-
 // warnArrURLCredentials warns (field-name-only, never echoing the URL) when an arr
 // url embeds a credential-like userinfo or query parameter, which would otherwise
 // leak into a library-walk-failure *url.Error log. For arr URLs the query half is
@@ -638,50 +607,25 @@ func (c *Config) warnArrURLCredentials() {
 	}
 }
 
-// warnIdenticalArrURLs warns when sonarr.url and radarr.url are identical - almost
-// always a paste error, since a shared URL points one client at the wrong service and
-// every library walk on that side fails. Warn-only, field-name-only.
-func (c *Config) warnIdenticalArrURLs() {
-	if c.SonarrURL != "" && c.SonarrURL == c.RadarrURL {
-		slog.Warn("sonarr.url and radarr.url are identical; the two arrs are different " +
-			"applications, so one of them points at the wrong service and its " +
-			"library walk will fail at runtime")
-	}
-}
-
 // validateIndexer rejects an enabled Torznab feed with no feed API key. The feed is
 // the only HTTP surface and authenticates callers by the apikey query param, so an
 // empty key would leave it unauthenticated - and able to leak the AnimeBytes passkey
 // embedded in synthesized RSS download links.
 func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
-		c.infoDisabledIndexerKeys()
 		return nil
 	}
-	c.infoIndexerModeMismatch()
 	if err := c.validateIndexerEndpoints(); err != nil {
 		return err
 	}
-	c.warnIndexerEndpointProblems()
+	c.warnABPasskeyConfiguration()
 	c.warnTorznabURLCredentials()
 	c.warnMissingProwlarrKey()
 	return nil
 }
 
-// infoIndexerModeMismatch signals a configured feed in report mode. The Torznab feed
-// is served only by the daemon, so a file-level report mode never starts it. Info,
-// mirroring the other half-configuration signals.
-func (c *Config) infoIndexerModeMismatch() {
-	if c.RunMode == RunModeReport {
-		slog.Info("indexer torznab urls are set but mode is report; " +
-			"the Torznab feed is served only by a daemon run, so a mode-driven start " +
-			"(no subcommand) exits after the one-shot audit without serving it - an " +
-			"explicit `daemon` subcommand serves it regardless of this key")
-	}
-}
-
 // The field names of the two per-indexer Torznab URL keys, shared by the
-// validation and the warn batteries that each enumerate the pair.
+// endpoint validator and the warn battery that each enumerate the pair.
 const (
 	fieldNyaaTorznabURL = "indexer.nyaa_torznab_url"
 	fieldABTorznabURL   = "indexer.ab_torznab_url"
@@ -691,7 +635,7 @@ const (
 type torznabEndpoint struct{ name, val string }
 
 // torznabEndpoints is the single enumeration of the per-indexer Torznab URL fields,
-// shared by the endpoint validator and the two warn batteries that walk the pair.
+// shared by the endpoint validator and the warn battery that walks the pair.
 func (c *Config) torznabEndpoints() []torznabEndpoint {
 	return []torznabEndpoint{
 		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
@@ -741,13 +685,6 @@ func (c *Config) validateFeedAPIKey() error {
 				"placeholder - a key guessable from the public README and config.example"
 		}
 		return errors.New(msg)
-	}
-	// Presence is required above; strength is warn-only defense-in-depth on the only
-	// gate protecting the passkey-bearing /ab feed. Field-name-only.
-	if len(c.IndexerAPIKey) < 16 {
-		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the "+
-			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)",
-			"field", "indexer.feed_api_key")
 	}
 	return nil
 }
@@ -888,53 +825,6 @@ func wellFormedABPasskey(v string) bool {
 	return true
 }
 
-// warnIndexerEndpointProblems emits the warn/info diagnostics for suspicious but
-// runnable endpoint combinations: a pasted-twice shared endpoint, a torznab url whose
-// path cannot be a per-indexer endpoint, and the two AB passkey half-configurations.
-func (c *Config) warnIndexerEndpointProblems() {
-	c.warnIdenticalIndexerEndpoints()
-	c.warnNonPerIndexerEndpoints()
-	c.warnABPasskeyConfiguration()
-	c.warnReusedIndexerSecrets()
-}
-
-// warnIdenticalIndexerEndpoints warns when both per-indexer Torznab URLs hold
-// the same value. Field-name-only; never echoes a URL.
-func (c *Config) warnIdenticalIndexerEndpoints() {
-	// The two upstream URLs are per-indexer Prowlarr Torznab endpoints (/1/api vs
-	// /2/api); identical values are almost always a paste error, and the AB matcher is
-	// torrent-id-only, so a Nyaa endpoint yields wrong-tracker attribution.
-	if c.IndexerNyaaTorznabURL != "" && c.IndexerNyaaTorznabURL == c.IndexerABTorznabURL {
-		slog.Warn("indexer.nyaa_torznab_url and indexer.ab_torznab_url are identical; " +
-			"they should be Prowlarr's per-indexer endpoints (e.g. /1/api vs /2/api) - " +
-			"a shared endpoint double-queries one indexer and misattributes trackers")
-	}
-}
-
-// warnNonPerIndexerEndpoints warns when a configured torznab url's path cannot
-// be a Prowlarr per-indexer Torznab endpoint. Field-name-only; never echoes a
-// URL.
-func (c *Config) warnNonPerIndexerEndpoints() {
-	// A Prowlarr per-indexer Torznab endpoint always carries a path (.../1/api). A bare
-	// origin, or Prowlarr's REST API, is a paste error that loads cleanly and then
-	// answers every proxied search with a Torznab error 900. Warn-only,
-	// field-name-only; the synthesized RSS feed never contacts Prowlarr.
-	for _, tu := range c.torznabEndpoints() {
-		if tu.val == "" {
-			continue
-		}
-		// validateIndexerEndpoints parsed this same immutable string above and refused
-		// every value url.Parse rejects, so the error cannot occur here.
-		u, _ := url.Parse(tu.val)
-		if p := strings.TrimSuffix(u.Path, "/"); p == "" || strings.HasPrefix(p, "/api/v1") {
-			slog.Warn("torznab url is not a Prowlarr per-indexer Torznab endpoint "+
-				"(expected a path like /1/api); every proxied search "+
-				"fails upstream and answers the arr with a Torznab error",
-				"field", tu.name)
-		}
-	}
-}
-
 // warnABPasskeyConfiguration emits the three AB half-configuration
 // diagnostics. Field-name-only; never echoes a secret.
 func (c *Config) warnABPasskeyConfiguration() {
@@ -966,25 +856,6 @@ func (c *Config) warnABPasskeyConfiguration() {
 	}
 }
 
-// warnReusedIndexerSecrets warns when indexer.feed_api_key repeats another indexer
-// secret. feed_api_key is the least protected of the three - the arrs send it as the
-// apikey QUERY parameter and store it in their own indexer configuration - so pasting
-// the Prowlarr key or the AnimeBytes passkey into it widens that credential's
-// exposure. Warn-only and field-name-only; never echoes a secret.
-func (c *Config) warnReusedIndexerSecrets() {
-	for _, s := range []struct{ name, val string }{
-		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
-		{"indexer.ab_passkey", c.IndexerABPasskey},
-	} {
-		if s.val != "" && s.val == c.IndexerAPIKey {
-			slog.Warn("indexer.feed_api_key repeats another indexer secret; the arrs send "+
-				"feed_api_key as a query parameter and store it in their indexer config, so the "+
-				"reused credential is exposed far more widely - give the feed its own key "+
-				"(openssl rand -hex 16)", "field", s.name)
-		}
-	}
-}
-
 // warnMissingProwlarrKey warns on an empty Prowlarr API key. Empty is accepted (it is
 // valid when Prowlarr has auth "Disabled for Local Addresses"), but the common case is
 // a misconfiguration: Prowlarr then 401s every proxied search and the feed answers the
@@ -996,19 +867,6 @@ func (c *Config) warnMissingProwlarrKey() {
 			"unless Prowlarr auth is disabled for local addresses they fail upstream (401) and "+
 			"every search answers the arr with a Torznab <error code=\"900\"> instead of results",
 			"field", "indexer.prowlarr_api_key")
-	}
-}
-
-// infoDisabledIndexerKeys emits the half-configuration signal for indexer secrets set
-// with no torznab URL: the Prowlarr key and the AB passkey are always
-// operator-written. Info, not Warn - parked keys must not raise Loki alert noise.
-func (c *Config) infoDisabledIndexerKeys() {
-	// indexer.feed_api_key is deliberately NOT a trigger: the first-boot starter seeds
-	// it with a generated key, so every default no-indexer deployment carries one and
-	// including it would fire the signal on the correct stock configuration.
-	if c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
-		slog.Info("indexer keys are set but no torznab url is configured; " +
-			"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")
 	}
 }
 
@@ -1161,29 +1019,6 @@ func trimList(items []string) []string {
 		}
 	}
 	return out
-}
-
-// warnAllBlankTagList warns when a configured arr_tags list holds only blank entries:
-// trimList drops them all, so that filter is silently OFF and no unmatched-tag
-// warning fires from the walk either.
-func warnAllBlankTagList(which string, raw, trimmed []string) {
-	if len(raw) > 0 && len(trimmed) == 0 {
-		slog.Warn("configured tag list holds only blank entries; the filter is off", "field", which)
-	}
-}
-
-// warnConfigPermissions warns when the config file is readable beyond its owner. This
-// file carries every secret the app has, and an operator-authored or age-decrypted
-// config commonly lands 0644, exposing them to any other uid on the host that mounts
-// /config. Warn-only; the mode itself is not secret, so it is the one value this
-// diagnostic echoes. It takes the FileInfo of the descriptor the config was READ
-// from, never a second stat of the pathname, which could describe another inode.
-func warnConfigPermissions(info os.FileInfo) {
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		slog.Warn("config file is readable beyond its owner; it holds the arr api keys, "+
-			"the Prowlarr key and the AnimeBytes passkey - chmod 600 it",
-			"field", "config file", "mode", strconv.FormatUint(uint64(perm), 8))
-	}
 }
 
 // parseLogFormat normalizes log.format via slogx.ParseFormat into the typed

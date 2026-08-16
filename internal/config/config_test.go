@@ -119,76 +119,6 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	}
 }
 
-// TestToConfigInfoOnDisabledArrWithKey pins the half-configuration signal: a
-// disabled arr whose api_key is set (always operator-written) logs an Info at
-// flatten time, while the defaults baseline (disabled, key-less) stays silent
-// so a plain config boots without noise.
-func TestToConfigInfoOnDisabledArrWithKey(t *testing.T) {
-	t.Run("disabled arr with key logs info", func(t *testing.T) {
-		rec := capture.Default(t)
-		fc := defaultFileConfig()
-		fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "sk"}
-		fc.Radarr = arrFile{Enabled: false, URL: "http://radarr:7878", APIKey: "rk"}
-
-		c := fc.toConfig()
-
-		if c.RadarrURL != "" || c.RadarrAPIKey != "" {
-			t.Errorf("disabled radarr should still be dropped, got url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
-		}
-		if !rec.Contains("api_key is set but the arr is not enabled") ||
-			!rec.AttrContains("api_key is set but the arr is not enabled", "field", "radarr.api_key") {
-			t.Errorf("toConfig log = %v, want the disabled-radarr-with-key info", rec.Messages())
-		}
-	})
-	t.Run("default key-less disabled arr stays silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		fc := defaultFileConfig()
-		fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "sk"}
-
-		fc.toConfig()
-
-		for _, msg := range rec.Messages() {
-			if strings.Contains(msg, "will not be scanned") {
-				t.Errorf("toConfig logged %q for a default key-less disabled arr", msg)
-			}
-		}
-	})
-}
-
-// TestWarnOverlappingTags pins the include/exclude overlap diagnostic: a tag
-// in both arr_tags lists warns (exclude wins, so the include entry is dead),
-// disjoint lists stay silent, and the warning is field-name-only — it never
-// echoes the tag value, which can carry an expanded ${VAR}.
-func TestWarnOverlappingTags(t *testing.T) {
-	tests := []struct {
-		name     string
-		include  []string
-		exclude  []string
-		wantWarn bool
-	}{
-		{"overlap warns", []string{"anime", "keep"}, []string{"anime"}, true},
-		{"case and whitespace still overlap", []string{" Anime "}, []string{"anime"}, true},
-		{"disjoint lists stay silent", []string{"anime"}, []string{"skip"}, false},
-		{"empty lists stay silent", nil, nil, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-			c := Config{IncludeTags: tt.include, ExcludeTags: tt.exclude}
-			c.warnOverlappingTags()
-			got := rec.Contains("exclude wins, so items carrying it are never scanned")
-			if got != tt.wantWarn {
-				t.Errorf("overlap warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
-			}
-			for _, msg := range rec.Messages() {
-				if strings.Contains(msg, "anime") || strings.Contains(msg, "skip") {
-					t.Errorf("warning echoes a tag value: %q", msg)
-				}
-			}
-		})
-	}
-}
-
 func TestWebBaseFallsBackToInternalURL(t *testing.T) {
 	withPublic := Config{SonarrURL: "http://internal:8989", SonarrPublicURL: "https://sonarr.example.com"}
 	if got := withPublic.SonarrWebBase(); got != "https://sonarr.example.com" {
@@ -703,49 +633,6 @@ func TestValidateWarnsOnSmuggledPublicURL(t *testing.T) {
 	}
 }
 
-// TestValidateWarnsOnIdenticalArrURLs pins warnIdenticalArrURLs' warn-only
-// contract: identical sonarr.url/radarr.url values warn (a paste error - one
-// client queries the wrong application), distinct values stay silent, and the
-// warning is field-name-only (never echoes a URL).
-func TestValidateWarnsOnIdenticalArrURLs(t *testing.T) {
-	t.Run("identical arr urls warn", func(t *testing.T) {
-		rec := capture.Default(t)
-		cfg := Config{
-			RunMode:   RunModeDaemon,
-			SonarrURL: "http://arr:8989", SonarrAPIKey: "sk",
-			RadarrURL: "http://arr:8989", RadarrAPIKey: "rk",
-		}
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("Validate() error = %v, want identical arr urls to remain warn-only", err)
-		}
-		if !rec.Contains("sonarr.url and radarr.url are identical") {
-			t.Errorf("Validate() log = %v, want the identical-arr-url warning", rec.Messages())
-		}
-		for _, m := range rec.Messages() {
-			if strings.Contains(m, "http://arr:8989") {
-				t.Errorf("Validate() log echoes the URL: %q", m)
-			}
-		}
-		if rec.AttrContains("", "", "http://arr:8989") {
-			t.Errorf("Validate() structured attributes echo the URL: %v", rec.Messages())
-		}
-	})
-	t.Run("distinct arr urls stay silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		cfg := Config{
-			RunMode:   RunModeDaemon,
-			SonarrURL: "http://sonarr:8989", SonarrAPIKey: "sk",
-			RadarrURL: "http://radarr:7878", RadarrAPIKey: "rk",
-		}
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains("sonarr.url and radarr.url are identical") {
-			t.Errorf("Validate() log = %v, want no identical-arr-url warning", rec.Messages())
-		}
-	})
-}
-
 func TestValidateIndexerProwlarrKeyWarning(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
@@ -775,83 +662,13 @@ func TestValidateIndexerProwlarrKeyWarning(t *testing.T) {
 	})
 }
 
-// TestValidateIndexerHalfConfiguredInfo pins the half-configuration signal:
-// indexer secrets set without any torznab URL log an Info naming the missing
-// URLs (the feed would otherwise silently not start), while a fully-empty
-// indexer section stays silent. Info, not Warn - deliberately parked keys
-// must not raise Loki alert noise.
-func TestValidateIndexerHalfConfiguredInfo(t *testing.T) {
-	base := Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k"}
-
-	t.Run("keys without torznab url log info", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := base
-		c.IndexerProwlarrAPIKey = "pk"
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if !rec.Contains("indexer keys are set but no torznab url is configured") {
-			t.Errorf("Validate() log = %v, want the half-configured indexer info", rec.Messages())
-		}
-	})
-	t.Run("a starter-seeded feed key alone stays silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := base
-		c.IndexerAPIKey = strings.Repeat("a", 32) // what seedFeedAPIKey writes
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains("indexer keys are set but no torznab url is configured") {
-			t.Errorf("Validate() log = %v, want no half-configured indexer info", rec.Messages())
-		}
-	})
-	t.Run("empty indexer section stays silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := base
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains("indexer keys are set but no torznab url is configured") {
-			t.Errorf("Validate() log = %v, want no half-configured indexer info", rec.Messages())
-		}
-	})
-	// The mode/feature half-configuration: a torznab URL with mode report - the
-	// feed is served only by the daemon, so it silently never starts. Info,
-	// same no-Loki-noise posture as the other half-configuration signals.
-	feedBase := base
-	feedBase.IndexerNyaaTorznabURL = "http://prowlarr:9696/22/api"
-	feedBase.IndexerAPIKey = strings.Repeat("a", 32)
-	feedBase.IndexerProwlarrAPIKey = "pk"
-	t.Run("torznab url with mode report logs info", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := feedBase
-		c.RunMode = RunModeReport
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if !rec.Contains("indexer torznab urls are set but mode is report") {
-			t.Errorf("Validate() log = %v, want the report-mode indexer info", rec.Messages())
-		}
-	})
-	t.Run("torznab url with mode daemon stays silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := feedBase
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains("indexer torznab urls are set but mode is report") {
-			t.Errorf("Validate() log = %v, want no report-mode indexer info", rec.Messages())
-		}
-	})
-}
-
 // TestValidateIndexerParkedABPasskeyInfo pins the inverse half-configuration
 // signal inside a configured feed: indexer.ab_passkey set while
 // indexer.ab_torznab_url is empty (the feed otherwise configured via
 // nyaa_torznab_url) logs an Info naming the inert passkey - the AB URL is the
 // AnimeBytes on switch, so the passkey is otherwise silently unused. Info,
-// not Warn, mirroring infoDisabledIndexerKeys: a deliberately parked passkey
-// must not raise Loki alert noise. Silent when ab_torznab_url is also set.
+// not Warn: a deliberately parked passkey must not raise Loki alert noise.
+// Silent when ab_torznab_url is also set.
 func TestValidateIndexerParkedABPasskeyInfo(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
@@ -906,70 +723,6 @@ func TestValidateIndexerParkedABPasskeyInfo(t *testing.T) {
 		}
 		if rec.Contains("indexer.ab_torznab_url is set but animebytes is false") {
 			t.Errorf("Validate() log = %v, want no animebytes-off info", rec.Messages())
-		}
-	})
-}
-
-func TestValidateIndexerWarnsOnIdenticalTorznabURLs(t *testing.T) {
-	rec := capture.Default(t)
-	const upstream = "http://prowlarr:9696/22/api"
-	cfg := Config{
-		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		IndexerAPIKey: strings.Repeat("a", 16), IndexerProwlarrAPIKey: "pk", IndexerABPasskey: testABPasskey,
-		IndexerNyaaTorznabURL: upstream, IndexerABTorznabURL: upstream,
-	}
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want identical endpoints to remain warn-only", err)
-	}
-	if !rec.Contains("indexer.nyaa_torznab_url and indexer.ab_torznab_url are identical") {
-		t.Errorf("Validate() log = %v, want the identical-endpoint warning", rec.Messages())
-	}
-}
-
-// TestValidateIndexerDistinctTorznabURLsStaySilent pins the absence side of
-// the identical-torznab-endpoints warning: two distinct per-indexer Prowlarr
-// endpoints (the correct configuration) must not fire it.
-func TestValidateIndexerDistinctTorznabURLsStaySilent(t *testing.T) {
-	rec := capture.Default(t)
-	cfg := Config{
-		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		IndexerAPIKey: strings.Repeat("a", 16), IndexerProwlarrAPIKey: "pk", IndexerABPasskey: testABPasskey,
-		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
-		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want distinct per-indexer endpoints to validate", err)
-	}
-	if rec.Contains("are identical") {
-		t.Errorf("Validate() log = %v, want no identical-endpoint warning for distinct per-indexer URLs", rec.Messages())
-	}
-}
-
-// TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
-// indexer.feed_api_key: a key under 16 characters warns, because it gates the
-// AnimeBytes-passkey-bearing feed. Field-name-only: the key value never rides
-// the log record.
-func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
-	base := Config{
-		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
-		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api", IndexerProwlarrAPIKey: "pk",
-	}
-
-	t.Run("short key warns without value", func(t *testing.T) {
-		const shortKey = "hunter2"
-		rec := capture.Default(t)
-		c := base
-		c.IndexerAPIKey = shortKey
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if !rec.Contains("feed_api_key is shorter than 16 characters") {
-			t.Errorf("Validate() log = %v, want the short feed_api_key warning", rec.Messages())
-		}
-		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, shortKey) || rec.AttrContains("", "", shortKey) {
-			t.Errorf("Validate() log leaks the key value: %v", rec.Messages())
 		}
 	})
 }
@@ -1032,47 +785,6 @@ func TestValidateIndexerRejectsMalformedFeedKey(t *testing.T) {
 			if corpus := strings.Join(rec.Messages(), "\n"); strings.Contains(corpus, tc.key) ||
 				rec.AttrContains("", "", tc.key) {
 				t.Errorf("Validate() log leaks the configured feed_api_key value: %v", rec.Messages())
-			}
-		})
-	}
-}
-
-// TestValidateIndexerWarnsOnNonTorznabEndpoint pins the endpoint-shape
-// diagnostic: a bare Prowlarr origin and Prowlarr's REST API path are the two
-// documented paste errors that load cleanly and then fail every proxied
-// search, so both warn (naming the field, never the URL) while a real
-// per-indexer Torznab path stays silent.
-func TestValidateIndexerWarnsOnNonTorznabEndpoint(t *testing.T) {
-	tests := []struct {
-		name     string
-		endpoint string
-		wantWarn bool
-	}{
-		{"bare Prowlarr origin warns", "http://prowlarr:9696", true},
-		{"Prowlarr REST API path warns", "http://prowlarr:9696/api/v1/search", true},
-		{"per-indexer Torznab path stays silent", "http://prowlarr:9696/22/api", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-			cfg := Config{
-				RunMode:               RunModeDaemon,
-				SonarrURL:             "http://sonarr:8989",
-				SonarrAPIKey:          "k",
-				IndexerAPIKey:         strings.Repeat("a", 32),
-				IndexerNyaaTorznabURL: tt.endpoint,
-				IndexerProwlarrAPIKey: "pk",
-			}
-
-			if err := cfg.Validate(); err != nil {
-				t.Fatalf("Validate: %v", err)
-			}
-			got := rec.Contains("torznab url is not a Prowlarr per-indexer Torznab endpoint")
-			if got != tt.wantWarn {
-				t.Errorf("endpoint-shape warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
-			}
-			if got && !rec.AttrContains("", "field", "indexer.nyaa_torznab_url") {
-				t.Errorf("Validate() log = %v, want the warning to name indexer.nyaa_torznab_url", rec.Messages())
 			}
 		})
 	}
@@ -1646,24 +1358,6 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 	})
 }
 
-// TestToConfigInfoOnDisabledSonarrWithKey mirrors the radarr variant above for
-// the sonarr half-configuration signal: a disabled sonarr with an api_key set
-// logs the Info line and its URL/key are dropped from the runtime Config.
-func TestToConfigInfoOnDisabledSonarrWithKey(t *testing.T) {
-	rec := capture.Default(t)
-	fc := defaultFileConfig()
-	fc.Sonarr = arrFile{Enabled: false, URL: "http://sonarr:8989", APIKey: "sk"}
-	fc.Radarr = arrFile{Enabled: true, URL: "http://radarr:7878", APIKey: "rk"}
-	c := fc.toConfig()
-	if c.SonarrURL != "" || c.SonarrAPIKey != "" {
-		t.Errorf("disabled sonarr should be dropped, got url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
-	}
-	if !rec.Contains("api_key is set but the arr is not enabled") ||
-		!rec.AttrContains("api_key is set but the arr is not enabled", "field", "sonarr.api_key") {
-		t.Errorf("toConfig log = %v, want the disabled-sonarr-with-key info", rec.Messages())
-	}
-}
-
 // TestLoadEmptyOrCommentOnlyConfig pins Load's contract for a config file
 // that exists but carries no YAML document (an empty file, or comments only):
 // the load succeeds on the pure defaults baseline (RunMode daemon, default
@@ -1852,38 +1546,6 @@ func TestValidateWarnsOnPublicURLQuery(t *testing.T) {
 	}
 }
 
-// TestValidateIndexerFeedKeyLengthBoundary pins the exact floor of the
-// short-feed-key warning: a key of exactly 16 characters meets the minimum
-// the warning names ("shorter than 16 characters") and must stay silent,
-// while a 15-character key still warns.
-func TestValidateIndexerFeedKeyLengthBoundary(t *testing.T) {
-	base := Config{
-		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
-		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api", IndexerProwlarrAPIKey: "pk",
-	}
-	tests := []struct {
-		name     string
-		keyLen   int
-		wantWarn bool
-	}{
-		{"15-char key warns", 15, true},
-		{"16-char key stays silent", 16, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-			c := base
-			c.IndexerAPIKey = strings.Repeat("a", tt.keyLen)
-			if err := c.Validate(); err != nil {
-				t.Fatalf("Validate: %v", err)
-			}
-			if got := rec.Contains("feed_api_key is shorter than 16 characters"); got != tt.wantWarn {
-				t.Errorf("short-key warning present = %v, want %v for a %d-character key", got, tt.wantWarn, tt.keyLen)
-			}
-		})
-	}
-}
-
 // TestValidateIndexerEmptyABPasskeyWarning pins the empty-ab_passkey startup
 // warning (indexer.ab_torznab_url set + indexer.ab_passkey empty): the /ab
 // RSS feed builds its download links from the passkey, so the operator gets a
@@ -1915,45 +1577,6 @@ func TestValidateIndexerEmptyABPasskeyWarning(t *testing.T) {
 		}
 		if rec.Contains("indexer.ab_passkey is empty") {
 			t.Errorf("Validate() log = %v, want no empty-ab_passkey warning", rec.Messages())
-		}
-	})
-}
-
-// TestToConfigWarnsOnAllBlankTagLists pins the all-blank tag-list diagnostic
-// on BOTH arr_tags sides: trimList drops every blank entry, so the filter is
-// silently off, and the field-name-only warning (never the tag values, which
-// can carry an expanded ${VAR}) is the operator's only signal that the
-// configured list does nothing.
-func TestToConfigWarnsOnAllBlankTagLists(t *testing.T) {
-	t.Run("include list", func(t *testing.T) {
-		rec := capture.Default(t)
-		fc := defaultFileConfig()
-		fc.ArrTags.Include = []string{" ", "\t"}
-
-		cfg := fc.toConfig()
-
-		if len(cfg.IncludeTags) != 0 {
-			t.Errorf("IncludeTags = %v, want no effective tags", cfg.IncludeTags)
-		}
-		if !rec.Contains("configured tag list holds only blank entries; the filter is off") ||
-			!rec.AttrContains("", "field", "arr_tags.include") {
-			t.Errorf("toConfig() log = %v, want all-blank include-list warning", rec.Messages())
-		}
-	})
-
-	t.Run("exclude list", func(t *testing.T) {
-		rec := capture.Default(t)
-		fc := defaultFileConfig()
-		fc.ArrTags.Exclude = []string{" ", "\n"}
-
-		cfg := fc.toConfig()
-
-		if len(cfg.ExcludeTags) != 0 {
-			t.Errorf("ExcludeTags = %v, want no effective tags", cfg.ExcludeTags)
-		}
-		if !rec.Contains("configured tag list holds only blank entries; the filter is off") ||
-			!rec.AttrContains("", "field", "arr_tags.exclude") {
-			t.Errorf("toConfig() log = %v, want all-blank exclude-list warning", rec.Messages())
 		}
 	})
 }
@@ -2004,93 +1627,6 @@ func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
 			t.Errorf("Validate() log = %v, want no relative-report.dir warning", rec.Messages())
 		}
 	})
-}
-
-// TestLoadWarnsOnWorldReadableConfig pins the permission diagnostic Load emits
-// through warnConfigPermissions: the file holds every secret the app has (the
-// arr api keys, the Prowlarr key, the AnimeBytes passkey), so a mode readable
-// beyond the owner WARNs and names the octal mode, while an owner-only 0600
-// file stays silent. The mode is the one value this diagnostic echoes, so the
-// warning must never carry file content.
-func TestLoadWarnsOnWorldReadableConfig(t *testing.T) {
-	const content = "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: sk-sentinel\n"
-	tests := []struct {
-		name     string
-		mode     os.FileMode
-		wantMode string
-		wantWarn bool
-	}{
-		{"group and world readable warns", 0o644, "644", true},
-		{"group readable warns", 0o640, "640", true},
-		{"owner-only stays silent", 0o600, "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte(content), tt.mode); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(path, tt.mode); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Load(path); err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			const msg = "config file is readable beyond its owner"
-			if got := rec.CountLevel(slog.LevelWarn, msg) > 0; got != tt.wantWarn {
-				t.Errorf("permission warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
-			}
-			if !tt.wantWarn {
-				return
-			}
-			if !rec.HasAttr(msg, "mode", tt.wantMode) {
-				t.Errorf("permission warning mode attr = %v, want %q", rec.Messages(), tt.wantMode)
-			}
-			if rec.AttrContains(msg, "", "sk-sentinel") {
-				t.Errorf("permission warning echoes config content: %v", rec.Messages())
-			}
-		})
-	}
-}
-
-// TestValidateWarnsOnNonTorznabABEndpoint covers the AnimeBytes half of the
-// endpoint-shape diagnostic: warnNonPerIndexerEndpoints enumerates both
-// per-indexer URL fields, and only the nyaa entry is exercised elsewhere, so
-// dropping the ab entry would silently cost the operator the config-time
-// signal for a pasted AB base while every test stayed green.
-func TestValidateWarnsOnNonTorznabABEndpoint(t *testing.T) {
-	base := Config{
-		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		IndexerAPIKey:         strings.Repeat("a", 32),
-		IndexerProwlarrAPIKey: "pk",
-		IndexerABPasskey:      testABPasskey,
-		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
-	}
-	tests := []struct {
-		name     string
-		endpoint string
-		wantWarn bool
-	}{
-		{"bare Prowlarr origin warns", "http://prowlarr:9696", true},
-		{"Prowlarr REST API path warns", "http://prowlarr:9696/api/v1/search", true},
-		{"per-indexer Torznab path stays silent", "http://prowlarr:9696/2/api", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-			c := base
-			c.IndexerABTorznabURL = tt.endpoint
-			if err := c.Validate(); err != nil {
-				t.Fatalf("Validate: %v", err)
-			}
-			const msg = "torznab url is not a Prowlarr per-indexer Torznab endpoint"
-			got := rec.AttrContains(msg, "field", "indexer.ab_torznab_url")
-			if got != tt.wantWarn {
-				t.Errorf("ab endpoint-shape warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
-			}
-		})
-	}
 }
 
 // TestValidateWarnsOnUnexpandedSecretRef pins warnUnexpandedSecretRefs after it
@@ -2173,53 +1709,6 @@ func TestValidateSecretRefWarningUnreachableForGatedKeys(t *testing.T) {
 			if rec.Contains("still holds a literal environment-variable reference") {
 				t.Errorf("the narrowed warning fired for %s; the hard gate is supposed to have "+
 					"decided already: %v", field, rec.Messages())
-			}
-		})
-	}
-}
-
-// TestValidateWarnsOnReusedIndexerSecret pins warnReusedIndexerSecrets: reusing
-// the Prowlarr key or the AnimeBytes passkey as indexer.feed_api_key warns and
-// names the reused field (feed_api_key travels as a query parameter and is
-// stored in each arr's indexer config), while distinct secrets stay silent. The
-// warning never echoes a secret.
-func TestValidateWarnsOnReusedIndexerSecret(t *testing.T) {
-	const msg = "feed_api_key repeats another indexer secret"
-	shared := strings.Repeat("b", 32)
-	base := Config{
-		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
-		IndexerAPIKey:         shared,
-		IndexerProwlarrAPIKey: "pk",
-	}
-	tests := []struct {
-		name      string
-		mutate    func(*Config)
-		wantField string
-	}{
-		{"prowlarr key reused warns", func(c *Config) { c.IndexerProwlarrAPIKey = shared }, "indexer.prowlarr_api_key"},
-		{"ab passkey reused warns", func(c *Config) { c.IndexerABPasskey = shared }, "indexer.ab_passkey"},
-		{"distinct secrets stay silent", func(*Config) {}, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-			c := base
-			tt.mutate(&c)
-			if err := c.Validate(); err != nil {
-				t.Fatalf("Validate: %v", err)
-			}
-			if tt.wantField == "" {
-				if rec.Contains(msg) {
-					t.Errorf("Validate() log = %v, want no reused-secret warning", rec.Messages())
-				}
-				return
-			}
-			if !rec.AttrContains(msg, "field", tt.wantField) {
-				t.Errorf("Validate() log = %v, want the reused-secret warning naming %s", rec.Messages(), tt.wantField)
-			}
-			if rec.AttrContains(msg, "", shared) {
-				t.Errorf("reused-secret warning echoes the secret: %v", rec.Messages())
 			}
 		})
 	}
