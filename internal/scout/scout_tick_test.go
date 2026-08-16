@@ -332,7 +332,7 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
-	latch := s.latchTicks(frozenFastPathTolerance)
+	latch := s.latchTicks()
 	const warnMsg = "SeaDex change window too large to fetch; deferring to the reconcile"
 	const errSub = "SeaDex change window has been too large to fetch repeatedly"
 	for i := 1; i <= latch; i++ {
@@ -430,7 +430,7 @@ func TestTickProductiveResetsTheOversizeRun(t *testing.T) {
 	// The counter is latched against a wall-clock tolerance converted at this
 	// loop's interval, so prime from the derived value rather than a literal
 	// count.
-	s.oversizeRun = s.latchTicks(frozenFastPathTolerance) - 1
+	s.oversizeRun = s.latchTicks() - 1
 
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("productive tick healthy=false, want true")

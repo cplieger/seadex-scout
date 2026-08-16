@@ -35,16 +35,16 @@ const (
 	minLatchTicks = 2
 )
 
-// latchTicks converts a wall-clock tolerance into the number of CONSECUTIVE
-// ticks that spans at this loop's own interval, floored at minLatchTicks so one
+// latchTicks converts frozenFastPathTolerance into the number of CONSECUTIVE
+// ticks that span it at this loop's own interval, floored at minLatchTicks so one
 // blip is always tolerated. Raw iteration counts only meant what they claimed at
 // the 15m default: poll_interval is accepted up to 30 days, so an 8-tick "2h"
 // escalation is 24h at a 3h interval. A zero or negative interval runs no ticks.
-func (s *Scout) latchTicks(d time.Duration) int {
+func (s *Scout) latchTicks() int {
 	if s.pollInterval <= 0 {
 		return minLatchTicks
 	}
-	return max(minLatchTicks, int(d/s.pollInterval))
+	return max(minLatchTicks, int(frozenFastPathTolerance/s.pollInterval))
 }
 
 // tick runs one bounded recent-changes pass. It is healthy whenever it completed,
@@ -183,7 +183,7 @@ func (s *Scout) logTickDegraded(reason string, attrs ...any) {
 // picks a counter. It re-fires at and above the threshold, so a count-based rule
 // keeps firing while the condition holds.
 func (s *Scout) warnUnreachableUpstream(msg string, err error) {
-	s.escalate(s.unreachableRun, s.latchTicks(frozenFastPathTolerance), msg,
+	s.escalate(s.unreachableRun, s.latchTicks(), msg,
 		"SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
 		attrError, logSafeUpstreamError(err),
 		"consecutive_unreachable_ticks", s.unreachableRun)
@@ -194,7 +194,7 @@ func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 // is working. The remedy is to wait for the reconcile or check the clock - one
 // running BEHIND widens every window the same way a bulk upstream edit does.
 func (s *Scout) warnOversizeWindow(count int) {
-	s.escalate(s.oversizeRun, s.latchTicks(frozenFastPathTolerance),
+	s.escalate(s.oversizeRun, s.latchTicks(),
 		"SeaDex change window too large to fetch; deferring to the reconcile",
 		"SeaDex change window has been too large to fetch repeatedly; the fast path is frozen and only the daily reconcile is refreshing - check this container's clock, then wait for the reconcile",
 		"window_entries", count, "max", seadexapi.MaxWindowEntries,

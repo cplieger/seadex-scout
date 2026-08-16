@@ -60,10 +60,7 @@ func TestPublicationLogIsNeverDeletable(t *testing.T) {
 	}
 	for _, scope := range []passScope{scopeCatalogue, scopeWindow} {
 		t.Run(scope.String(), func(t *testing.T) {
-			snap, err := buildSnapshot(&feedState{published: prev}, &passWrites{scope: scope})
-			if err != nil {
-				t.Fatalf("buildSnapshot at %v scope: %v", scope, err)
-			}
+			snap := buildSnapshot(&feedState{published: prev}, &passWrites{scope: scope})
 			for id := range prev {
 				if !snap.Published[id] {
 					t.Errorf("a %v pass deleted %q from the publication log; it must never be able to", scope, id)
@@ -212,10 +209,7 @@ func TestProjectionAlwaysAllocatesThePairRelation(t *testing.T) {
 // foreign version it happened to read.
 func TestBuildSnapshotStampsTheCurrentVersion(t *testing.T) {
 	prev := feedState{}
-	snap, err := buildSnapshot(&prev, &passWrites{scope: scopeCatalogue})
-	if err != nil {
-		t.Fatalf("buildSnapshot: %v", err)
-	}
+	snap := buildSnapshot(&prev, &passWrites{scope: scopeCatalogue})
 	if snap.Version != currentFeedVersion {
 		t.Errorf("version = %d, want %d", snap.Version, currentFeedVersion)
 	}
@@ -228,10 +222,7 @@ func TestBuildSnapshotStampsTheCurrentVersion(t *testing.T) {
 // so a pass that publishes nothing still carries every prior record.
 func TestBuildSnapshotNeverShrinksThePublicationLog(t *testing.T) {
 	prev := feedState{published: publishedSignals("nyaa:1", "ab:2")}
-	snap, err := buildSnapshot(&prev, &passWrites{scope: scopeWindow, published: publishedSignals("nyaa:3")})
-	if err != nil {
-		t.Fatalf("buildSnapshot: %v", err)
-	}
+	snap := buildSnapshot(&prev, &passWrites{scope: scopeWindow, published: publishedSignals("nyaa:3")})
 	want := publishedSignals("nyaa:1", "ab:2", "nyaa:3")
 	if !maps.Equal(snap.Published, want) {
 		t.Errorf("publication log = %v, want %v", snap.Published, want)

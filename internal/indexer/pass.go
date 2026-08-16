@@ -311,10 +311,7 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 		writes.titles = retainTitles(writes.titles, writes.nyaa, writes.ab)
 	}
 
-	snap, err := buildSnapshot(&prev, &writes)
-	if err != nil {
-		return err
-	}
+	snap := buildSnapshot(&prev, &writes)
 	if err := w.publicationLogPersistable(&snap, scope); err != nil {
 		return err
 	}

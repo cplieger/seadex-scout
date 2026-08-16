@@ -195,7 +195,8 @@ type passWrites struct {
 
 // buildSnapshot folds one pass's writes onto the previous state, member by member
 // in the canonical order, and is the only constructor of a persisted snapshot.
-func buildSnapshot(prev *feedState, w *passWrites) (snapshot, error) {
+// Every member is a direct assignment, so there is nothing here that can fail.
+func buildSnapshot(prev *feedState, w *passWrites) snapshot {
 	return snapshot{
 		Version:       currentFeedVersion,
 		Owners:        upsertOwners(prev.owners, w.evaluated, w.scope),
@@ -204,7 +205,7 @@ func buildSnapshot(prev *feedState, w *passWrites) (snapshot, error) {
 		HarvestCursor: w.cursor,
 		NyaaFeed:      w.nyaa,
 		ABFeed:        w.ab,
-	}, nil
+	}
 }
 
 // appendPublished applies the PAST-fact rule: the union of what was already
