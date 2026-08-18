@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/runesafe"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
@@ -257,7 +257,7 @@ func credentialParamName(name string) bool {
 // (httpx.RedactSecretString).
 func (u *upstream) redactSecrets(s string) string {
 	for _, secret := range u.upstreamSecrets() {
-		s = httpx.RedactSecretString(s, secret)
+		s = httpx.RedactSecretString(s, httpx.Secret(secret))
 	}
 	return s
 }

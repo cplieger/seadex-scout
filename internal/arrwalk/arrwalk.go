@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/arrapi"
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"

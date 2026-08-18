@@ -13,7 +13,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/cplieger/arrapi"
+	"github.com/cplieger/arrapi/v2"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/slogx/capture"
 )

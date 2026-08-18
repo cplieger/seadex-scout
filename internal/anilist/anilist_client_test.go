@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/slogx/capture"
 )

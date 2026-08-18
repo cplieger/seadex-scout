@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cplieger/arrapi"
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
@@ -264,7 +264,7 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 	var sonarr *arrapi.Sonarr
 	var radarr *arrapi.Radarr
 	if cfg.SonarrEnabled() {
-		s, err := arrapi.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey,
+		s, err := arrapi.NewSonarr(cfg.SonarrURL, httpx.Secret(cfg.SonarrAPIKey),
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
 			// arrapi's constructor error echoes the full baseURL with %q and an arr
@@ -275,7 +275,7 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 		sonarr = s
 	}
 	if cfg.RadarrEnabled() {
-		r, err := arrapi.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey,
+		r, err := arrapi.NewRadarr(cfg.RadarrURL, httpx.Secret(cfg.RadarrAPIKey),
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
 			if sonarr != nil {

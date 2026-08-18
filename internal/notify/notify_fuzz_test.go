@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe"
+	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
@@ -41,7 +41,7 @@ func FuzzCapAttrBoundedAndSanitized(f *testing.F) {
 			t.Errorf("capAttr(%q) = %q, want valid UTF-8", raw, got)
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafe(r, true) {
+			if runesafe.IsUnsafeMultiLine(r) {
 				t.Errorf("capAttr(%q) emits unsafe rune %U", raw, r)
 			}
 		}
@@ -82,7 +82,7 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 			t.Errorf("joinLinksAttr(%d links) = %q, want valid UTF-8", count, got)
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafe(r, true) {
+			if runesafe.IsUnsafeMultiLine(r) {
 				t.Errorf("joinLinksAttr(%d links) emits unsafe rune %U", count, r)
 			}
 		}
@@ -131,7 +131,7 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 			}
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafe(r, true) {
+			if runesafe.IsUnsafeMultiLine(r) {
 				t.Errorf("capAlertTextAttr(%d bytes) emits unsafe rune %U", len(raw), r)
 			}
 		}
@@ -168,7 +168,7 @@ func FuzzCapURLAttrBoundedAndInertDestination(f *testing.F) {
 			t.Errorf("capURLAttr(%d bytes) leaves destination-breaking byte %q at offset %d", len(raw), got[i], i)
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafe(r, true) {
+			if runesafe.IsUnsafeMultiLine(r) {
 				t.Errorf("capURLAttr(%d bytes) emits unsafe rune %U", len(raw), r)
 			}
 		}

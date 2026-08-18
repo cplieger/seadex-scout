@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/keyenc"
-	"github.com/cplieger/runesafe"
+	"github.com/cplieger/runesafe/v2"
 )
 
 // TestMaxBytesMirrorsKeyencBudget pins the equality logattr's doc comment

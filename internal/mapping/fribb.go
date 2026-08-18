@@ -11,7 +11,7 @@ import (
 
 	"github.com/cplieger/jsonx"
 	"github.com/cplieger/jsonx/bounded"
-	"github.com/cplieger/runesafe"
+	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
