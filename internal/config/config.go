@@ -51,9 +51,10 @@ const maxConfigBytes = 1 << 20
 // Fixed endpoints, cadences, internal /config file paths, and the default report
 // directory: internal machinery wired at build time, deliberately NOT config-file
 // keys. DefaultReportDir is the one baseline report.dir overrides.
+//
+// Each upstream's package owns its own DefaultURL and request cadence beside the
+// decoder that embodies its contract; config is a leaf that cannot import them.
 const (
-	// Each upstream's package owns its own DefaultURL and request cadence beside the
-	// decoder that embodies its contract; config is a leaf that cannot import them.
 	// DefaultMappingOverrides is the local alID->IDs override file; absent is fine.
 	DefaultMappingOverrides = DefaultConfigDir + "/overrides.json"
 	// DefaultStatePath is the atomic JSON cache/state file.

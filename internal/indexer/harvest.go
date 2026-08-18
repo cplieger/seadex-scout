@@ -398,12 +398,6 @@ const (
 	harvestShowFailed
 )
 
-// requestScopedHarvestError reports whether err names a failure the upstream scoped to
-// THIS show's query, so the failure is show-local - terminal for the show (retrying the
-// same invalid request cannot help, which is why terminalTorznabCode and fetchAndParse
-// already fail it fast) but never evidence the upstream itself is down, so one
-// rejection stays show-local (a consecutive run of them may still trip
-// consecutiveRejectedLatch and latch the scope).
 func permanentUpstreamCredentialError(err error) bool {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		return docErr.codeNum >= 100 && docErr.codeNum < 200
@@ -417,6 +411,12 @@ func permanentUpstreamCredentialError(err error) bool {
 	return false
 }
 
+// requestScopedHarvestError reports whether err names a failure the upstream scoped to
+// THIS show's query, so the failure is show-local - terminal for the show (retrying the
+// same invalid request cannot help, which is why terminalTorznabCode and fetchAndParse
+// already fail it fast) but never evidence the upstream itself is down, so one
+// rejection stays show-local (a consecutive run of them may still trip
+// consecutiveRejectedLatch and latch the scope).
 func requestScopedHarvestError(err error) bool {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		return docErr.codeNum >= 200 && docErr.codeNum < 300
