@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/seadex-scout/internal/reportfs"
 )
 

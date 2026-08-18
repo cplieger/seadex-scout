@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 

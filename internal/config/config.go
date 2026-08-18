@@ -27,9 +27,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/envx/yamlenv"
-	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/envx/yamlenv/v2"
+	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/secretref"
@@ -258,7 +258,7 @@ func Load(path string) (Config, error) {
 	}
 	fc := defaultFileConfig()
 	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
-		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho()))
+		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho(true)))
 	if len(refs) > 0 {
 		slog.Warn("config references environment variables that are not set; "+
 			"the literal ${VAR} is kept and will likely fail authentication",
@@ -425,7 +425,7 @@ func parseInterval(raw string) (time.Duration, bool) {
 	s := scheduler.ParseInterval(raw, DefaultPollInterval,
 		scheduler.WithBounds(minPollInterval, maxPollInterval),
 		scheduler.WithName("poll_interval"),
-		scheduler.WithRedactedValue(),
+		scheduler.WithRedactedValue(true),
 		scheduler.WithIntervalLogger(slog.Default()))
 	if s.Mode == scheduler.ModeExternal {
 		return 0, true

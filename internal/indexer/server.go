@@ -14,7 +14,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/secretref"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/webhttp/v2"
 )
 
 const (
@@ -121,7 +121,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 // feed: it renders a recovered panic's 500 as a Torznab <error> document on the XML
 // content type the arrs expect. Recoverer already logged the panic and only calls
 // this when the response has not been committed.
-func torznabErrorResponder(w http.ResponseWriter, _ *http.Request, status int, _, msg string) {
+func torznabErrorResponder(w http.ResponseWriter, _ *http.Request, status int, _ webhttp.ErrorCode, msg string) {
 	noCacheHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(status)
