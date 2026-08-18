@@ -36,7 +36,7 @@ func TestMatchCancelledLookupsLogDebugNotWarn(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(nil) // no record: the entry needs the AniList lookup
 
-	res := NewMatcher(cancelledAniList{}, logger).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
+	res := New(cancelledAniList{}, logger).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
 
 	if !res.Degraded {
 		t.Error("Degraded = false, want true: a cancelled needed lookup must preserve findings")
@@ -97,7 +97,7 @@ func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
 	})
 	fake := &cancelOnFetchAniList{cancel: cancel}
 
-	res := NewMatcher(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
 		t.Fatalf("matches = %+v, want exactly the one title match completed before the cancellation", res.Matches)
@@ -134,7 +134,7 @@ func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
 		901: {Titles: []string{"Stale"}, Format: "TV", Year: 2019, Expiry: time.Now().Add(-time.Hour)},
 	}}
 
-	res := NewMatcher(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
 
 	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
 		t.Fatalf("matches = %+v, want the final entry's completed title match retained", res.Matches)
@@ -165,7 +165,7 @@ func TestPrefetchSkippedOnAlreadyCancelledContext(t *testing.T) {
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
 	}}
 
-	res := NewMatcher(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, &library.Snapshot{}, idx, Memo{})
+	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, &library.Snapshot{}, idx, Memo{})
 
 	if fake.batchCalls != 0 {
 		t.Errorf("batch calls = %d, want 0 (a batch issued on an already-cancelled cycle can only fail)", fake.batchCalls)

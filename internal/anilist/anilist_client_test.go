@@ -55,7 +55,7 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
@@ -85,7 +85,7 @@ func TestDo429WithoutRetryAfterUsesDefault(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
@@ -111,7 +111,7 @@ func TestDoHonorsValidRetryAfterHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
@@ -135,7 +135,7 @@ func TestDo429WithoutRetryAfterUsesResetHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
@@ -158,7 +158,7 @@ func TestDo429WithPastResetFallsBackToDefault(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
@@ -179,7 +179,7 @@ func TestFetchReturnsMediaAndCountsCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	m, err := c.Fetch(t.Context(), 154587)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -203,7 +203,7 @@ func TestFetchRejectsMismatchedMediaID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	if _, err := c.Fetch(t.Context(), 600); err == nil || !strings.Contains(err.Error(), "does not match requested id") {
 		t.Fatalf("Fetch mismatched identity error = %v, want identity rejection", err)
 	}
@@ -240,7 +240,7 @@ func TestFetchManyChunksBatchesAndMergesResults(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err != nil {
@@ -290,7 +290,7 @@ func TestFetchManyReturnsPartialResultsOnError(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err == nil {
@@ -312,7 +312,7 @@ func TestFetchManyPreservesValidRecordsOnRecordError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), []int{1, 2})
 	out := res.Media
 	if err == nil {
@@ -352,7 +352,7 @@ func TestFetchManyContinuesAfterRecordError(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err == nil {
@@ -380,7 +380,7 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), []int{1, 2})
 	out := res.Media
 	if err == nil {
@@ -485,7 +485,7 @@ func TestFetchCountsEveryHTTPAttempt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	if _, err := c.Fetch(t.Context(), 1); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestDoBoundsOversizedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	got, err := c.do(t.Context(), []byte(`{}`))
 	var tooLarge *httpx.ResponseTooLargeError
 	if !errors.As(err, &tooLarge) {
@@ -528,7 +528,7 @@ func TestDoBoundsOversizedResponse(t *testing.T) {
 // a context canceled while waiting for a throttle reservation returns
 // context.Canceled before counting or issuing an AniList request.
 func TestFetchCanceledBeforeReservedSlot(t *testing.T) {
-	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", WithRate(60))
 	c.throttle.penalize(time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -546,7 +546,7 @@ func TestFetchCanceledBeforeReservedSlot(t *testing.T) {
 // path, including the documented partial-result shape and the requirement not
 // to count a request that never starts.
 func TestFetchManyCanceledBeforeReservedSlot(t *testing.T) {
-	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", WithRate(60))
 	c.throttle.penalize(time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -579,7 +579,7 @@ func TestFetchNotFound404ReturnsErrNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	_, err := c.Fetch(t.Context(), 999999999)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Fetch() error = %v, want ErrNotFound (AniList mirrors not-found into HTTP 404)", err)
@@ -613,7 +613,7 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 				w.WriteHeader(tt.status)
 			}))
 			defer srv.Close()
-			c := NewClient(srv.Client(), srv.URL, 100000, nil)
+			c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 			_, err := c.Fetch(t.Context(), 1)
 			if err == nil {
 				t.Fatalf("Fetch() on status %d = nil error, want typed error", tt.status)
@@ -668,7 +668,7 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 60, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
 	var rle *httpx.RateLimitError
@@ -702,7 +702,7 @@ func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
 	client := srv.Client()
 	srv.Close() // connection refused from here on
 
-	c := NewClient(client, srv.URL, 100000, nil)
+	c := NewClient(client, srv.URL, WithRate(100000))
 	_, err := c.do(t.Context(), []byte(`{}`))
 	if err == nil {
 		t.Fatal("do() against a closed server = nil error, want a transport error")
@@ -719,7 +719,7 @@ func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
 // batched fetch: no ids means no chunks, no outbound attempts, an empty map,
 // and a nil error.
 func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
-	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", WithRate(60))
 	res, err := c.FetchMany(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("FetchMany(nil): %v", err)
@@ -739,7 +739,7 @@ func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
 // unparseable client URL surfaces as an error before any outbound attempt, so
 // Stats().Calls stays 0 (the attempt counter tracks outbound HTTP attempts).
 func TestDoRejectsUnparseableURL(t *testing.T) {
-	c := NewClient(http.DefaultClient, "://missing-scheme", 60, nil)
+	c := NewClient(http.DefaultClient, "://missing-scheme", WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 	if err == nil {
 		t.Fatal("do() with an unparseable URL = nil error, want a request-construction error")
@@ -760,7 +760,7 @@ func TestFetchManyFirstChunkFailureReturnsIncomplete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), []int{1, 2})
 	if err == nil {
 		t.Fatal("FetchMany must surface the first chunk's envelope error")
@@ -801,7 +801,7 @@ func TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's envelope error")
@@ -847,7 +847,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's HTTP failure")
@@ -886,7 +886,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 // attempt, so Stats().Calls stays 0 (the same no-attempt invariant
 // TestDoRejectsUnparseableURL pins for the URL-construction branch).
 func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
-	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", WithRate(60))
 	_, err := c.request(t.Context(), query, map[string]any{"bad": make(chan int)})
 	if err == nil {
 		t.Fatal("request() with unmarshalable variables = nil error, want a marshal error")
@@ -931,7 +931,7 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	out := res.Media
 	if err == nil {
@@ -970,7 +970,7 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 // the guard's boundary from <= 0 to < 0 would instead send id 0 through
 // three doomed HTTP attempts against the unroutable base URL.
 func TestFetchRejectsNonPositiveIDWithoutRequest(t *testing.T) {
-	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", WithRate(60))
 
 	if _, err := c.Fetch(t.Context(), 0); err == nil || !strings.Contains(err.Error(), "invalid media id 0") {
 		t.Errorf("Fetch(0) error = %v, want invalid-media-id rejection", err)
@@ -1001,7 +1001,7 @@ func TestDoSendsRequiredHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	if _, err := c.Fetch(t.Context(), 1); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -1051,7 +1051,7 @@ func TestTransientEnvelopeStatusRetries(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c := NewClient(srv.Client(), srv.URL, 100000, nil)
+			c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 			_, err := c.Fetch(t.Context(), 1)
 
 			if err == nil {
@@ -1092,7 +1092,7 @@ func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 
 	if err == nil {
@@ -1126,7 +1126,7 @@ func TestFetchDoesNotRetryUnparseableBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	_, err := c.Fetch(t.Context(), 1)
 	if err == nil {
 		t.Fatal("Fetch() on an unparseable body = nil error, want a parse failure")
@@ -1165,7 +1165,7 @@ func TestEnvelopeRateLimitCountsOneWait(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	if _, err := c.Fetch(t.Context(), 1); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -1208,7 +1208,7 @@ func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the aborting chunk's envelope error")
@@ -1251,7 +1251,7 @@ func TestDoObservesRateHeadersOnErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	if _, err := c.do(t.Context(), []byte(`{}`)); err == nil {
 		t.Fatal("do() on a 400 = nil error, want a status error")
 	}
@@ -1296,7 +1296,7 @@ func TestFetchManyScopesUnrequestedIDsToTheAbandonedTail(t *testing.T) {
 	for i := range ids {
 		ids[i] = i + 1
 	}
-	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	c := NewClient(srv.Client(), srv.URL, WithRate(100000))
 	res, err := c.FetchMany(t.Context(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the aborting chunk's envelope error")

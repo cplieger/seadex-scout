@@ -24,7 +24,7 @@ var memoTestClock = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 // jitter sequence: the i-th rand draw returns draws[i%len(draws)], so every
 // stamped expiry is exact and deterministic — no sleeps, no real randomness.
 func expiryMatcher(client AniListClient, draws ...float64) *Matcher {
-	m := NewMatcher(client, nil)
+	m := New(client, nil)
 	m.now = func() time.Time { return memoTestClock }
 	i := 0
 	m.rand = func() float64 {

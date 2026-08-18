@@ -53,7 +53,7 @@ func TestFetchEntriesPaginatesAndDecodes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.Client(), server.URL, 0, nil)
+	client := NewClient(server.Client(), server.URL)
 	entries, err := client.FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
@@ -92,7 +92,7 @@ func TestFetchEntriesPaginationCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.Client(), server.URL, 0, nil)
+	client := NewClient(server.Client(), server.URL)
 	entries, err := client.FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want pagination cap error")
@@ -120,7 +120,7 @@ func TestFetchEntriesDecodesEveryPublishedField(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}

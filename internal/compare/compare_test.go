@@ -361,13 +361,13 @@ func TestCompareOrdersEqualURLLinksByTracker(t *testing.T) {
 }
 
 func comparer(opts filter.Options, excludeSpecials bool) *Comparer {
-	return NewComparer(Config{Filter: opts, ExcludeSpecials: excludeSpecials})
+	return New(Config{Filter: opts, ExcludeSpecials: excludeSpecials})
 }
 
 // abComparer is a comparer with the AnimeBytes tracker toggle enabled (the
 // toggle rides Config, not filter.Options, which holds only content filters).
 func abComparer() *Comparer {
-	return NewComparer(Config{AnimeBytes: true})
+	return New(Config{AnimeBytes: true})
 }
 
 func TestCompareAlignedProducesNoFinding(t *testing.T) {
@@ -917,7 +917,7 @@ func TestCompareBrokenBestRecommendedByDefault(t *testing.T) {
 			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/804", Tags: []string{"Broken"}},
 		}}
 		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-		feedOnly := NewComparer(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+		feedOnly := New(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
 			"broken": {tagfilter.SurfaceFeed},
 		})})
 		got := feedOnly.Compare([]match.Match{m})
@@ -937,7 +937,7 @@ func TestCompareExcludedTagBestNotRecommended(t *testing.T) {
 	newItem := func() *library.Item {
 		return &library.Item{Title: "Warned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
 	}
-	excluding := NewComparer(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+	excluding := New(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
 		"broken":     {tagfilter.SurfaceFindings},
 		"incomplete": {tagfilter.SurfaceFindings},
 	})})

@@ -25,7 +25,7 @@ func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("empty refresh returned nil error, want degraded error")
@@ -52,7 +52,7 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("refresh with no arr identifiers returned nil error, want degraded error")
@@ -88,7 +88,7 @@ func TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("refresh with 1/250 arr-identifier coverage returned nil error, want degraded error")
@@ -118,7 +118,7 @@ func TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err != nil {
 		t.Fatalf("refresh with exactly 1/100 arr identifiers returned error: %v", err)
@@ -162,7 +162,7 @@ func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 			next, err := l.refreshCache(t.Context(), &Cache{})
 			if tc.wantAccept {
 				if err != nil {
@@ -206,7 +206,7 @@ func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   prevRecords,
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("truncated refresh (1 record replacing 4) returned nil error, want degraded error")
@@ -246,7 +246,7 @@ func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
 		{AniListID: 4, Type: "TV", TvdbID: 400},
 	}
 	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: prevRecords}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	var stale *StaleMapError
 	if !errors.As(err, &stale) {
@@ -299,7 +299,7 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 			defer ts.Close()
 
 			prev := routingFloorPrevCache()
-			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 			next, err := l.refreshCache(t.Context(), prev)
 			var stale *StaleMapError
 			if !errors.As(err, &stale) {
@@ -332,7 +332,7 @@ func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 
 	prev := routingFloorPrevCache()
 	prev.RejectedRefreshes = 3
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("additive refresh growing both routing sides returned error %v, want accepted", err)
@@ -365,7 +365,7 @@ func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("first-boot refresh with 1/200 AniList-keyed records returned nil error, want below-minimum rejection")
@@ -395,7 +395,7 @@ func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.
 	}))
 	defer ts.Close()
 
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("first-boot refresh of 200 duplicates of one AniList ID returned nil error, want below-minimum rejection")
@@ -427,7 +427,7 @@ func TestLoader_refreshCache_negativeOnlyCacheNotUsable(t *testing.T) {
 		FetchedAt: time.Now(), // inside the refresh window: freshness alone would reuse it
 		Records:   records,
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
@@ -458,7 +458,7 @@ func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("first-boot refresh of 200 negative-ID records returned nil error, want rejection")
@@ -495,7 +495,7 @@ func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 			{AniListID: 4, Type: "TV", TvdbID: 400},
 		},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refresh with one duplicated ID returned error %v, want accepted (4 effective records against 4 stale)", err)
@@ -552,7 +552,7 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   prevRecords,
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	stale, ok := errors.AsType[*StaleMapError](err)
 	if !ok {
@@ -615,7 +615,7 @@ func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
 		Records:           prevRecords,
 		RejectedRefreshes: 3,
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("exactly-half refresh (4 of 8) returned error %v, want accepted (the guards are strictly below-half)", err)

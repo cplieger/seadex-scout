@@ -252,7 +252,7 @@ func noNetworkClient() *http.Client {
 // plain load error, not a mapping.StaleMapError).
 func unreachableMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
-	return mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger)
+	return mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
 // emptyRecordsMapLoader returns a Fribb loader whose upstream answers an empty
@@ -264,7 +264,7 @@ func emptyRecordsMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 		_, _ = w.Write([]byte("[]"))
 	}))
 	t.Cleanup(srv.Close)
-	return mapping.NewLoader(srv.Client(), srv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger)
+	return mapping.NewLoader(srv.Client(), srv.URL, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
 // aniStatsFn adapts an AniList client's Stats to the Deps.AniListStats
@@ -396,8 +396,8 @@ func TestCycleGateReemitsAStandingSetAfterReadiness(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   sea,
-		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{}),
+		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(logger, nil),
 	})
 

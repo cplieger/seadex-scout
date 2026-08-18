@@ -93,7 +93,7 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // The lock must cover the write.
 func recordRunHealth(ctx context.Context, marker *health.Marker, healthy bool, runs int, cycleErr error) error {
 	if ctx.Err() != nil {
-		if shutdown.IsShutdownError(ctx, cycleErr) {
+		if shutdown.Is(ctx, cycleErr) {
 			return cycleErr
 		}
 		return shutdown.Interrupted(ctx)

@@ -37,7 +37,7 @@ func TestVerdictFor(t *testing.T) {
 }
 
 func TestAuditNotOnSeaDex(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Covered", TvdbID: 100, SeasonGroups: map[int][]string{1: {"x"}}, Groups: []string{"x"}, HasFile: true},
@@ -114,7 +114,7 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
 	}}
 
-	rep := NewAuditor(Config{}).Audit(matches, snap, idx, nil)
+	rep := New(Config{}).Audit(matches, snap, idx, nil)
 
 	if len(rep.Rows) != 2 {
 		t.Fatalf("rows = %d, want 2 (the matched row plus the not_on_seadex row)", len(rep.Rows))
@@ -151,7 +151,7 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 	})
 
 	rowsFor := func(exclude bool) map[string]bool {
-		a := NewAuditor(Config{ExcludeSpecials: exclude})
+		a := New(Config{ExcludeSpecials: exclude})
 		rep := a.Audit(nil, snap, idx, nil)
 		got := map[string]bool{}
 		for i := range rep.Rows {
@@ -185,7 +185,7 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 // known best, or a known library group against a NOGRP-only best torrent)
 // yields the same unverified verdict instead of have_unlisted.
 func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	tests := []struct {
 		name      string
 		diskGroup string
@@ -237,7 +237,7 @@ func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 // skipped, an excluded special is skipped, and a nil snapshot/index adds no
 // not_on_seadex rows.
 func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
-	a := NewAuditor(Config{ExcludeSpecials: true})
+	a := New(Config{ExcludeSpecials: true})
 	inLib := library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Absolute Run", TvdbID: 100,
 		SeasonGroups: map[int][]string{1: {"a&c"}, 2: {"zzz"}},
@@ -319,7 +319,7 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 			{"AB on keeps it", true, true},
 		} {
 			t.Run(tc.sneakyURL+" "+tt.name, func(t *testing.T) {
-				a := NewAuditor(Config{AnimeBytes: tt.animeBytes})
+				a := New(Config{AnimeBytes: tt.animeBytes})
 				rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
 				var row *Row
 				for i := range rep.Rows {
@@ -386,7 +386,7 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 		Record: mapping.Record{Type: "TV", TvdbID: 1200, SeasonTvdb: 1},
 	}}
 
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
 	var row *Row
 	for i := range rep.Rows {
@@ -479,7 +479,7 @@ func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 // resolved run (nil or empty set) carries none - so the section (and the
 // JSON key, via omitempty) only ever appears when something actually failed.
 func TestAuditIncompleteMappings(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 
 	rep := a.Audit(nil, nil, nil, map[int]struct{}{99: {}, 7: {}})
 
@@ -554,7 +554,7 @@ func TestRowQualifier(t *testing.T) {
 // TestAuditExcludedTagBestNotCounted, which configures `broken: [report]`
 // explicitly. The annotation half is unchanged and asserted in both.
 func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
-	rowFor := auditRowFixture(NewAuditor(Config{}))
+	rowFor := auditRowFixture(New(Config{}))
 
 	t.Run("warned best counts and is annotated", func(t *testing.T) {
 		row := rowFor(t, []seadex.Torrent{{
@@ -577,7 +577,7 @@ func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
 	})
 
 	t.Run("a feed-only exclusion leaves the report alone", func(t *testing.T) {
-		feedOnly := auditRowFixture(NewAuditor(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+		feedOnly := auditRowFixture(New(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
 			"broken": {tagfilter.SurfaceFeed},
 		})}))
 		row := feedOnly(t, []seadex.Torrent{{
@@ -626,7 +626,7 @@ func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
 // now the operator's choice. Matching stays exact and case-insensitive, so a
 // substring near-miss keeps counting.
 func TestAuditExcludedTagBestNotCounted(t *testing.T) {
-	rowFor := auditRowFixture(NewAuditor(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+	rowFor := auditRowFixture(New(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
 		"broken": {tagfilter.SurfaceReport},
 	})}))
 
@@ -697,7 +697,7 @@ func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) Row {
 // longer silently diverge. An obtainable best on the same entry still
 // classifies as usual and carries no marker.
 func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
 		t.Helper()
 		item := &library.Item{
@@ -755,7 +755,7 @@ func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 // catalogued, so this test fails if the covered mark ever moves below the
 // specials filter.
 func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
-	a := NewAuditor(Config{ExcludeSpecials: true})
+	a := New(Config{ExcludeSpecials: true})
 	snap := &library.Snapshot{Items: []library.Item{{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialOnly", TvdbID: 700,
 		Groups: []string{"g"}, HasFile: true,
@@ -787,7 +787,7 @@ func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 // absolute-numbered run) yields Season 0 on the row, so a negative season can
 // never reach the JSON wire shape (omitempty then drops the zero).
 func TestAssessClampsNegativeSeason(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	item := &library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Absolute", TvdbID: 100,
 		SeasonGroups: map[int][]string{1: {"g"}}, Groups: []string{"g"}, HasFile: true,
@@ -807,7 +807,7 @@ func TestAssessClampsNegativeSeason(t *testing.T) {
 }
 
 func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "UncoveredMovie", TmdbID: 400, HasFile: true},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredSeries", TvdbID: 200, Groups: []string{"grp"}, HasFile: true},
@@ -829,7 +829,7 @@ func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
 }
 
 func TestAssessCarriesEntryStateFlags(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	item := &library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Flagged", TvdbID: 100,
 		SeasonGroups: map[int][]string{0: {"g"}}, Groups: []string{"g"}, HasFile: true,
@@ -880,12 +880,12 @@ func TestClassifyReleasesGatesAnimeBytes(t *testing.T) {
 		{Tracker: "AB", ReleaseGroup: "Commie", IsBest: false, URL: "/torrents.php?id=1"},
 	}}
 
-	off := NewAuditor(Config{}).classifyReleases(entry)
+	off := New(Config{}).classifyReleases(entry)
 	if len(off) != 1 || off[0].Tracker != "Nyaa" {
 		t.Errorf("with AnimeBytes off only the Nyaa release should survive, got %+v", off)
 	}
 
-	on := NewAuditor(Config{AnimeBytes: true}).classifyReleases(entry)
+	on := New(Config{AnimeBytes: true}).classifyReleases(entry)
 	if len(on) != 2 {
 		t.Errorf("with AnimeBytes on both releases should be present, got %d", len(on))
 	}
@@ -934,7 +934,7 @@ func TestBestCellMarksOnlyHiddenBests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// AnimeBytes off: every AB release above is withheld.
-			row := NewAuditor(Config{}).assess(&match.Match{
+			row := New(Config{}).assess(&match.Match{
 				Item:   item,
 				Arr:    library.ArrSonarr,
 				Source: match.SourceID,
@@ -965,7 +965,7 @@ func TestBestCellMarksOnlyHiddenBests(t *testing.T) {
 // while uncoveredRows never calls Decide at all and its not_on_seadex verdict stays
 // TRUE - so the marker is that row's only way to qualify its own groups column.
 func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
-	a := NewAuditor(Config{})
+	a := New(Config{})
 
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "MatchedPlaceholder", TvdbID: 100, Failed: true},
@@ -1047,7 +1047,7 @@ func TestClassifyReleasesMapsPublisherRefusalToItsOwnMarker(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			a := NewAuditor(Config{})
+			a := New(Config{})
 			entry := seadex.Entry{AniListID: 42, Torrents: []seadex.Torrent{
 				{Tracker: tc.tracker, URL: tc.url, ReleaseGroup: "PMR", IsBest: true},
 			}}

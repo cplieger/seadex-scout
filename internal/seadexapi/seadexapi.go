@@ -167,18 +167,44 @@ type Client struct {
 	lastAccepted int
 }
 
+// cfg holds the resolved tuning knobs for a Client.
+type cfg struct {
+	logger    *slog.Logger
+	pageDelay time.Duration
+}
+
+// Option tunes a Client built by NewClient.
+type Option func(*cfg)
+
+// WithPageDelay sets the politeness delay slept between pages of a walk.
+// Defaults to no delay; DefaultPageDelay is the value the app runs.
+func WithPageDelay(d time.Duration) Option {
+	return func(c *cfg) { c.pageDelay = d }
+}
+
+// WithLogger sets the logger the client's diagnostics go to. Defaults to
+// slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(c *cfg) { c.logger = l }
+}
+
 // NewClient returns a SeaDex client for baseURL (e.g. "https://releases.moe")
-// using the given HTTP client. pageDelay is slept between pages for politeness;
-// logger may be nil (slog.Default is used).
-func NewClient(httpClient *http.Client, baseURL string, pageDelay time.Duration, logger *slog.Logger) *Client {
-	if logger == nil {
-		logger = slog.Default()
+// using the given HTTP client.
+func NewClient(httpClient *http.Client, baseURL string, opts ...Option) *Client {
+	c := &cfg{}
+	for _, o := range opts {
+		if o != nil {
+			o(c)
+		}
+	}
+	if c.logger == nil {
+		c.logger = slog.Default()
 	}
 	return &Client{
 		http:      httpClient,
-		log:       logger,
+		log:       c.logger,
 		baseURL:   baseURL,
-		pageDelay: pageDelay,
+		pageDelay: c.pageDelay,
 	}
 }
 

@@ -108,10 +108,10 @@ func (f *twoArrShrinkFixture) scout(logger *slog.Logger) *Scout {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: f.sonarr, Radarr: f.radarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 	})
 }
 
@@ -429,10 +429,10 @@ func TestCycleSingleArrDeploymentShrinksAsBefore(t *testing.T) {
 			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries()},
-			Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-			Comparer:     compare.NewComparer(compare.Config{}),
+			Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+			Comparer:     compare.New(compare.Config{}),
 			Notifier:     notify.NewNotifier(logger, nil),
-			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 		})
 	}
 	if healthy := newScout(scoutTestLogger()).Cycle(t.Context()); !healthy {

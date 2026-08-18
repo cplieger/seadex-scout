@@ -121,8 +121,8 @@ type Config struct {
 	AnimeBytes bool
 }
 
-// NewComparer builds a Comparer from cfg.
-func NewComparer(cfg Config) *Comparer {
+// New builds a Comparer from cfg.
+func New(cfg Config) *Comparer {
 	return &Comparer{
 		tags:            cfg.TagFilter,
 		opts:            cfg.Filter,

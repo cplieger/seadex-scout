@@ -33,9 +33,9 @@ func TestAniListExhaustionWarnsOnceWithAppContext(t *testing.T) {
 	// One logger for both layers: the library's verdict and the app's land in
 	// the same recorder, which is what an operator's Loki stream sees.
 	logger, recorder := capture.New()
-	client := anilist.NewClient(srv.Client(), srv.URL, 100000, logger)
+	client := anilist.NewClient(srv.Client(), srv.URL, anilist.WithRate(100000), anilist.WithLogger(logger))
 
-	res := NewMatcher(client, logger).Match(t.Context(),
+	res := New(client, logger).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
 
 	if !res.Degraded {

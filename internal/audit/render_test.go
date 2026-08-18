@@ -229,7 +229,7 @@ func TestRenderMarkdownAndJSON(t *testing.T) {
 func TestRenderMarkdownScopePrecedence(t *testing.T) {
 	// Build the rows through assess so the test pins the real classification
 	// precedence (movie beats season beats special), not just the label map.
-	a := NewAuditor(Config{})
+	a := New(Config{})
 	movie := &library.Item{
 		Arr: library.ArrRadarr, Title: "Movie",
 		Groups: []string{"g"}, HasFile: true,

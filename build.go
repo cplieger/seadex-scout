@@ -89,7 +89,8 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 	anilistHTTP := httpx.NewClient(anilistTimeout)
 	pingArrs(ctx, sonarr, radarr)
 
-	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL, anilist.DefaultRate, log)
+	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL,
+		anilist.WithRate(anilist.DefaultRate), anilist.WithLogger(log))
 
 	store := state.NewStore(config.DefaultStatePath, log)
 	if readOnlyState {
@@ -108,9 +109,12 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, mapping.DefaultRefresh, log),
-		seadex:  seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL, seadexapi.DefaultPageDelay, log),
-		matcher: match.NewMatcher(anilistClient, log),
+		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL,
+			mapping.WithOverridesPath(config.DefaultMappingOverrides),
+			mapping.WithRefresh(mapping.DefaultRefresh), mapping.WithLogger(log)),
+		seadex: seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL,
+			seadexapi.WithPageDelay(seadexapi.DefaultPageDelay), seadexapi.WithLogger(log)),
+		matcher: match.New(anilistClient, log),
 		anilist: anilistClient,
 		cleanup: func() {
 			seadexHTTP.CloseIdleConnections()
@@ -145,7 +149,7 @@ func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer
 		Mapping: c.mapping,
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
-		Comparer: compare.NewComparer(compare.Config{
+		Comparer: compare.New(compare.Config{
 			TagFilter:       cfg.TagFilter,
 			Filter:          filterOptions(cfg),
 			ExcludeSpecials: cfg.ExcludeSpecials,
@@ -182,7 +186,7 @@ func buildReporter(ctx context.Context, cfg *config.Config) (builtReporter, erro
 		Mapping: c.mapping,
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
-		Auditor: audit.NewAuditor(audit.Config{
+		Auditor: audit.New(audit.Config{
 			TagFilter:       cfg.TagFilter,
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,

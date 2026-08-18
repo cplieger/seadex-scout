@@ -90,10 +90,10 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 				Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				Mapping:      fakeMapping{},
 				SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry())},
-				Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-				Comparer:     compare.NewComparer(compare.Config{}),
+				Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+				Comparer:     compare.New(compare.Config{}),
 				Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
-				AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+				AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 			})
 
 			if healthy := s.Cycle(t.Context()); !healthy {
@@ -207,10 +207,10 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 			}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-			Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-			Comparer:     compare.NewComparer(compare.Config{}),
+			Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+			Comparer:     compare.New(compare.Config{}),
 			Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
-			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 		})
 	}
 	// Sonarr lists a series but carries no tags at all, so the configured

@@ -46,8 +46,8 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.NewMatcher(notFoundAniList{}, logger),
-		Auditor: audit.NewAuditor(audit.Config{}),
+		Matcher: match.New(notFoundAniList{}, logger),
+		Auditor: audit.New(audit.Config{}),
 	})
 
 	rep, err := s.Report(t.Context())
@@ -99,8 +99,8 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: entries},
-		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{}),
+		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.New(audit.Config{}),
 	})
 
 	if _, err := s.Report(t.Context()); err != nil {
@@ -322,8 +322,8 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{}),
+		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.New(audit.Config{}),
 	})
 
 	rep, err := s.Report(t.Context())
@@ -358,8 +358,8 @@ func TestReportDegradedMatching(t *testing.T) {
 			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
-			Auditor: audit.NewAuditor(audit.Config{}),
+			Matcher: match.New(degradedMatcherAniList{}, logger),
+			Auditor: audit.New(audit.Config{}),
 		})
 
 		rep, err := s.Report(t.Context())
@@ -392,7 +392,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-			Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, logger),
+			Matcher: match.New(&ctxCancellingAniList{cancel: cancel}, logger),
 		})
 
 		_, err := s.Report(ctx)
@@ -423,7 +423,7 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
 
@@ -495,10 +495,10 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", overrides, time.Hour, logger),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(overrides), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger)),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{}),
+		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.New(audit.Config{}),
 	})
 
 	if _, err := s.Report(t.Context()); err != nil {
@@ -563,8 +563,8 @@ func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
 				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				Mapping: fakeMapping{},
 				SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-				Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-				Auditor: audit.NewAuditor(audit.Config{}),
+				Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+				Auditor: audit.New(audit.Config{}),
 			})
 
 			rep, err := s.Report(t.Context())

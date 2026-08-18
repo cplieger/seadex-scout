@@ -299,20 +299,53 @@ func populationCollapsed(prevCount, count, previousMinimum int) bool {
 	return prevCount >= previousMinimum && degradation.Shrunk(count, prevCount)
 }
 
-// NewLoader returns a mapping loader. httpClient must be non-nil for any loader
-// that will fetch, url is the Fribb JSON source, overridesPath is the local
-// override file (may be absent), refresh is the conditional re-download
-// cadence, and logger may be nil.
-func NewLoader(httpClient *http.Client, url, overridesPath string, refresh time.Duration, logger *slog.Logger) *Loader {
-	if logger == nil {
-		logger = slog.Default()
+// cfg holds the resolved tuning knobs for a Loader.
+type cfg struct {
+	logger        *slog.Logger
+	overridesPath string
+	refresh       time.Duration
+}
+
+// Option tunes a Loader built by NewLoader.
+type Option func(*cfg)
+
+// WithOverridesPath points the loader at the local operator override file,
+// whose entries win over the Fribb map. Defaults to empty, which loads no
+// overrides; a configured path that is absent is not an error.
+func WithOverridesPath(path string) Option {
+	return func(c *cfg) { c.overridesPath = path }
+}
+
+// WithRefresh sets the reuse-if-fresh window before the loader re-issues its
+// conditional GET. Defaults to DefaultRefresh (0: revalidate every load).
+func WithRefresh(d time.Duration) Option {
+	return func(c *cfg) { c.refresh = d }
+}
+
+// WithLogger sets the logger the loader's diagnostics go to. Defaults to
+// slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(c *cfg) { c.logger = l }
+}
+
+// NewLoader returns a mapping loader reading the Fribb JSON source at url.
+// httpClient must be non-nil for any loader that will fetch.
+func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
+	c := &cfg{refresh: DefaultRefresh}
+	for _, o := range opts {
+		if o != nil {
+			o(c)
+		}
+	}
+	if c.logger == nil {
+		c.logger = slog.Default()
 	}
 	return &Loader{
 		http:          httpClient,
-		log:           logger,
+		log:           c.logger,
 		url:           url,
-		overridesPath: overridesPath,
-		refresh:       refresh,
+		overridesPath: c.overridesPath,
+		refresh:       c.refresh,
 	}
 }
 

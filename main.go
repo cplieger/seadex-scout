@@ -215,7 +215,7 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 func runReport(cfg *config.Config) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	defer func() { err = shutdown.NormalizeShutdownError(ctx, err) }()
+	defer func() { err = shutdown.Normalize(ctx, err) }()
 
 	if dirErr := checkReportDir(cfg.ReportDir); dirErr != nil {
 		return dirErr

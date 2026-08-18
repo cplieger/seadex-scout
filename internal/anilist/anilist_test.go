@@ -406,7 +406,7 @@ func TestParseMediaPageBoundsMediaCardinality(t *testing.T) {
 // maxRetryAfter would be the wrong bound here (l-f7).
 func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(30))
 		resp := &http.Response{Header: make(http.Header)}
 		resp.Header.Set("X-RateLimit-Remaining", "1")
 		resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10))
@@ -427,7 +427,7 @@ func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 func TestObserveRateHeadersHonoursARealWindowBeyondAMinute(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const stated = 3 * time.Minute // > maxRetryAfter, < maxThrottlePenalty
-		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(30))
 		resp := &http.Response{Header: make(http.Header)}
 		resp.Header.Set("X-RateLimit-Remaining", "1")
 		resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(stated).Unix(), 10))
@@ -546,7 +546,7 @@ func TestNewClientCoercesNonPositiveRate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				c := NewClient(http.DefaultClient, "https://example.invalid/graphql", tt.rate, nil)
+				c := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(tt.rate))
 				if got := c.throttle.reserve(); got != 0 {
 					t.Errorf("first reserve wait = %v, want 0", got)
 				}
@@ -560,7 +560,7 @@ func TestNewClientCoercesNonPositiveRate(t *testing.T) {
 
 func TestObserveRateHeadersMissingResetDefaultsToMinute(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(30))
 		resp := &http.Response{Header: make(http.Header)}
 		resp.Header.Set("X-RateLimit-Remaining", "1")
 
@@ -577,7 +577,7 @@ func TestObserveRateHeadersMissingResetDefaultsToMinute(t *testing.T) {
 
 func TestObserveRateHeadersMalformedResetDefaultsToMinute(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(30))
 		resp := &http.Response{Header: make(http.Header)}
 		resp.Header.Set("X-RateLimit-Remaining", "0")
 		resp.Header.Set("X-RateLimit-Reset", "not-a-timestamp")
@@ -655,7 +655,7 @@ func TestObserveRateHeadersThresholdBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 100000, nil)
+				client := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(100000))
 				resp := &http.Response{Header: make(http.Header)}
 				if tt.remaining != "" {
 					resp.Header.Set("X-RateLimit-Remaining", tt.remaining)

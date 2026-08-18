@@ -26,7 +26,7 @@ func TestLoader_refreshCache_notModifiedLogsEndedRejectionStreak(t *testing.T) {
 		RejectedRefreshes: 3,
 	}
 	logger, logs := capture.New()
-	loader := NewLoader(server.Client(), server.URL, "", time.Hour, logger)
+	loader := NewLoader(server.Client(), server.URL, WithRefresh(time.Hour), WithLogger(logger))
 	if _, err := loader.refreshCache(t.Context(), previous); err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestLoader_refreshCache_acceptedRefreshLogsEndedRejectionStreak(t *testing.
 		RejectedRefreshes: 3,
 	}
 	logger, logs := capture.New()
-	loader := NewLoader(server.Client(), server.URL, "", time.Hour, logger)
+	loader := NewLoader(server.Client(), server.URL, WithRefresh(time.Hour), WithLogger(logger))
 	if _, err := loader.refreshCache(t.Context(), previous); err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestLoader_refreshCache_noRejectionStreakLogsNoRecoverySignal(t *testing.T)
 		}))
 		defer server.Close()
 		logger, logs := capture.New()
-		loader := NewLoader(server.Client(), server.URL, "", time.Hour, logger)
+		loader := NewLoader(server.Client(), server.URL, WithRefresh(time.Hour), WithLogger(logger))
 		previous := &Cache{
 			FetchedAt: time.Now().Add(-2 * time.Hour),
 			ETag:      "v1",
@@ -105,7 +105,7 @@ func TestLoader_refreshCache_noRejectionStreakLogsNoRecoverySignal(t *testing.T)
 		}))
 		defer server.Close()
 		logger, logs := capture.New()
-		loader := NewLoader(server.Client(), server.URL, "", time.Hour, logger)
+		loader := NewLoader(server.Client(), server.URL, WithRefresh(time.Hour), WithLogger(logger))
 		previous := &Cache{
 			FetchedAt: time.Now().Add(-2 * time.Hour),
 			Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},

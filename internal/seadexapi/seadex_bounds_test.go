@@ -70,7 +70,7 @@ func fetchHostilePage(t *testing.T, page, wantErr string) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries returned nil error, want %q error", wantErr)
 	}
@@ -175,7 +175,7 @@ func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if !errors.Is(err, errCumulativeElements) {
 		t.Fatalf("FetchEntries error = %v, want errCumulativeElements", err)
 	}
@@ -209,7 +209,7 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want byte-cap error")
 	}
@@ -227,7 +227,7 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 // upstream (the base URL here is unroutable, so any request attempt fails the
 // test with a different error) and without touching the accumulated entries.
 func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
-	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
+	c := NewClient(&http.Client{}, "http://unreachable.invalid")
 	tot := fetchTotals{bytes: maxTotalBytes}
 	all := []seadex.Entry{{AniListID: 1}}
 	var cur cursor
@@ -251,7 +251,7 @@ func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 // upstream (the base URL here is unroutable, so any request attempt fails the
 // test with a different error) and without touching the accumulated entries.
 func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
-	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
+	c := NewClient(&http.Client{}, "http://unreachable.invalid")
 	tot := fetchTotals{elements: maxTotalElements}
 	all := []seadex.Entry{{AniListID: 1}}
 	var cur cursor
@@ -285,7 +285,7 @@ func TestFetchEntriesPerPageByteCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want per-page byte-cap error")
 	}
@@ -319,7 +319,7 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want per-page element-budget error")
 	}
@@ -374,7 +374,7 @@ func TestFetchEntriesBoundsDecodeFailureDiagnostic(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want a page-decode error", len(entries))
 	}

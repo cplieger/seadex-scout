@@ -167,8 +167,8 @@ type Auditor struct {
 	includeAnimeBytes bool
 }
 
-// NewAuditor builds an Auditor from cfg.
-func NewAuditor(cfg Config) *Auditor {
+// New builds an Auditor from cfg.
+func New(cfg Config) *Auditor {
 	return &Auditor{
 		tags:              cfg.TagFilter,
 		excludeSpecials:   cfg.ExcludeSpecials,

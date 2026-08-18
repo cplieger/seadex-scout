@@ -61,7 +61,7 @@ func TestFetchWindowRequestContract(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), windowOptions())
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), windowOptions())
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestFetchWindowFullModeSendsNoWindowConjunct(t *testing.T) {
 
 	// A Since set on a FULL fetch is ignored, which is what makes FetchFull the
 	// safe zero value of the mode.
-	if _, err := NewClient(server.Client(), server.URL, 0, nil).
+	if _, err := NewClient(server.Client(), server.URL).
 		FetchEntries(t.Context(), Options{Since: windowSince}); err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestFetchWindowEmptyResultSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.Client(), server.URL, 0, nil)
+	client := NewClient(server.Client(), server.URL)
 	entries, err := client.FetchEntries(t.Context(), windowOptions())
 	if err != nil {
 		t.Fatalf("windowed FetchEntries returned error: %v (an empty window is a successful tick)", err)
@@ -150,7 +150,7 @@ func TestFetchWindowBelowHalfShortfallSucceeds(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	client := NewClient(server.Client(), server.URL, 0, logger)
+	client := NewClient(server.Client(), server.URL, WithLogger(logger))
 	entries, err := client.FetchEntries(t.Context(), windowOptions())
 	if err != nil {
 		t.Fatalf("windowed FetchEntries returned error: %v (the below-half shortfall is a full-mode guard)", err)
@@ -200,7 +200,7 @@ func TestFetchWindowDoesNotPoisonTheShrinkComparison(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	client := NewClient(server.Client(), server.URL, 0, logger)
+	client := NewClient(server.Client(), server.URL, WithLogger(logger))
 	for i, opts := range []Options{{}, windowOptions(), {}} {
 		if _, err := client.FetchEntries(t.Context(), opts); err != nil {
 			t.Fatalf("fetch %d (mode %v) returned error: %v", i, opts.Mode, err)
@@ -228,7 +228,7 @@ func TestFetchWindowRejectsZeroSince(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).
+	entries, err := NewClient(server.Client(), server.URL).
 		FetchEntries(t.Context(), Options{Mode: FetchWindow})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want a zero-Since error", len(entries))
@@ -292,7 +292,7 @@ func TestFetchWindowKeepsStructuralGuards(t *testing.T) {
 			defer server.Close()
 
 			logger, _ := capture.New()
-			entries, err := NewClient(server.Client(), server.URL, 0, logger).
+			entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).
 				FetchEntries(t.Context(), windowOptions())
 			if err == nil {
 				t.Fatalf("FetchEntries = %d entries, want a structural error in window mode", len(entries))
@@ -317,7 +317,7 @@ func TestFetchWindowKeepsMetadataConsistencyGuard(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).
+	entries, err := NewClient(server.Client(), server.URL).
 		FetchEntries(t.Context(), windowOptions())
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want the metadata-consistency refusal", len(entries))
@@ -339,7 +339,7 @@ func TestCountWindowRequestAndTotal(t *testing.T) {
 	}))
 	defer server.Close()
 
-	n, err := NewClient(server.Client(), server.URL, 0, nil).CountWindow(t.Context(), windowSince)
+	n, err := NewClient(server.Client(), server.URL).CountWindow(t.Context(), windowSince)
 	if err != nil {
 		t.Fatalf("CountWindow returned error: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestCountWindowRejectsNegativeTotal(t *testing.T) {
 			}))
 			defer server.Close()
 
-			n, err := NewClient(server.Client(), server.URL, 0, nil).CountWindow(t.Context(), windowSince)
+			n, err := NewClient(server.Client(), server.URL).CountWindow(t.Context(), windowSince)
 			if err == nil {
 				t.Fatalf("CountWindow = %d, want an error", n)
 			}
@@ -416,7 +416,7 @@ func TestCountWindowZeroTotalIsNotAnError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	n, err := NewClient(server.Client(), server.URL, 0, nil).CountWindow(t.Context(), windowSince)
+	n, err := NewClient(server.Client(), server.URL).CountWindow(t.Context(), windowSince)
 	if err != nil {
 		t.Fatalf("CountWindow returned error: %v (a quiet upstream is not a fault)", err)
 	}
@@ -437,7 +437,7 @@ func TestCountWindowRejectsZeroSince(t *testing.T) {
 	}))
 	defer server.Close()
 
-	n, err := NewClient(server.Client(), server.URL, 0, nil).CountWindow(t.Context(), time.Time{})
+	n, err := NewClient(server.Client(), server.URL).CountWindow(t.Context(), time.Time{})
 	if err == nil {
 		t.Fatalf("CountWindow = %d, want a zero-since error", n)
 	}
@@ -468,7 +468,7 @@ func TestCountWindowNormalizesSinceToUTC(t *testing.T) {
 
 	// The same instant as windowSince, carried in a +05:00 zone.
 	zoned := windowSince.In(time.FixedZone("test", 5*60*60))
-	if _, err := NewClient(server.Client(), server.URL, 0, nil).CountWindow(t.Context(), zoned); err != nil {
+	if _, err := NewClient(server.Client(), server.URL).CountWindow(t.Context(), zoned); err != nil {
 		t.Fatalf("CountWindow returned error: %v", err)
 	}
 	if filter != wantWindowFilter {
@@ -522,7 +522,7 @@ func TestCountWindowUpstreamFailureErrors(t *testing.T) {
 			server := httptest.NewServer(tc.handler)
 			defer server.Close()
 
-			n, err := NewClient(server.Client(), server.URL, 0, nil).
+			n, err := NewClient(server.Client(), server.URL).
 				CountWindow(t.Context(), windowSince)
 			if err == nil {
 				t.Fatalf("CountWindow = %d, want an error (a failed probe must never read as a quiet window)", n)
@@ -557,7 +557,7 @@ func TestFetchWindowWarnsOnAOneChunkShortfall(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).
 		FetchEntries(t.Context(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v (a short window must keep the freshness it DID deliver)", err)
@@ -590,7 +590,7 @@ func TestFetchWindowDoesNotWarnOnACompleteWindow(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	if _, err := NewClient(server.Client(), server.URL, 0, logger).
+	if _, err := NewClient(server.Client(), server.URL, WithLogger(logger)).
 		FetchEntries(t.Context(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)}); err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestFetchWindowEmptyWindowDoesNotWarn(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).
 		FetchEntries(t.Context(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v (an empty window is a completed tick)", err)
@@ -656,7 +656,7 @@ func TestFetchWindowDoesNotWarnAcrossChunks(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).
 		FetchEntries(t.Context(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)

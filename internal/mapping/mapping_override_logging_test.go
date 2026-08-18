@@ -23,7 +23,7 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 		t.Fatalf("write overrides: %v", err)
 	}
 	logger, rec := capture.New()
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(logger))
 	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestLoader_Load_cleanOverridesEmitNoDiagnostics(t *testing.T) {
 		t.Fatalf("write overrides: %v", err)
 	}
 	logger, logs := capture.New()
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(logger))
 	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestLoader_Load_emptyOverridesEmitNoAppliedLog(t *testing.T) {
 		t.Fatalf("write overrides: %v", err)
 	}
 	logger, logs := capture.New()
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(logger))
 	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path := tc.setup(t)
 			logger, logs := capture.New()
-			l := NewLoader(nil, "http://unused.invalid", path, time.Hour, logger)
+			l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(path), WithRefresh(time.Hour), WithLogger(logger))
 			prev := freshCache()
 			next, idx, err := l.Load(t.Context(), prev)
 			if err != nil {

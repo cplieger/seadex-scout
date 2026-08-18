@@ -68,9 +68,9 @@ func logStop(ctx context.Context, log *slog.Logger, err error) {
 	switch {
 	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
 		log.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
-	case shutdown.IsShutdownError(ctx, err):
+	case shutdown.Is(ctx, err):
 		// Bind cancelled mid-startup, or a clean graceful drain: routine.
-		// IsShutdownError also accepts the cause-only form, which a plain
+		// shutdown.Is also accepts the cause-only form, which a plain
 		// errors.Is(err, context.Canceled) would misread as a fault.
 		log.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
 	default:

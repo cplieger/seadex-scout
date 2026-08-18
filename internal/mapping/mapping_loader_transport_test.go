@@ -24,7 +24,7 @@ func TestLoader_refreshCache_transportErrorKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", "", time.Hour, discardLogger())
+	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("transport-error refresh returned nil error, want degraded error")

@@ -174,10 +174,10 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, logger),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
 		Feed:         feed,
 	})
 
@@ -390,7 +390,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-		Matcher: match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
+		Matcher: match.New(degradedMatcherAniList{}, scoutTestLogger()),
 		Feed:    feed,
 	})
 

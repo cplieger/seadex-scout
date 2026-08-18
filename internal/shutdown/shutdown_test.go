@@ -31,15 +31,15 @@ func TestInterruptedClassifiesNonCanceledCause(t *testing.T) {
 	}
 }
 
-// TestNormalizeShutdownErrorClassifiesCauseOnlyForm pins the terminal-boundary
-// shutdown classifier: an error that IS this context's cancellation but only
+// TestNormalizeClassifiesCauseOnlyForm pins the terminal-boundary shutdown
+// classifier: an error that IS this context's cancellation but only
 // carries the CAUSE (a WithCancelCause cause need not wrap context.Canceled,
 // and net/http surfaces the cause verbatim) is stamped with the stable
 // ctx.Err() so main's single errors.Is(err, context.Canceled) check reads it as
 // a routine-shutdown WARN. A nil error, an error already carrying
 // context.Canceled, and a genuine fault that merely landed while the context
 // was cancelled all pass through untouched, so a real fault is never hidden.
-func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
+func TestNormalizeClassifiesCauseOnlyForm(t *testing.T) {
 	cause := errors.New("terminated signal received") // deliberately NOT wrapping context.Canceled
 	causeCtx, cancelCause := context.WithCancelCause(t.Context())
 	cancelCause(cause)
@@ -62,7 +62,7 @@ func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NormalizeShutdownError(tt.ctx, tt.err)
+			got := Normalize(tt.ctx, tt.err)
 
 			if gotCancel := errors.Is(got, context.Canceled); gotCancel != tt.wantCancel {
 				t.Errorf("errors.Is(%v, context.Canceled) = %v, want %v", got, gotCancel, tt.wantCancel)
@@ -70,10 +70,10 @@ func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
 			// Identity, not chain membership, is the assertion here: a stamped
 			// error still wraps the original (checked below).
 			if unchanged := got == tt.err; unchanged != tt.wantUnchanged {
-				t.Errorf("NormalizeShutdownError(%v) = %v, want the error returned unchanged = %v", tt.err, got, tt.wantUnchanged)
+				t.Errorf("Normalize(%v) = %v, want the error returned unchanged = %v", tt.err, got, tt.wantUnchanged)
 			}
 			if tt.err != nil && !errors.Is(got, tt.err) {
-				t.Errorf("NormalizeShutdownError(%v) = %v, want the original error still in the chain", tt.err, got)
+				t.Errorf("Normalize(%v) = %v, want the original error still in the chain", tt.err, got)
 			}
 		})
 	}

@@ -208,19 +208,45 @@ type Client struct {
 	rlWaits  atomic.Int64
 }
 
-// NewClient returns an AniList client for url at rate requests per minute
-// (values <= 0 are treated as 1). logger may be nil.
-func NewClient(httpClient *http.Client, url string, rate int, logger *slog.Logger) *Client {
-	if logger == nil {
-		logger = slog.Default()
+// cfg holds the resolved tuning knobs for a Client.
+type cfg struct {
+	logger *slog.Logger
+	rate   int
+}
+
+// Option tunes a Client built by NewClient.
+type Option func(*cfg)
+
+// WithRate sets the request ceiling in requests per minute the client spaces
+// itself to. Values <= 0 mean one request per minute, which is also the default.
+func WithRate(rate int) Option {
+	return func(c *cfg) { c.rate = rate }
+}
+
+// WithLogger sets the logger the client's diagnostics go to. Defaults to
+// slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(c *cfg) { c.logger = l }
+}
+
+// NewClient returns an AniList client for url.
+func NewClient(httpClient *http.Client, url string, opts ...Option) *Client {
+	c := &cfg{}
+	for _, o := range opts {
+		if o != nil {
+			o(c)
+		}
 	}
-	if rate <= 0 {
-		rate = 1
+	if c.logger == nil {
+		c.logger = slog.Default()
+	}
+	if c.rate <= 0 {
+		c.rate = 1
 	}
 	return &Client{
 		http:     httpClient,
-		log:      logger,
-		throttle: &throttle{interval: time.Minute / time.Duration(rate)},
+		log:      c.logger,
+		throttle: &throttle{interval: time.Minute / time.Duration(c.rate)},
 		url:      url,
 	}
 }

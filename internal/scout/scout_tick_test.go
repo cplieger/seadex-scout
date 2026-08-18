@@ -49,8 +49,8 @@ func tickDeps(logger *slog.Logger, sea *fakeSeaDex, feed FeedWriter, notifier *n
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       sea,
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notifier,
 		Feed:         feed,
 		PollInterval: pollIntervalForEvery(every),
@@ -622,7 +622,7 @@ func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) 
 		windowEntries: []seadex.Entry{windowEntry(1003, 503)},
 	}
 	deps, store := tickDeps(logger, sea, nil, nil, 96)
-	deps.Matcher = match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger())
+	deps.Matcher = match.New(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger())
 	// An accepted mapping refresh on every load, so "did the interrupted tick
 	// persist what it learned" is observable at all: with a 304-shaped loader
 	// saveTick's own skip fires and the assertion could not tell a declined save
@@ -1128,8 +1128,8 @@ func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{}),
+		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 

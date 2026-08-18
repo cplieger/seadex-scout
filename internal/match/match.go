@@ -75,14 +75,14 @@ type Matcher struct {
 	anilist AniListClient
 	log     *slog.Logger
 	// now and rand feed the memo-expiry policy (the run clock and the TTL
-	// jitter draw). NewMatcher fixes them to time.Now and rand.Float64; tests
-	// override the fields for deterministic, sleep-free expiry coverage.
+	// jitter draw). New fixes them to time.Now and rand.Float64; tests override
+	// the fields for deterministic, sleep-free expiry coverage.
 	now  func() time.Time
 	rand func() float64
 }
 
-// NewMatcher builds a Matcher. logger may be nil.
-func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
+// New builds a Matcher. logger may be nil.
+func New(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 	if logger == nil {
 		logger = slog.Default()
 	}

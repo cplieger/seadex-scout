@@ -29,7 +29,7 @@ func TestConditionalGetExhaustedTerminalRecordIsDemoted(t *testing.T) {
 	defer srv.Close()
 
 	logger, rec := capture.New()
-	l := NewLoader(srv.Client(), srv.URL, "", time.Hour, logger)
+	l := NewLoader(srv.Client(), srv.URL, WithRefresh(time.Hour), WithLogger(logger))
 
 	if _, err := l.refreshCache(t.Context(), &Cache{}); err == nil {
 		t.Fatal("refreshCache against a permanently-503 upstream = nil error, want the exhausted error")

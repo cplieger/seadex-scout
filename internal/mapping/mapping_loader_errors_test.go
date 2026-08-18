@@ -15,7 +15,7 @@ import (
 // nil logger falls back to slog.Default() so the loader's log calls cannot
 // panic on the fresh-reuse path (which logs at Debug).
 func TestNewLoader_nilLoggerDefaults(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, nil)
+	l := NewLoader(nil, "http://unused.invalid", WithRefresh(time.Hour))
 	next, err := l.refreshCache(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("refreshCache with nil logger error: %v", err)
@@ -30,7 +30,7 @@ func TestNewLoader_nilLoggerDefaults(t *testing.T) {
 // conditional GET, surfacing the no-cache-available
 // error on first boot.
 func TestLoader_refreshCache_badURLErrors(t *testing.T) {
-	l := NewLoader(&http.Client{}, "://not-a-url", "", time.Hour, discardLogger())
+	l := NewLoader(&http.Client{}, "://not-a-url", WithRefresh(time.Hour), WithLogger(discardLogger()))
 	if _, err := l.refreshCache(t.Context(), &Cache{}); err == nil {
 		t.Fatal("refreshCache with unparseable URL = nil error, want error")
 	}
@@ -49,7 +49,7 @@ func TestLoader_refreshCache_unexpectedStatusKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("204 refresh returned nil error, want unexpected-status degraded error")
@@ -71,7 +71,7 @@ func TestLoader_refreshCache_boundsParseErrorText(t *testing.T) {
 		_, _ = w.Write([]byte(hostile))
 	}))
 	defer ts.Close()
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	_, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
 		t.Fatal("refreshCache with string-body upstream = nil error, want parse-failure error")
@@ -96,7 +96,7 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
 	_, idx, err := l.Load(ctx, freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
@@ -115,7 +115,7 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 // a permission bit): the read error is logged and ignored, and the Fribb
 // record survives unmodified.
 func TestLoader_Load_directoryOverridesIgnored(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", t.TempDir(), time.Hour, discardLogger())
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(t.TempDir()), WithRefresh(time.Hour), WithLogger(discardLogger()))
 	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with directory overrides error: %v", err)
@@ -134,7 +134,7 @@ func TestLoader_Load_zeroIDOverrideIgnored(t *testing.T) {
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":0,"type":"movie"}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
 	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)

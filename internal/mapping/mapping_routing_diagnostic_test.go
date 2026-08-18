@@ -37,7 +37,7 @@ func TestLoader_refreshCache_usablePreviousExtinctionStillRejected(t *testing.T)
 			{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{7}},
 		},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, logger)
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(logger))
 
 	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {

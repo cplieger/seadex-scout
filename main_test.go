@@ -994,9 +994,8 @@ func TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence(t *testing.T) {
 // shutdown.DetachedWriteError is the mechanism, because what it pins is the
 // coupling to dispatchOutcome - the root's own exit-code/level contract. Three
 // non-obvious properties carry it - the multi-%w wrap surviving (fmt drops ALL
-// wrapping on a nil %w operand), the guard's asymmetry, and
-// shutdown.NormalizeShutdownError leaving an already-classified error alone rather
-// than wrapping it twice.
+// wrapping on a nil %w operand), the guard's asymmetry, and shutdown.Normalize
+// leaving an already-classified error alone rather than wrapping it twice.
 func TestDetachedWriteError(t *testing.T) {
 	cancelled := func() context.Context {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1017,10 +1016,10 @@ func TestDetachedWriteError(t *testing.T) {
 		if level, _, _ := dispatchOutcome(got); level != slog.LevelWarn {
 			t.Errorf("dispatchOutcome level = %v, want WARN (a shutdown-truncated report must not trip SeadexScoutCycleError)", level)
 		}
-		// shutdown.NormalizeShutdownError runs deferred over the same ctx and must
+		// shutdown.Normalize runs deferred over the same ctx and must
 		// leave an already-classified error alone rather than wrapping it twice.
-		if again := shutdown.NormalizeShutdownError(ctx, got); again != got {
-			t.Errorf("NormalizeShutdownError re-wrapped the classified error: %v", again)
+		if again := shutdown.Normalize(ctx, got); again != got {
+			t.Errorf("Normalize re-wrapped the classified error: %v", again)
 		}
 	})
 	t.Run("a genuine write failure keeps its fault classification", func(t *testing.T) {

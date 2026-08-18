@@ -65,7 +65,7 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 	fake := &partialBatchAniList{batchMedia: map[int]anilist.Media{
 		66: {Titles: []string{"Returned"}, Format: "MOVIE", Year: 2020},
 	}}
-	m := NewMatcher(fake, nil)
+	m := New(fake, nil)
 
 	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 66}, {AniListID: 77}}, snap, idx, Memo{})
 
@@ -135,7 +135,7 @@ func TestMatchSingleFetchRecoversAfterFailedBatch(t *testing.T) {
 		},
 	}
 
-	res := NewMatcher(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 || fake.fetchCalls != 1 {
 		t.Errorf("calls = batch %d / fetch %d, want 1 / 1 (partial batch falls back to one single Fetch)", fake.batchCalls, fake.fetchCalls)
@@ -186,7 +186,7 @@ func TestMatchTotalBatchOutageSkipsPerIDFallback(t *testing.T) {
 	})
 	fake := &totalOutageAniList{}
 
-	res := NewMatcher(fake, nil).Match(t.Context(),
+	res := New(fake, nil).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
@@ -254,7 +254,7 @@ func TestMatchMidBatchOutageTripsFastFailBreaker(t *testing.T) {
 		{AniListID: 60}, // breaker tripped: fails fast, no request
 	}
 
-	res := NewMatcher(fake, nil).Match(t.Context(), entries, snap, idx, Memo{})
+	res := New(fake, nil).Match(t.Context(), entries, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
@@ -310,7 +310,7 @@ func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
 	fake := &recoveringAniList{}
 	entries := []seadex.Entry{{AniListID: 10}, {AniListID: 20}, {AniListID: 30}, {AniListID: 40}, {AniListID: 50}, {AniListID: 60}}
 
-	res := NewMatcher(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
 
 	if fake.fetchCalls != 5 {
 		t.Errorf("single Fetch calls = %d, want 5: success after two failures must reset the breaker streak", fake.fetchCalls)
@@ -362,7 +362,7 @@ func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
 	})
 	fake := &allNotFoundBatchAniList{}
 
-	res := NewMatcher(fake, nil).Match(t.Context(),
+	res := New(fake, nil).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
@@ -429,7 +429,7 @@ func TestMatchNotFoundResetsFailureBreaker(t *testing.T) {
 		{AniListID: 80},
 	}
 
-	res := NewMatcher(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
 
 	if fake.fetchCalls != 6 {
 		t.Errorf("single Fetch calls = %d, want 6: a definitive not-found must reset the consecutive-failure streak", fake.fetchCalls)

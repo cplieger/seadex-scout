@@ -44,7 +44,7 @@ func TestRequestExhaustedTerminalRecordIsDemoted(t *testing.T) {
 	for name, call := range cases {
 		t.Run(name, func(t *testing.T) {
 			logger, rec := capture.New()
-			c := NewClient(srv.Client(), srv.URL, 100000, logger)
+			c := NewClient(srv.Client(), srv.URL, WithRate(100000), WithLogger(logger))
 			call(t, c)
 
 			// The library's generic terminal verdict must not be a WARN:

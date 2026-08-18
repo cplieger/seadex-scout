@@ -23,7 +23,7 @@ func exhaustingMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(srv.Close)
-	return mapping.NewLoader(srv.Client(), srv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger)
+	return mapping.NewLoader(srv.Client(), srv.URL, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
 // staleMappingState is a persisted cache holding usable records fetched beyond

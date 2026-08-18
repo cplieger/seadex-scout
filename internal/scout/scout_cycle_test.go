@@ -184,10 +184,10 @@ func TestCycleAniListDegradedComparesMajority(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
-		Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(degradedMatcherAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -230,10 +230,10 @@ func TestCycleEmptySeaDexEntriesReportsNothing(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{},
-		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, logger),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     reporter,
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -338,10 +338,10 @@ func TestCyclePartialWalkComparesCleanSubset(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -452,10 +452,10 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, logger),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -589,10 +589,10 @@ func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, logger),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -653,10 +653,10 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -698,10 +698,10 @@ func TestCycleCompletedCyclePersistsAniListMemo(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
-		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, logger),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -812,7 +812,7 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-		Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger()),
+		Matcher: match.New(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger()),
 	})
 
 	if healthy := s.Cycle(ctx); !healthy {
@@ -1002,10 +1002,10 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 		Feed:         feed,
 	})
 
@@ -1096,7 +1096,7 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 			}}
 			s := New(&Deps{
 				Logger:  logger,
-				Mapping: mapping.NewLoader(ts.Client(), ts.URL, "", time.Hour, scoutTestLogger()),
+				Mapping: mapping.NewLoader(ts.Client(), ts.URL, mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 			})
 
 			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)
@@ -1322,8 +1322,8 @@ func TestCycleReportCarriesForwardIncompleteEvidence(t *testing.T) {
 			Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 			Mapping:  fakeMapping{},
 			SeaDex:   &fakeSeaDex{entries: entries},
-			Matcher:  match.NewMatcher(anilistClient, scoutTestLogger()),
-			Comparer: compare.NewComparer(compare.Config{}),
+			Matcher:  match.New(anilistClient, scoutTestLogger()),
+			Comparer: compare.New(compare.Config{}),
 			Notifier: notifier,
 		})
 	}
@@ -1431,7 +1431,7 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 	})
 
@@ -1486,8 +1486,8 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
 		AniListStats: stats,
 	})
@@ -1554,10 +1554,10 @@ func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -1609,10 +1609,10 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: entries},
-			Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
-			Comparer:     compare.NewComparer(compare.Config{}),
+			Matcher:      match.New(degradedMatcherAniList{}, scoutTestLogger()),
+			Comparer:     compare.New(compare.Config{}),
 			Notifier:     notify.NewNotifier(logger, nil),
-			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
 		}), recorder
 	}
 
@@ -1681,8 +1681,8 @@ func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 1}}},
-		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{}),
+		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
+		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
@@ -1728,10 +1728,10 @@ func TestCycleUndegradedCycleResetsAniListDegradedStreak(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{}),
+		Matcher:      match.New(notFoundAniList{}, logger),
+		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
 	})
 
 	if healthy := s.Cycle(t.Context()); !healthy {
@@ -1765,8 +1765,8 @@ func TestCycleAniListDegradedWinsMappingStaleCompletionLine(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{}),
+		Matcher:  match.New(degradedMatcherAniList{}, scoutTestLogger()),
+		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
@@ -1866,8 +1866,8 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 333}}},
-		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{}),
+		Matcher:  match.New(degradedMatcherAniList{}, scoutTestLogger()),
+		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
 
@@ -1924,7 +1924,7 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 			}}
 			s := New(&Deps{
 				Logger:  logger,
-				Mapping: mapping.NewLoader(ts.Client(), ts.URL, "", time.Hour, scoutTestLogger()),
+				Mapping: mapping.NewLoader(ts.Client(), ts.URL, mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 			})
 
 			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)

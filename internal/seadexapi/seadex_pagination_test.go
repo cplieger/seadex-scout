@@ -69,7 +69,7 @@ func TestFetchEntriesDiscardsPartialOnMidPaginationError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.Client(), server.URL, 0, nil)
+	client := NewClient(server.Client(), server.URL)
 	entries, err := client.FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want a page-2 fetch error")
@@ -109,7 +109,7 @@ func TestFetchEntriesKeysetSurvivesPrefixDeletion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestFetchEntriesKeysetWalksEqualCreatedRecords(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestFetchEntriesErrorsOnEmptyChunkWithOutstandingItems(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want empty-chunk error")
 	}
@@ -215,7 +215,7 @@ func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want truncated-view error on metadata regression")
 	}
@@ -239,7 +239,7 @@ func TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal(t *testing.T) 
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want missing-total completeness error")
 	}
@@ -282,7 +282,7 @@ func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
 		defer cancel()
 		// The page delay far exceeds the context deadline, so the sleep
 		// between chunk 1 and chunk 2 is where the cancellation lands.
-		client := NewClient(&http.Client{Transport: newStaticPageTransport()}, "https://example.test", time.Minute, nil)
+		client := NewClient(&http.Client{Transport: newStaticPageTransport()}, "https://example.test", WithPageDelay(time.Minute))
 		started := time.Now()
 		entries, err := client.FetchEntries(ctx, Options{})
 		if err == nil {
@@ -307,7 +307,7 @@ func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
 // delay exceeds the internal one, so only the wrapper can end the walk.
 func TestFetchEntriesWholeWalkDeadlineAborts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client := NewClient(&http.Client{Transport: newStaticPageTransport()}, "https://example.test", maxFetchDuration+time.Minute, nil)
+		client := NewClient(&http.Client{Transport: newStaticPageTransport()}, "https://example.test", WithPageDelay(maxFetchDuration+time.Minute))
 		started := time.Now()
 		entries, err := client.FetchEntries(t.Context(), Options{})
 		if err == nil {
@@ -336,7 +336,7 @@ func TestFetchEntriesHTTPStatusErrorAborts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want HTTP status error")
 	}
@@ -384,7 +384,7 @@ func (tr *flakyStatusTransport) RoundTrip(req *http.Request) (*http.Response, er
 func TestFetchEntriesRetriesTransientStatus(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tr := &flakyStatusTransport{status: http.StatusServiceUnavailable, failures: maxAttempts - 1}
-		entries, err := NewClient(&http.Client{Transport: tr}, "https://example.test", 0, nil).FetchEntries(t.Context(), Options{})
+		entries, err := NewClient(&http.Client{Transport: tr}, "https://example.test").FetchEntries(t.Context(), Options{})
 		if err != nil {
 			t.Fatalf("FetchEntries returned error: %v (a transient 503 must be retried, not degrade the cycle)", err)
 		}
@@ -408,7 +408,7 @@ func TestFetchEntriesEmptyCatalogueErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want empty-catalogue error")
 	}
@@ -433,7 +433,7 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v (a small count mismatch must not fail the fetch)", err)
 	}
@@ -463,7 +463,7 @@ func TestFetchEntriesBelowHalfShortfallErrors(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want the below-half shortfall to fail the fetch")
 	}
@@ -495,7 +495,7 @@ func TestFetchEntriesInconsistentTotalsError(t *testing.T) {
 	defer server.Close()
 
 	logger, _ := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want an error (totalItems 501 cannot fit 1 page of %d)", len(entries), perPage)
 	}
@@ -535,7 +535,7 @@ func (tr *pagedRecordingTransport) RoundTrip(req *http.Request) (*http.Response,
 func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tr := &pagedRecordingTransport{started: time.Now()}
-		client := NewClient(&http.Client{Transport: tr}, "https://example.test", time.Minute, nil)
+		client := NewClient(&http.Client{Transport: tr}, "https://example.test", WithPageDelay(time.Minute))
 		entries, err := client.FetchEntries(t.Context(), Options{})
 		if err != nil {
 			t.Fatalf("FetchEntries returned error: %v", err)
@@ -569,7 +569,7 @@ func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestFetchEntriesWarnsWhenCatalogueShrinksAgainstPreviousFetch(t *testing.T)
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	client := NewClient(server.Client(), server.URL, 0, logger)
+	client := NewClient(server.Client(), server.URL, WithLogger(logger))
 	const msg = "seadex catalogue shrank against this process's previous fetch; upstream may be serving a truncated catalogue"
 
 	if _, err := client.FetchEntries(t.Context(), Options{}); err != nil {
@@ -677,7 +677,7 @@ func TestFetchEntriesExactlyFullChunkCompletesOnEmptyFollowUp(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v (an exactly-full catalogue must complete on the empty follow-up chunk)", err)
 	}
@@ -713,7 +713,7 @@ func TestFetchEntriesRetainsReportedPagesAcrossChunks(t *testing.T) {
 	defer server.Close()
 
 	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err != nil {
 		t.Fatalf("FetchEntries returned error: %v (a chunk omitting totalPages must not invalidate the retained page count)", err)
 	}
@@ -747,7 +747,7 @@ func TestFinishFetchWarnsWhenBudgetMostlySpent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, recorder := capture.New()
-			client := NewClient(nil, "", 0, logger)
+			client := NewClient(nil, "", WithLogger(logger))
 			entries, err := client.finishFetch([]seadex.Entry{{AniListID: 1}}, fetchTotals{
 				bytes:         tc.bytes,
 				elements:      tc.elements,
@@ -812,7 +812,7 @@ func TestFetchEntriesRejectsBrokenEntryIdentities(t *testing.T) {
 			defer server.Close()
 
 			logger, _ := capture.New()
-			entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+			entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 			if err == nil {
 				t.Fatalf("FetchEntries = %d entries, want an entry-identity error", len(entries))
 			}
@@ -842,7 +842,7 @@ func TestFetchEntriesRejectsDuplicateIdentityAcrossPages(t *testing.T) {
 	defer server.Close()
 
 	logger, _ := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL, WithLogger(logger)).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want a cross-page duplicate-identity error", len(entries))
 	}
@@ -871,7 +871,7 @@ func TestFetchEntriesUnusableCursorAborts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want an unusable-cursor error", len(entries))
 	}
@@ -908,7 +908,7 @@ func TestFetchEntriesRegressingCursorAborts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want a non-advancing-cursor error", len(entries))
 	}
@@ -933,7 +933,7 @@ func TestFetchEntriesDisorderedShortChunkAborts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(t.Context(), Options{})
+	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries = %d entries, want a disordered-chunk error", len(entries))
 	}
