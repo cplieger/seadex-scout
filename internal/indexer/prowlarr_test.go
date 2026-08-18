@@ -626,7 +626,7 @@ func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
 		"decoded query value reassembled from DEL": {
 			username:    "alice",
 			password:    "s3cret",
-			rawQuery:    "passkey=Ab9+cd/efGH12345678==",
+			rawQuery:    "passkey=Ab9+cd/efGH12345678==", // gitleaks:allow (synthetic fixture; the '+' is the needle)
 			code:        "100",
 			description: "decode: unexpected token in &quot;Ab9\x7fcd/efGH12345678==&quot;",
 			secret:      "Ab9 cd/efGH12345678==",

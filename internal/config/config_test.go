@@ -16,7 +16,7 @@ import (
 
 // The string-level expansion mechanics (braced-only matching, keep-literal on
 // unknown/unset, bare-dollar safety) are yamlenv's contract, tested in
-// github.com/cplieger/envx/yamlenv. Here the app tests its own allowlist
+// github.com/cplieger/envx/yamlenv/v2. Here the app tests its own allowlist
 // policy plus the Load-level wiring (expansion, the unresolved-refs warning,
 // keys-stay-literal, and the secret-redaction posture).
 
@@ -1151,7 +1151,7 @@ func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
 }
 
 // TestSanitizeYAMLErrorFallbacks and TestIsLinePrefix moved with the
-// sanitizer to github.com/cplieger/envx/yamlenv (SanitizeDecodeError's
+// sanitizer to github.com/cplieger/envx/yamlenv/v2 (SanitizeDecodeError's
 // fallback, collision-guard, and line-prefix tables live there); the
 // Load-level tests above and below pin the app-visible posture end to end,
 // including the WithUnknownKeyEcho policy (TestLoadRejectsUnknownKeys).

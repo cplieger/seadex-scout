@@ -9,7 +9,7 @@ import (
 )
 
 // The ${VAR} expansion fuzz coverage moved with the expansion engine to
-// github.com/cplieger/envx/yamlenv (FuzzExpand there pins the no-op,
+// github.com/cplieger/envx/yamlenv/v2 (FuzzExpand there pins the no-op,
 // keep-literal, and name-grammar invariants), and the decode-error redaction
 // fuzz coverage moved with the sanitizer (FuzzSanitizeDecodeError there pins
 // the excerpt-sentinel and exact-rebuild invariants); the app keeps only its

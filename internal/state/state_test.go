@@ -734,7 +734,10 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	// TestStoreLoadReadsPersistedValidatorsAndPartialWalk carries a zero
 	// timestamp) and a renamed partial would zero-load a complete-looking
 	// library out of every existing state file.
-	assertKeySet(t, "library snapshot", envelope.Library, []string{"items", "partial", "taken_at"})
+	wantSnapshotKeys := []string{"items", "partial", "taken_at"}
+	if keys := slices.Sorted(maps.Keys(envelope.Library)); !slices.Equal(keys, wantSnapshotKeys) {
+		t.Errorf("persisted library snapshot keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantSnapshotKeys)
+	}
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal(envelope.Library["items"], &items); err != nil {
 		t.Fatalf("decode persisted library items: %v", err)
@@ -742,10 +745,13 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("persisted library.items = %d, want 1", len(items))
 	}
-	assertKeySet(t, "library item", items[0], []string{
+	wantItemKeys := []string{
 		"alt_titles", "arr", "arr_id", "arr_url", "current", "failed", "groups",
 		"has_file", "imdb_id", "season_groups", "title", "tmdb_id", "tvdb_id", "year",
-	})
+	}
+	if keys := slices.Sorted(maps.Keys(items[0])); !slices.Equal(keys, wantItemKeys) {
+		t.Errorf("persisted library item keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantItemKeys)
+	}
 	// The nested release fingerprint is the state file's comparison baseline:
 	// a renamed field there silently zero-loads a group or tracker and
 	// re-alerts every finding, so its keys are pinned like the outer members.
@@ -753,26 +759,21 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	if err := json.Unmarshal(items[0]["current"], &current); err != nil {
 		t.Fatalf("decode persisted library item current: %v", err)
 	}
-	assertKeySet(t, "library item current", current, []string{
+	wantCurrentKeys := []string{
 		"codec", "dual_audio", "group", "kind", "reason", "resolution", "tracker", "tracker_type",
-	})
+	}
+	if keys := slices.Sorted(maps.Keys(current)); !slices.Equal(keys, wantCurrentKeys) {
+		t.Errorf("persisted library item current keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantCurrentKeys)
+	}
 	entry, ok := envelope.Memo.Entries["1"]
 	if !ok {
 		t.Fatalf("persisted anilist_memo.entries missing id 1 (got %v)", slices.Sorted(maps.Keys(envelope.Memo.Entries)))
 	}
-	assertKeySet(t, "anilist_memo entry", entry, []string{
+	wantEntryKeys := []string{
 		"expiry", "format", "not_found", "titles", "year",
-	})
-}
-
-// assertKeySet compares the json keys a persisted member actually wrote
-// against the schema this package pins for it, naming the SchemaVersion
-// obligation in the failure so a deliberate rename is not just "fixed" here.
-func assertKeySet(t *testing.T, what string, got map[string]json.RawMessage, want []string) {
-	t.Helper()
-	keys := slices.Sorted(maps.Keys(got))
-	if !slices.Equal(keys, want) {
-		t.Errorf("persisted %s keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", what, keys, want)
+	}
+	if keys := slices.Sorted(maps.Keys(entry)); !slices.Equal(keys, wantEntryKeys) {
+		t.Errorf("persisted anilist_memo entry keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantEntryKeys)
 	}
 }
 
@@ -862,15 +863,15 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
 		t.Fatalf("write newer-version state: %v", err)
 	}
-	if _, err := store.Load(t.Context()); err == nil {
+	_, loadErr := store.Load(t.Context())
+	if loadErr == nil {
 		t.Fatal("Load of a newer-schema file returned nil error, want refusal")
-	} else {
-		wantFile := fmt.Sprintf("schema version %d", SchemaVersion+1)
-		wantSupported := fmt.Sprintf("(%d)", SchemaVersion)
-		if !strings.Contains(err.Error(), wantFile) || !strings.Contains(err.Error(), wantSupported) {
-			t.Errorf("error = %q, want both the file's version (%q) and the supported version (%q) named",
-				err.Error(), wantFile, wantSupported)
-		}
+	}
+	wantFile := fmt.Sprintf("schema version %d", SchemaVersion+1)
+	wantSupported := fmt.Sprintf("(%d)", SchemaVersion)
+	if !strings.Contains(loadErr.Error(), wantFile) || !strings.Contains(loadErr.Error(), wantSupported) {
+		t.Errorf("error = %q, want both the file's version (%q) and the supported version (%q) named",
+			loadErr.Error(), wantFile, wantSupported)
 	}
 	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("newer-schema file quarantined (stat err = %v), want it preserved at the live path", statErr)
