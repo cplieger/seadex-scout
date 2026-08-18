@@ -264,7 +264,7 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 	var sonarr *arrapi.Sonarr
 	var radarr *arrapi.Radarr
 	if cfg.SonarrEnabled() {
-		s, err := arrapi.NewSonarr(cfg.SonarrURL, httpx.Secret(cfg.SonarrAPIKey),
+		s, err := arrapi.NewSonarr(cfg.SonarrURL, arrapi.APIKey(cfg.SonarrAPIKey),
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
 			// arrapi's constructor error echoes the full baseURL with %q and an arr
@@ -275,7 +275,7 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 		sonarr = s
 	}
 	if cfg.RadarrEnabled() {
-		r, err := arrapi.NewRadarr(cfg.RadarrURL, httpx.Secret(cfg.RadarrAPIKey),
+		r, err := arrapi.NewRadarr(cfg.RadarrURL, arrapi.APIKey(cfg.RadarrAPIKey),
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
 			if sonarr != nil {
