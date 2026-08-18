@@ -169,3 +169,92 @@ func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
 		}
 	})
 }
+
+// TestJoinerPairIsAllOrNothing pins WritePair's atomicity, the property a
+// pair charged piece by piece cannot hold. Three ways the budget can run out
+// mid-triple, and every one of them leaves an element that is not a pair:
+//
+//	left cut       -> a truncated key, which names nothing
+//	separator cut  -> the key alone, which reads as a value
+//	right cut      -> "key=" with no value
+//
+// All three are refused whole. Charging left, separator and right as three
+// writes admits every one of them, and the "..." marker cannot distinguish
+// "there was more" from "this element is malformed", so a consumer splitting the
+// attribute on the separator has no way to tell.
+func TestJoinerPairIsAllOrNothing(t *testing.T) {
+	const (
+		key   = "Nyaa"
+		sep   = "="
+		value = "https://nyaa.si/view/1"
+	)
+	for _, tc := range []struct {
+		name string
+		room int // budget left when the pair is charged
+	}{
+		{"room for part of the key", len(key) - 1},
+		{"room for the key but not the separator", len(key)},
+		{"room for the key and the separator but not the value", len(key) + len(sep)},
+		{"room for all but the last byte of the value", len(key) + len(sep) + len(value) - 1},
+		{"no room at all", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := NewJoiner()
+			head := strings.Repeat("h", MaxBytes-tc.room)
+			if !j.Write(head) {
+				t.Fatalf("filling the budget to %d bytes of room reported a cut", tc.room)
+			}
+			if j.WritePair(key, sep, value) {
+				t.Errorf("WritePair reported success with %d bytes of room, want refusal", tc.room)
+			}
+			got := j.String()
+			if rest := strings.TrimPrefix(got, head); strings.ContainsAny(rest, key+sep) {
+				t.Errorf("aggregate tail = %q, want the refused pair absent entirely", rest)
+			}
+			if !strings.HasSuffix(got, TruncMarker) {
+				t.Errorf("aggregate carries no %q marker despite a refused pair", TruncMarker)
+			}
+			if len(got) > MaxBytes {
+				t.Errorf("aggregate = %d bytes, want <= %d", len(got), MaxBytes)
+			}
+		})
+	}
+}
+
+// TestJoinerPairLandsWholeWhenItFits is the other half of the contract: a pair
+// the budget can hold arrives byte-identical to its three separate writes, so
+// atomicity costs an honest value nothing.
+func TestJoinerPairLandsWholeWhenItFits(t *testing.T) {
+	pair := NewJoiner()
+	if !pair.WritePair("Nyaa", "=", "https://nyaa.si/view/1") {
+		t.Fatal("WritePair refused a pair well inside the budget")
+	}
+	pieces := NewJoiner()
+	pieces.Write("Nyaa")
+	pieces.WriteSep("=")
+	pieces.Write("https://nyaa.si/view/1")
+	if got, want := pair.String(), pieces.String(); got != want {
+		t.Errorf("WritePair = %q, want %q (identical to the piecewise writes)", got, want)
+	}
+}
+
+// TestJoinerPairRefusesAValueThatGrowsPastTheBudget pins that the fit is
+// measured on the SANITIZED pieces: every invalid UTF-8 byte becomes the
+// three-byte U+FFFD, so a value that fits raw can triple past the budget. A
+// raw-byte fit test would admit the pair and then cut it, which is the half-link
+// atomicity exists to prevent.
+func TestJoinerPairRefusesAValueThatGrowsPastTheBudget(t *testing.T) {
+	j := NewJoiner()
+	const key = "Nyaa"
+	// Raw, the pair fits with a byte to spare; sanitized, the value triples.
+	room := len(key) + len("=") + 8
+	if !j.Write(strings.Repeat("h", MaxBytes-room)) {
+		t.Fatalf("filling the budget to %d bytes of room reported a cut", room)
+	}
+	if j.WritePair(key, "=", strings.Repeat("\xff", 4)) {
+		t.Error("WritePair accepted a value whose sanitized form exceeds the budget")
+	}
+	if got := j.String(); strings.Contains(got, key) {
+		t.Error("the refused pair's key was emitted")
+	}
+}

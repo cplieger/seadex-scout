@@ -320,3 +320,50 @@ func TestCapAlertTextAttrNeverEndsInADanglingEscape(t *testing.T) {
 		})
 	}
 }
+
+// TestJoinLinksAttrNeverEmitsAHalfLink pins the release_urls invariant a reader
+// depends on: every element of the space-separated list IS a `tracker=url` pair.
+// The failure it guards is a live one, not a style point. joinLinksAttr charges a
+// link as three writes against one shared budget, and Write returns false once
+// the budget is spent WITHOUT unwinding what it already appended - so a budget
+// that ends between the tracker and its "=url" leaves the tracker name standing
+// alone as a list element. An operator (or a Loki query splitting on "=") then
+// reads a tracker name where a URL belongs, and the "..." marker cannot tell them
+// apart: it means "sources were dropped" in both the honest and the broken case.
+//
+// The fill is COMPUTED so the budget lands exactly on that boundary - the second
+// link's tracker fits and its "=url" does not - because that offset is the only
+// input that reaches the defect, and it moves whenever maxAttrBytes does.
+func TestJoinLinksAttrNeverEmitsAHalfLink(t *testing.T) {
+	const tracker = "Nyaa"
+	const urlPrefix = "https://nyaa.si/view/"
+
+	// The first link's whole piece is tracker + "=" + url. Size it so that after
+	// the 1-byte " " separator the budget holds exactly len(tracker) more bytes.
+	firstPiece := maxAttrBytes - len(" ") - len(tracker)
+	fill := firstPiece - len(tracker) - len("=") - len(urlPrefix)
+	if fill <= 0 {
+		t.Fatalf("maxAttrBytes = %d is too small to stage the boundary", maxAttrBytes)
+	}
+	links := []compare.ReleaseLink{
+		{Tracker: tracker, URL: urlPrefix + strings.Repeat("u", fill)},
+		{Tracker: tracker, URL: urlPrefix + "2"},
+	}
+
+	got := joinLinksAttr(links)
+
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("release_urls = %d bytes without the ... marker despite a dropped link", len(got))
+	}
+	for elem := range strings.FieldsSeq(got) {
+		if elem == "..." {
+			continue
+		}
+		if !strings.Contains(strings.TrimSuffix(elem, "..."), "=") {
+			t.Errorf("release_urls element %q is not a tracker=url pair (dangling half-link)", elem)
+		}
+	}
+	if len(got) > maxAttrBytes+len("...") {
+		t.Errorf("release_urls = %d bytes, want <= %d", len(got), maxAttrBytes+len("..."))
+	}
+}

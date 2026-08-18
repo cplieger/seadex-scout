@@ -513,13 +513,16 @@ func seadexTags(f *compare.Finding) string {
 // joinLinksAttr renders every obtainable source for the recommended release as
 // a space-separated "tracker=url" list, so a finding carries both a Nyaa and an
 // AnimeBytes link when the release exists on both, not just the headline one.
+// Each link is charged as one unit: a tracker without its "=url" is not a
+// source, and rendering one would put a bare tracker name where the attribute's
+// readers expect a pair.
 func joinLinksAttr(links []compare.ReleaseLink) string {
 	j := logattr.NewJoiner()
 	for i := range links {
 		if i > 0 && !j.WriteSep(" ") {
 			break
 		}
-		if !j.Write(links[i].Tracker) || !j.WriteSep("=") || !j.Write(links[i].URL) {
+		if !j.WritePair(links[i].Tracker, "=", links[i].URL) {
 			break
 		}
 	}

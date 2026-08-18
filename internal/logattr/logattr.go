@@ -58,6 +58,10 @@ func EscapeLinkDestination(s string) string { return linkDestEscaper.Replace(s) 
 // each piece and writing the ASCII separators raw yields the same bytes.
 type Joiner struct {
 	b *runesafe.Budget
+	// dropped records a unit WritePair refused whole. runesafe.Budget cannot
+	// carry that fact: nothing was written, so its own cut stays unlatched, and
+	// an unmarked aggregate would claim to hold every source.
+	dropped bool
 }
 
 // NewJoiner returns a joiner with the full per-attribute budget. The
@@ -77,12 +81,53 @@ func (j *Joiner) Write(raw string) bool { return j.b.Write(raw) }
 // either.
 func (j *Joiner) WriteSep(sep string) bool { return j.Write(sep) }
 
+// WritePair appends left+sep+right as ONE unit: the triple lands whole or not at
+// all. Charged piece by piece the budget can run out mid-triple, and every state
+// that leaves reads as an element that is not a pair - a truncated left, a left
+// with no separator, a left+sep with no right - so a reader splitting the
+// attribute on sep sees a key standing where a value belongs. Refusing the whole
+// unit keeps the invariant that every element rendered IS a pair, and the refusal
+// marks the aggregate truncated, so the elision stays visible.
+//
+// The fit is measured on the SANITIZED pieces, because sanitizing can grow a
+// value (each invalid UTF-8 byte becomes the three-byte U+FFFD) and a raw-byte
+// estimate would admit a pair the budget then cuts. Each piece is measured under
+// the remaining budget, so the work stays bounded by it however long the inputs
+// are.
+func (j *Joiner) WritePair(left, sep, right string) bool {
+	room := j.remaining()
+	cleanLeft, leftCut := runesafe.SanitizeBudgeted(left, room, "")
+	cleanRight, rightCut := runesafe.SanitizeBudgeted(right, room, "")
+	if leftCut || rightCut || len(cleanLeft)+len(sep)+len(cleanRight) > room {
+		j.dropped = true
+		return false
+	}
+	// Sanitizing is idempotent and each piece is already inside the budget, so
+	// these three writes cannot cut.
+	return j.Write(cleanLeft) && j.WriteSep(sep) && j.Write(cleanRight)
+}
+
+// remaining reports the bytes the budget still accepts. Result reads the budget
+// without spending it and returns exactly the bytes written so far, so the
+// difference from MaxBytes is the budget's own remainder; a cut budget accepts
+// nothing more.
+func (j *Joiner) remaining() int {
+	text, cut := j.b.Result()
+	if cut {
+		return 0
+	}
+	return MaxBytes - len(text)
+}
+
 // String returns the joined attribute, marked with TruncMarker when any source
-// was cut - the same truncation signal a single capped value carries.
+// was cut or refused - the same truncation signal a single capped value carries.
 func (j *Joiner) String() string {
 	text, cut := j.b.Result()
 	if cut {
 		return text + TruncMarker
+	}
+	if j.dropped {
+		return runesafe.CapBytes(text, max(0, MaxBytes-len(TruncMarker))) + TruncMarker
 	}
 	return text
 }
