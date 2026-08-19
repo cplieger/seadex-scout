@@ -986,6 +986,17 @@ func TestSameHTTPOrigin(t *testing.T) {
 		{"host mismatch rejected", "https://sonarr:9696/1/download", "https://prowlarr:9696/1/api", false},
 		{"userinfo rejected even on the origin host", "https://user@prowlarr:9696/1/download", "https://prowlarr:9696/1/api", false},
 		{"non-http scheme rejected", "ftp://prowlarr:9696/1/download", "https://prowlarr:9696/1/api", false},
+		// The fold is ASCII-only, so a host that differs from the origin by a
+		// non-ASCII rune is a DIFFERENT origin however the toolchain's Unicode
+		// simple-fold table happens to relate the two. All three pairs below
+		// are the ones Unicode 17 (Go 1.27) newly folds together, and
+		// strings.EqualFold answers "same origin" for every one of them - which
+		// is exactly why this gate must not use it. U+017F is the long-s case
+		// the app's other host gates were hardened against.
+		{"U+0390 host is not the U+1FD3 origin", "https://pro\u0390larr:9696/1/download", "https://pro\u1FD3larr:9696/1/api", false},
+		{"U+03B0 host is not the U+1FE3 origin", "https://pro\u03B0larr:9696/1/download", "https://pro\u1FE3larr:9696/1/api", false},
+		{"U+FB05 host is not the U+FB06 origin", "https://prowlarr\uFB05:9696/1/download", "https://prowlarr\uFB06:9696/1/api", false},
+		{"long-s host is not the ASCII origin", "https://\u017Fonarr:9696/1/download", "https://sonarr:9696/1/api", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

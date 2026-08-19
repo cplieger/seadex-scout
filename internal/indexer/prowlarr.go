@@ -499,15 +499,27 @@ func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 // userinfo, whose ORIGIN matches origin's: scheme and hostname compared
 // case-insensitively, and the EFFECTIVE port compared after defaulting an omitted port
 // to the scheme's (80 for http, 443 for https).
+//
+// Both comparisons fold ASCII-ONLY, deliberately not strings.EqualFold, which is
+// the rule every other host and protocol-token comparison in this app already
+// reads (isCanonicalTrackerHost, displaylink.isHTTPScheme). Full Unicode simple
+// folding has ASCII-PRODUCING mappings, so it launders a homograph host into a
+// canonical one before this gate can refuse it - and the fold is not static:
+// measured across Unicode 15 to 17 (Go 1.26 to 1.27), strings.EqualFold newly
+// reads U+0390 as U+1FD3, U+03B0 as U+1FE3 and U+FB05 as U+FB06, so a host
+// differing from the configured origin by one of those runes was a different
+// origin on 1.26 and would be the same one here. A gate whose answers move with
+// the toolchain's fold table is not a gate; urlform's folds cannot move, because
+// a non-ASCII byte can never fold to an ASCII one.
 func sameHTTPOrigin(raw string, origin *url.URL) bool {
 	parsed, ok := httpNoUserinfoURL(raw)
 	if !ok {
 		return false
 	}
-	if !strings.EqualFold(parsed.Scheme, origin.Scheme) {
+	if !urlform.EqualASCIIFold(parsed.Scheme, origin.Scheme) {
 		return false
 	}
-	if !strings.EqualFold(parsed.Hostname(), origin.Hostname()) {
+	if urlform.FoldHostASCII(parsed.Hostname()) != urlform.FoldHostASCII(origin.Hostname()) {
 		return false
 	}
 	return effectiveHTTPPort(parsed) == effectiveHTTPPort(origin)
