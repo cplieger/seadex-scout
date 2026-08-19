@@ -362,7 +362,8 @@ func buildIgnoreSet(raw []int) (map[int]struct{}, error) {
 	for _, id := range raw {
 		if id <= 0 {
 			return nil, fmt.Errorf(
-				"filters.ignore holds a non-positive AniList ID (%d); IDs start at 1", id)
+				"filters.ignore holds a non-positive AniList ID (%d); IDs start at 1", id,
+			)
 		}
 		out[id] = struct{}{}
 	}
@@ -383,7 +384,8 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 	}
 	if len(raw) > maxExcludeTags {
 		return tagfilter.Filter{}, fmt.Errorf(
-			"filters.exclude_tags lists more than %d tags", maxExcludeTags)
+			"filters.exclude_tags lists more than %d tags", maxExcludeTags,
+		)
 	}
 	valid := strings.Join(tagfilter.SurfaceNames(), ", ")
 	bySurface := make(map[string][]tagfilter.Surface, len(raw))
@@ -393,21 +395,25 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 		switch key := strings.TrimSpace(tag); {
 		case key == "":
 			return tagfilter.Filter{}, errors.New(
-				"filters.exclude_tags holds a blank tag key")
+				"filters.exclude_tags holds a blank tag key",
+			)
 		case len(key) > maxExcludeTagLen:
 			return tagfilter.Filter{}, fmt.Errorf(
-				"a filters.exclude_tags tag key is longer than %d bytes", maxExcludeTagLen)
+				"a filters.exclude_tags tag key is longer than %d bytes", maxExcludeTagLen,
+			)
 		case len(raw[tag]) == 0:
 			return tagfilter.Filter{}, fmt.Errorf(
 				"a filters.exclude_tags tag lists no surfaces; list at least one of %s, "+
-					"or remove the tag (an empty exclude_tags filters nothing)", valid)
+					"or remove the tag (an empty exclude_tags filters nothing)", valid,
+			)
 		}
 		surfaces := make([]tagfilter.Surface, 0, len(raw[tag]))
 		for _, name := range raw[tag] {
 			s, ok := tagfilter.ParseSurface(name)
 			if !ok {
 				return tagfilter.Filter{}, fmt.Errorf(
-					"filters.exclude_tags lists an unknown surface; valid surfaces are %s", valid)
+					"filters.exclude_tags lists an unknown surface; valid surfaces are %s", valid,
+				)
 			}
 			surfaces = append(surfaces, s)
 		}

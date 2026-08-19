@@ -19,10 +19,12 @@ const abPasskeyFuzzSentinel = "pk-SECRET-Zq7"
 // AnimeBytes passkey could ride a public-tracker link.
 var (
 	nyaaDownloadForm = regexp.MustCompile(
-		`^https://nyaa\.si/download/[0-9]{1,` + strconv.Itoa(maxTrackerIDDigits) + `}\.torrent$`)
+		`^https://nyaa\.si/download/[0-9]{1,` + strconv.Itoa(maxTrackerIDDigits) + `}\.torrent$`,
+	)
 	abDownloadForm = regexp.MustCompile(
 		`^https://animebytes\.tv/torrent/[0-9]{1,` + strconv.Itoa(maxTrackerIDDigits) +
-			`}/download/` + regexp.QuoteMeta(abPasskeyFuzzSentinel) + `$`)
+			`}/download/` + regexp.QuoteMeta(abPasskeyFuzzSentinel) + `$`,
+	)
 )
 
 // FuzzDownloadURL_staysOnTheCanonicalTrackerRoute exercises the download-link

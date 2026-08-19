@@ -94,8 +94,7 @@ func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
 	if err == nil {
 		t.Fatal("parseTorznab on an <error> document returned nil error")
 	}
-	var doc *upstreamDocError
-	if !errors.As(err, &doc) {
+	if _, ok := errors.AsType[*upstreamDocError](err); !ok {
 		t.Fatalf("error = %T, want *upstreamDocError", err)
 	}
 	got := err.Error()
@@ -258,7 +257,8 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			// even though each field and the item count stay under their own caps.
 			inner: "<item>" + strings.Repeat(
 				"<title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>",
-				maxUpstreamTextBytes/maxUpstreamFieldBytes+1) + "</item>",
+				maxUpstreamTextBytes/maxUpstreamFieldBytes+1,
+			) + "</item>",
 			wantErr: true,
 		},
 		"cumulative text over the budget rejected": {
@@ -269,7 +269,8 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner: strings.Repeat(
 				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
 					"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
-				maxUpstreamTextBytes/(2*maxUpstreamFieldBytes)+1),
+				maxUpstreamTextBytes/(2*maxUpstreamFieldBytes)+1,
+			),
 			wantErr: true,
 		},
 		"cumulative text across two channels rejected": {
@@ -282,12 +283,14 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner: strings.Repeat(
 				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
 					"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
-				257) +
+				257,
+			) +
 				"</channel><channel>" +
 				strings.Repeat(
 					"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
 						"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
-					257),
+					257,
+				),
 			wantErr: true,
 		},
 		"maximum-length field parses": {
@@ -302,8 +305,7 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 				if err == nil {
 					t.Fatalf("parseTorznab accepted an over-limit response (%d items)", len(items))
 				}
-				var limitErr *torznabLimitError
-				if !errors.As(err, &limitErr) {
+				if _, ok := errors.AsType[*torznabLimitError](err); !ok {
 					t.Errorf("error = %T (%v), want *torznabLimitError", err, err)
 				}
 				return
@@ -605,8 +607,7 @@ func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
 	if err == nil {
 		t.Fatal("parseErrorDocument accepted an <error> document with over-budget cumulative attribute text")
 	}
-	var limitErr *torznabLimitError
-	if !errors.As(err, &limitErr) {
+	if _, ok := errors.AsType[*torznabLimitError](err); !ok {
 		t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 	}
 	if !strings.Contains(err.Error(), "cumulative decoded text") {

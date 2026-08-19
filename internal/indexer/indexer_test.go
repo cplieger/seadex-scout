@@ -532,10 +532,11 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}))
 	defer torznabSrv.Close()
 
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+	ix := warmedIndexer(&Config{
+		SnapshotPath:   path,
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
-	}}, nil, torznabSrv.Client())
+	}, nil, torznabSrv.Client())
 
 	// A real search (non-empty q) filters to the curation set loaded from the
 	// snapshot: the sample item matches by info hash, gets the best marker, and
@@ -734,7 +735,7 @@ func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 	// A loader is running and has not resolved its first load: exactly the state
 	// start leaves behind when the wait expires before the load returns.
 	ix.cache.watchStarted.Store(true)
@@ -811,7 +812,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 	ix.cache.start(ctx)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("feed after start = %d items, want the persisted snapshot loaded (1)", len(got))
@@ -844,7 +845,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 // what makes the new feed servable.
 func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
+	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 
 	// No snapshot yet: the empty-q feed serves nothing.
 	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
@@ -909,33 +910,36 @@ func TestAnimeBytesMatching(t *testing.T) {
 }
 
 func TestServesQuery(t *testing.T) {
-	serves := []url.Values{
-		{"t": {"movie"}, "q": {"Totoro"}},                                       // movie
-		{"t": {"search"}, "q": {"From Up on Poppy Hill 2011"}, "cat": {"2000"}}, // movie search (Movies cat) ending in a year
-		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}},                  // season pack search
-		{"t": {"tvsearch"}},                     // bare tvsearch / RSS
-		{"t": {"search"}},                       // RSS (empty q)
-		{"t": {"search"}, "q": {"Frieren"}},     // generic series search
-		{"t": {"search"}, "q": {"Frieren OVA"}}, // special
-		{"t": {"caps"}},                         // (query() not called for caps, but classifies as serve)
-		{"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}},         // top of the Movies range still reads as a film
-		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"0"}, "ep": {"1"}}, // season-0 special search (single release, always answered)
+	serves := map[string]url.Values{
+		"movie":                          {"t": {"movie"}, "q": {"Totoro"}},
+		"movie search in the Movies cat": {"t": {"search"}, "q": {"From Up on Poppy Hill 2011"}, "cat": {"2000"}},
+		"season pack search":             {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}},
+		"bare tvsearch (RSS)":            {"t": {"tvsearch"}},
+		"bare search (RSS, empty q)":     {"t": {"search"}},
+		"generic series search":          {"t": {"search"}, "q": {"Frieren"}},
+		"special":                        {"t": {"search"}, "q": {"Frieren OVA"}},
+		// query() is not called for caps, but caps still classifies as a serve.
+		"caps":                              {"t": {"caps"}},
+		"top of the Movies range is a film": {"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}},
+		// A single release, so it is always answered.
+		"season-0 special search": {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"0"}, "ep": {"1"}},
 	}
-	for _, q := range serves {
+	for name, q := range serves {
 		if !servesQuery(q) {
-			t.Errorf("servesQuery(%v) = false, want true", q)
+			t.Errorf("servesQuery(%s: %v) = false, want true", name, q)
 		}
 	}
 
-	skips := []url.Values{
-		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "ep": {"1"}}, // per-episode (season+ep)
-		{"t": {"search"}, "q": {"Frieren 01"}},                              // anime absolute episode
-		{"t": {"search"}, "q": {"One Piece 1085"}},                          // 4-digit absolute episode
-		{"t": {"search"}, "q": {"Frieren 01"}, "cat": {"3000"}},             // 3000 is past the Movies range; the episode skip applies
+	skips := map[string]url.Values{
+		"per-episode (season+ep)":  {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "ep": {"1"}},
+		"anime absolute episode":   {"t": {"search"}, "q": {"Frieren 01"}},
+		"4-digit absolute episode": {"t": {"search"}, "q": {"One Piece 1085"}},
+		// cat 3000 is past the Movies range, so the episode skip still applies.
+		"absolute episode outside the Movies range": {"t": {"search"}, "q": {"Frieren 01"}, "cat": {"3000"}},
 	}
-	for _, q := range skips {
+	for name, q := range skips {
 		if servesQuery(q) {
-			t.Errorf("servesQuery(%v) = true, want false (per-episode query)", q)
+			t.Errorf("servesQuery(%s: %v) = true, want false (per-episode query)", name, q)
 		}
 	}
 }
@@ -1141,7 +1145,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, nil, nil)
+	noKey := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
 	if body := serve(noKey, "/ab?t=search&apikey=k"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
@@ -1149,7 +1153,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}}, nil, nil)
+	withKey := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}, nil, nil)
 	if body := serve(withKey, "/ab?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
@@ -1179,7 +1183,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	}
 
 	t.Run("unconfigured AB serves the empty-feed shape", func(t *testing.T) {
-		off := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, nil, nil)
+		off := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABPasskey: "SECRETPASSKEY"}, nil, nil)
 		body := serve(off)
 		if strings.Contains(body, "SECRETPASSKEY") {
 			t.Errorf("unconfigured AB response leaks the passkey: %q", body)
@@ -1193,7 +1197,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	})
 
 	t.Run("configured AB serves the same snapshot", func(t *testing.T) {
-		on := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, nil, nil)
+		on := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}, nil, nil)
 		body := serve(on)
 		if !strings.Contains(body, "<item>") || !strings.Contains(body, "Frieren - S01 (BD Remux 1080p) [PMR]") {
 			t.Errorf("configured AB did not serve the snapshot item: %q", body)
@@ -1594,7 +1598,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
+	ix := warmedIndexer(&Config{SnapshotPath: path, ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, nil, srv.Client())
 
 	items, stats, fault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {
@@ -1620,17 +1624,17 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 // hold items, so a routing bug can never leak one tracker's feed (or the
 // in-memory credential-bearing AB items) under an unrecognized scope.
 func TestFeedForUnknownScopeServesNothing(t *testing.T) {
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+	ix := New(&Config{
 		NyaaTorznabURL: "http://prowlarr/1/api",
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      "PK",
-	}}, nil, nil)
+	}, nil, nil)
 	ix.cache.mu.Lock()
 	ix.cache.snap.NyaaFeed = []journalItem{
-		{item: item{Title: "n"}},
+		{Title: "n"},
 	}
 	ix.cache.snap.ABFeed = []journalItem{
-		{item: item{Title: "a"}},
+		{Title: "a"},
 	}
 	ix.cache.mu.Unlock()
 	if got := ix.feedFor("other"); got != nil {
@@ -1651,7 +1655,7 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 // tracker still answers the missing-passkey nudge rather than the
 // unconfigured-tracker empty feed.
 func TestNewCopiesConfig(t *testing.T) {
-	cfg := &Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}
+	cfg := &Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}
 	ix := New(cfg, nil, nil)
 
 	// The caller reuses (or clears) its Config after construction.
@@ -1682,7 +1686,7 @@ func TestRejectionLinesNameTheClientIP(t *testing.T) {
 	log, rec := capture.New()
 	ix := New(&Config{
 		APIKey:         "secret",
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, log, nil)
 
 	badKey := httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil)
@@ -1735,7 +1739,7 @@ func TestDisabledTrackerFeedIsNotGatedBySnapshotState(t *testing.T) {
 		t.Fatalf("write malformed snapshot: %v", err)
 	}
 	// Nyaa on, AnimeBytes off.
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
+	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
 
 	rss := url.Values{}
 	items, stats, fault := ix.query(t.Context(), rss, upstreamAB)
