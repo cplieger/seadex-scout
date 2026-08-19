@@ -1,6 +1,7 @@
 package anilist
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -773,17 +774,51 @@ func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
 
 // TestValidateResponseBoundsThePreflightWalk is the cross-library acceptance
 // test for the structural preflight this package delegates to
-// (bounded.Preflight): json.Decoder.Token does not enforce encoding/json's
-// nesting limit, so an all-opens body must be rejected by the library's depth
-// ceiling rather than recursing once per byte of a 1 MiB '[' body, and a
-// key-dense object must still validate (the library tracks per-object keys in
-// a fold-canonicalized set, so the cost is O(keys) rather than a rescan of
+// (bounded.Preflight): an all-opens body must be rejected by a depth ceiling
+// rather than recursing once per byte of a 1 MiB '[' body, and a key-dense
+// object must still validate (the library tracks per-object keys in a
+// fold-canonicalized set, so the cost is O(keys) rather than a rescan of
 // every prior key on an upstream-controlled key count).
+//
+// The ceiling is the JSON TOKENIZER's, not the library's, and that is the
+// contract worth pinning here. Since Go 1.27 encoding/json is backed by
+// encoding/json/v2 and json.Decoder.Token enforces jsontext's own
+// 10000-container nesting limit - at exactly bounded.MaxDepth, and one call
+// BELOW the library's depth check, which therefore never sees the token that
+// would trip it. bounded.ErrMaxDepth is structurally unreachable through
+// Preflight, so asserting on it would pin a sentinel that can no longer fire.
+// What replaces it is stronger: the refusal arrives as encoding/json's own
+// *json.SyntaxError, and Preflight's depth acceptance set is now exactly
+// json.Unmarshal's, so the preflight cannot admit a body the decode step would
+// reject on depth. Both boundary levels are pinned because that parity is the
+// claim; the error TEXT deliberately is not, since jsontext exports no depth
+// sentinel and documents its syntactic-error contents as unstable.
 func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
-	deep := []byte(strings.Repeat("[", bounded.MaxDepth+10))
-	err := validateResponse(deep)
-	if !errors.Is(err, bounded.ErrMaxDepth) {
-		t.Fatalf("validateResponse(over-deep body) = %v, want bounded.ErrMaxDepth", err)
+	// A WELL-FORMED body one level over the ceiling, so the refusal is depth and
+	// nothing else - an all-opens body is also truncated, which muddies the
+	// diagnosis.
+	overDeep := []byte(strings.Repeat("[", bounded.MaxDepth+1) + strings.Repeat("]", bounded.MaxDepth+1))
+	var syntaxErr *json.SyntaxError
+	if err := validateResponse(overDeep); !errors.As(err, &syntaxErr) {
+		t.Fatalf("validateResponse(%d nested arrays) = %v (%T), want the tokenizer's *json.SyntaxError", bounded.MaxDepth+1, err, err)
+	}
+	var sink any
+	if json.Unmarshal(overDeep, &sink) == nil {
+		t.Errorf("json.Unmarshal accepted %d nested arrays; the preflight is now stricter on depth than the decoder it guards", bounded.MaxDepth+1)
+	}
+
+	// At the ceiling exactly both accept, so the preflight adds no depth
+	// strictness of its own.
+	atCeiling := []byte(strings.Repeat("[", bounded.MaxDepth) + strings.Repeat("]", bounded.MaxDepth))
+	if err := validateResponse(atCeiling); err != nil {
+		t.Errorf("validateResponse(%d nested arrays) = %v, want it accepted (json.Unmarshal accepts it)", bounded.MaxDepth, err)
+	}
+
+	// The original hostile shape: 1 MiB of nothing but '['. Still refused, and
+	// refused by the ceiling rather than by walking the body, which is what keeps
+	// the cost bounded by MaxDepth instead of by the input length.
+	if err := validateResponse([]byte(strings.Repeat("[", 1<<20))); err == nil {
+		t.Error("validateResponse(1 MiB of open brackets) = nil, want it rejected")
 	}
 
 	var wide strings.Builder
