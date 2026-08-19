@@ -762,8 +762,16 @@ func joinBestAttrs(releases []Release) (groups, notes string) {
 	first := true
 	annotatedAny := false
 	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
-		// Both separators are charged together, so one budget refusing a piece
-		// stops BOTH attributes and neither can gain a slot the other is missing.
+		// Both SEPARATORS are charged together, so one budget refusing a
+		// separator stops both attributes at the same element count.
+		//
+		// The values are not: writeBestGroupAttr cuts incrementally (see its
+		// doc for why), so a budget exhausted INSIDE a group leaves
+		// seadex_best holding a partial trailing slot that seadex_best_notes
+		// never gained. The pairs before it still align, and String() marks
+		// the aggregate truncated, so the trailing unpaired fragment is
+		// visible as one — this is the accepted scope of the coupling, not a
+		// claim that the two attributes can never differ in length.
 		if !first && (!gj.WriteSep(",") || !nj.WriteSep(";")) {
 			return false
 		}
@@ -789,6 +797,15 @@ func joinBestAttrs(releases []Release) (groups, notes string) {
 // in upstream group text cannot read as the seadex_best separator that
 // seadex_best_notes binds to positionally. It cuts incrementally rather than
 // escaping the whole value first, so a multi-MB group is never copied.
+//
+// Incremental ON PURPOSE, and the alternative was tried and rejected: charging
+// the escaped value atomically (the shape the tracker=url pair uses) means a
+// group that alone exceeds the budget is refused entirely, so the attribute
+// carries nothing but the truncation marker instead of naming the group that
+// overflowed. TestBestGroupDedupeIsBoundedAndCaseInsensitive pins the emitted
+// form at exactly the cap plus the marker, which is that decision: for a
+// SINGLE oversized value there is no partner slot to desynchronize, and a
+// truncated name an operator can read beats a dropped one.
 func writeBestGroupAttr(j *logattr.Joiner, group string) bool {
 	for {
 		before, after, found := strings.Cut(group, ",")
