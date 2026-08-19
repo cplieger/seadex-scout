@@ -75,7 +75,7 @@ func TestFetchEntriesDiscardsPartialOnMidPaginationError(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want a page-2 fetch error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %+v, want nil (partial results discarded, never a truncated view)", entries)
+		t.Errorf("entries = %+v, want nil (partial results discarded, never a truncated view)", entries)
 	}
 	if !strings.Contains(err.Error(), "fetch page 2") {
 		t.Errorf("error = %q, want it to name the failed page 2", err.Error())
@@ -188,7 +188,7 @@ func TestFetchEntriesErrorsOnEmptyChunkWithOutstandingItems(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want empty-chunk error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %+v, want nil on truncated-view error", entries)
+		t.Errorf("entries = %+v, want nil on truncated-view error", entries)
 	}
 	if !strings.Contains(err.Error(), "page 2 empty") {
 		t.Errorf("error = %q, want it to name the empty page 2", err.Error())
@@ -220,7 +220,7 @@ func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want truncated-view error on metadata regression")
 	}
 	if entries != nil {
-		t.Fatalf("len(entries) = %d, want nil on truncated-view error", len(entries))
+		t.Errorf("len(entries) = %d, want nil on truncated-view error", len(entries))
 	}
 	if want := fmt.Sprintf("%d of %d reported entries fetched", perPage, perPage+1); !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want it to name %q", err.Error(), want)
@@ -244,7 +244,7 @@ func TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal(t *testing.T) 
 		t.Fatal("FetchEntries returned nil error, want missing-total completeness error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %+v, want nil on an unverifiable catalogue", entries)
+		t.Errorf("entries = %+v, want nil on an unverifiable catalogue", entries)
 	}
 	if !strings.Contains(err.Error(), "no reported total to vouch for completeness") {
 		t.Errorf("error = %q, want missing-total completeness context", err.Error())
@@ -289,7 +289,7 @@ func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
 			t.Fatal("FetchEntries returned nil error, want interrupted-between-pages error")
 		}
 		if entries != nil {
-			t.Fatalf("entries = %+v, want nil (partial pages discarded on interruption)", entries)
+			t.Errorf("entries = %+v, want nil (partial pages discarded on interruption)", entries)
 		}
 		if !strings.Contains(err.Error(), "interrupted between pages") {
 			t.Errorf("error = %q, want interrupted-between-pages context", err.Error())
@@ -314,7 +314,7 @@ func TestFetchEntriesWholeWalkDeadlineAborts(t *testing.T) {
 			t.Fatal("FetchEntries returned nil error, want whole-walk deadline error")
 		}
 		if entries != nil {
-			t.Fatalf("entries = %+v, want nil after the whole-walk deadline", entries)
+			t.Errorf("entries = %+v, want nil after the whole-walk deadline", entries)
 		}
 		if !strings.Contains(err.Error(), "interrupted between pages") {
 			t.Errorf("error = %q, want deadline interruption context", err.Error())
@@ -341,7 +341,7 @@ func TestFetchEntriesHTTPStatusErrorAborts(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want HTTP status error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %+v, want nil on HTTP failure", entries)
+		t.Errorf("entries = %+v, want nil on HTTP failure", entries)
 	}
 	if !strings.Contains(err.Error(), "fetch page 1") {
 		t.Errorf("error = %q, want it to name the failed page 1", err.Error())
@@ -413,7 +413,7 @@ func TestFetchEntriesEmptyCatalogueErrors(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want empty-catalogue error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %+v, want nil on an empty catalogue", entries)
+		t.Errorf("entries = %+v, want nil on an empty catalogue", entries)
 	}
 	if !strings.Contains(err.Error(), "empty catalogue") {
 		t.Errorf("error = %q, want empty-catalogue context", err.Error())
@@ -611,7 +611,7 @@ func TestFetchEntriesWarnsWhenCatalogueShrinksAgainstPreviousFetch(t *testing.T)
 		t.Fatalf("first FetchEntries returned error: %v", err)
 	}
 	if got := recorder.CountExact(msg); got != 0 {
-		t.Fatalf("first fetch logged the shrink WARN %d times, want 0 (no baseline yet)", got)
+		t.Errorf("first fetch logged the shrink WARN %d times, want 0 (no baseline yet)", got)
 	}
 
 	entryCount = 1
@@ -623,7 +623,7 @@ func TestFetchEntriesWarnsWhenCatalogueShrinksAgainstPreviousFetch(t *testing.T)
 		t.Fatalf("entries = %d, want 1 (the shrunken catalogue is still returned)", len(entries))
 	}
 	if got := recorder.CountExact(msg); got != 1 {
-		t.Fatalf("shrink WARN count = %d, want 1", got)
+		t.Errorf("shrink WARN count = %d, want 1", got)
 	}
 	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
 		t.Errorf("self-consistent shrunken catalogue logged the count mismatch %d times, want 0 "+
@@ -817,7 +817,7 @@ func TestFetchEntriesRejectsBrokenEntryIdentities(t *testing.T) {
 				t.Fatalf("FetchEntries = %d entries, want an entry-identity error", len(entries))
 			}
 			if entries != nil {
-				t.Fatalf("entries = %d items, want nil on an identity error", len(entries))
+				t.Errorf("entries = %d items, want nil on an identity error", len(entries))
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %q, want substring %q", err.Error(), tc.want)
@@ -847,7 +847,7 @@ func TestFetchEntriesRejectsDuplicateIdentityAcrossPages(t *testing.T) {
 		t.Fatalf("FetchEntries = %d entries, want a cross-page duplicate-identity error", len(entries))
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil on an identity error", len(entries))
+		t.Errorf("entries = %d items, want nil on an identity error", len(entries))
 	}
 	if !strings.Contains(err.Error(), "page 2 repeats AniList ID 1") {
 		t.Errorf("error = %q, want cross-page duplicate-identity context", err.Error())
@@ -876,7 +876,7 @@ func TestFetchEntriesUnusableCursorAborts(t *testing.T) {
 		t.Fatalf("FetchEntries = %d entries, want an unusable-cursor error", len(entries))
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil (a truncated view must never reach the comparison)", len(entries))
+		t.Errorf("entries = %d items, want nil (a truncated view must never reach the comparison)", len(entries))
 	}
 	if !strings.Contains(err.Error(), "carries no usable keyset cursor") {
 		t.Errorf("error = %q, want the unusable-cursor refusal", err.Error())
@@ -913,7 +913,7 @@ func TestFetchEntriesRegressingCursorAborts(t *testing.T) {
 		t.Fatalf("FetchEntries = %d entries, want a non-advancing-cursor error", len(entries))
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil (a truncated view must never reach the comparison)", len(entries))
+		t.Errorf("entries = %d items, want nil (a truncated view must never reach the comparison)", len(entries))
 	}
 	if !strings.Contains(err.Error(), "keyset cursor did not advance past") {
 		t.Errorf("error = %q, want the non-advancing-cursor refusal", err.Error())
@@ -938,7 +938,7 @@ func TestFetchEntriesDisorderedShortChunkAborts(t *testing.T) {
 		t.Fatalf("FetchEntries = %d entries, want a disordered-chunk error", len(entries))
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil (an unordered chunk proves no exhaustion)", len(entries))
+		t.Errorf("entries = %d items, want nil (an unordered chunk proves no exhaustion)", len(entries))
 	}
 	if !strings.Contains(err.Error(), "keyset cursor did not advance past") {
 		t.Errorf("error = %q, want the non-advancing-cursor refusal", err.Error())

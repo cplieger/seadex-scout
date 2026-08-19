@@ -213,7 +213,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 		t.Fatalf("read persisted snapshot: %v", err)
 	}
 	if n := bytes.Count(data, []byte(passkey)); n != 0 {
-		t.Fatalf("persisted feed.json contains the AB passkey %d times, want 0", n)
+		t.Errorf("persisted feed.json contains the AB passkey %d times, want 0", n)
 	}
 	snap := readSnapshotFile(t, path)
 	if len(snap.ABFeed) != 1 || len(snap.NyaaFeed) != 1 {
@@ -1567,7 +1567,7 @@ func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 				t.Fatalf("decodeSnapshot error = %v, want the snapshot accepted with the bad items pruned", err)
 			}
 			if reason != "" {
-				t.Fatalf("reason = %q, want \"\" (a per-item defect must not reject the snapshot)", reason)
+				t.Errorf("reason = %q, want \"\" (a per-item defect must not reject the snapshot)", reason)
 			}
 			if len(snap.NyaaFeed) != tc.wantKept {
 				t.Errorf("nyaa_feed = %d items, want %d", len(snap.NyaaFeed), tc.wantKept)

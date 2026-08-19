@@ -101,10 +101,10 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 			}
 			added++
 			if !pending[k] || !strings.HasPrefix(k, upstreamNyaa+":") {
-				t.Fatalf("matchHarvest admitted key %q (title %q), want a pending %s key", k, v, upstreamNyaa)
+				t.Errorf("matchHarvest admitted key %q (title %q), want a pending %s key", k, v, upstreamNyaa)
 			}
 			if want := strings.TrimSpace(title); v != want {
-				t.Fatalf("matchHarvest cached %q for key %q, want the trimmed upstream title %q", v, k, want)
+				t.Errorf("matchHarvest cached %q for key %q, want the trimmed upstream title %q", v, k, want)
 			}
 			if v == "" || len(v) > harvestMaxTitleLen {
 				t.Fatalf("matchHarvest cached an out-of-contract title for %q: len %d", k, len(v))
@@ -120,7 +120,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		got, _, _, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, nil, nil)
 		if admissible {
 			if got != 1 || fresh["nyaa:42"] != trimmed {
-				t.Fatalf("matchHarvest(canonical identity, title %q) = %d matches caching %q, want it admitted as %q",
+				t.Errorf("matchHarvest(canonical identity, title %q) = %d matches caching %q, want it admitted as %q",
 					title, got, fresh["nyaa:42"], trimmed)
 			}
 		} else if got != 0 || len(fresh) != 0 {

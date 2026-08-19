@@ -288,7 +288,7 @@ func TestObtainableLinksOrdersHeadlineGroupFirst(t *testing.T) {
 	f := Finding{AniListID: 1}
 	fillBest(&f, pool, groupSet(pool))
 	if f.RecommendedGroup != "ZGroup" {
-		t.Fatalf("headline group = %q, want ZGroup (the 1080p candidate)", f.RecommendedGroup)
+		t.Errorf("headline group = %q, want ZGroup (the 1080p candidate)", f.RecommendedGroup)
 	}
 	if len(f.Links) != 2 {
 		t.Fatalf("link count = %d, want 2: %+v", len(f.Links), f.Links)

@@ -687,10 +687,10 @@ func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 		}
 	}
 	if c.skipped != 0 || c.dropped != 0 {
-		t.Fatalf("filling the budget skipped=%d dropped=%d, want 0/0", c.skipped, c.dropped)
+		t.Errorf("filling the budget skipped=%d dropped=%d, want 0/0", c.skipped, c.dropped)
 	}
 	if c.identifiers != maxFribbIdentifiersTotal {
-		t.Fatalf("charged %d identifiers, want the full budget %d", c.identifiers, maxFribbIdentifiersTotal)
+		t.Errorf("charged %d identifiers, want the full budget %d", c.identifiers, maxFribbIdentifiersTotal)
 	}
 
 	retained := len(c.records)
@@ -702,10 +702,10 @@ func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 		t.Fatalf("over-budget record retained (%d records, want %d)", len(c.records), retained)
 	}
 	if c.skipped != 0 {
-		t.Fatalf("over-budget record counted skipped=%d, want 0 (a budget breach is not a malformed record)", c.skipped)
+		t.Errorf("over-budget record counted skipped=%d, want 0 (a budget breach is not a malformed record)", c.skipped)
 	}
 	if c.identifiers != maxFribbIdentifiersTotal {
-		t.Fatalf("over-budget record charged the budget to %d, want %d", c.identifiers, maxFribbIdentifiersTotal)
+		t.Errorf("over-budget record charged the budget to %d, want %d", c.identifiers, maxFribbIdentifiersTotal)
 	}
 	if c.firstErr != nil {
 		t.Fatalf("firstErr = %v, want nil (a budget breach is not a malformed-record error)", c.firstErr)

@@ -128,7 +128,7 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	ix.cache.loader.refresh(t.Context())
 	ix.cache.loader.refresh(t.Context())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 1 {
-		t.Fatalf("stat-failure warned %d times across three faulted reloads, want exactly 1 (the onset ladder warns once per onset, not once per request: an unreadable /config would otherwise WARN at request rate); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+		t.Errorf("stat-failure warned %d times across three faulted reloads, want exactly 1 (the onset ladder warns once per onset, not once per request: an unreadable /config would otherwise WARN at request rate); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	restoreDir()
@@ -184,7 +184,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	setMtime(t, path, distinct)
 	ix.cache.loader.refresh(t.Context())
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
-		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+		t.Errorf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	// Onset: inject the root-safe ENOTDIR stat fault (see dirFault), then
@@ -194,7 +194,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	blockDir()
 	ix.cache.loader.refresh(t.Context())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 1 {
-		t.Fatalf("stat-failure warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+		t.Errorf("stat-failure warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	// Recovery over the memoized bad file: repeated reloads must neither
@@ -244,10 +244,10 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 
 	rss := url.Values{"t": {"search"}}
 	if _, _, fault := ix.query(t.Context(), rss, upstreamNyaa); fault == nil {
-		t.Fatalf("startup over a malformed snapshot: fault = nil, want a snapshot-unavailable fault (a Torznab error)")
+		t.Errorf("startup over a malformed snapshot: fault = nil, want a snapshot-unavailable fault (a Torznab error)")
 	}
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
-		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+		t.Errorf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	// The bad file disappears (unmounted / renamed away): fresh-install
@@ -258,7 +258,7 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	}
 	tick(ix)
 	if _, _, fault := ix.query(t.Context(), rss, upstreamNyaa); fault != nil {
-		t.Fatalf("missing first snapshot: fault = %+v, want fresh-install semantics (no error)", fault)
+		t.Errorf("missing first snapshot: fault = %+v, want fresh-install semantics (no error)", fault)
 	}
 
 	// The SAME malformed inode reappears (remounted / renamed back): the memo
@@ -1528,7 +1528,7 @@ func TestPublishedSnapshotServesWhileTheFirstLoadIsStillRunning(t *testing.T) {
 	}
 	items, _, fault := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if fault != nil {
-		t.Fatalf("fault = %+v after a publish, want none (the published snapshot is servable)", fault)
+		t.Errorf("fault = %+v after a publish, want none (the published snapshot is servable)", fault)
 	}
 	if len(items) != 1 || items[0].Title != "published" {
 		t.Errorf("served feed = %+v, want the published item", items)
@@ -1675,7 +1675,7 @@ func TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves(t *testing.T) {
 	}
 	items, stats, fault := ix.query(ctx, url.Values{}, upstreamNyaa)
 	if fault != nil {
-		t.Fatalf("fresh-install RSS fault = %+v, want none", fault)
+		t.Errorf("fresh-install RSS fault = %+v, want none", fault)
 	}
 	if len(items) != 0 || !stats.answered || !stats.feed {
 		t.Errorf("fresh-install RSS = %d items, stats %+v, want an answered empty feed", len(items), stats)

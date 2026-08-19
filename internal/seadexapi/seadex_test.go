@@ -98,7 +98,7 @@ func TestFetchEntriesPaginationCapErrors(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want pagination cap error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d, want nil on cap error", len(entries))
+		t.Errorf("entries = %d, want nil on cap error", len(entries))
 	}
 	want := fmt.Sprintf("pagination exceeded max %d pages", maxPages)
 	if !strings.Contains(err.Error(), want) {

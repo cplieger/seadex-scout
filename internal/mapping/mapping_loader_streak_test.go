@@ -49,7 +49,7 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 			t.Fatalf("rejection %d error = %v, want a *StaleMapError", i, err)
 		}
 		if next.RejectedRefreshes != i {
-			t.Fatalf("RejectedRefreshes after %d rejections = %d, want %d", i, next.RejectedRefreshes, i)
+			t.Errorf("RejectedRefreshes after %d rejections = %d, want %d", i, next.RejectedRefreshes, i)
 		}
 		*prev = next
 	}
@@ -198,7 +198,7 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 			t.Fatalf("refresh %d returned nil error, want a degraded refresh", i)
 		}
 		if next.RejectedRefreshes != i {
-			t.Fatalf("RejectedRefreshes after %d refusals = %d, want %d", i, next.RejectedRefreshes, i)
+			t.Errorf("RejectedRefreshes after %d refusals = %d, want %d", i, next.RejectedRefreshes, i)
 		}
 		if escalates := next.RejectedRefreshes >= degradation.TickEscalationThreshold; escalates != (i >= degradation.TickEscalationThreshold) {
 			t.Fatalf("after %d refusals the scout escalation gate = %v, want %v (only the threshold escalates)", i, escalates, i >= degradation.TickEscalationThreshold)
@@ -375,7 +375,7 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 			t.Fatalf("refresh %d returned a *StaleMapError, want the no-cache error (there is no usable map to serve)", i)
 		}
 		if next.RejectedRefreshes != i {
-			t.Fatalf("RejectedRefreshes after %d refusals = %d, want %d", i, next.RejectedRefreshes, i)
+			t.Errorf("RejectedRefreshes after %d refusals = %d, want %d", i, next.RejectedRefreshes, i)
 		}
 		*prev = next
 	}

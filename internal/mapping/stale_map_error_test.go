@@ -123,7 +123,7 @@ func TestStaleOrFail_recordsReportIndexedCount(t *testing.T) {
 		t.Fatalf("staleOrFail error = %v, want a *StaleMapError over a usable cache", err)
 	}
 	if got := buildIndex(next.Records).Len(); got != 1 {
-		t.Fatalf("returned stale map indexes %d records, want 1", got)
+		t.Errorf("returned stale map indexes %d records, want 1", got)
 	}
 	if stale.records != 1 {
 		t.Errorf("stale_records = %d, want 1 (the indexed size, not the %d persisted rows)", stale.records, len(prev.Records))

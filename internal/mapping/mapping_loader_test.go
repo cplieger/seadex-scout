@@ -343,7 +343,7 @@ func TestLoader_Load_noOverridesPathServesFribbUnmodified(t *testing.T) {
 		t.Fatalf("Load with no overrides path error: %v", err)
 	}
 	if idx.Len() != 1 {
-		t.Fatalf("Load with no overrides path indexed %d records, want 1", idx.Len())
+		t.Errorf("Load with no overrides path indexed %d records, want 1", idx.Len())
 	}
 	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" || rec.TvdbID != 100 {
 		t.Errorf("Load with no overrides path record = %+v ok=%v, want unmodified TV/100", rec, ok)
@@ -436,7 +436,7 @@ func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
 		t.Fatalf("zero-refresh revalidation error: %v", err)
 	}
 	if got := requests.Load(); got != 1 {
-		t.Fatalf("zero-refresh loader made %d upstream requests, want 1 (must revalidate every cycle)", got)
+		t.Errorf("zero-refresh loader made %d upstream requests, want 1 (must revalidate every cycle)", got)
 	}
 	if len(next.Records) != 1 {
 		t.Errorf("zero-refresh 304 kept %d records, want 1", len(next.Records))

@@ -873,7 +873,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 		}
 	}
 	if got := res.Verdicts[1]; got != VerdictFound {
-		t.Fatalf("Verdicts[1] = %s, want VerdictFound (the completed first chunk is preserved)", verdictName(got))
+		t.Errorf("Verdicts[1] = %s, want VerdictFound (the completed first chunk is preserved)", verdictName(got))
 	}
 	if got := res.Media[1].Titles; !slices.Equal(got, []string{"t1"}) {
 		t.Errorf("media[1].Titles = %v, want [t1] (completed chunk preserved on a later HTTP failure)", got)

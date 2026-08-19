@@ -509,7 +509,7 @@ func TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 		{Name: "S01E02/Movie Cut B.mkv"},
 	}
 	if got := coveredEpisodes(files); got != 2 {
-		t.Fatalf("coveredEpisodes = %d, want 2 (tokens counted from the full path)", got)
+		t.Errorf("coveredEpisodes = %d, want 2 (tokens counted from the full path)", got)
 	}
 	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Movie Cut A" {
 		t.Errorf("derivedTitle = %q, want %q (basename fallback when the base carries no episode token)", got, "Movie Cut A")
@@ -530,7 +530,7 @@ func TestDerivedTitleAbsolutePackUnderSharedEpisodeTokenDirectory(t *testing.T) 
 		{Name: "[Grp] Show S01E01-E12 [1080p]/[Grp] Show - 03 [1080p].mkv"},
 	}
 	if got := coveredEpisodes(files); got != 3 {
-		t.Fatalf("coveredEpisodes = %d, want 3 (each file keys on its own absolute number,"+
+		t.Errorf("coveredEpisodes = %d, want 3 (each file keys on its own absolute number,"+
 			" not the shared directory token)", got)
 	}
 	tor := &seadex.Torrent{Files: files}
@@ -572,7 +572,7 @@ func TestDerivedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
 		{Name: "Show S02E00 Cut - S01E02 (1080p).mkv"},
 	}
 	if got := coveredEpisodes(files); got != 2 {
-		t.Fatalf("coveredEpisodes = %d, want 2 (episodes keyed on the LAST token; the title's SxxExx-shaped substring must not shadow the real marker)", got)
+		t.Errorf("coveredEpisodes = %d, want 2 (episodes keyed on the LAST token; the title's SxxExx-shaped substring must not shadow the real marker)", got)
 	}
 	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show S02E00 Cut - S01 (1080p)"; got != want {
 		t.Errorf("derivedTitle = %q, want %q (only the LAST episode token collapses; the title's own SxxExx-shaped substring is preserved verbatim)", got, want)
@@ -590,7 +590,7 @@ func TestDerivedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
 		{Name: "Show - 07 (WEB) - 02.mkv"},
 	}
 	if got := coveredEpisodes(files); got != 2 {
-		t.Fatalf("coveredEpisodes = %d, want 2 (absolute episodes keyed on the LAST token)", got)
+		t.Errorf("coveredEpisodes = %d, want 2 (absolute episodes keyed on the LAST token)", got)
 	}
 	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show - 07 (WEB)"; got != want {
 		t.Errorf("derivedTitle = %q, want %q (only the LAST absolute token collapses; the ' - NN'-shaped title segment is preserved)", got, want)

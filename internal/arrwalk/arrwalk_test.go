@@ -524,7 +524,7 @@ func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
 	}
 	item := snap.Items[0]
 	if item.Arr != ArrRadarr || item.ArrID != 10 || item.Title != "Kept Movie" {
-		t.Fatalf("movie identity = %+v, want kept Radarr movie id 10", item)
+		t.Errorf("movie identity = %+v, want kept Radarr movie id 10", item)
 	}
 	if item.ArrURL != "https://radarr.example/movie/1234" {
 		t.Errorf("ArrURL = %q, want Radarr deep link", item.ArrURL)

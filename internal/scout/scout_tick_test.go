@@ -1397,7 +1397,7 @@ func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 				t.Fatal("tick healthy=false, want true")
 			}
 			if _, window := countWindowModes(sea); window != 1 {
-				t.Fatalf("window fetches = %d, want 1 (the tick must have done its work)", window)
+				t.Errorf("window fetches = %d, want 1 (the tick must have done its work)", window)
 			}
 
 			wrote := store.saves > savesAfterReconcile

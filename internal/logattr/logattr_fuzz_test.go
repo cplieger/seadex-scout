@@ -53,7 +53,7 @@ func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 		truncated := len(raw) > MaxBytes || len(want) > MaxBytes
 		if !truncated {
 			if got != want {
-				t.Fatalf("Cap(%d bytes) changed an in-budget value: got %q, want %q", len(raw), got, want)
+				t.Errorf("Cap(%d bytes) changed an in-budget value: got %q, want %q", len(raw), got, want)
 			}
 		} else {
 			if !strings.HasSuffix(got, TruncMarker) {

@@ -75,7 +75,7 @@ func fetchHostilePage(t *testing.T, page, wantErr string) {
 		t.Fatalf("FetchEntries returned nil error, want %q error", wantErr)
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+		t.Errorf("entries = %d items, want nil on cap error", len(entries))
 	}
 	if !strings.Contains(err.Error(), wantErr) {
 		t.Errorf("error = %q, want substring %q", err.Error(), wantErr)
@@ -214,7 +214,7 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want byte-cap error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+		t.Errorf("entries = %d items, want nil on cap error", len(entries))
 	}
 	if !strings.Contains(err.Error(), "cumulative page bytes exceeded cap") {
 		t.Errorf("error = %q, want cumulative-byte-cap context", err.Error())
@@ -290,7 +290,7 @@ func TestFetchEntriesPerPageByteCapErrors(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want per-page byte-cap error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+		t.Errorf("entries = %d items, want nil on cap error", len(entries))
 	}
 	if errors.Is(err, errCumulativeBytes) {
 		t.Errorf("error = %v, want the per-page violation NOT classified as the cumulative-byte cap", err)
@@ -324,7 +324,7 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 		t.Fatal("FetchEntries returned nil error, want per-page element-budget error")
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+		t.Errorf("entries = %d items, want nil on cap error", len(entries))
 	}
 	if errors.Is(err, errCumulativeElements) {
 		t.Errorf("error = %v, want the per-page violation NOT classified as the cumulative-element cap", err)
@@ -379,7 +379,7 @@ func TestFetchEntriesBoundsDecodeFailureDiagnostic(t *testing.T) {
 		t.Fatalf("FetchEntries = %d entries, want a page-decode error", len(entries))
 	}
 	if entries != nil {
-		t.Fatalf("entries = %d items, want nil on a decode error", len(entries))
+		t.Errorf("entries = %d items, want nil on a decode error", len(entries))
 	}
 	msg := err.Error()
 	if strings.Contains(msg, huge) {

@@ -27,7 +27,7 @@ func TestServeRejectsUnscopedRequest(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unscoped request status = %d, want %d", rec.Code, http.StatusNotFound)
+		t.Errorf("unscoped request status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "/nyaa or /ab") {
 		t.Errorf("404 body = %q, want the per-tracker hint", body)
@@ -46,7 +46,7 @@ func TestServeMarksResponsesNonCacheable(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?apikey=k", nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("authenticated /ab RSS status = %d, want %d", rec.Code, http.StatusOK)
+		t.Errorf("authenticated /ab RSS status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	if got, want := rec.Header().Get("Cache-Control"), "private, no-store, max-age=0"; got != want {
 		t.Errorf("Cache-Control = %q, want %q", got, want)
@@ -121,7 +121,7 @@ func TestTorznabErrorResponder(t *testing.T) {
 	rec := httptest.NewRecorder()
 	torznabErrorResponder(rec, nil, http.StatusInternalServerError, "", `boom & <panic> "quoted"`)
 	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/xml; charset=utf-8" {
 		t.Errorf("content type = %q, want application/xml; charset=utf-8", ct)
@@ -578,7 +578,7 @@ func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<caps>") {
-		t.Fatalf("handler /nyaa caps = %d %q, want 200 with a caps document", rec.Code, rec.Body.String())
+		t.Errorf("handler /nyaa caps = %d %q, want 200 with a caps document", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/other?apikey=k", nil))
@@ -600,7 +600,7 @@ func TestServeThrottlesFailedAuth(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
 		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("bad-key request %d status = %d, want %d (inside burst)", i, w.Code, http.StatusUnauthorized)
+			t.Errorf("bad-key request %d status = %d, want %d (inside burst)", i, w.Code, http.StatusUnauthorized)
 		}
 	}
 	accessBefore := rec.CountExact("http")
@@ -608,7 +608,7 @@ func TestServeThrottlesFailedAuth(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
 	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("bad-key request past burst status = %d, want %d", w.Code, http.StatusTooManyRequests)
+		t.Errorf("bad-key request past burst status = %d, want %d", w.Code, http.StatusTooManyRequests)
 	}
 	if got := w.Header().Get("Retry-After"); got != "6" {
 		t.Errorf("throttled Retry-After = %q, want %q (one token accrued per 6s)", got, "6")
@@ -750,10 +750,10 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 	rr := httptest.NewRecorder()
 	ix.serve(rr, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k&limit=1000", nil))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (a truncated feed is still a valid document)", rr.Code)
+		t.Errorf("status = %d, want 200 (a truncated feed is still a valid document)", rr.Code)
 	}
 	if got := rec.CountExact("indexer feed truncated by the render byte budget"); got != 1 {
-		t.Fatalf("truncation WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+		t.Errorf("truncation WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 	parsed, err := parseTorznab(rr.Body.Bytes())
 	if err != nil {
@@ -880,7 +880,7 @@ func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
 	w := httptest.NewRecorder()
 	ix.serve(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Kept&apikey=k", nil))
 	if w.Code != http.StatusOK {
-		t.Fatalf("search status = %d, want 200", w.Code)
+		t.Errorf("search status = %d, want 200", w.Code)
 	}
 
 	for _, want := range []struct{ key, value string }{

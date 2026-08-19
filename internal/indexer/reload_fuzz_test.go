@@ -54,7 +54,7 @@ func FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks(f *testing.F) 
 			t.Fatalf("vouched form %q of accepted URL %q does not parse with net/url: %v; the gate must never vouch a value its own parser of record cannot resolve", cleaned, raw, err)
 		}
 		if got := strings.ToLower(u.Hostname()); got != host {
-			t.Fatalf("accepted URL %q (vouched as %q) resolves to host %q under net/url, want the canonical %q; the gate must never vouch a link a consumer sends elsewhere", raw, cleaned, got, host)
+			t.Errorf("accepted URL %q (vouched as %q) resolves to host %q under net/url, want the canonical %q; the gate must never vouch a link a consumer sends elsewhere", raw, cleaned, got, host)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
 			t.Fatalf("accepted URL %q has scheme %q; only an http(s) link may be published to the arr UI", raw, u.Scheme)

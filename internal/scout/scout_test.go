@@ -806,7 +806,7 @@ func TestSaveRetryAlwaysGetsTheAnchoredGrace(t *testing.T) {
 	s.save(t.Context(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 	if store.attempts != 2 {
-		t.Fatalf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)
+		t.Errorf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)
 	}
 	if !store.retryHadDead {
 		t.Fatal("retry context carried no deadline, want the anchored shutdown budget")

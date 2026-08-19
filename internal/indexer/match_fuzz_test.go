@@ -41,7 +41,7 @@ func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 		assertValid := func(name, id string) {
 			t.Helper()
 			if id != "" && !boundedTrackerID(id) {
-				t.Fatalf("%s(%q) = %q, want a bounded run of digits or empty", name, raw, id)
+				t.Errorf("%s(%q) = %q, want a bounded run of digits or empty", name, raw, id)
 			}
 		}
 		for _, needle := range []string{"/view/", "/torrent/", "torrentid="} {
@@ -159,7 +159,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		switch scope {
 		case upstreamNyaa:
 			if !hostForm || host != "nyaa.si" {
-				t.Fatalf("nyaa key %q minted from %q (class %v, host %q), want an http(s) URL on exactly nyaa.si",
+				t.Errorf("nyaa key %q minted from %q (class %v, host %q), want an http(s) URL on exactly nyaa.si",
 					key, raw, f.Class, f.Host)
 			}
 		case upstreamAB:

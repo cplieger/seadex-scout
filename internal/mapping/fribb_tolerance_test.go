@@ -260,7 +260,7 @@ func TestParseFribb_duplicateKeysLaterOddValueWins(t *testing.T) {
 		t.Fatalf("parseFribb kept %d records, want 1 (later odd anilist_id drops its record)", len(records))
 	}
 	if records[0].AniListID != 2 {
-		t.Fatalf("surviving record AniListID = %d, want 2", records[0].AniListID)
+		t.Errorf("surviving record AniListID = %d, want 2", records[0].AniListID)
 	}
 	if records[0].Type != "" {
 		t.Errorf("duplicate-key Type = %q, want empty (later odd value wins)", records[0].Type)

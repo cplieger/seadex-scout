@@ -250,7 +250,7 @@ func TestPublicLinkAlertLabel(t *testing.T) {
 			pub, abLink := trackerURLs(gradedLinks(compare.ReleaseLink{Tracker: tc.tracker, URL: tc.url}))
 			ab := abLink.url
 			if ab != "" {
-				t.Fatalf("ab = %q, want the link routed to a public slot", ab)
+				t.Errorf("ab = %q, want the link routed to a public slot", ab)
 			}
 			if got := pub.nyaaURL(); got != tc.wantNyaa {
 				t.Errorf("nyaa_url = %q, want %q", got, tc.wantNyaa)
@@ -282,7 +282,7 @@ func TestTrackerURLsHostOverridesMismatchedLabel(t *testing.T) {
 	pub, abLink := trackerURLs(links)
 	ab := abLink.url
 	if ab != "" {
-		t.Fatalf("ab = %q, want both public links routed to public slots", ab)
+		t.Errorf("ab = %q, want both public links routed to public slots", ab)
 	}
 	if got := pub.nyaaURL(); got != "https://nyaa.si/view/2" {
 		t.Errorf("nyaa_url = %q, want the genuine Nyaa URL", got)
@@ -302,7 +302,7 @@ func TestTrackerURLsMismatchedLabelAloneRendersItsRealTracker(t *testing.T) {
 	))
 	ab := abLink.url
 	if ab != "" {
-		t.Fatalf("ab = %q, want the link routed to a public slot", ab)
+		t.Errorf("ab = %q, want the link routed to a public slot", ab)
 	}
 	if got := pub.nyaaURL(); got != "" {
 		t.Errorf("nyaa_url = %q, want empty for an AnimeTosho destination", got)
@@ -341,7 +341,7 @@ func TestTrackerURLsPrefersHeadlineGroupOverNyaaTier(t *testing.T) {
 	))
 	ab := abLink.url
 	if ab != "" {
-		t.Fatalf("ab = %q, want both links routed to public slots", ab)
+		t.Errorf("ab = %q, want both links routed to public slots", ab)
 	}
 	if got := pub.nyaaURL(); got != "" {
 		t.Errorf("nyaa_url = %q, want empty (the non-headline Nyaa link must not win)", got)

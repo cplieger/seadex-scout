@@ -220,7 +220,7 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 		t.Fatalf("first Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
-		t.Fatalf("harvest queries after first rebuild = %d, want 1", mock.calls())
+		t.Errorf("harvest queries after first rebuild = %d, want 1", mock.calls())
 	}
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
@@ -612,7 +612,7 @@ func TestHarvestConsumesTheWholeSingleResponse(t *testing.T) {
 		func(int) EntryInfo { return EntryInfo{Title: "Sousou no Frieren"} }, "")
 
 	if mock.calls() != 1 || stats.matched != 1 {
-		t.Fatalf("harvest queries = %d, matched = %d; want 1 and 1 (the whole set arrives in one response)", mock.calls(), stats.matched)
+		t.Errorf("harvest queries = %d, matched = %d; want 1 and 1 (the whole set arrives in one response)", mock.calls(), stats.matched)
 	}
 	if got := titles["ab:1167293"]; got != romaji {
 		t.Errorf("cached title = %q, want %q - the alias the complete trailing run yields", got, romaji)
@@ -2260,7 +2260,7 @@ func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
 		func(int) EntryInfo { return EntryInfo{Title: "Sousou no Frieren"} }, "")
 
 	if mock.calls() != 1 || stats.matched != 1 {
-		t.Fatalf("harvest queries = %d, matched = %d; want 1 and 1 (two aliases are ONE torrent)", mock.calls(), stats.matched)
+		t.Errorf("harvest queries = %d, matched = %d; want 1 and 1 (two aliases are ONE torrent)", mock.calls(), stats.matched)
 	}
 	if got := titles["ab:1167293"]; got != romaji {
 		t.Errorf("cached title = %q, want the arr-vocabulary alias %q", got, romaji)

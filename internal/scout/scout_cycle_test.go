@@ -1101,7 +1101,7 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 
 			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)
 			if mapErr == nil {
-				t.Fatal("loadMapping with a guard-rejected refresh returned nil error, want *StaleMapError")
+				t.Error("loadMapping with a guard-rejected refresh returned nil error, want *StaleMapError")
 			}
 			if len(mapCache.Records) != 4 {
 				t.Fatalf("loadMapping kept %d records, want the 4 stale records", len(mapCache.Records))
@@ -1929,7 +1929,7 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 
 			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)
 			if mapErr == nil {
-				t.Fatal("loadMapping with a terminal non-2xx returned nil error, want the degraded stale map")
+				t.Error("loadMapping with a terminal non-2xx returned nil error, want the degraded stale map")
 			}
 			if mapCache.RejectedRefreshes != tc.wantStreak {
 				t.Errorf("RejectedRefreshes = %d, want %d (only an operator-remedy status advances the streak)", mapCache.RejectedRefreshes, tc.wantStreak)

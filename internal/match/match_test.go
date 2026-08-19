@@ -162,7 +162,7 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 1 {
-		t.Fatalf("expected a match to the Radarr movie, got %+v", got.Item)
+		t.Errorf("expected a match to the Radarr movie, got %+v", got.Item)
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
@@ -388,7 +388,7 @@ func TestMatchTitleFallbackYearDisambiguatesAmbiguousTitles(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 2 {
-		t.Fatalf("match item = %+v, want the 2010 series ArrID 2 (the year must disambiguate the two same-titled items)", got.Item)
+		t.Errorf("match item = %+v, want the 2010 series ArrID 2 (the year must disambiguate the two same-titled items)", got.Item)
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
@@ -471,7 +471,7 @@ func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 7 {
-		t.Fatalf("match item = %+v, want the Sonarr series ArrID 7", got.Item)
+		t.Errorf("match item = %+v, want the Sonarr series ArrID 7", got.Item)
 	}
 	if got.Source != SourceID {
 		t.Errorf("source = %q, want %q", got.Source, SourceID)
@@ -511,7 +511,7 @@ func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 3 {
-		t.Fatalf("match item = %+v, want the Sonarr series ArrID 3", got.Item)
+		t.Errorf("match item = %+v, want the Sonarr series ArrID 3", got.Item)
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
@@ -550,7 +550,7 @@ func TestMatchAltTitleFallbackFiltersArrAndDedupes(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 9 {
-		t.Fatalf("match item = %+v, want the Sonarr series ArrID 9 via its alternate title", got.Item)
+		t.Errorf("match item = %+v, want the Sonarr series ArrID 9 via its alternate title", got.Item)
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
@@ -679,7 +679,7 @@ func TestMatchEmptyFormatTitleFallbackSearchesBothArrs(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 4 {
-		t.Fatalf("match item = %+v, want the Sonarr series despite the unknown format", got.Item)
+		t.Errorf("match item = %+v, want the Sonarr series despite the unknown format", got.Item)
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
@@ -845,7 +845,7 @@ func TestMatchTitleFallbackKeepsUnknownYearItem(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 6 {
-		t.Fatalf("match item = %+v, want the year-less Sonarr series kept through year narrowing", got.Item)
+		t.Errorf("match item = %+v, want the year-less Sonarr series kept through year narrowing", got.Item)
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
@@ -895,7 +895,7 @@ func TestMatchIDLessUntypedRecordRoutesByAniListFormat(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.Arr != library.ArrRadarr || got.Item.ArrID != 2 {
-		t.Fatalf("match item = %+v, want the Radarr movie the AniList format names", got.Item)
+		t.Errorf("match item = %+v, want the Radarr movie the AniList format names", got.Item)
 	}
 	if got.Arr != library.ArrRadarr {
 		t.Errorf("match arr = %q, want %q", got.Arr, library.ArrRadarr)
@@ -934,7 +934,7 @@ func TestMatchIDLessUntypedRecordUnknownFormatSearchesBothArrs(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.Arr != library.ArrRadarr {
-		t.Fatalf("match item = %+v, want the Radarr movie an unrestricted search finds", got.Item)
+		t.Errorf("match item = %+v, want the Radarr movie an unrestricted search finds", got.Item)
 	}
 	if got.Arr != library.ArrRadarr {
 		t.Errorf("match arr = %q, want %q (the matched item's arr)", got.Arr, library.ArrRadarr)
@@ -970,7 +970,7 @@ func TestMatchUntypedRecordWithMovieIDResolvesByID(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 2 {
-		t.Fatalf("match item = %+v, want the Radarr movie the newly-usable TMDB id names", got.Item)
+		t.Errorf("match item = %+v, want the Radarr movie the newly-usable TMDB id names", got.Item)
 	}
 	if got.Source != SourceID {
 		t.Errorf("source = %q, want %q (the typed record is no longer id-less)", got.Source, SourceID)
@@ -1079,7 +1079,7 @@ func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	}
 	got := res.Matches[0]
 	if !got.InLibrary() || got.Item.ArrID != 7 {
-		t.Fatalf("match item = %+v, want the Radarr movie the record's movie id names", got.Item)
+		t.Errorf("match item = %+v, want the Radarr movie the record's movie id names", got.Item)
 	}
 	if got.Source != SourceID {
 		t.Errorf("source = %q, want %q", got.Source, SourceID)

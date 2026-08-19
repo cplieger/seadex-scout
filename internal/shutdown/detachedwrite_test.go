@@ -26,7 +26,7 @@ func TestDetachedWriteContext(t *testing.T) {
 		got, cancel := DetachedWriteContext(ctx)
 		defer cancel()
 		if got.Err() != nil {
-			t.Fatalf("Err() = %v, want nil", got.Err())
+			t.Errorf("Err() = %v, want nil", got.Err())
 		}
 
 		cancelParent()
@@ -50,7 +50,7 @@ func TestDetachedWriteContext(t *testing.T) {
 		got, cancel := DetachedWriteContext(ctx)
 		defer cancel()
 		if got.Err() != nil {
-			t.Fatalf("Err() = %v, want nil (a shutdown must not cost the ~25m report artifact)", got.Err())
+			t.Errorf("Err() = %v, want nil (a shutdown must not cost the ~25m report artifact)", got.Err())
 		}
 		if v, _ := got.Value(detachedCtxTestKey{}).(string); v != "report" {
 			t.Errorf("Value = %q, want %q (WithoutCancel keeps values)", v, "report")

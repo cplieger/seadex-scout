@@ -30,7 +30,7 @@ func TestFindByTitleBoundsAmbiguousTitleLog(t *testing.T) {
 	logger, recorder := capture.New()
 
 	if got := li.findByTitle([]string{title}, 0, library.ArrSonarr, logger); got != nil {
-		t.Fatalf("findByTitle() = %+v, want nil for an ambiguous title", got)
+		t.Errorf("findByTitle() = %+v, want nil for an ambiguous title", got)
 	}
 	records := recorder.Records()
 	if len(records) != 1 {

@@ -1733,7 +1733,7 @@ func TestToConfigTagFilterDefaultFiltersNothing(t *testing.T) {
 			c := fc.toConfig()
 
 			if c.tagFilterErr != nil {
-				t.Fatalf("tagFilterErr = %v, want nil", c.tagFilterErr)
+				t.Errorf("tagFilterErr = %v, want nil", c.tagFilterErr)
 			}
 			for _, s := range []tagfilter.Surface{
 				tagfilter.SurfaceFindings, tagfilter.SurfaceReport, tagfilter.SurfaceFeed,
@@ -1759,7 +1759,7 @@ func TestToConfigTagFilterPopulated(t *testing.T) {
 	c := fc.toConfig()
 
 	if c.tagFilterErr != nil {
-		t.Fatalf("tagFilterErr = %v, want nil", c.tagFilterErr)
+		t.Errorf("tagFilterErr = %v, want nil", c.tagFilterErr)
 	}
 	tests := []struct {
 		tag     string
@@ -1947,7 +1947,7 @@ func TestToConfigIgnoreSet(t *testing.T) {
 			c := fc.toConfig()
 
 			if c.ignoreErr != nil {
-				t.Fatalf("ignoreErr = %v, want nil", c.ignoreErr)
+				t.Errorf("ignoreErr = %v, want nil", c.ignoreErr)
 			}
 			if len(tt.want) == 0 {
 				if c.IgnoreFindings != nil {

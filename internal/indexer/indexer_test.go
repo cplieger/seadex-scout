@@ -721,7 +721,7 @@ func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	select {
 	case fault := <-served:
 		if fault == nil || fault.summary != "feed snapshot unavailable" {
-			t.Fatalf("fault while the first load is unresolved = %+v, want the snapshot-unavailable fault", fault)
+			t.Errorf("fault while the first load is unresolved = %+v, want the snapshot-unavailable fault", fault)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("request waited on the unresolved first load; want an immediate snapshot-unavailable fault")
@@ -732,7 +732,7 @@ func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	close(ix.cache.firstLoad)
 	items, _, fault := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if fault != nil {
-		t.Fatalf("post-load fault = %+v, want none", fault)
+		t.Errorf("post-load fault = %+v, want none", fault)
 	}
 	if len(items) != 1 {
 		t.Errorf("post-load feed = %d items, want 1", len(items))
@@ -1218,7 +1218,7 @@ func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
 	bad := httptest.NewRecorder()
 	ix.serve(bad, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil))
 	if bad.Code != http.StatusUnauthorized {
-		t.Fatalf("bad apikey status = %d, want %d", bad.Code, http.StatusUnauthorized)
+		t.Errorf("bad apikey status = %d, want %d", bad.Code, http.StatusUnauthorized)
 	}
 	if strings.Contains(bad.Body.String(), "<caps>") {
 		t.Errorf("bad apikey body contains caps response: %q", bad.Body.String())
@@ -1227,13 +1227,13 @@ func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
 	missing := httptest.NewRecorder()
 	ix.serve(missing, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps", nil))
 	if missing.Code != http.StatusUnauthorized {
-		t.Fatalf("missing apikey status = %d, want %d", missing.Code, http.StatusUnauthorized)
+		t.Errorf("missing apikey status = %d, want %d", missing.Code, http.StatusUnauthorized)
 	}
 
 	good := httptest.NewRecorder()
 	ix.serve(good, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=secret", nil))
 	if good.Code != http.StatusOK {
-		t.Fatalf("good apikey status = %d, want %d; body=%q", good.Code, http.StatusOK, good.Body.String())
+		t.Errorf("good apikey status = %d, want %d; body=%q", good.Code, http.StatusOK, good.Body.String())
 	}
 	if ct := good.Header().Get("Content-Type"); ct != "application/xml; charset=utf-8" {
 		t.Errorf("caps content type = %q, want application/xml; charset=utf-8", ct)

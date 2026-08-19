@@ -43,7 +43,7 @@ func FuzzSameHTTPOrigin_acceptedURLTargetsProwlarrOrigin(f *testing.F) {
 			t.Fatalf("accepted URL %q carries userinfo", raw)
 		}
 		if s := strings.ToLower(req.URL.Scheme); s != "http" && s != "https" {
-			t.Fatalf("accepted URL %q resolves to scheme %q, want http(s)", raw, req.URL.Scheme)
+			t.Errorf("accepted URL %q resolves to scheme %q, want http(s)", raw, req.URL.Scheme)
 		}
 		if !strings.EqualFold(req.URL.Host, origin.Host) {
 			t.Fatalf("accepted URL %q resolves to host %q, want the origin %q", raw, req.URL.Host, origin.Host)
@@ -75,7 +75,7 @@ func FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks(f *testing.F) {
 			return
 		}
 		if got != raw {
-			t.Fatalf("sanitizeDisplayURL(%q, %q) = %q, want the input unchanged or empty", scope, raw, got)
+			t.Errorf("sanitizeDisplayURL(%q, %q) = %q, want the input unchanged or empty", scope, raw, got)
 		}
 		u, err := url.Parse(got)
 		if err != nil {
@@ -85,7 +85,7 @@ func FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks(f *testing.F) {
 			t.Fatalf("kept URL %q carries userinfo", got)
 		}
 		if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
-			t.Fatalf("kept URL %q has scheme %q, want http(s)", got, u.Scheme)
+			t.Errorf("kept URL %q has scheme %q, want http(s)", got, u.Scheme)
 		}
 		switch scope {
 		case upstreamNyaa:

@@ -527,7 +527,7 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshot(t *testing.T) {
 		t.Fatal("Cycle healthy=true, want false when the library walk fails")
 	}
 	if store.saves != 1 {
-		t.Fatalf("saves = %d, want 1 (the walk-failed arm persists the refreshed mapping cache)", store.saves)
+		t.Errorf("saves = %d, want 1 (the walk-failed arm persists the refreshed mapping cache)", store.saves)
 	}
 	if len(store.st.Library.Items) != 1 || store.st.Library.Items[0].Title != "Frieren" {
 		t.Errorf("persisted library = %+v, want the prior snapshot untouched (a failed walk must never replace it, or the next cycle mass-resolves every finding)", store.st.Library)

@@ -414,7 +414,7 @@ func TestHealthPublishedInsideCycleLock(t *testing.T) {
 		t.Fatalf("RunOnce = %v, want nil (a healthy own run)", err)
 	}
 	if calls != 2 {
-		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+		t.Errorf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
 	}
 	if seenAtRerun == "sentinel-untouched" {
 		t.Error("the queued rerun still saw the seeded sentinel: run 1's verdict was committed " +
@@ -450,7 +450,7 @@ func TestRunOnceRanQueuedThenCancelled(t *testing.T) {
 	err := RunOnce(ctx, ex, cy, health.NewMarker(path))
 
 	if calls != 2 {
-		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+		t.Errorf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
 	}
 	if queuedErr != nil {
 		t.Errorf("queued requester RunOnce = %v, want nil (recorded demand is success)", queuedErr)
@@ -1284,7 +1284,7 @@ func TestRunOnceQueuedRerunMarkerWriteFailure(t *testing.T) {
 		t.Fatalf("RunOnce = %v, want nil: a queued rerun's marker-write failure has no exit code to report through and must not fail this invocation's own healthy run", err)
 	}
 	if calls != 2 {
-		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+		t.Errorf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
 	}
 	const msg = "queued rerun could not record poll health"
 	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
@@ -1365,7 +1365,7 @@ func TestRunOnceOwnMarkerWriteFailureBeforeShutdown(t *testing.T) {
 		t.Errorf("err = %v, want the uniform interruption (the shutdown displaces the own result)", err)
 	}
 	if calls != 2 {
-		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+		t.Errorf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
 	}
 	const msg = "own cycle could not record poll health before shutdown"
 	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
