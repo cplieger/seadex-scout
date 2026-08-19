@@ -1160,7 +1160,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 1 || got[0].Title != "restored" {
-		t.Fatalf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
+		t.Errorf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
 	}
 	ix.cache.mu.RLock()
 	reloadedMod := ix.cache.snapID.ModTime()
@@ -1261,7 +1261,7 @@ func TestReloadRebasesFutureSnapshotTimestamps(t *testing.T) {
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 2 {
-		t.Fatalf("nyaa feed = %d items, want 2 (the skew is corrected, not dropped)", len(got))
+		t.Errorf("nyaa feed = %d items, want 2 (the skew is corrected, not dropped)", len(got))
 	}
 	byTitle := map[string]item{}
 	for _, it := range got {
@@ -1471,7 +1471,7 @@ func TestReloadDropsOutOfVocabularyCategories(t *testing.T) {
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 2 {
-		t.Fatalf("nyaa feed = %d items (%+v), want 2 (the ids are filtered, the item kept)", len(got), got)
+		t.Errorf("nyaa feed = %d items (%+v), want 2 (the ids are filtered, the item kept)", len(got), got)
 	}
 	byTitle := map[string]item{}
 	for _, it := range got {
@@ -1640,7 +1640,7 @@ func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 1 || got[0].Title != "generation-n" {
-		t.Fatalf("served feed = %+v, want the published generation-n kept (an overtaken read must not move the cache backwards)", got)
+		t.Errorf("served feed = %+v, want the published generation-n kept (an overtaken read must not move the cache backwards)", got)
 	}
 	if ix.cache.unavailable() {
 		t.Error("unavailable() = true after the publish, want false")

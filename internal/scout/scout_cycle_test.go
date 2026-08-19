@@ -1104,7 +1104,7 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 				t.Error("loadMapping with a guard-rejected refresh returned nil error, want *StaleMapError")
 			}
 			if len(mapCache.Records) != 4 {
-				t.Fatalf("loadMapping kept %d records, want the 4 stale records", len(mapCache.Records))
+				t.Errorf("loadMapping kept %d records, want the 4 stale records", len(mapCache.Records))
 			}
 			if mapCache.RejectedRefreshes != tc.priorStreak+1 {
 				t.Errorf("RejectedRefreshes = %d, want %d", mapCache.RejectedRefreshes, tc.priorStreak+1)

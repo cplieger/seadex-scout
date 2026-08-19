@@ -16,6 +16,15 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
+// t.Errorf, so one run names every wrong value in the cluster instead of stopping
+// at the first. It stays a t.Fatal* when (a) a later line indexes or dereferences
+// what the check guards, so converting would trade a named failure for a panic;
+// (b) the check establishes the object its siblings read, so continuing asserts
+// against a known-bad fixture; (c) a sibling would pass VACUOUSLY once it fails;
+// (d) the body is a rapid property or a fuzz target, whose harness re-runs it
+// while shrinking; or (e) continuing risks a synctest deadlock or a blocked send.
+
 // newTestWriter builds a FeedWriter for path with no harvest upstreams (the
 // common shape of the journal tests). Nyaa is always configured (a fake Nyaa
 // Torznab URL, the tracker's on switch - without it the Nyaa journal is
@@ -2190,7 +2199,7 @@ func TestCorrectedUpstreamRecordJournalsAsNew(t *testing.T) {
 	}
 	snap = readSnapshotFile(t, path)
 	if len(snap.NyaaFeed) != 1 {
-		t.Fatalf("nyaa feed = %+v, want the corrected record journaled as new", snap.NyaaFeed)
+		t.Errorf("nyaa feed = %+v, want the corrected record journaled as new", snap.NyaaFeed)
 	}
 	if !snap.Published["nyaa:7"] {
 		t.Errorf("publication log missing nyaa:7 after it was actually served: %v", snap.Published)

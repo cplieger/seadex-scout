@@ -237,43 +237,47 @@ func TestMarkAndDedupe(t *testing.T) {
 // torrent (an alt entry, or a structurally valid but uncurated one) must be
 // dropped, never admitted on the first matching signal.
 func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
-	set := &curation{
-		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"nyaa:1143533": false},
-	}
-	raw := []item{
-		{
-			Title: "best hash + alt key", GUID: "g1",
-			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
-			InfoURL:  "https://nyaa.si/view/1143533",
-		},
-		{
-			Title: "best hash + uncurated key", GUID: "g2",
-			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
-			InfoURL:  "https://nyaa.si/view/999",
-		},
-	}
-	if out, _ := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
-	}
+	t.Run("best hash against an alt or uncurated key", func(t *testing.T) {
+		set := &curation{
+			byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
+			byKey:  map[string]bool{"nyaa:1143533": false},
+		}
+		raw := []item{
+			{
+				Title: "best hash + alt key", GUID: "g1",
+				InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
+				InfoURL:  "https://nyaa.si/view/1143533",
+			},
+			{
+				Title: "best hash + uncurated key", GUID: "g2",
+				InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
+				InfoURL:  "https://nyaa.si/view/999",
+			},
+		}
+		if out, _ := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
+			t.Errorf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
+		}
+	})
 
 	// Two curated keys that AGREE on best/alt but name DIFFERENT releases:
 	// healthy Prowlarr emits the same tracker id in comments and guid, so an
 	// item whose InfoURL and GUID resolve to distinct curated torrents is an
 	// invalid untrusted response and must fail closed - the same-marker
 	// coincidence must not admit it.
-	bothBest := &curation{
-		byHash: map[string]bool{},
-		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
-	}
-	conflicting := []item{{
-		Title:   "two curated best ids",
-		InfoURL: "https://nyaa.si/view/100",
-		GUID:    "https://nyaa.si/view/200",
-	}}
-	if out, _ := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (distinct tracker identities must drop the item even when both are best)", len(out))
-	}
+	t.Run("two curated best ids on one item", func(t *testing.T) {
+		bothBest := &curation{
+			byHash: map[string]bool{},
+			byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		}
+		conflicting := []item{{
+			Title:   "two curated best ids",
+			InfoURL: "https://nyaa.si/view/100",
+			GUID:    "https://nyaa.si/view/200",
+		}}
+		if out, _ := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
+			t.Errorf("got %d items, want 0 (distinct tracker identities must drop the item even when both are best)", len(out))
+		}
+	})
 }
 
 // TestMarkAndDedupeRejectsCrossTorrentPair pins lookup's hash/key pair
@@ -295,38 +299,60 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 			pairKey(hashB, "nyaa:200"): true,
 		},
 	}
-	matching := []item{{
-		Title: "hash and key from one torrent", InfoHash: hashA,
-		InfoURL: "https://nyaa.si/view/100", GUID: "https://nyaa.si/view/100",
-	}}
-	if out, _ := markAndDedupe(matching, set, upstreamNyaa); len(out) != 1 {
-		t.Fatalf("got %d items, want 1 (a same-torrent hash/key pair must match)", len(out))
-	}
-	crossWired := []item{{
-		Title: "torrent A hash + torrent B key", InfoHash: hashA,
-		InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
-	}}
-	if out, _ := markAndDedupe(crossWired, set, upstreamNyaa); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (a cross-torrent hash/key pair must not match even when both are best)", len(out))
-	}
-	hashOnly := []item{{Title: "hash only", InfoHash: hashA, GUID: "g1"}}
-	if out, _ := markAndDedupe(hashOnly, set, upstreamNyaa); len(out) != 1 {
-		t.Fatalf("got %d items, want 1 (a hash-only Nyaa item needs no pair)", len(out))
-	}
 	// A legacy snapshot (nil byPair, persisted before the relation existed)
 	// cannot PROVE any hash/key co-membership, so a dual-signal item fails
 	// closed - even a genuinely same-torrent pair - until the next cycle
 	// rewrites the snapshot with the relation; single-signal matching keeps
 	// working through the upgrade window.
 	legacy := &curation{byHash: set.byHash, byKey: set.byKey}
-	if out, _ := markAndDedupe(crossWired, legacy, upstreamNyaa); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (a legacy nil-byPair snapshot must reject an unprovable dual-signal pair)", len(out))
-	}
-	if out, _ := markAndDedupe(matching, legacy, upstreamNyaa); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (even a same-torrent pair is unprovable against a nil byPair)", len(out))
-	}
-	if out, _ := markAndDedupe(hashOnly, legacy, upstreamNyaa); len(out) != 1 {
-		t.Fatalf("got %d items, want 1 (single-signal matching survives a legacy nil-byPair snapshot)", len(out))
+
+	matching := []item{{
+		Title: "hash and key from one torrent", InfoHash: hashA,
+		InfoURL: "https://nyaa.si/view/100", GUID: "https://nyaa.si/view/100",
+	}}
+	crossWired := []item{{
+		Title: "torrent A hash + torrent B key", InfoHash: hashA,
+		InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
+	}}
+	hashOnly := []item{{Title: "hash only", InfoHash: hashA, GUID: "g1"}}
+
+	for _, tc := range []struct {
+		name  string
+		items []item
+		set   *curation
+		want  int
+		why   string
+	}{
+		{
+			"same-torrent pair matches", matching, set, 1,
+			"a same-torrent hash/key pair must match",
+		},
+		{
+			"cross-torrent pair rejected", crossWired, set, 0,
+			"a cross-torrent hash/key pair must not match even when both are best",
+		},
+		{
+			"hash-only item needs no pair", hashOnly, set, 1,
+			"a hash-only Nyaa item needs no pair",
+		},
+		{
+			"legacy snapshot rejects cross-torrent pair", crossWired, legacy, 0,
+			"a legacy nil-byPair snapshot must reject an unprovable dual-signal pair",
+		},
+		{
+			"legacy snapshot rejects same-torrent pair", matching, legacy, 0,
+			"even a same-torrent pair is unprovable against a nil byPair",
+		},
+		{
+			"legacy snapshot keeps single-signal matching", hashOnly, legacy, 1,
+			"single-signal matching survives a legacy nil-byPair snapshot",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if out, _ := markAndDedupe(tc.items, tc.set, upstreamNyaa); len(out) != tc.want {
+				t.Errorf("got %d items, want %d (%s)", len(out), tc.want, tc.why)
+			}
+		})
 	}
 }
 
@@ -392,7 +418,7 @@ func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
 	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
 	if len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
+		t.Errorf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
 	}
 	if conflicts != 0 {
 		t.Errorf("identity conflicts = %d, want 0 (nothing curated was contradicted)", conflicts)
@@ -453,7 +479,7 @@ func TestMarkAndDedupeCountsIdentityConflicts(t *testing.T) {
 	}
 	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
 	if len(out) != 0 {
-		t.Fatalf("got %d items, want 0", len(out))
+		t.Errorf("got %d items, want 0", len(out))
 	}
 	if conflicts != 1 {
 		t.Errorf("identity conflicts = %d, want 1 (only the contradicted item counts)", conflicts)
@@ -636,7 +662,7 @@ func TestNilClientProxiesNothing(t *testing.T) {
 	}
 	ix := New(&Config{UpstreamConfig: cfg}, nil, nil)
 	if len(ix.upstreams) != 0 {
-		t.Fatalf("a nil client wired %d upstreams, want 0", len(ix.upstreams))
+		t.Errorf("a nil client wired %d upstreams, want 0", len(ix.upstreams))
 	}
 	items, fetched, failed := ix.fetchRaw(t.Context(), url.Values{"q": {"anything"}}, upstreamNyaa)
 	if items != nil || fetched != 0 || failed {
@@ -1265,17 +1291,17 @@ func TestFilterByCatsAppliesTorznabCategorySemantics(t *testing.T) {
 	}
 
 	if got := filterByCats(items, nil); len(got) != 3 {
-		t.Fatalf("empty category filter returned %d items, want 3", len(got))
+		t.Errorf("empty category filter returned %d items, want 3", len(got))
 	}
 
 	anime := filterByCats(items, map[int]bool{catAnime: true})
 	if len(anime) != 2 || anime[0].Title != "anime" || anime[1].Title != "uncategorized" {
-		t.Fatalf("anime filter returned %#v, want anime plus uncategorized passthrough", anime)
+		t.Errorf("anime filter returned %#v, want anime plus uncategorized passthrough", anime)
 	}
 
 	tv := filterByCats(items, map[int]bool{catTV: true})
 	if len(tv) != 2 || tv[0].Title != "anime" || tv[1].Title != "uncategorized" {
-		t.Fatalf("TV parent filter returned %#v, want anime subcategory plus uncategorized passthrough", tv)
+		t.Errorf("TV parent filter returned %#v, want anime subcategory plus uncategorized passthrough", tv)
 	}
 
 	movies := filterByCats(items, map[int]bool{catMovies: true})

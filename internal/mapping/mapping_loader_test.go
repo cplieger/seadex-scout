@@ -152,7 +152,7 @@ func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *test
 		t.Error("refresh sent cache validators for an unusable cache; a 304 would freeze the non-canonical records indefinitely")
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Fatalf("returned cache records = %+v, want the full 200 replacement (one record id 42)", next.Records)
+		t.Errorf("returned cache records = %+v, want the full 200 replacement (one record id 42)", next.Records)
 	}
 	if rec, ok := idx.Lookup(42); !ok || rec.TvdbID != 100 {
 		t.Errorf("index Lookup(42) = %+v ok=%v, want the replacement record", rec, ok)
@@ -232,7 +232,7 @@ func TestLoader_refreshCache_httpErrorKeepsStale(t *testing.T) {
 		t.Fatal("HTTP error refresh returned nil error, want degraded error")
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("HTTP error refresh records = %+v, want stale record id 1", next.Records)
+		t.Errorf("HTTP error refresh records = %+v, want stale record id 1", next.Records)
 	}
 	if next.ETag != "v1" || next.LastModified != lastModified {
 		t.Errorf("HTTP error refresh validators = ETag %q LastModified %q, want stale validators", next.ETag, next.LastModified)
@@ -387,7 +387,7 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if len(next.Records) != 1 {
-		t.Fatalf("future-FetchedAt failed refresh records = %+v, want stale record kept", next.Records)
+		t.Errorf("future-FetchedAt failed refresh records = %+v, want stale record kept", next.Records)
 	}
 	stale, ok := errors.AsType[*StaleMapError](err)
 	if !ok {

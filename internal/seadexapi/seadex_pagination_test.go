@@ -389,7 +389,7 @@ func TestFetchEntriesRetriesTransientStatus(t *testing.T) {
 			t.Fatalf("FetchEntries returned error: %v (a transient 503 must be retried, not degrade the cycle)", err)
 		}
 		if len(entries) != 1 {
-			t.Fatalf("entries = %d, want 1", len(entries))
+			t.Errorf("entries = %d, want 1", len(entries))
 		}
 		if tr.requests != maxAttempts {
 			t.Errorf("requests = %d, want %d (the page retried through the configured attempt budget)", tr.requests, maxAttempts)
@@ -438,7 +438,7 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 		t.Fatalf("FetchEntries returned error: %v (a small count mismatch must not fail the fetch)", err)
 	}
 	if len(entries) != 2 {
-		t.Fatalf("entries = %d, want 2", len(entries))
+		t.Errorf("entries = %d, want 2", len(entries))
 	}
 	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 1 {
 		t.Errorf("count-mismatch WARN count = %d, want 1", got)
@@ -682,7 +682,7 @@ func TestFetchEntriesExactlyFullChunkCompletesOnEmptyFollowUp(t *testing.T) {
 		t.Fatalf("FetchEntries returned error: %v (an exactly-full catalogue must complete on the empty follow-up chunk)", err)
 	}
 	if len(entries) != perPage {
-		t.Fatalf("entries = %d, want %d", len(entries), perPage)
+		t.Errorf("entries = %d, want %d", len(entries), perPage)
 	}
 	if reqs != 2 {
 		t.Errorf("requests = %d, want 2 (the full chunk plus the empty follow-up)", reqs)
@@ -718,7 +718,7 @@ func TestFetchEntriesRetainsReportedPagesAcrossChunks(t *testing.T) {
 		t.Fatalf("FetchEntries returned error: %v (a chunk omitting totalPages must not invalidate the retained page count)", err)
 	}
 	if len(entries) != perPage+1 {
-		t.Fatalf("entries = %d, want %d", len(entries), perPage+1)
+		t.Errorf("entries = %d, want %d", len(entries), perPage+1)
 	}
 	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
 		t.Errorf("count-mismatch WARN count = %d, want 0 (the reported total is satisfied)", got)
@@ -758,7 +758,7 @@ func TestFinishFetchWarnsWhenBudgetMostlySpent(t *testing.T) {
 				t.Fatalf("finishFetch returned error: %v", err)
 			}
 			if len(entries) != 1 {
-				t.Fatalf("finishFetch returned %d entries, want 1", len(entries))
+				t.Errorf("finishFetch returned %d entries, want 1", len(entries))
 			}
 			const msg = "seadex fetch budget mostly spent; raise the caps before the catalogue outgrows them"
 			if got := recorder.CountExact(msg); got != tc.want {

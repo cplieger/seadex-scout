@@ -700,7 +700,7 @@ func TestTickNeverWritesTheLibrarySnapshot(t *testing.T) {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 	if n := len(store.st.Library.Items); n != 1 {
-		t.Fatalf("library items after the reconcile = %d, want 1 (the walk's snapshot)", n)
+		t.Errorf("library items after the reconcile = %d, want 1 (the walk's snapshot)", n)
 	}
 	savesAfterReconcile := store.saves
 

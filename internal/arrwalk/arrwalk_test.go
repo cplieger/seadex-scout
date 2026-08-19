@@ -18,6 +18,15 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
+// t.Errorf, so one run names every wrong value in the cluster instead of stopping
+// at the first. It stays a t.Fatal* when (a) a later line indexes or dereferences
+// what the check guards, so converting would trade a named failure for a panic;
+// (b) the check establishes the object its siblings read, so continuing asserts
+// against a known-bad fixture; (c) a sibling would pass VACUOUSLY once it fails;
+// (d) the body is a rapid property or a fuzz target, whose harness re-runs it
+// while shrinking; or (e) continuing risks a synctest deadlock or a blocked send.
+
 // The walker produces the internal/library model; these test-local aliases keep
 // the walk assertions reading as they did when the model lived in this package.
 // The walker itself always names the model explicitly (library.Item), so the
@@ -821,7 +830,7 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 		t.Fatalf("Walk returned error, want nil (a live-context per-request timeout is not fatal): %v", err)
 	}
 	if len(snap.Items) != 2 {
-		t.Fatalf("items = %d, want 2 (the timed-out series stays as a Failed placeholder)", len(snap.Items))
+		t.Errorf("items = %d, want 2 (the timed-out series stays as a Failed placeholder)", len(snap.Items))
 	}
 	if !rec.Contains("sonarr episode fetch failed; series kept as failed placeholder") {
 		t.Errorf("messages = %q, want a per-series episode-fetch-failed warning", rec.Messages())
@@ -864,7 +873,7 @@ func TestWalkNoArrsWithNilLoggerReturnsEmptySnapshot(t *testing.T) {
 		t.Fatalf("Walk with no arrs: %v", err)
 	}
 	if len(snap.Items) != 0 {
-		t.Fatalf("items = %d, want 0", len(snap.Items))
+		t.Errorf("items = %d, want 0", len(snap.Items))
 	}
 	if snap.TakenAt.IsZero() {
 		t.Error("TakenAt is zero, want the walk timestamp set")
@@ -913,7 +922,7 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
 	}
 	if len(snap.Items) != 3 {
-		t.Fatalf("items = %d, want 3 (one clean item plus two Failed placeholders)", len(snap.Items))
+		t.Errorf("items = %d, want 3 (one clean item plus two Failed placeholders)", len(snap.Items))
 	}
 	if !rec.Contains("snapshot is partial") {
 		t.Fatalf("messages = %q, want an aggregate partial-snapshot warning", rec.Messages())
@@ -1157,7 +1166,7 @@ func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 	snap, err := w.Walk(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "failure budget") {
-		t.Fatalf("Walk error = %v, want the walk failure budget error", err)
+		t.Errorf("Walk error = %v, want the walk failure budget error", err)
 	}
 	if len(snap.Items) != 0 {
 		t.Errorf("items = %d, want the zero Snapshot on a budget failure", len(snap.Items))
@@ -1342,7 +1351,7 @@ func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
 		t.Fatalf("Walk: %v", err)
 	}
 	if len(snap.Items) != 0 {
-		t.Fatalf("items = %+v, want none (an include set resolving to zero ids admits nothing)", snap.Items)
+		t.Errorf("items = %+v, want none (an include set resolving to zero ids admits nothing)", snap.Items)
 	}
 	if !snap.FilteredEmpty {
 		t.Error("snapshot FilteredEmpty=false; a dead include filter must mark the walk so the cycle closes degraded instead of reading complete forever")
@@ -1519,7 +1528,7 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 			t.Fatalf("Walk: %v", err)
 		}
 		if len(snap.Items) != 0 {
-			t.Fatalf("items = %+v, want none (no series carries the resolved tag)", snap.Items)
+			t.Errorf("items = %+v, want none (no series carries the resolved tag)", snap.Items)
 		}
 		if n := rec.CountExact(msg); n != 1 {
 			t.Fatalf("dead-filter warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
@@ -1550,7 +1559,7 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 			t.Fatalf("Walk: %v", err)
 		}
 		if len(snap.Items) != 0 {
-			t.Fatalf("items = %+v, want none", snap.Items)
+			t.Errorf("items = %+v, want none", snap.Items)
 		}
 		if n := rec.CountExact(msg); n != 1 {
 			t.Fatalf("dead-filter warnings = %d, want exactly 1; messages = %q", n, rec.Messages())

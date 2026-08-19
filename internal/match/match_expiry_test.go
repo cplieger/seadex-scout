@@ -610,7 +610,7 @@ func TestLookupServesExpiredMemoDuringOutage(t *testing.T) {
 			[]seadex.Entry{{AniListID: 600}}, snap, idx, memo)
 
 		if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
-			t.Fatalf("matches = %+v, want one title match from the expired memo entry", res.Matches)
+			t.Errorf("matches = %+v, want one title match from the expired memo entry", res.Matches)
 		}
 		if !res.Degraded {
 			t.Error("Degraded = false, want true: a stale-served match does not clear the outage")

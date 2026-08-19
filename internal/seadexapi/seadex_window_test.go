@@ -12,6 +12,15 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
+// t.Errorf, so one run names every wrong value in the cluster instead of stopping
+// at the first. It stays a t.Fatal* when (a) a later line indexes or dereferences
+// what the check guards, so converting would trade a named failure for a panic;
+// (b) the check establishes the object its siblings read, so continuing asserts
+// against a known-bad fixture; (c) a sibling would pass VACUOUSLY once it fails;
+// (d) the body is a rapid property or a fuzz target, whose harness re-runs it
+// while shrinking; or (e) continuing risks a synctest deadlock or a blocked send.
+
 // windowSince is the fixed Since every window test in this file walks from,
 // and wantWindowFilter is the conjunct it must render to. Both are literals
 // rather than derived from windowFilter: the filter is the WIRE contract with
@@ -66,7 +75,7 @@ func TestFetchWindowRequestContract(t *testing.T) {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
 	if len(entries) != perPage+1 {
-		t.Fatalf("entries = %d, want %d", len(entries), perPage+1)
+		t.Errorf("entries = %d, want %d", len(entries), perPage+1)
 	}
 	if len(filters) != 2 {
 		t.Fatalf("requests = %d, want 2", len(filters))
@@ -621,7 +630,7 @@ func TestFetchWindowEmptyWindowDoesNotWarn(t *testing.T) {
 		t.Fatalf("FetchEntries returned error: %v (an empty window is a completed tick)", err)
 	}
 	if len(entries) != 0 {
-		t.Fatalf("entries = %d, want 0", len(entries))
+		t.Errorf("entries = %d, want 0", len(entries))
 	}
 	if got := recorder.CountExact("seadex change window delivered fewer entries than it reported selecting; this tick's freshness is incomplete and the next reconcile is the backstop"); got != 0 {
 		t.Errorf("empty window logged the shortfall WARN %d times, want 0", got)
@@ -662,7 +671,7 @@ func TestFetchWindowDoesNotWarnAcrossChunks(t *testing.T) {
 		t.Fatalf("FetchEntries returned error: %v", err)
 	}
 	if len(entries) != perPage+1 {
-		t.Fatalf("entries = %d, want %d across two chunks", len(entries), perPage+1)
+		t.Errorf("entries = %d, want %d across two chunks", len(entries), perPage+1)
 	}
 	if reqs < 2 {
 		t.Fatalf("the walk made %d request(s); the fixture is vacuous unless it spans two chunks", reqs)

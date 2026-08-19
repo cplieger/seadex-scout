@@ -353,7 +353,7 @@ func TestCompareOrdersEqualURLLinksByTracker(t *testing.T) {
 		{Tracker: "Nyaa", URL: sharedURL, Headline: true},
 	}
 	if len(forward) != 1 || !reflect.DeepEqual(forward[0].Links, want) {
-		t.Fatalf("forward links = %+v, want %+v", forward, want)
+		t.Errorf("forward links = %+v, want %+v", forward, want)
 	}
 	if len(reversed) != 1 || !reflect.DeepEqual(reversed[0].Links, want) {
 		t.Errorf("reversed links = %+v, want %+v", reversed, want)

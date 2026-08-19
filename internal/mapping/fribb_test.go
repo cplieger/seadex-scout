@@ -12,6 +12,15 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
+// t.Errorf, so one run names every wrong value in the cluster instead of stopping
+// at the first. It stays a t.Fatal* when (a) a later line indexes or dereferences
+// what the check guards, so converting would trade a named failure for a panic;
+// (b) the check establishes the object its siblings read, so continuing asserts
+// against a known-bad fixture; (c) a sibling would pass VACUOUSLY once it fails;
+// (d) the body is a rapid property or a fuzz target, whose harness re-runs it
+// while shrinking; or (e) continuing risks a synctest deadlock or a blocked send.
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
@@ -452,13 +461,13 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 		t.Fatalf("parseFribb error: %v", err)
 	}
 	if len(records) != 1 {
-		t.Fatalf("parseFribb kept %d records, want 1", len(records))
+		t.Errorf("parseFribb kept %d records, want 1", len(records))
 	}
 	if rec.CountExact("mapping: skipped malformed records") != 1 {
 		t.Fatalf("logs = %v, want one skipped-records warning", rec.Messages())
 	}
 	if rec.CountLevel(slog.LevelWarn, "mapping: skipped malformed records") != 1 {
-		t.Fatalf("skipped-records line is not at WARN (logs = %v); demoted to DEBUG it vanishes from the deployed info-level stream and dropped upstream rows go unseen", rec.Messages())
+		t.Errorf("skipped-records line is not at WARN (logs = %v); demoted to DEBUG it vanishes from the deployed info-level stream and dropped upstream rows go unseen", rec.Messages())
 	}
 	if !rec.HasAttr("", "skipped", "2") {
 		t.Errorf("skipped-records logs = %v, want skipped=2", rec.Messages())
@@ -473,7 +482,7 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 		t.Fatalf("logs = %v, want one dropped-records debug line", rec.Messages())
 	}
 	if rec.CountLevel(slog.LevelDebug, "mapping: dropped records without anilist_id") != 1 {
-		t.Fatalf("dropped-records line is not at DEBUG (logs = %v); a keyless-row count promoted to WARN is per-cycle noise on a shape Fribb always carries", rec.Messages())
+		t.Errorf("dropped-records line is not at DEBUG (logs = %v); a keyless-row count promoted to WARN is per-cycle noise on a shape Fribb always carries", rec.Messages())
 	}
 	if !rec.HasAttr("", "dropped", "1") {
 		t.Errorf("dropped-records logs = %v, want dropped=1", rec.Messages())
@@ -577,26 +586,30 @@ func TestParseFribb_atCapRecordAccepted(t *testing.T) {
 		return `{"anilist_id":1,"imdb_id":"tt` + strings.Repeat("x", pad) + `"}`
 	}
 
-	atCap := buildRecord(maxFribbRecordBytes)
-	if len(atCap) != maxFribbRecordBytes {
-		t.Fatalf("at-cap record is %d bytes, want exactly %d", len(atCap), maxFribbRecordBytes)
-	}
-	records, err := parseFribb([]byte(`[`+atCap+`]`), discardLogger())
-	if err != nil {
-		t.Fatalf("parseFribb(at-cap record) error: %v", err)
-	}
-	if len(records) != 1 {
-		t.Fatalf("parseFribb kept %d records, want 1 (an exactly-at-cap record is accepted)", len(records))
-	}
+	t.Run("at-cap record accepted", func(t *testing.T) {
+		atCap := buildRecord(maxFribbRecordBytes)
+		if len(atCap) != maxFribbRecordBytes {
+			t.Fatalf("at-cap record is %d bytes, want exactly %d", len(atCap), maxFribbRecordBytes)
+		}
+		records, err := parseFribb([]byte(`[`+atCap+`]`), discardLogger())
+		if err != nil {
+			t.Fatalf("parseFribb(at-cap record) error: %v", err)
+		}
+		if len(records) != 1 {
+			t.Errorf("parseFribb kept %d records, want 1 (an exactly-at-cap record is accepted)", len(records))
+		}
+	})
 
-	overCap := buildRecord(maxFribbRecordBytes + 1)
-	records, err = parseFribb([]byte(`[`+overCap+`]`), discardLogger())
-	if err != nil {
-		t.Fatalf("parseFribb(over-cap record) error: %v", err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("parseFribb kept %d records, want 0 (one byte over the cap is skipped)", len(records))
-	}
+	t.Run("one byte over the cap skipped", func(t *testing.T) {
+		overCap := buildRecord(maxFribbRecordBytes + 1)
+		records, err := parseFribb([]byte(`[`+overCap+`]`), discardLogger())
+		if err != nil {
+			t.Fatalf("parseFribb(over-cap record) error: %v", err)
+		}
+		if len(records) != 0 {
+			t.Errorf("parseFribb kept %d records, want 0 (one byte over the cap is skipped)", len(records))
+		}
+	})
 }
 
 // TestTmdbID_atCapMovieListRetained pins the inclusive side of the
@@ -662,7 +675,7 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 		t.Fatalf("parseFribbForRefresh error: %v", err)
 	}
 	if len(parsed.records) != 1 {
-		t.Fatalf("parseFribbForRefresh kept %d records, want 1", len(parsed.records))
+		t.Errorf("parseFribbForRefresh kept %d records, want 1", len(parsed.records))
 	}
 	if parsed.elements != 4 {
 		t.Errorf("parseFribbForRefresh elements = %d, want 4 (1 survivor + 2 skipped-malformed + 1 dropped-keyless)", parsed.elements)
@@ -699,7 +712,7 @@ func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 		t.Fatalf("over-budget record returned %v, want errIdentifierBudgetExceeded", budgetErr)
 	}
 	if len(c.records) != retained {
-		t.Fatalf("over-budget record retained (%d records, want %d)", len(c.records), retained)
+		t.Errorf("over-budget record retained (%d records, want %d)", len(c.records), retained)
 	}
 	if c.skipped != 0 {
 		t.Errorf("over-budget record counted skipped=%d, want 0 (a budget breach is not a malformed record)", c.skipped)

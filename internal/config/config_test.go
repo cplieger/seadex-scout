@@ -2054,33 +2054,39 @@ func TestLoadIgnoreFromFile(t *testing.T) {
 		return path
 	}
 
-	c, err := Load(write(t, "populated.yaml", arrs+"filters:\n  ignore: [154587, 21519]\n"))
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	for _, id := range []int{154587, 21519} {
-		if _, ok := c.IgnoreFindings[id]; !ok {
-			t.Errorf("configured ignore id %d missing from %v", id, c.IgnoreFindings)
+	t.Run("populated ignore list", func(t *testing.T) {
+		c, err := Load(write(t, "populated.yaml", arrs+"filters:\n  ignore: [154587, 21519]\n"))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
 		}
-	}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+		for _, id := range []int{154587, 21519} {
+			if _, ok := c.IgnoreFindings[id]; !ok {
+				t.Errorf("configured ignore id %d missing from %v", id, c.IgnoreFindings)
+			}
+		}
+	})
 
-	ec, err := Load(write(t, "empty.yaml", arrs+"filters:\n  ignore: []\n"))
-	if err != nil {
-		t.Fatalf("Load() of the shipped empty spelling error = %v", err)
-	}
-	if err := ec.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if ec.IgnoreFindings != nil {
-		t.Errorf("IgnoreFindings = %v, want nil for an empty list", ec.IgnoreFindings)
-	}
+	t.Run("shipped empty spelling", func(t *testing.T) {
+		ec, err := Load(write(t, "empty.yaml", arrs+"filters:\n  ignore: []\n"))
+		if err != nil {
+			t.Fatalf("Load() of the shipped empty spelling error = %v", err)
+		}
+		if err := ec.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+		if ec.IgnoreFindings != nil {
+			t.Errorf("IgnoreFindings = %v, want nil for an empty list", ec.IgnoreFindings)
+		}
+	})
 
-	if _, err := Load(write(t, "typed.yaml", arrs+"filters:\n  ignore: \"154587\"\n")); err == nil {
-		t.Error("Load() of a string filters.ignore = nil error, want the strict decode rejection")
-	}
+	t.Run("string ignore rejected", func(t *testing.T) {
+		if _, err := Load(write(t, "typed.yaml", arrs+"filters:\n  ignore: \"154587\"\n")); err == nil {
+			t.Error("Load() of a string filters.ignore = nil error, want the strict decode rejection")
+		}
+	})
 }
 
 // TestValidateRejectsUnusableABPasskey pins the config boundary's ONE format

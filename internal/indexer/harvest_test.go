@@ -1854,7 +1854,7 @@ func TestPendingHarvestSkipsCrossScopeJournalKey(t *testing.T) {
 	}
 	groups, index, _ := pendingHarvest(feeds, map[string]string{}, info)
 	if len(groups) != 1 || groups[0].scope != upstreamNyaa || len(groups[0].keys) != 1 || groups[0].keys[0] != "nyaa:42" {
-		t.Fatalf("pendingHarvest groups = %+v, want only nyaa:42 grouped under the nyaa feed", groups)
+		t.Errorf("pendingHarvest groups = %+v, want only nyaa:42 grouped under the nyaa feed", groups)
 	}
 	if _, ok := index["ab:300"]; ok {
 		t.Errorf("index = %v, indexed the cross-scope key ab:300 that matchHarvest can never satisfy", index)

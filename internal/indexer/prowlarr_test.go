@@ -51,7 +51,7 @@ func TestUpstreamSearchPreservesExistingQuery(t *testing.T) {
 		t.Fatalf("search: %v", err)
 	}
 	if len(items) != 0 {
-		t.Fatalf("got %d items from an empty channel, want 0", len(items))
+		t.Errorf("got %d items from an empty channel, want 0", len(items))
 	}
 
 	mu.Lock()
@@ -185,7 +185,7 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 		t.Fatalf("search after one malformed response: %v (a parse failure must be retried)", err)
 	}
 	if len(items) != 1 {
-		t.Fatalf("got %d items, want 1", len(items))
+		t.Errorf("got %d items, want 1", len(items))
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -329,7 +329,7 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 			t.Fatalf("search after one code-900 error document: %v (a generic upstream error must be retried)", err)
 		}
 		if len(items) != 1 {
-			t.Fatalf("got %d items, want 1", len(items))
+			t.Errorf("got %d items, want 1", len(items))
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -1091,7 +1091,7 @@ func TestUpstreamSearchReportsRawPageCount(t *testing.T) {
 		t.Fatalf("search: %v", err)
 	}
 	if len(items) != 1 {
-		t.Fatalf("filtered items = %d, want 1 (only the same-origin item survives)", len(items))
+		t.Errorf("filtered items = %d, want 1 (only the same-origin item survives)", len(items))
 	}
 	if raw != 3 {
 		t.Errorf("raw page count = %d, want 3 (the parsed-item count BEFORE the origin filter)", raw)

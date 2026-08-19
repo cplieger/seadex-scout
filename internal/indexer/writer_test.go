@@ -25,6 +25,15 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
+// t.Errorf, so one run names every wrong value in the cluster instead of stopping
+// at the first. It stays a t.Fatal* when (a) a later line indexes or dereferences
+// what the check guards, so converting would trade a named failure for a panic;
+// (b) the check establishes the object its siblings read, so continuing asserts
+// against a known-bad fixture; (c) a sibling would pass VACUOUSLY once it fails;
+// (d) the body is a rapid property or a fuzz target, whose harness re-runs it
+// while shrinking; or (e) continuing risks a synctest deadlock or a blocked send.
+
 // TestRebuildPersistsPairRelation pins that the persisted curation set
 // carries the hash/key pair relation lookup's cross-torrent gate reads: a
 // torrent with both identity signals records its exact pair, and the map is
@@ -1514,7 +1523,7 @@ func TestSplitCurationWarnedLeavesInputUnmutated(t *testing.T) {
 	}}}
 	kept, ws := splitCurationWarned(entries, feedExcludesWarnings())
 	if len(entries[0].Torrents) != 2 || entries[0].Torrents[0].URL != "https://nyaa.si/view/41" {
-		t.Fatalf("splitCurationWarned mutated the shared input: %+v", entries[0].Torrents)
+		t.Errorf("splitCurationWarned mutated the shared input: %+v", entries[0].Torrents)
 	}
 	if len(kept[0].Torrents) != 1 || kept[0].Torrents[0].URL != "https://nyaa.si/view/42" {
 		t.Errorf("kept torrents = %+v, want only the unwarned nyaa:42", kept[0].Torrents)
@@ -1679,32 +1688,36 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 // container budget before any per-item validation could reject it. Both
 // documents here stay well under maxFeedBytes and must still be refused.
 func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
-	feed := `{"version":2,"owners":{},"published":{},"nyaa_feed":[` +
-		strings.TrimSuffix(strings.Repeat("{},", maxSnapshotFeedItems+1), ",") + `],"ab_feed":[]}`
-	if len(feed) > maxFeedBytes {
-		t.Fatalf("over-cardinality feed document = %d bytes, want it under the %d byte cap", len(feed), maxFeedBytes)
-	}
-	if _, _, _, err := decodeSnapshot([]byte(feed)); err == nil {
-		t.Error("decodeSnapshot accepted a feed past its cardinality cap, want a bounded-decode error")
-	}
-
-	var ledger strings.Builder
-	ledger.WriteString(`{"version":2,"owners":{},"nyaa_feed":[],"ab_feed":[],"published":{`)
-	for i := range maxSnapshotMapEntries + 1 {
-		if i > 0 {
-			ledger.WriteByte(',')
+	t.Run("feed item cardinality", func(t *testing.T) {
+		feed := `{"version":2,"owners":{},"published":{},"nyaa_feed":[` +
+			strings.TrimSuffix(strings.Repeat("{},", maxSnapshotFeedItems+1), ",") + `],"ab_feed":[]}`
+		if len(feed) > maxFeedBytes {
+			t.Fatalf("over-cardinality feed document = %d bytes, want it under the %d byte cap", len(feed), maxFeedBytes)
 		}
-		ledger.WriteString(`"nyaa:`)
-		ledger.WriteString(strconv.Itoa(i))
-		ledger.WriteString(`":true`)
-	}
-	ledger.WriteString("}}")
-	if ledger.Len() > maxFeedBytes {
-		t.Fatalf("over-cardinality ledger document = %d bytes, want it under the %d byte cap", ledger.Len(), maxFeedBytes)
-	}
-	if _, _, _, err := decodeSnapshot([]byte(ledger.String())); err == nil {
-		t.Error("decodeSnapshot accepted a publication log past its entry cap, want a bounded-decode error")
-	}
+		if _, _, _, err := decodeSnapshot([]byte(feed)); err == nil {
+			t.Error("decodeSnapshot accepted a feed past its cardinality cap, want a bounded-decode error")
+		}
+	})
+
+	t.Run("publication log entry cardinality", func(t *testing.T) {
+		var ledger strings.Builder
+		ledger.WriteString(`{"version":2,"owners":{},"nyaa_feed":[],"ab_feed":[],"published":{`)
+		for i := range maxSnapshotMapEntries + 1 {
+			if i > 0 {
+				ledger.WriteByte(',')
+			}
+			ledger.WriteString(`"nyaa:`)
+			ledger.WriteString(strconv.Itoa(i))
+			ledger.WriteString(`":true`)
+		}
+		ledger.WriteString("}}")
+		if ledger.Len() > maxFeedBytes {
+			t.Fatalf("over-cardinality ledger document = %d bytes, want it under the %d byte cap", ledger.Len(), maxFeedBytes)
+		}
+		if _, _, _, err := decodeSnapshot([]byte(ledger.String())); err == nil {
+			t.Error("decodeSnapshot accepted a publication log past its entry cap, want a bounded-decode error")
+		}
+	})
 }
 
 // TestCollectWarnedIdentitiesClosesReverseOrderedChain pins the transitive

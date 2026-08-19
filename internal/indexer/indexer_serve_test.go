@@ -189,7 +189,7 @@ func TestQueryTotalUpstreamFailureReturnsFault(t *testing.T) {
 
 	items, stats, fault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 0 {
-		t.Fatalf("got %d items from a failed upstream, want 0", len(items))
+		t.Errorf("got %d items from a failed upstream, want 0", len(items))
 	}
 	if !stats.answered || stats.feed || stats.upstream != 0 || stats.curated != 0 {
 		t.Errorf("stats = %+v, want answered search with 0 upstream/curated", stats)
@@ -305,7 +305,7 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 	ix := New(&Config{}, nil, nil)
 	items, stats, _ := ix.query(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
 	if len(items) != 0 {
-		t.Fatalf("skipped query returned %d items, want 0", len(items))
+		t.Errorf("skipped query returned %d items, want 0", len(items))
 	}
 	if stats.answered || stats.feed || stats.upstream != 0 || stats.curated != 0 {
 		t.Errorf("stats = %+v, want the zero queryStats (deliberate skip)", stats)
@@ -535,7 +535,7 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	cancel()
 	items, stats, fault := ix.query(ctx, url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
 	if len(items) != 0 {
-		t.Fatalf("cancelled search returned %d items, want 0", len(items))
+		t.Errorf("cancelled search returned %d items, want 0", len(items))
 	}
 	if !stats.answered || stats.feed || stats.upstream != 0 || stats.curated != 0 {
 		t.Errorf("stats = %+v, want an answered search with 0 upstream/curated", stats)

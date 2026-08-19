@@ -100,7 +100,7 @@ func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
 	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
-		t.Fatalf("matches = %+v, want exactly the one title match completed before the cancellation", res.Matches)
+		t.Errorf("matches = %+v, want exactly the one title match completed before the cancellation", res.Matches)
 	}
 	if !res.Degraded {
 		t.Error("Degraded = false, want true when the loop is cut short mid-run")

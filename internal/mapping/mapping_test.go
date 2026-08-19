@@ -163,7 +163,7 @@ func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
 	if len(set.records) != 2 {
-		t.Fatalf("records = %d, want 2 (unknown keys do not reject the record)", len(set.records))
+		t.Errorf("records = %d, want 2 (unknown keys do not reject the record)", len(set.records))
 	}
 	if set.unknown != 4 {
 		t.Errorf("unknown keys = %d, want 4 (every non-canonical key counted)", set.unknown)
@@ -181,7 +181,7 @@ func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
 	if len(set.records) != 1 || set.records[0].AniListID != 5 || set.records[0].Type != "MOVIE" {
-		t.Fatalf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", set.records)
+		t.Errorf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", set.records)
 	}
 	if set.unknown != 0 {
 		t.Errorf("unknown keys = %d, want none for case-variant canonical keys (encoding/json accepts them)", set.unknown)
@@ -237,7 +237,7 @@ func TestParseOverrides_duplicateIDKeepsLastRecord(t *testing.T) {
 		t.Errorf("applied = %d, want 5 (every keyed record applies)", set.applied)
 	}
 	if len(set.records) != 2 {
-		t.Fatalf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
+		t.Errorf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
 	}
 	idx := NewIndex(set.records)
 	if got, ok := idx.Lookup(1); !ok || got.TvdbID != 12 {
@@ -431,7 +431,7 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 			t.Errorf("budget-breach error does not match errIdentifierBudgetExceeded through the StaleMapError wrap: %v", err)
 		}
 		if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-			t.Fatalf("budget-breach records = %+v, want the stale record id 1 retained", next.Records)
+			t.Errorf("budget-breach records = %+v, want the stale record id 1 retained", next.Records)
 		}
 		if next.RejectedRefreshes != 3 {
 			t.Errorf("budget-breach RejectedRefreshes = %d, want 3 (the prior streak advances)", next.RejectedRefreshes)

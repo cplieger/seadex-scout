@@ -257,7 +257,7 @@ func TestFetchManyChunksBatchesAndMergesResults(t *testing.T) {
 		t.Errorf("batch sizes = %v, want %v", batchSizes, wantBatches)
 	}
 	if len(out) != 120 {
-		t.Fatalf("merged result has %d ids, want 120", len(out))
+		t.Errorf("merged result has %d ids, want 120", len(out))
 	}
 	if got := out[77].Titles; len(got) != 1 || got[0] != "t77" {
 		t.Errorf("out[77].Titles = %v, want [t77]", got)
@@ -319,7 +319,7 @@ func TestFetchManyPreservesValidRecordsOnRecordError(t *testing.T) {
 		t.Fatal("FetchMany must surface the invalid record")
 	}
 	if len(out) != 1 {
-		t.Fatalf("FetchMany returned %d valid records, want 1", len(out))
+		t.Errorf("FetchMany returned %d valid records, want 1", len(out))
 	}
 	if got := out[1].Titles; !slices.Equal(got, []string{"valid"}) {
 		t.Errorf("out[1].Titles = %v, want [valid]", got)

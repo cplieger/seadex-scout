@@ -306,7 +306,7 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 				t.Fatalf("routing-collapse refresh error = %v, want a *StaleMapError guard rejection", err)
 			}
 			if len(next.Records) != len(prev.Records) {
-				t.Fatalf("routing-collapse refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prev.Records))
+				t.Errorf("routing-collapse refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prev.Records))
 			}
 			if next.RejectedRefreshes != 1 {
 				t.Errorf("routing-collapse RejectedRefreshes = %d, want 1 (the routing floor is an acceptance-guard rejection)", next.RejectedRefreshes)
@@ -338,7 +338,7 @@ func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 		t.Fatalf("additive refresh growing both routing sides returned error %v, want accepted", err)
 	}
 	if len(next.Records) != 6 {
-		t.Fatalf("accepted refresh records = %d, want 6", len(next.Records))
+		t.Errorf("accepted refresh records = %d, want 6", len(next.Records))
 	}
 	if next.RejectedRefreshes != 0 {
 		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
@@ -559,7 +559,7 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 		t.Fatalf("below-half refresh error = %v, want a *StaleMapError guard rejection", err)
 	}
 	if len(next.Records) != len(prevRecords) {
-		t.Fatalf("below-half refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
+		t.Errorf("below-half refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
 	}
 	if next.RejectedRefreshes != 1 {
 		t.Errorf("below-half refresh RejectedRefreshes = %d, want 1 (the shrink guard is an acceptance-guard rejection)", next.RejectedRefreshes)
@@ -621,7 +621,7 @@ func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
 		t.Fatalf("exactly-half refresh (4 of 8) returned error %v, want accepted (the guards are strictly below-half)", err)
 	}
 	if len(next.Records) != 4 {
-		t.Fatalf("accepted refresh records = %d, want 4", len(next.Records))
+		t.Errorf("accepted refresh records = %d, want 4", len(next.Records))
 	}
 	if next.RejectedRefreshes != 0 {
 		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)

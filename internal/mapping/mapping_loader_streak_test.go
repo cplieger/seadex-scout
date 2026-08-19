@@ -246,7 +246,7 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 		t.Errorf("cap-breach error does not match errRecordCapExceeded through the StaleMapError wrap: %v", err)
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("cap-breach refresh records = %+v, want stale record id 1", next.Records)
+		t.Errorf("cap-breach refresh records = %+v, want stale record id 1", next.Records)
 	}
 	if next.RejectedRefreshes != degradation.TickEscalationThreshold {
 		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, degradation.TickEscalationThreshold)

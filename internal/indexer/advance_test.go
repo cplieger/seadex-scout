@@ -221,7 +221,7 @@ func TestAdvancePreservesTitlesAndHarvestCursorVerbatim(t *testing.T) {
 	after := rawSnapshotMembers(t, path)
 	for _, member := range []string{"titles", "harvest_cursor"} {
 		if len(after[member]) == 0 {
-			t.Fatalf("%s missing from the advanced snapshot; Advance must carry it through", member)
+			t.Errorf("%s missing from the advanced snapshot; Advance must carry it through", member)
 		}
 		if string(after[member]) != string(before[member]) {
 			t.Errorf("%s changed across Advance: before %s, after %s", member, before[member], after[member])
