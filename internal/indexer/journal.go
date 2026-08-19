@@ -193,17 +193,15 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			continue
 		}
 		it = journalItem{
-			item: item{
-				Title:                synthesizeTitle(occ.torrent, infoFor(occ.entry.AniListID)),
-				GUID:                 classify.PublishURL(occ.torrent),
-				InfoURL:              entryURL(occ.entry.AniListID),
-				DownloadURL:          dl,
-				InfoHash:             validInfoHash(occ.torrent.InfoHash),
-				DownloadVolumeFactor: dvfAlt,
-				Size:                 totalSize(occ.torrent.Files),
-			},
-			Key:       key,
-			AniListID: occ.entry.AniListID,
+			Title:                synthesizeTitle(occ.torrent, infoFor(occ.entry.AniListID)),
+			GUID:                 classify.PublishURL(occ.torrent),
+			InfoURL:              entryURL(occ.entry.AniListID),
+			DownloadURL:          dl,
+			InfoHash:             validInfoHash(occ.torrent.InfoHash),
+			DownloadVolumeFactor: dvfAlt,
+			Size:                 totalSize(occ.torrent.Files),
+			Key:                  key,
+			AniListID:            occ.entry.AniListID,
 		}
 		if it.Title == "" {
 			// No episode files and no release group on this occurrence: an

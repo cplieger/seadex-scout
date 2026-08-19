@@ -465,8 +465,7 @@ func TestLoader_refreshCache_unusableCacheFetchFailureErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("fetch failure over an unusable cache returned nil error, want a no-cache-available error")
 	}
-	var stale *StaleMapError
-	if errors.As(err, &stale) {
+	if _, ok := errors.AsType[*StaleMapError](err); ok {
 		t.Fatalf("fetch failure over an unusable cache returned %v, want the no-cache error (a StaleMapError would make scout compare against an empty map)", err)
 	}
 }

@@ -117,7 +117,7 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -167,7 +167,7 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -214,7 +214,7 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
@@ -269,7 +269,7 @@ func TestHarvestTimeSliceEnforced(t *testing.T) {
 	info := func(alID int) EntryInfo { return EntryInfo{Title: fmt.Sprintf("Show %d", alID)} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	clock := time.Unix(1700000000, 0)
 	w.now = func() time.Time { return clock }
@@ -316,7 +316,7 @@ func TestHarvestRotationResumesAfterCursor(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedLedgerWithCursor(t, path, "nyaa:1500")
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -349,7 +349,7 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		log, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -397,7 +397,7 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		log, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -454,7 +454,7 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		log, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -492,7 +492,7 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -551,11 +551,11 @@ func TestHarvestSpendsOneQueryPerTitleCandidate(t *testing.T) {
 			defer srv.Close()
 
 			feeds := map[string][]journalItem{
-				upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+				upstreamNyaa: {{Title: "Show S01", Key: "nyaa:42", AniListID: 7}},
 			}
-			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+			w := NewFeedWriter(&FeedWriterConfig{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-			}}, nil, srv.Client())
+			}, nil, srv.Client())
 			titles := map[string]string{}
 			w.harvest.harvestTitles(t.Context(), feeds, titles,
 				func(int) EntryInfo { return EntryInfo{Title: tc.title, Season: 1, SeasonKnown: true} }, "")
@@ -602,11 +602,11 @@ func TestHarvestConsumesTheWholeSingleResponse(t *testing.T) {
 	defer srv.Close()
 
 	feeds := map[string][]journalItem{
-		upstreamAB: {{item: item{Title: "Frieren S01"}, Key: "ab:1167293", AniListID: 154587}},
+		upstreamAB: {{Title: "Frieren S01", Key: "ab:1167293", AniListID: 154587}},
 	}
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		ABTorznabURL: srv.URL, ABPasskey: "PK", ProwlarrAPIKey: "k",
-	}}, nil, srv.Client())
+	}, nil, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Sousou no Frieren"} }, "")
@@ -648,7 +648,7 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -793,7 +793,7 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 			log, rec := capture.New()
 			w := NewFeedWriter(&FeedWriterConfig{
 				Path:           filepath.Join(t.TempDir(), "feed.json"),
-				UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 			}, log, srv.Client())
 			w.harvest.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
 				func(int) EntryInfo { return EntryInfo{} }, tc.cursor)
@@ -820,10 +820,10 @@ func TestHarvestReportsStrandedReleases(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}, log, srv.Client())
 	feeds := map[string][]journalItem{
-		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+		upstreamNyaa: {{Title: "Show S01", Key: "nyaa:42", AniListID: 7}},
 	}
 	titles := map[string]string{}
 	w.harvest.harvestTitles(t.Context(), feeds, titles, func(int) EntryInfo {
@@ -940,7 +940,7 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"},
 		log, countSrv.Client())
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -981,11 +981,11 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 	log, rec := capture.New()
 	cfg := &FeedWriterConfig{
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}
 	w := NewFeedWriter(cfg, log, srv.Client())
 	feeds := map[string][]journalItem{
-		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+		upstreamNyaa: {{Title: "Show S01", Key: "nyaa:42", AniListID: 7}},
 	}
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
@@ -1086,10 +1086,10 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
-			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
-			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
+			{Title: "Show C", Key: "nyaa:44", AniListID: 9},
+			{Title: "Show D", Key: "nyaa:45", AniListID: 10},
 		},
 	}
 	info := map[int]EntryInfo{
@@ -1097,9 +1097,9 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1139,12 +1139,12 @@ func TestHarvestMatchesHashlessRecordAgainstHashBearingResult(t *testing.T) {
 	// The journal item carries NO info hash, so pendingHarvest indexes its key
 	// alone - exactly the shape a SeaDex record without the field produces.
 	feeds := map[string][]journalItem{
-		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+		upstreamNyaa: {{Title: "Show S01", Key: "nyaa:42", AniListID: 7}},
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
@@ -1181,14 +1181,14 @@ func TestHarvestReportsContradictoryResults(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show S02"}, Key: "nyaa:43", AniListID: 7},
+			{Title: "Show S01", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show S02", Key: "nyaa:43", AniListID: 7},
 		},
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
@@ -1227,10 +1227,10 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
-			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
-			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
+			{Title: "Show C", Key: "nyaa:44", AniListID: 9},
+			{Title: "Show D", Key: "nyaa:45", AniListID: 10},
 		},
 	}
 	info := map[int]EntryInfo{
@@ -1238,9 +1238,9 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1278,12 +1278,12 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
-			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
-			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
-			{item: item{Title: "Show E"}, Key: "nyaa:46", AniListID: 11},
-			{item: item{Title: "Show F"}, Key: "nyaa:47", AniListID: 12},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
+			{Title: "Show C", Key: "nyaa:44", AniListID: 9},
+			{Title: "Show D", Key: "nyaa:45", AniListID: 10},
+			{Title: "Show E", Key: "nyaa:46", AniListID: 11},
+			{Title: "Show F", Key: "nyaa:47", AniListID: 12},
 		},
 	}
 	info := map[int]EntryInfo{
@@ -1291,9 +1291,9 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
 	}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1324,15 +1324,15 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
 		},
 	}
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1376,16 +1376,16 @@ func TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
 		},
 	}
 	// B's arr carries the Romaji title; A's does not appear in either alias.
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Shou Bii"}}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1411,7 +1411,8 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 		case "Show F":
 			body = strings.ReplaceAll(
 				torznabBody(torznabItem("Show F Real Title", "https://nyaa.si/view/47")),
-				"http://prowlarr:9696", "http://"+r.Host)
+				"http://prowlarr:9696", "http://"+r.Host,
+			)
 		default:
 			body = "this is not torznab xml <<<"
 		}
@@ -1421,12 +1422,12 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
-			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
-			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
-			{item: item{Title: "Show E"}, Key: "nyaa:46", AniListID: 11},
-			{item: item{Title: "Show F"}, Key: "nyaa:47", AniListID: 12},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
+			{Title: "Show C", Key: "nyaa:44", AniListID: 9},
+			{Title: "Show D", Key: "nyaa:45", AniListID: 10},
+			{Title: "Show E", Key: "nyaa:46", AniListID: 11},
+			{Title: "Show F", Key: "nyaa:47", AniListID: 12},
 		},
 	}
 	info := map[int]EntryInfo{
@@ -1434,9 +1435,9 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
 	}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1602,15 +1603,15 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 
 			feeds := map[string][]journalItem{
 				upstreamNyaa: {
-					{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-					{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+					{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+					{Title: "Show B", Key: "nyaa:43", AniListID: 8},
 				},
 			}
 			info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 			log, rec := capture.New()
-			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+			w := NewFeedWriter(&FeedWriterConfig{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-			}}, log, srv.Client())
+			}, log, srv.Client())
 			titles := map[string]string{}
 			stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1848,8 +1849,8 @@ func TestPendingHarvestSkipsCrossScopeJournalKey(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "synthetic"}, Key: "ab:300", AniListID: 7},
-			{item: item{Title: "synthetic"}, Key: "nyaa:42", AniListID: 7},
+			{Title: "synthetic", Key: "ab:300", AniListID: 7},
+			{Title: "synthetic", Key: "nyaa:42", AniListID: 7},
 		},
 	}
 	groups, index, _ := pendingHarvest(feeds, map[string]string{}, info)
@@ -1876,8 +1877,8 @@ func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:1", AniListID: 7},
-			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:2", AniListID: 7},
+			{Title: "synthetic", InfoHash: hash, Key: "nyaa:1", AniListID: 7},
+			{Title: "synthetic", InfoHash: hash, Key: "nyaa:2", AniListID: 7},
 		},
 	}
 	_, index, showTitles := pendingHarvest(feeds, map[string]string{}, info)
@@ -1910,9 +1911,9 @@ func TestPendingHarvestKeepsAnAmbiguousInfoHashRetired(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:1", AniListID: 7},
-			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:2", AniListID: 7},
-			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:3", AniListID: 7},
+			{Title: "synthetic", InfoHash: hash, Key: "nyaa:1", AniListID: 7},
+			{Title: "synthetic", InfoHash: hash, Key: "nyaa:2", AniListID: 7},
+			{Title: "synthetic", InfoHash: hash, Key: "nyaa:3", AniListID: 7},
 		},
 	}
 	_, index, showTitles := pendingHarvest(feeds, map[string]string{}, info)
@@ -2203,7 +2204,7 @@ func TestUpstreamFailureWarnsOnce(t *testing.T) {
 
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}, log, srv.Client())
 
 	u := upstreamForScope(w.harvest.upstreams, upstreamNyaa)
@@ -2250,11 +2251,11 @@ func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
 	defer srv.Close()
 
 	feeds := map[string][]journalItem{
-		upstreamAB: {{item: item{Title: "Frieren S01"}, Key: "ab:1167293", AniListID: 154587}},
+		upstreamAB: {{Title: "Frieren S01", Key: "ab:1167293", AniListID: 154587}},
 	}
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		ABTorznabURL: srv.URL, ABPasskey: "PK", ProwlarrAPIKey: "k",
-	}}, nil, srv.Client())
+	}, nil, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Sousou no Frieren"} }, "")
@@ -2312,13 +2313,13 @@ func TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope(t *testing.T) {
 			info := map[int]EntryInfo{}
 			for i, name := range names {
 				feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
-					journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i})
+					journalItem{Title: "synthetic", Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i})
 				info[7+i] = EntryInfo{Title: name}
 			}
 			log, rec := capture.New()
-			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+			w := NewFeedWriter(&FeedWriterConfig{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-			}}, log, srv.Client())
+			}, log, srv.Client())
 			titles := map[string]string{}
 			stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -2392,14 +2393,14 @@ func TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope(t *testing.T)
 	info := map[int]EntryInfo{}
 	for i, name := range names {
 		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
-			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i},
-			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(20+i), AniListID: 7 + i})
+			journalItem{Title: "synthetic", Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i},
+			journalItem{Title: "synthetic", Key: "nyaa:" + strconv.Itoa(20+i), AniListID: 7 + i})
 		info[7+i] = EntryInfo{Title: name}
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -2447,14 +2448,14 @@ func TestHarvestPartialProgressDoesNotLatchTheScope(t *testing.T) {
 	info := map[int]EntryInfo{}
 	for i := range shows {
 		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
-			journalItem{item: item{Title: "Show S01"}, Key: "nyaa:10" + strconv.Itoa(i), AniListID: 7 + i},
-			journalItem{item: item{Title: "Show S01"}, Key: "nyaa:20" + strconv.Itoa(i), AniListID: 7 + i})
+			journalItem{Title: "Show S01", Key: "nyaa:10" + strconv.Itoa(i), AniListID: 7 + i},
+			journalItem{Title: "Show S01", Key: "nyaa:20" + strconv.Itoa(i), AniListID: 7 + i})
 		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i) + " (2020)"}
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -2521,12 +2522,12 @@ func TestHarvestLadderStopsAtTheFirstSatisfyingCandidate(t *testing.T) {
 	defer srv.Close()
 
 	feeds := map[string][]journalItem{upstreamNyaa: {
-		{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+		{Title: "Show S01", Key: "nyaa:42", AniListID: 7},
 	}}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Hunter x Hunter (2011)", Season: 1, SeasonKnown: true} }, "")
@@ -2562,11 +2563,11 @@ func TestHarvestLadderAdvancesToTheStrippedTitle(t *testing.T) {
 	defer srv.Close()
 
 	feeds := map[string][]journalItem{upstreamNyaa: {
-		{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+		{Title: "Show S01", Key: "nyaa:42", AniListID: 7},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, nil, srv.Client())
+	}, nil, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Hunter x Hunter (2011)", Season: 1, SeasonKnown: true} }, "")
@@ -2599,12 +2600,12 @@ func TestHarvestExhaustedLadderLogsOnceAtDebug(t *testing.T) {
 	defer srv.Close()
 
 	feeds := map[string][]journalItem{upstreamNyaa: {
-		{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+		{Title: "Show S01", Key: "nyaa:42", AniListID: 7},
 	}}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, map[string]string{},
 		func(int) EntryInfo { return EntryInfo{Title: "A (B) (C)"} }, "")
 
@@ -2642,15 +2643,15 @@ func TestHarvestCleanZeroMatchesNeverLatchTheScope(t *testing.T) {
 	info := map[int]EntryInfo{}
 	for i := range shows {
 		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
-			journalItem{item: item{Title: "Show S01"}, Key: "nyaa:" + strconv.Itoa(100+i), AniListID: 7 + i})
+			journalItem{Title: "Show S01", Key: "nyaa:" + strconv.Itoa(100+i), AniListID: 7 + i})
 		// Single-candidate titles, so one query per show: the assertion is
 		// about the latch, not about the ladder's length.
 		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i)}
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, map[string]string{},
 		func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -2700,15 +2701,15 @@ func TestHarvestCredentialErrorDocumentLatchesTheScopeAtError(t *testing.T) {
 
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
-			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{Title: "Show A", Key: "nyaa:42", AniListID: 7},
+			{Title: "Show B", Key: "nyaa:43", AniListID: 8},
 		},
 	}
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
+	}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 

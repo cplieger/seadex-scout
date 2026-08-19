@@ -33,8 +33,7 @@ func TestUpstreamSearchPreservesExistingQuery(t *testing.T) {
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		u := *r.URL
-		gotURL = &u
+		gotURL = r.URL.Clone()
 		gotKey = r.Header.Get("X-Api-Key")
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/rss+xml")
@@ -1505,9 +1504,9 @@ func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
 			defer srv.Close()
 
 			log, rec := capture.New()
-			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+			ix := New(&Config{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-			}}, log, srv.Client())
+			}, log, srv.Client())
 
 			items, stats, fault := ix.query(t.Context(),
 				url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, upstreamNyaa)

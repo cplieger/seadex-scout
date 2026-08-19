@@ -241,7 +241,8 @@ func releaseFlags(t *seadex.Torrent) []string {
 var episodeToken = regexp.MustCompile(
 	`((` + nametoken.Literal("S") + `\d{1,2})` + nametoken.Literal("E") + `\d{1,4}` +
 		`(?:-` + nametoken.Literal("E") + `?\d{1,4})?(?:` + nametoken.Literal("v") + `\d+)?)` +
-		`(?:` + nametoken.NonWordEdge + `|$)`)
+		`(?:` + nametoken.NonWordEdge + `|$)`,
+)
 
 // absoluteEpisode matches an absolute episode number in the fansub "- 07" form
 // (optional version suffix), with the episode number captured in group 1. The
@@ -421,16 +422,9 @@ func titleBase(name string) string {
 	if hasEpisodeEvidence(base) {
 		return base
 	}
-	// Walk the ancestors nearest-first over ONE cleaned prefix instead of re-deriving
-	// it on every step.
-	rest := path.Dir(name)
-	for rest != "" {
-		component := rest
-		if i := strings.LastIndexByte(rest, '/'); i >= 0 {
-			component, rest = rest[i+1:], rest[:i]
-		} else {
-			rest = ""
-		}
+	// Walk the ancestors nearest-first over ONE cleaned split, so a component is
+	// never re-derived and path.Dir is never called per step.
+	for _, component := range slices.Backward(strings.Split(path.Dir(name), "/")) {
 		if component == "" {
 			continue
 		}
@@ -575,7 +569,8 @@ var seasonPackDisqualifier = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])(?:EXTRA
 // SONARR will make of a title, not what this app believes a name says.
 var sonarrSimpleNoise = regexp.MustCompile(
 	`(?i)(?:(?:480|540|576|720|1080|2160)[ip]|[xh][\W_]?26[45]|DD\W?5\W1` +
-		`|848x480|1280x720|1920x1080|3840x2160|4096x2160|10-bit)\s*`)
+		`|848x480|1280x720|1920x1080|3840x2160|4096x2160|10-bit)\s*`,
+)
 
 // packFromTitle reports the season-pack verdict a release TITLE carries, and
 // whether the title answered at all. It is the title half of the harvest's

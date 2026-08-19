@@ -32,7 +32,7 @@ import (
 // (the tracker's on switch); abPasskey makes AB releases journalable (persisted
 // GUID-only; the server derives the served links).
 func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
-	cfg := &FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: abPasskey}}
+	cfg := &FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: abPasskey}
 	if abConfigured {
 		cfg.ABTorznabURL = "http://prowlarr/2/api"
 	}
@@ -44,7 +44,7 @@ func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
 func newLoggedTestWriter(path string, log *slog.Logger) *FeedWriter {
 	return NewFeedWriter(&FeedWriterConfig{
 		Path:           path,
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, log, nil)
 }
 
@@ -66,7 +66,7 @@ func newExcludingTestWriter(path string) *FeedWriter {
 	return NewFeedWriter(&FeedWriterConfig{
 		Path:           path,
 		TagFilter:      feedExcludesWarnings(),
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, nil, nil)
 }
 
@@ -75,7 +75,7 @@ func newLoggedExcludingTestWriter(path string, log *slog.Logger) *FeedWriter {
 	return NewFeedWriter(&FeedWriterConfig{
 		Path:           path,
 		TagFilter:      feedExcludesWarnings(),
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, log, nil)
 }
 
@@ -706,7 +706,7 @@ func TestRebuildIdlessABNotCountedAsPasskeySkip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -786,7 +786,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, nil, nil)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
 	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return now }
 	if err := w.Rebuild(t.Context(), entries, info); err != nil {
@@ -878,7 +878,7 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+			{Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
 	})
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nil, nil); err != nil {
@@ -924,7 +924,7 @@ func TestRebuildCarriedGUIDKeptOnlyForSameIdentity(t *testing.T) {
 				Owners:    owns(),
 				Published: map[string]bool{"nyaa:42": true},
 				NyaaFeed: []journalItem{
-					{item: item{Title: "Show - S01 (1080p) [G]", GUID: tc.stored, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+					{Title: "Show - S01 (1080p) [G]", GUID: tc.stored, PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 				},
 			})
 			entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
@@ -959,7 +959,7 @@ func TestRebuildCarriesABItemWhenPasskeyRemoved(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{"ab:1167293": true},
 		ABFeed: []journalItem{
-			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
+			{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
 		},
 	})
 	entries := []seadex.Entry{{
@@ -970,7 +970,7 @@ func TestRebuildCarriesABItemWhenPasskeyRemoved(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
 		}},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, nil, nil)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
 	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -990,12 +990,12 @@ func TestRebuildCarriesNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{"ab:1167293": true},
 		ABFeed: []journalItem{
-			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
+			{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
 		},
 	})
 	// No entries: the carried item's torrent is absent from the curation set,
 	// exercising the non-curated carry arm.
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, nil, nil)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
 	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1023,8 +1023,8 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 		Owners:    owns(keyed("ab:1000", true)),
 		Published: map[string]bool{"ab:1000": true},
 		ABFeed: []journalItem{{
-			item: item{Title: stored, GUID: guid, PubDate: first},
-			Key:  "ab:1000", AniListID: 11, FirstSeen: first,
+			Title: stored, GUID: guid, PubDate: first,
+			Key: "ab:1000", AniListID: 11, FirstSeen: first,
 		}},
 	})
 	// AnimeBytes configured (its Torznab URL is set) with the passkey REMOVED.
@@ -1079,7 +1079,7 @@ func TestRebuildDefersNewABItemUntilPasskeyArrives(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
 		}},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, log, nil)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, log, nil)
 	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1121,7 +1121,7 @@ func TestRebuildDefersNewABItemUntilPasskeyArrives(t *testing.T) {
 func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return t0 }
 	future := t0.Add(72 * time.Hour)
@@ -1129,7 +1129,7 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: future}, Key: "nyaa:42", AniListID: 7, FirstSeen: future},
+			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: future, Key: "nyaa:42", AniListID: 7, FirstSeen: future},
 		},
 	})
 	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
@@ -1165,7 +1165,7 @@ func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
 	w.now = func() time.Time { return time.Date(2026, time.July, 2, 0, 0, 0, 0, time.UTC) }
 	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -1186,7 +1186,7 @@ func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 // boundary is covered by TestRebuildDropsKeylessSeededItem.
 func TestPrepareCarriedItemCarriesAnInWindowItem(t *testing.T) {
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
-	carryable := journalItem{item: item{Title: "Show - S01 (1080p) [G]"}, Key: "nyaa:42", FirstSeen: now.Add(-time.Hour)}
+	carryable := journalItem{Title: "Show - S01 (1080p) [G]", Key: "nyaa:42", FirstSeen: now.Add(-time.Hour)}
 	var js journalStats
 	if p := (&journalPass{js: &js, now: now}); !p.prepareCarriedItem(&carryable) {
 		t.Error("prepareCarriedItem(a keyed, in-window item) = false, want true")
@@ -1221,7 +1221,7 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1330,7 +1330,7 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 		Owners:    owns(keyed("nyaa:42", true)),
 		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
 	})
 	entries := []seadex.Entry{{
@@ -1338,7 +1338,7 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1460,7 +1460,7 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 		Owners:    owns(keyed("nyaa:99", true)),
 		Published: map[string]bool{"nyaa:99": true},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99", DownloadURL: "https://nyaa.si/download/99.torrent", InfoHash: hash, PubDate: time.Now().UTC()}, Key: "nyaa:99", AniListID: 8, FirstSeen: time.Now().UTC()},
+			{Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99", DownloadURL: "https://nyaa.si/download/99.torrent", InfoHash: hash, PubDate: time.Now().UTC(), Key: "nyaa:99", AniListID: 8, FirstSeen: time.Now().UTC()},
 		},
 	})
 	entries := []seadex.Entry{{
@@ -1503,7 +1503,7 @@ func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{"nyaa:42": true, "nyaa:h:" + sharedHash: true},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", InfoHash: sharedHash, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", InfoHash: sharedHash, PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
 	})
 	files := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
@@ -1677,7 +1677,7 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
 	})
 	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
@@ -1707,9 +1707,9 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 // item untouched.
 func TestApplyTitlesSkipsEmptyCachedTitle(t *testing.T) {
 	items := []journalItem{
-		{item: item{Title: "Synth A"}, Key: "nyaa:1"},
-		{item: item{Title: "Synth B"}, Key: "nyaa:2"},
-		{item: item{Title: "Synth C"}, Key: "nyaa:3"},
+		{Title: "Synth A", Key: "nyaa:1"},
+		{Title: "Synth B", Key: "nyaa:2"},
+		{Title: "Synth C", Key: "nyaa:3"},
 	}
 	applyTitles(items, map[string]string{"nyaa:1": "", "nyaa:2": "Harvested B"}, titleAudit{})
 	if items[0].Title != "Synth A" {
@@ -1829,11 +1829,11 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 				Owners:    owns(),
 				Published: map[string]bool{"nyaa:42": true},
 				NyaaFeed: []journalItem{
-					{item: item{Title: "Show - S01 (1080p) [G]", GUID: tc.guid, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+					{Title: "Show - S01 (1080p) [G]", GUID: tc.guid, PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 				},
 			})
 			log, rec := capture.New()
-			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil).Rebuild(t.Context(), nil, nil); err != nil {
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), nil, nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -1896,10 +1896,10 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	log, rec := capture.New()
 	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
 	items := []journalItem{
-		{item: item{Title: "Show S01E01 [720p]"}, Key: "nyaa:1"},
-		{item: item{Title: "Other S01E01 [720p]"}, Key: "nyaa:2"},
-		{item: item{Title: "Third S01E01 [720p]"}, Key: "nyaa:3"},
-		{item: item{Title: "Fourth S01E01 [720p]"}, Key: "nyaa:4"},
+		{Title: "Show S01E01 [720p]", Key: "nyaa:1"},
+		{Title: "Other S01E01 [720p]", Key: "nyaa:2"},
+		{Title: "Third S01E01 [720p]", Key: "nyaa:3"},
+		{Title: "Fourth S01E01 [720p]", Key: "nyaa:4"},
 	}
 	titles := map[string]string{
 		"nyaa:1": "Show - S01E01 [1080p]",   // says episode, census says pack: reported
@@ -1956,8 +1956,8 @@ func TestApplyTitlesAuditSilentWithoutCensus(t *testing.T) {
 	log, rec := capture.New()
 	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
 	items := []journalItem{
-		{item: item{Title: "Show S01E01"}, Key: "nyaa:1"},
-		{item: item{Title: "Other S01E01"}, Key: "nyaa:2"},
+		{Title: "Show S01E01", Key: "nyaa:1"},
+		{Title: "Other S01E01", Key: "nyaa:2"},
 	}
 	titles := map[string]string{"nyaa:1": "Show - S01", "nyaa:2": "some unparseable name"}
 	applyTitles(items, titles, titleAudit{
@@ -2037,8 +2037,8 @@ func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
 		}}},
 	}
 	items := []journalItem{
-		{item: item{Title: "Synth 1"}, Key: "nyaa:1"},
-		{item: item{Title: "Synth 2"}, Key: "nyaa:2"},
+		{Title: "Synth 1", Key: "nyaa:1"},
+		{Title: "Synth 2", Key: "nyaa:2"},
 	}
 	titles := map[string]string{
 		"nyaa:1": "Show - S01 [1080p][x265]-GRP",
@@ -2133,8 +2133,8 @@ func TestApplyTitlesLeavesUnknownCensusEvidenceAlone(t *testing.T) {
 		}}},
 	}
 	items := []journalItem{
-		{item: item{Title: "Synth 1"}, Key: "nyaa:1"},
-		{item: item{Title: "Synth 2"}, Key: "nyaa:2"},
+		{Title: "Synth 1", Key: "nyaa:1"},
+		{Title: "Synth 2", Key: "nyaa:2"},
 	}
 	titles := map[string]string{"nyaa:1": "Show - S01", "nyaa:2": "Show - S01"}
 	// Captured BEFORE the call: applyTitles writes the SERVED title back into the

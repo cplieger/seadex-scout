@@ -44,8 +44,7 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	for i := 1; i <= degradation.TickEscalationThreshold; i++ {
 		next, err := l.refreshCache(t.Context(), prev)
-		var stale *StaleMapError
-		if !errors.As(err, &stale) {
+		if _, ok := errors.AsType[*StaleMapError](err); !ok {
 			t.Fatalf("rejection %d error = %v, want a *StaleMapError", i, err)
 		}
 		if next.RejectedRefreshes != i {
@@ -107,8 +106,7 @@ func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) 
 	}
 	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
-	var stale *StaleMapError
-	if !errors.As(err, &stale) {
+	if _, ok := errors.AsType[*StaleMapError](err); !ok {
 		t.Fatalf("transport-failure error = %v, want a *StaleMapError", err)
 	}
 	if next.RejectedRefreshes != 3 {
@@ -341,8 +339,7 @@ func TestLoader_refreshCache_nonArrayBodyAdvancesRejectionStreak(t *testing.T) {
 		l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 		next, err := l.refreshCache(t.Context(), prev)
 		ts.Close()
-		var stale *StaleMapError
-		if !errors.As(err, &stale) {
+		if _, ok := errors.AsType[*StaleMapError](err); !ok {
 			t.Errorf("body %q error = %v, want a *StaleMapError", body, err)
 			continue
 		}
@@ -370,8 +367,7 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 		if err == nil {
 			t.Fatalf("refresh %d returned nil error, want the no-cache error", i)
 		}
-		var stale *StaleMapError
-		if errors.As(err, &stale) {
+		if _, ok := errors.AsType[*StaleMapError](err); ok {
 			t.Fatalf("refresh %d returned a *StaleMapError, want the no-cache error (there is no usable map to serve)", i)
 		}
 		if next.RejectedRefreshes != i {
@@ -411,8 +407,7 @@ func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *test
 		if err == nil {
 			t.Fatalf("304 %d over an unusable cache returned nil error, want the no-cache error", i)
 		}
-		var stale *StaleMapError
-		if errors.As(err, &stale) {
+		if _, ok := errors.AsType[*StaleMapError](err); ok {
 			t.Fatalf("304 %d returned a *StaleMapError, want the no-cache error (there is no usable map to serve)", i)
 		}
 		if next.RejectedRefreshes != i {

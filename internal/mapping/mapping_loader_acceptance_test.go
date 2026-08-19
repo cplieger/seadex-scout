@@ -248,8 +248,7 @@ func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
 	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: prevRecords}
 	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
-	var stale *StaleMapError
-	if !errors.As(err, &stale) {
+	if _, ok := errors.AsType[*StaleMapError](err); !ok {
 		t.Fatalf("duplicate-collapse refresh error = %v, want a *StaleMapError", err)
 	}
 	if len(next.Records) != len(prevRecords) {
@@ -301,8 +300,7 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 			prev := routingFloorPrevCache()
 			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
 			next, err := l.refreshCache(t.Context(), prev)
-			var stale *StaleMapError
-			if !errors.As(err, &stale) {
+			if _, ok := errors.AsType[*StaleMapError](err); !ok {
 				t.Fatalf("routing-collapse refresh error = %v, want a *StaleMapError guard rejection", err)
 			}
 			if len(next.Records) != len(prev.Records) {

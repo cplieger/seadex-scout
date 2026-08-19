@@ -35,7 +35,7 @@ func TestSortFeedRetainsOverflow(t *testing.T) {
 	const n = 302 // larger than the retired 300-item persisted cap
 	items := make([]journalItem, n)
 	for i := range items {
-		items[i] = journalItem{item: item{GUID: strconv.Itoa(i)}, FirstSeen: base.Add(time.Duration(i) * time.Minute)}
+		items[i] = journalItem{GUID: strconv.Itoa(i), FirstSeen: base.Add(time.Duration(i) * time.Minute)}
 	}
 	got := sortFeed(items)
 	if len(got) != n {
@@ -813,7 +813,7 @@ func TestSortFeedIsStableForEqualFirstSeen(t *testing.T) {
 		if i%2 == 0 {
 			ts = base.Add(time.Duration(n-i) * time.Minute)
 		}
-		items = append(items, journalItem{item: item{GUID: strconv.Itoa(i)}, FirstSeen: ts})
+		items = append(items, journalItem{GUID: strconv.Itoa(i), FirstSeen: ts})
 	}
 	got := sortFeed(items)
 	prev := -1

@@ -127,14 +127,12 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 func TestReportPartialSnapshotErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &flakySonarr{
-		fakeSonarr: fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-				{ID: 8, Title: "Skipped Series", TvdbID: 124, Year: 2024},
-			},
-			files: map[int][]arrapi.EpisodeFile{
-				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			},
+		series: []arrapi.Series{
+			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+			{ID: 8, Title: "Skipped Series", TvdbID: 124, Year: 2024},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}

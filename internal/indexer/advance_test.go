@@ -41,15 +41,13 @@ func advanceFixture(firstSeen time.Time) *snapshot {
 			Key:       "nyaa:42",
 			FirstSeen: firstSeen,
 			AniListID: 7,
-			item: item{
-				Title: "Harvested Show S01 [Group]",
-				// The real journal GUID is the tracker's page URL, and it has to
-				// be: both carry arms and the reader's link rebuild gate a
-				// carried item on trackerKeyFromURL(GUID) == Key. A bare "nyaa:42"
-				// here would be refused by every one of them.
-				GUID:    "https://nyaa.si/view/42",
-				PubDate: firstSeen,
-			},
+			Title:     "Harvested Show S01 [Group]",
+			// The real journal GUID is the tracker's page URL, and it has to
+			// be: both carry arms and the reader's link rebuild gate a
+			// carried item on trackerKeyFromURL(GUID) == Key. A bare "nyaa:42"
+			// here would be refused by every one of them.
+			GUID:    "https://nyaa.si/view/42",
+			PubDate: firstSeen,
 		}},
 		ABFeed: []journalItem{},
 	}
@@ -251,7 +249,7 @@ func TestAdvanceJournalsNewExpiresOldAndNeverReadmits(t *testing.T) {
 		Key:       "nyaa:99",
 		FirstSeen: now.Add(-feedJournalMaxAge - time.Minute),
 		AniListID: 9,
-		item:      item{Title: "Aged Out S01", GUID: "nyaa:99", PubDate: now.Add(-feedJournalMaxAge - time.Minute)},
+		Title:     "Aged Out S01", GUID: "nyaa:99", PubDate: now.Add(-feedJournalMaxAge - time.Minute),
 	})
 	fixture.Published["nyaa:99"] = true
 	writeSnapshotFile(t, path, fixture)
@@ -327,23 +325,22 @@ func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 		Key:       "ab:1000",
 		FirstSeen: now.Add(-3 * time.Hour),
 		AniListID: 10,
-		item: item{
-			Title: "Old AB S01",
-			// A real AB journal GUID is the torrent permalink; the carry gates
-			// key off it (see advanceFixture).
-			GUID:    "https://animebytes.tv/torrents.php?id=86576&torrentid=1000",
-			PubDate: now.Add(-3 * time.Hour),
-		},
+		Title:     "Old AB S01",
+		// A real AB journal GUID is the torrent permalink; the carry gates
+		// key off it (see advanceFixture).
+		GUID:    "https://animebytes.tv/torrents.php?id=86576&torrentid=1000",
+		PubDate: now.Add(-3 * time.Hour),
 	}}
 	fixture.Published["ab:1000"] = true
 	writeSnapshotFile(t, path, fixture)
 
 	// AnimeBytes must be configured AND passkeyed for its journal to grow.
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
+		Path:           path,
 		NyaaTorznabURL: "http://prowlarr/1/api",
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      strings.Repeat("p", 32),
-	}}, nil, nil)
+	}, nil, nil)
 	w.now = func() time.Time { return now }
 
 	window := []seadex.Entry{
@@ -440,7 +437,7 @@ func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 			log, rec := capture.New()
 			w := NewFeedWriter(&FeedWriterConfig{
 				Path:           path,
-				UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+				NyaaTorznabURL: "http://prowlarr/1/api",
 			}, log, nil)
 
 			if err := w.Advance(t.Context(), window, nil); err != nil {
@@ -625,7 +622,7 @@ func TestAdvanceDropsForeignScopedCarriedItems(t *testing.T) {
 		Key:       "ab:1000",
 		FirstSeen: now.Add(-30 * time.Minute),
 		AniListID: 10,
-		item:      item{Title: "Misfiled AB S01", GUID: "ab:1000", PubDate: now.Add(-30 * time.Minute)},
+		Title:     "Misfiled AB S01", GUID: "ab:1000", PubDate: now.Add(-30 * time.Minute),
 	})
 	writeSnapshotFile(t, path, fixture)
 

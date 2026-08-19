@@ -628,13 +628,11 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 					t.Errorf("Fetch() on 204 error = %q, want %q", err.Error(), want)
 				}
 			case tt.wantAuth:
-				var authErr *httpx.AuthError
-				if !errors.As(err, &authErr) {
+				if _, ok := errors.AsType[*httpx.AuthError](err); !ok {
 					t.Errorf("Fetch() on 401 error = %v, want *httpx.AuthError", err)
 				}
 			default:
-				var statusErr *httpx.HTTPStatusError
-				if !errors.As(err, &statusErr) {
+				if statusErr, ok := errors.AsType[*httpx.HTTPStatusError](err); !ok {
 					t.Errorf("Fetch() on status %d error = %v, want *httpx.HTTPStatusError", tt.status, err)
 				} else if statusErr.Code != tt.status {
 					t.Errorf("HTTPStatusError.Code = %d, want %d", statusErr.Code, tt.status)
@@ -852,8 +850,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's HTTP failure")
 	}
-	var statusErr *httpx.HTTPStatusError
-	if !errors.As(err, &statusErr) {
+	if _, ok := errors.AsType[*httpx.HTTPStatusError](err); !ok {
 		t.Errorf("error = %v, want *httpx.HTTPStatusError from the failed chunk", err)
 	}
 	// The abort path's own contract: the aborting chunk and every chunk after it

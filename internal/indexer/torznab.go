@@ -318,8 +318,7 @@ func newUpstreamBudget() *xmlx.Budget {
 // fetchAndParse classifies on and what parseTorznab checks before re-parsing the
 // body as an <error> document. Any other error passes through untouched.
 func asLimitError(err error) error {
-	var le *xmlx.LimitError
-	if errors.As(err, &le) {
+	if le, ok := errors.AsType[*xmlx.LimitError](err); ok {
 		return &torznabLimitError{err: le}
 	}
 	return err

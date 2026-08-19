@@ -310,14 +310,12 @@ func TestCyclePartialWalkComparesCleanSubset(t *testing.T) {
 		}},
 	}}
 	sonarr := &flakySonarr{
-		fakeSonarr: fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
-			},
-			files: map[int][]arrapi.EpisodeFile{
-				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			},
+		series: []arrapi.Series{
+			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+			{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
@@ -1276,17 +1274,15 @@ func TestCycleReportCarriesForwardIncompleteEvidence(t *testing.T) {
 		}},
 	}}
 	sonarr := &flakySonarr{
-		fakeSonarr: fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
-				{ID: 9, Title: "Idless Show", TvdbID: 125, Year: 2024},
-			},
-			files: map[int][]arrapi.EpisodeFile{
-				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-				8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-				9: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			},
+		series: []arrapi.Series{
+			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+			{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+			{ID: 9, Title: "Idless Show", TvdbID: 125, Year: 2024},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+			8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+			9: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	entries := append(seadexFrierenEntry(),
@@ -1849,14 +1845,12 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 		AniListDegraded: degradation.ReconcileEscalationThreshold - 1,
 	}}
 	sonarr := &flakySonarr{
-		fakeSonarr: fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
-			},
-			files: map[int][]arrapi.EpisodeFile{
-				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			},
+		series: []arrapi.Series{
+			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+			{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}

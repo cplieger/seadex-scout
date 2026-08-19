@@ -72,15 +72,13 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 				PartialWalks: tc.priorStreak,
 			}}
 			sonarr := &flakySonarr{
-				fakeSonarr: fakeSonarr{
-					series: []arrapi.Series{
-						{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-						{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
-					},
-					files: map[int][]arrapi.EpisodeFile{
-						7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-						8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-					},
+				series: []arrapi.Series{
+					{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+					{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+				},
+				files: map[int][]arrapi.EpisodeFile{
+					7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+					8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 				},
 				failEpisodes: map[int]bool{8: true},
 			}
