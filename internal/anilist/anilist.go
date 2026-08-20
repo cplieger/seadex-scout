@@ -27,7 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
@@ -682,8 +682,8 @@ type gqlErrors []gqlError
 // no pre-check here, since a nil slice is exactly this field's null contract.
 func (l *gqlErrors) UnmarshalJSON(data []byte) error {
 	*l = nil
-	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
-	records, err := bounded.Array(dec, nil, maxEnvelopeErrors, "errors",
+	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
+	records, err := jsoncap.Array(dec, nil, maxEnvelopeErrors, "errors",
 		func(e *gqlError) error { return dec.Decode(e) })
 	if err != nil {
 		return fmt.Errorf("errors: %w", err)
@@ -741,14 +741,14 @@ func classifyNullMedia(errs []gqlError) error {
 // UTF-8: json.Unmarshal replaces malformed UTF-8 inside JSON strings with U+FFFD
 // instead of failing, so a wire title with invalid bytes could lossily normalize to a
 // legitimate title key, be title-matched, and be memoized. That half stays app-side
-// because it is a CONTENT policy. Structure: bounded.Preflight owns the rest, because
+// because it is a CONTENT policy. Structure: jsoncap.Preflight owns the rest, because
 // encoding/json applies the LAST duplicate object key and discards the earlier value
 // unseen, erasing the evidence every downstream invariant relies on.
 func validateResponse(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errors.New("anilist: response is not valid UTF-8")
 	}
-	if err := bounded.Preflight(bytes.NewReader(raw)); err != nil {
+	if err := jsoncap.Preflight(bytes.NewReader(raw)); err != nil {
 		return fmt.Errorf("anilist: ambiguous response JSON: %w", err)
 	}
 	return nil
@@ -840,8 +840,8 @@ func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
-	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
-	records, err := bounded.Array(dec, nil, batchSize, "media",
+	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
+	records, err := jsoncap.Array(dec, nil, batchSize, "media",
 		func(m *json.RawMessage) error { return dec.Decode(m) })
 	if err != nil {
 		return fmt.Errorf("media: %w", err)

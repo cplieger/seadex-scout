@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v3"
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx/capture"
@@ -1589,7 +1589,7 @@ func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 
 // TestDecodeSnapshotStructuralGateIsBounded pins the three structural
 // properties of the snapshot decode's own ingress, which stopped riding a
-// whole-document bounded.Preflight because that pass holds one key set per
+// whole-document jsoncap.Preflight because that pass holds one key set per
 // traversed object - unbounded in exactly the dimension this decode exists to
 // bound, and paid on every load by both consumers (h-f6).
 //
@@ -1634,7 +1634,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 		// Depth is still bounded without the preflight, by encoding/json's own
 		// scanner ceiling: an unknown field is consumed through Decode, never a
 		// token walk that would grow a container stack per open bracket.
-		const depth = bounded.MaxDepth + 1
+		const depth = jsoncap.MaxDepth + 1
 		doc := `{"version":2,"owners":{},"published":{},"unknown":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + `}`
 		if _, _, _, err := decodeSnapshot([]byte(doc)); err == nil {
 			t.Errorf("decodeSnapshot accepted an unknown field nested %d deep, want the scanner's depth ceiling to refuse it", depth)

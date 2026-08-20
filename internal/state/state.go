@@ -21,7 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/atomicfile/v3"
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -124,7 +124,7 @@ const staleTempMaxAge = time.Hour
 // contract treats as the legacy pre-version shape (see SchemaVersion) -
 // and any wire-level failure.
 func schemaVersion(data []byte) (version int, err error) {
-	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
+	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
 	err = dec.Object(func(key string) error {
 		if !strings.EqualFold(key, "version") {
 			return dec.Skip()

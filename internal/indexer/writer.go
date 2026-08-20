@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v3"
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
@@ -49,7 +49,7 @@ const (
 	// Movies); anything larger is a hand-edited snapshot.
 	maxPersistedCategories = 8
 	// maxPersistedItemBytes bounds ONE persisted feed item's serialized JSON - the
-	// bound the per-array cardinality caps cannot express, because bounded.Array bounds
+	// bound the per-array cardinality caps cannot express, because jsoncap.Array bounds
 	// how many items decode while each item's interior arrays are still decoded by
 	// encoding/json.
 	maxPersistedItemBytes = 8 * 6 * maxPersistedFieldBytes
@@ -135,7 +135,7 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 	// The aggregate array budget covers both journal feeds; each feed also
 	// carries its own per-array cap, so neither one feed nor the pair can
 	// multiply past the bound.
-	d := bounded.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
+	d := jsoncap.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
 	err := d.Object(func(key string) error {
 		member := snapshotField(key)
 		if member == "" {
@@ -215,7 +215,7 @@ func claimSnapshotField(claimed map[snapshotMember]struct{}, member snapshotMemb
 // every release inside them - because the fact is a map of arrays and either
 // dimension alone can carry hostile cardinality: a million owners with one
 // release each and one owner with a million releases cost the same heap.
-func decodeSnapshotOwners(d *bounded.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
+func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
 	const what = string(memberOwners)
 	open, err := d.Open('{')
 	if err != nil || !open {
@@ -233,7 +233,7 @@ func decodeSnapshotOwners(d *bounded.Decoder, dst map[string][]ownedRelease, ent
 		if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
 			return dst, chargeErr
 		}
-		releases, arrErr := bounded.Array(d, []ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
+		releases, arrErr := jsoncap.Array(d, []ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
 			if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
 				return chargeErr
 			}
@@ -252,8 +252,8 @@ func decodeSnapshotOwners(d *bounded.Decoder, dst map[string][]ownedRelease, ent
 // allocated. Each item still decodes through encoding/json for
 // stdlib-identical field handling; per-item validity (validPersistedItem,
 // validJournalRecord) is decodeSnapshot's separate prune.
-func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) error {
-	feed, err := bounded.Array(d, *dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
+func decodeSnapshotFeed(d *jsoncap.Decoder, dst *[]journalItem, what string) error {
+	feed, err := jsoncap.Array(d, *dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
 		// The per-array cap bounds how many ITEMS decode, not what ONE item
 		// allocates: an item's own Categories array is decoded by
 		// encoding/json, so a single item can amplify the byte cap into a
@@ -284,7 +284,7 @@ func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) err
 // because a nil map is the structural sentinel both consumers read. Per-value
 // LENGTH stays loadPrevious's own ingress prune (retainValidTitles): this
 // pass bounds cardinality, which is what json.Unmarshal cannot.
-func decodeSnapshotMap[V bool | string](d *bounded.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
+func decodeSnapshotMap[V bool | string](d *jsoncap.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
 	open, err := d.Open('{')
 	if err != nil || !open {
 		return dst, err

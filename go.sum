@@ -8,6 +8,8 @@ github.com/cplieger/health v1.5.2 h1:EJcp1u5Me5ARd028gbchruhQqYEASMYuxB2cIrEB048
 github.com/cplieger/health v1.5.2/go.mod h1:ViT0fs8p3ZpM1yQeE0k5TroM0SCT/Q56MdKWpv4q9us=
 github.com/cplieger/httpx/v4 v4.3.1 h1:XDyP4i0k02B6wvnW4mp0KQ7vM6RIHtzkkP0Gzzu2GVI=
 github.com/cplieger/httpx/v4 v4.3.1/go.mod h1:0coefCZ470kiMATdNrU0CY5a4g/W7pFy0433CVZHwWc=
+github.com/cplieger/jsoncap v1.0.0 h1:4mJ+rD9sPCoWNUb9jP30SknNysX12EAUZb2h3aercBk=
+github.com/cplieger/jsoncap v1.0.0/go.mod h1:X3auAdHApwFvUPyz1zPeY264uZ2tTL0MZF626xzPV7M=
 github.com/cplieger/jsonx v1.3.0 h1:m6rpdqXD2nZ74CguFaFXHmaS+V9Em9YVwsPN/X8FPWo=
 github.com/cplieger/jsonx v1.3.0/go.mod h1:6EoDR/SptVUcpEx+YyZcvGym6Je9vBPmhEwG/BwAVv8=
 github.com/cplieger/keyenc v1.0.0 h1:JcFP/Eo+vCWXOyRvUCIVXyJIUOtfy0GkKgOXKE+vU2Q=

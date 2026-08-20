@@ -6,20 +6,20 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 )
 
 // FuzzDecodePage is a differential fuzz target for the schema-aware bounded
 // page decoder: for any body, decodePage must match the json.Unmarshal
 // oracle it documents parity with. If json.Unmarshal accepts a body,
 // decodePage must either accept it with a deeply-equal pbList or reject it
-// for exactly one reason - a jsonx/bounded cardinality cap or element
+// for exactly one reason - a jsoncap cardinality cap or element
 // budget, the one deliberate divergence from stdlib. If json.Unmarshal
 // rejects a body, decodePage must reject it too (never accept what stdlib
 // refuses). This guards the whole parity surface at once: case-insensitive
 // key matching, null-into-container no-ops, duplicate-key overwrite order,
 // trailing-data strictness, scalar type errors, and nil-vs-empty slice
-// identity (jsonx/bounded matches stdlib exactly: null → nil, `[]` → empty
+// identity (jsoncap matches stdlib exactly: null → nil, `[]` → empty
 // non-nil, absent → untouched), so the comparison is a plain DeepEqual.
 func FuzzDecodePage(f *testing.F) {
 	seeds := []string{
@@ -76,7 +76,7 @@ func FuzzDecodePage(f *testing.F) {
 		var want pbList
 		wantErr := json.Unmarshal(body, &want)
 		if gotErr != nil {
-			boundsCap := errors.Is(gotErr, bounded.ErrArrayCap) || errors.Is(gotErr, bounded.ErrElementBudget)
+			boundsCap := errors.Is(gotErr, jsoncap.ErrArrayCap) || errors.Is(gotErr, jsoncap.ErrElementBudget)
 			if wantErr == nil && !boundsCap {
 				t.Errorf("decodePage(%q) = error %v, but json.Unmarshal accepts it (only cardinality caps and the element budget may diverge)", body, gotErr)
 			}
@@ -112,7 +112,7 @@ func FuzzDecodePage(f *testing.F) {
 // than the limit it was handed, must charge at least what it retained (an
 // undercharge silently raises the real fetch-wide ceiling), and must decode to
 // exactly the value the full budget produces (the budget bounds work, never
-// content). A zero limit is out of contract: jsonx/bounded reads a
+// content). A zero limit is out of contract: jsoncap reads a
 // non-positive budget as unbounded and fetchPage only ever passes a positive
 // remaining allowance.
 func FuzzDecodePageHonorsElementBudget(f *testing.F) {

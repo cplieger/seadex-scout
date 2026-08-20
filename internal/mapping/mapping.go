@@ -22,7 +22,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v3"
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -1000,7 +1000,7 @@ const maxOverrideRecords = 1 << 16
 // here because a token walk cannot read them, so a field added to Record must be
 // added here too - decode directly into the Record, and an unknown key is
 // counted and skipped.
-func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet) (record Record, err error) {
+func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record, err error) {
 	err = dec.Object(func(key string) error {
 		switch {
 		case strings.EqualFold(key, "anilist_id"):
@@ -1028,7 +1028,7 @@ func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet) (record Record
 // reduced to positives - the same canonical forms the Fribb decoder produces -
 // a zero-AniList-ID record counts as skipped, and a duplicate ID replaces its
 // earlier record.
-func (set *overrideSet) applyRecord(dec *bounded.Decoder, position map[int]int) error {
+func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) error {
 	record, err := decodeOverrideRecord(dec, set)
 	if err != nil {
 		return err
@@ -1084,7 +1084,7 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	if len(trimmedData) == 0 || trimmedData[0] != '[' {
 		return overrideSet{}, errors.New("mapping: overrides must be a JSON array")
 	}
-	dec := bounded.NewDecoder(bytes.NewReader(trimmedData), 0)
+	dec := jsoncap.NewDecoder(bytes.NewReader(trimmedData), 0)
 	if _, err := dec.Open('['); err != nil { // the '['-first-byte guard above rules out null
 		return overrideSet{}, err
 	}

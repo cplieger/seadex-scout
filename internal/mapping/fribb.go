@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/jsonx"
-	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
@@ -124,7 +124,7 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 	// Element budget 0 disables bounded's own aggregate cap deliberately:
 	// maxFribbRecords below is the app-level ceiling, and it must reject with the
 	// errRecordCapExceeded sentinel acceptRefresh matches on.
-	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
+	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
 	ok, err := dec.Open('[')
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -136,7 +136,7 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 		return fribbParseResult{}, fmt.Errorf("%w: %w", errNotJSONArray, err)
 	}
 	if !ok {
-		// bounded.Open reports a JSON null as ok=false without error; for the Fribb
+		// jsoncap.Open reports a JSON null as ok=false without error; for the Fribb
 		// map an absent list is as unusable as a non-array.
 		return fribbParseResult{}, fmt.Errorf("%w (got null)", errNotJSONArray)
 	}
@@ -188,7 +188,7 @@ func logFribbParseDiagnostics(log *slog.Logger, counts *fribbDecodeCounts) {
 // its own so one malformed record is skipped (counted) rather than failing the
 // whole map, and rejecting a list over maxFribbRecords or over
 // maxFribbIdentifiersTotal. It leaves the decoder on the array's closing token.
-func decodeFribbRecords(dec *bounded.Decoder) (fribbDecodeCounts, error) {
+func decodeFribbRecords(dec *jsoncap.Decoder) (fribbDecodeCounts, error) {
 	var counts fribbDecodeCounts
 	// The ordering is load-bearing: dec.More observes another element, the cap
 	// guard fires on it, and only then is that element read and decoded.
@@ -257,7 +257,7 @@ func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) error {
 // decodeNextFribbRecord reads the next array element off the stream and decodes
 // it. The two error results separate the tolerance boundary: decodeErr is a
 // tolerated per-record failure the caller skips and counts; streamErr is fatal.
-func decodeNextFribbRecord(dec *bounded.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
+func decodeNextFribbRecord(dec *jsoncap.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
 	var msg json.RawMessage
 	if err := dec.Decode(&msg); err != nil {
 		return Record{}, false, nil, fmt.Errorf("mapping: Fribb stream decode: %w", err)

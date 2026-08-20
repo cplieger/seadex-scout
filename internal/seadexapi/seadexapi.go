@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/jsoncap"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -150,7 +150,7 @@ var errCumulativeElements = fmt.Errorf("seadex: decoded elements exceeded the re
 	"and maxPageElements too if one page alone carries more than %d elements); "+
 	"refusing to compare against a truncated view", maxTotalElements, maxPageElements)
 
-// fetchPage's classification of the aggregate element budget rides jsonx/bounded's
+// fetchPage's classification of the aggregate element budget rides jsoncap's
 // ErrElementBudget sentinel: the full per-page bound is a per-page violation, while a
 // budget-reduced limit is the fetch-wide cumulative cap.
 
@@ -832,7 +832,7 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 
 	list, elems, err = decodePage(body, elemLimit)
 	if err != nil {
-		if errors.Is(err, bounded.ErrElementBudget) && elemLimit < maxPageElements {
+		if errors.Is(err, jsoncap.ErrElementBudget) && elemLimit < maxPageElements {
 			return pbList{}, 0, 0, errCumulativeElements
 		}
 		// The decoder's error can embed RAW upstream bytes: stdlib *json.UnmarshalTypeError
@@ -847,7 +847,7 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 // ---- Bounded token-level page decoder ----
 //
 // decodePage and the decode* functions below form a schema-aware bounded decoder for one
-// pbList page, built on jsonx/bounded: the token walk enforces every cardinality cap
+// pbList page, built on jsoncap: the token walk enforces every cardinality cap
 // BEFORE appending each element, where json.Unmarshal materializes the whole value first.
 
 // decodePage decodes one page body under the bounded-decoder caps, rejecting trailing
@@ -855,7 +855,7 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 // this page's aggregate element budget; the decoded count is returned so the caller can
 // charge the fetch-wide budget.
 func decodePage(body []byte, elemLimit int) (pbList, int, error) {
-	d := bounded.NewDecoder(bytes.NewReader(body), elemLimit)
+	d := jsoncap.NewDecoder(bytes.NewReader(body), elemLimit)
 	list, err := decodeList(d)
 	if err != nil {
 		return pbList{}, 0, err
@@ -869,13 +869,13 @@ func decodePage(body []byte, elemLimit int) (pbList, int, error) {
 // decodeList decodes the pbList envelope. The items array is capped at
 // perPage: the request asks for perPage records, so a page stuffing more is
 // upstream misbehavior and is rejected before the excess is decoded.
-func decodeList(d *bounded.Decoder) (pbList, error) {
+func decodeList(d *jsoncap.Decoder) (pbList, error) {
 	var list pbList
 	err := d.Object(func(k string) error {
 		switch {
 		case strings.EqualFold(k, "items"):
 			var err error
-			list.Items, err = bounded.Array(d, list.Items, perPage, "page items",
+			list.Items, err = jsoncap.Array(d, list.Items, perPage, "page items",
 				func(e *pbEntry) error { return decodeEntry(d, e) })
 			return err
 		case strings.EqualFold(k, "totalItems"):
@@ -892,13 +892,13 @@ func decodeList(d *bounded.Decoder) (pbList, error) {
 // decodeEntry decodes one entries record field-wise into e; the Object walk gives
 // json.Unmarshal's duplicate-key semantics (a null element is a no-op, and an object
 // only overwrites the fields it carries).
-func decodeEntry(d *bounded.Decoder, e *pbEntry) error {
+func decodeEntry(d *jsoncap.Decoder, e *pbEntry) error {
 	return d.Object(func(k string) error { return decodeEntryField(d, e, k) })
 }
 
 // decodeEntryField decodes one entries-record field (or skips an unknown
 // key).
-func decodeEntryField(d *bounded.Decoder, e *pbEntry, key string) error {
+func decodeEntryField(d *jsoncap.Decoder, e *pbEntry, key string) error {
 	switch {
 	case strings.EqualFold(key, "notes"):
 		return d.Decode(&e.Notes)
@@ -925,11 +925,11 @@ func decodeEntryField(d *bounded.Decoder, e *pbEntry, key string) error {
 // decodeExpand decodes the expand relation envelope field-wise into ex. The trs
 // relation is capped at maxTorrentsPerEntry; a repeated "trs" decodes INTO the existing
 // slice, matching json.Unmarshal's duplicate-key slice semantics.
-func decodeExpand(d *bounded.Decoder, ex *pbExpand) error {
+func decodeExpand(d *jsoncap.Decoder, ex *pbExpand) error {
 	return d.Object(func(k string) error {
 		if strings.EqualFold(k, "trs") {
 			var err error
-			ex.Trs, err = bounded.Array(d, ex.Trs, maxTorrentsPerEntry, "torrents per entry",
+			ex.Trs, err = jsoncap.Array(d, ex.Trs, maxTorrentsPerEntry, "torrents per entry",
 				func(t *seadex.Torrent) error { return decodeTorrent(d, t) })
 			return err
 		}
@@ -939,14 +939,14 @@ func decodeExpand(d *bounded.Decoder, ex *pbExpand) error {
 
 // decodeTorrent decodes one torrent record field-wise into t (see
 // decodeEntry for the duplicate-key semantics the Object walk provides).
-func decodeTorrent(d *bounded.Decoder, t *seadex.Torrent) error {
+func decodeTorrent(d *jsoncap.Decoder, t *seadex.Torrent) error {
 	return d.Object(func(k string) error { return decodeTorrentField(d, t, k) })
 }
 
 // decodeTorrentField decodes one torrent-record field (or skips an unknown key). The
 // files and tags arrays are capped per torrent; a File is flat, so per-element decoding
 // cannot amplify beyond the already-capped raw bytes.
-func decodeTorrentField(d *bounded.Decoder, t *seadex.Torrent, key string) error {
+func decodeTorrentField(d *jsoncap.Decoder, t *seadex.Torrent, key string) error {
 	switch {
 	case strings.EqualFold(key, "releaseGroup"):
 		return d.Decode(&t.ReleaseGroup)
@@ -962,12 +962,12 @@ func decodeTorrentField(d *bounded.Decoder, t *seadex.Torrent, key string) error
 		return d.Decode(&t.DualAudio)
 	case strings.EqualFold(key, "files"):
 		var err error
-		t.Files, err = bounded.Array(d, t.Files, maxFilesPerTorrent, "files per torrent",
+		t.Files, err = jsoncap.Array(d, t.Files, maxFilesPerTorrent, "files per torrent",
 			func(f *seadex.File) error { return d.Decode(f) })
 		return err
 	case strings.EqualFold(key, "tags"):
 		var err error
-		t.Tags, err = bounded.Array(d, t.Tags, maxTagsPerTorrent, "tags per torrent",
+		t.Tags, err = jsoncap.Array(d, t.Tags, maxTagsPerTorrent, "tags per torrent",
 			func(s *string) error { return d.Decode(s) })
 		return err
 	default:
