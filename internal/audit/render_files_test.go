@@ -463,12 +463,18 @@ func (c *countingCancelCtx) Err() error {
 // cancellation checkpoint (the one WriteFiles stage no existing test
 // reaches): a cancellation observed after the stem probe but before the JSON
 // half is rendered stops the pipeline with the report-render stage error and
-// writes nothing - the report dir is never created. Err call #1 is the
-// report-write checkpoint, #2 the single stem-probe round (empty dir), so
-// flipping at call 3 lands exactly on the report-render checkpoint.
+// writes nothing - the report dir is never created.
+//
+// The flip point is an Err() call index, so it has to be recounted whenever a
+// stage gains or loses a context check. Err call #1 is the report-write
+// checkpoint, #2 the stale-temp sweep (atomicfile's CleanupStaleTemps takes a
+// context as of /v3 and checks it once, even for a directory that does not
+// exist yet), #3 the single stem-probe round (empty dir), so flipping at call 4
+// lands exactly on the report-render checkpoint. Flipping at 3 lands one stage
+// early on the stem probe, and at 5 one stage late inside the JSON write.
 func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
-	ctx := &countingCancelCtx{Context: t.Context(), after: 3}
+	ctx := &countingCancelCtx{Context: t.Context(), after: 4}
 	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
 
 	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))

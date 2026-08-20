@@ -175,15 +175,8 @@ func (u *upstream) attemptError(err error) error {
 // httpx.RetryAfterHint implementer (GetBytes attaches it to the exhaustion
 // error), and it is already bounded by httpx.RetryAfterCap at the parse, so it
 // satisfies the interface's pre-capped contract on the way back out.
-//
-// This stays errors.As rather than errors.AsType: AsType is constrained to
-// [E error], and RetryAfterHint is a CAPABILITY interface carrying only
-// RetryAfterHint() - it has no Error method, so it cannot instantiate E. (Go
-// 1.27's `go fix -errorsastype` rewrites this site anyway and the result does
-// not compile; re-running it will re-break this function.)
 func retryAfterHint(err error) time.Duration {
-	var h httpx.RetryAfterHint
-	if errors.As(err, &h) {
+	if h, ok := errors.AsType[httpx.RetryAfterHint](err); ok {
 		return h.RetryAfterHint()
 	}
 	return 0

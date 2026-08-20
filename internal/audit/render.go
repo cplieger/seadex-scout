@@ -479,7 +479,7 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// orphans a .atomicfile-<digits>.tmp in the report dir forever otherwise. The
 	// caller holds report.lock, so no concurrent writer owns an in-flight temp, and
 	// a missing dir is not an error.
-	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
+	if _, err := atomicfile.CleanupStaleTemps(ctx, dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
 		// No dir attribute: the redacting logger would mask it anyway.
 		log.Warn("stale report temp cleanup failed", "error", err)
 	}
