@@ -138,7 +138,7 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 		httpx.WithMaxBodyBytes(upstreamMaxBytes),
 		httpx.WithLogger(u.log))
 	if err != nil {
-		return nil, u.attemptError(err)
+		return nil, attemptError(err)
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
@@ -151,7 +151,7 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // Do reads. GetBytes runs with WithMaxAttempts(1), so its every failure exit
 // arrives here and this function alone decides whether the search spends
 // another of its upstreamMaxAttempts.
-func (u *upstream) attemptError(err error) error {
+func attemptError(err error) error {
 	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
 		// httpx.IsRetryableStatus is the SAME rule GetBytes's own attempt
 		// function applies, not a restatement of it, so this caller's verdict

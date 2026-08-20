@@ -202,12 +202,12 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		totals[string(rows[i].Verdict)]++
 	}
 	sortRows(rows)
-	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows, Incomplete: a.incompleteEntries(incompleteIDs)}
+	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows, Incomplete: incompleteEntries(incompleteIDs)}
 }
 
 // incompleteEntries renders the transiently-unresolved AniList ids as the
 // report's incomplete-mapping section, sorted by id. Nil on a resolved run.
-func (a *Auditor) incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
+func incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
 	if len(ids) == 0 {
 		return nil
 	}

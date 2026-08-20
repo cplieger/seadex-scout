@@ -195,7 +195,11 @@ func (i *Index) ForEachRecord(fn func(Record)) {
 }
 
 // NewIndex builds an index over records already decoded elsewhere, keyed by
-// AniList ID. Production code obtains an Index from Loader.Load.
+// AniList ID.
+//
+// Reached only by tests: production obtains an Index from Loader.Load, which
+// decodes and indexes in one pass. This exists so a test can index a handful of
+// hand-written Records without a file, and 93 call sites take it up.
 func NewIndex(records []Record) *Index {
 	return buildIndex(records)
 }

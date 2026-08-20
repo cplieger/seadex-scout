@@ -144,7 +144,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 //
 // It takes the Result rather than the memo because both of its preconditions are
 // non-negotiable and both live there.
-func (m *Matcher) PruneMemo(res *Result, catalogue []seadex.Entry) {
+func PruneMemo(res *Result, catalogue []seadex.Entry) {
 	if res.Degraded {
 		// A degraded pass (outage, tripped breaker, shutdown) could not renew
 		// what expired; keep those entries so the feed's stale-title tier still

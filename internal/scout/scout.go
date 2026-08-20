@@ -334,7 +334,7 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 	// The reconcile is the ONE pass holding a whole catalogue, so it is the one that
 	// may garbage-collect the memo: the tick's 48 hours would delete nearly every
 	// expired entry, including the ones the feed's stale-title tier reads.
-	s.matcher.PruneMemo(&result, entries)
+	match.PruneMemo(&result, entries)
 	if ctx.Err() != nil {
 		// A shutdown arrived during or right after matching. The match set may be
 		// truncated, so comparing it would falsely resolve those entries' findings.

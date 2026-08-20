@@ -331,14 +331,14 @@ func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, boo
 		}
 		return kept, keptOK
 	default:
-		return p.carryUnevaluatedItem(it)
+		return carryUnevaluatedItem(it)
 	}
 }
 
 // carryUnevaluatedItem is the WINDOW's arm, and its ONLY arm: this pass holds no
 // evidence it may act on for this item, so the stored item is carried VERBATIM -
 // no de-curation verdict, no re-render, and deliberately no GUID gate.
-func (p *journalPass) carryUnevaluatedItem(it *journalItem) (journalItem, bool) {
+func carryUnevaluatedItem(it *journalItem) (journalItem, bool) {
 	return *it, true
 }
 

@@ -206,7 +206,7 @@ func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 	}}
 
 	res := m.Match(t.Context(), nil, &library.Snapshot{}, mapping.NewIndex(nil), memo)
-	m.PruneMemo(&res, nil)
+	PruneMemo(&res, nil)
 
 	if _, ok := res.Memo.Entries[901]; ok {
 		t.Error("expired unrenewed entry 901 survived the pass, want it pruned from the persisted memo")
@@ -288,7 +288,7 @@ func TestMemoEntryWithoutAnExpiryIsRefetchedNotServed(t *testing.T) {
 
 	entries := []seadex.Entry{{AniListID: 11}}
 	res := m.Match(t.Context(), entries, snap, idx, memo)
-	m.PruneMemo(&res, entries)
+	PruneMemo(&res, entries)
 
 	if fake.calls == 0 {
 		t.Error("AniList calls = 0, want the unstamped entry treated as a miss and re-fetched")
@@ -367,7 +367,7 @@ func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
 	res := m.Match(t.Context(), catalogue, &library.Snapshot{}, idx, memo)
 	// The guard under test lives in PruneMemo, which Match never calls: the
 	// reconcile calls it explicitly (scout/scout.go:450), so the test must too.
-	m.PruneMemo(&res, catalogue)
+	PruneMemo(&res, catalogue)
 
 	if !res.Degraded {
 		t.Fatal("Degraded = false, want true on a total AniList outage")
