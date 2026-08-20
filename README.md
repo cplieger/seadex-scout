@@ -65,6 +65,39 @@ When the [Torznab feed](#indexer-torznab-feed) is configured, the same pass
 rebuilds it from that one SeaDex fetch, so a finding and what the arrs can grab
 from the feed always reflect the same refresh.
 
+## Quick start
+
+The image publishes to both `ghcr.io/cplieger/seadex-scout` and
+`docker.io/cplieger/seadex-scout`; identical images and tags. The same example
+ships as [`compose.yaml`](compose.yaml):
+
+```yaml
+services:
+  seadex-scout:
+    image: ghcr.io/cplieger/seadex-scout:latest
+    container_name: seadex-scout
+    restart: unless-stopped
+    # PUID/PGID come from .env; ./config must ALREADY be owned by this uid.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # Key-only refs for config.yaml; an unset variable stays unset.
+    environment:
+      - SONARR_API_KEY
+      - RADARR_API_KEY
+      - SEADEX_SCOUT_FEED_KEY
+      - SEADEX_SCOUT_PROWLARR_KEY
+      - SEADEX_SCOUT_AB_PASSKEY
+    volumes:
+      - "./config:/config"  # config.yaml, state, and the reports dir
+```
+
+1. Create the config directory owned by that uid:
+   `mkdir config && chown "${PUID:-1000}:${PGID:-1000}" config`.
+2. Start the container. The first boot writes a starter `/config/config.yaml`,
+   warns, and exits.
+3. Set `sonarr.url` and `sonarr.api_key` in that file, then restart.
+
+Every key is in the [Configuration reference](#configuration-reference).
+
 ## Run modes
 
 The `mode` setting (or a subcommand) picks the run mode:
@@ -210,6 +243,16 @@ download links. The file is written owner-only (`0600`), but treat it as
 secret-bearing: a `/config` backup captures the passkey even when your
 `config.yaml` only references it through `${SEADEX_SCOUT_AB_PASSKEY}`.
 
+The image is distroless and runs as a non-root user. For a hardened deployment,
+layer these directives onto the service:
+
+```yaml
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=1m,mode=1777,noexec,nosuid,nodev"]  # backs the health marker
+```
+
 ## How matching works
 
 SeaDex keys everything on AniList IDs; Sonarr keys on TVDB, Radarr on TMDB/IMDb.
@@ -265,9 +308,8 @@ through their own quality profile and Custom Formats. All are optional:
 ## Configuration reference
 
 All configuration lives in one YAML file, `/config/config.yaml` (override the path
-with `CONFIG_PATH`). On first boot with no config, seadex-scout writes a commented
-starter there, with a generated `feed_api_key` already in place, and exits with a
-warning; edit it and restart. The full annotated template is
+with `CONFIG_PATH`). The first-boot starter carries a generated `feed_api_key`.
+The full annotated template is
 [`config.example.yaml`](config.example.yaml).
 
 Any string value can reference `SONARR_*`, `RADARR_*`, or `SEADEX_SCOUT_*`
@@ -361,25 +403,6 @@ alert on your external scheduler's own job result instead. The rules assume the
 default JSON log handler; for `log.format: text`, swap the
 `| json | level="ERROR"` parser stage for a `|= "level=ERROR"` line filter. Route
 by whatever labels your Alertmanager uses.
-
-## Deployment
-
-seadex-scout ships as a distroless, non-root, multi-arch (amd64 + arm64) image at
-`ghcr.io/cplieger/seadex-scout`. The [`compose.yaml`](compose.yaml) at the repo
-root is a working example. For a hardened deployment, layer on:
-
-```yaml
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-    tmpfs: ["/tmp:size=1m,mode=1777,noexec,nosuid,nodev"]  # backs the health marker
-```
-
-The `/config` volume must be writable by the container user (set `user:` to match
-the host owner of the mounted directory); it holds `config.yaml`, the state cache,
-and the report output. The container binds a port only when you configure the
-[indexer](#indexer-torznab-feed) feed, which serves on a fixed `:9118`; publish
-that port only on your LAN.
 
 ## Contributing
 
