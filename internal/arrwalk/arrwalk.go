@@ -32,19 +32,19 @@ const episodeFailureBudget = 5
 // --- Arr client surfaces ---
 
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
-// interface; *arrapi.Sonarr satisfies it). GetEpisodeFiles lists exactly the
+// interface; *arrapi.Sonarr satisfies it). EpisodeFiles lists exactly the
 // episodes that have a file on disk - the walker only consumes episodes WITH
 // files, so it needs no episode rows to skip.
 type SonarrClient interface {
-	GetSeries(ctx context.Context) ([]arrapi.Series, error)
-	GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error)
-	GetTags(ctx context.Context) ([]arrapi.Tag, error)
+	Series(ctx context.Context) ([]arrapi.Series, error)
+	EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error)
+	Tags(ctx context.Context) ([]arrapi.Tag, error)
 }
 
 // RadarrClient is the arrapi Radarr surface the walker needs.
 type RadarrClient interface {
-	GetMovies(ctx context.Context) ([]arrapi.Movie, error)
-	GetTags(ctx context.Context) ([]arrapi.Tag, error)
+	Movies(ctx context.Context) ([]arrapi.Movie, error)
+	Tags(ctx context.Context) ([]arrapi.Tag, error)
 }
 
 // --- Walker and walk flow ---
@@ -201,12 +201,12 @@ func filterSeriesByTags(series []arrapi.Series, includeIDs, excludeIDs map[int]s
 // walkSonarr lists series, applies tag filters, and builds an item per kept
 // series with its episode files fetched concurrently (bounded).
 func (w *Walker) walkSonarr(ctx context.Context) (sideResult, error) {
-	series, err := w.sonarr.GetSeries(ctx)
+	series, err := w.sonarr.Series(ctx)
 	if err != nil {
 		return sideResult{}, err
 	}
 	w.warnEmptyArrList(library.ArrSonarr, len(series))
-	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.GetTags)
+	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.Tags)
 	if err != nil {
 		return sideResult{}, err
 	}
@@ -285,7 +285,7 @@ func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (r
 
 // fetchSeriesItem fetches one series' episode files and builds its Item.
 func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*library.Item, bool) {
-	files, err := w.sonarr.GetEpisodeFiles(ctx, s.ID)
+	files, err := w.sonarr.EpisodeFiles(ctx, s.ID)
 	if err != nil {
 		// Stay quiet only when the fan-out context itself is done (a shutdown, or
 		// the failure budget already tripped): that error is expected and Walk
@@ -332,12 +332,12 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 // so the compare and the diff must scope it out exactly as they scope out a
 // series whose episode fetch failed - see the placeholder note below.
 func (w *Walker) walkRadarr(ctx context.Context) (sideResult, error) {
-	movies, err := w.radarr.GetMovies(ctx)
+	movies, err := w.radarr.Movies(ctx)
 	if err != nil {
 		return sideResult{}, err
 	}
 	w.warnEmptyArrList(library.ArrRadarr, len(movies))
-	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.radarr.GetTags)
+	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.radarr.Tags)
 	if err != nil {
 		return sideResult{}, err
 	}
@@ -454,7 +454,7 @@ func (w *Walker) warnFilteredEmpty(arr string, listed, kept int, filtered bool) 
 // --- Item construction and fingerprinting ---
 
 // seriesItem builds a library Item from a series and its episode files (as
-// listed by GetEpisodeFiles: exactly the episodes with a file on disk, each
+// listed by EpisodeFiles: exactly the episodes with a file on disk, each
 // carrying its own SeasonNumber), aggregating the distinct release groups
 // present and a representative fingerprint.
 func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) library.Item {

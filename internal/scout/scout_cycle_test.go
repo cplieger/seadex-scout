@@ -729,16 +729,16 @@ func TestLoadStateCorruptFileStartsCold(t *testing.T) {
 // then fails it, modelling a SIGTERM/redeploy landing mid-walk.
 type cancellingSonarr struct{ cancel context.CancelFunc }
 
-func (c *cancellingSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+func (c *cancellingSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	c.cancel()
 	return nil, context.Canceled
 }
 
-func (c *cancellingSonarr) GetEpisodeFiles(context.Context, int) ([]arrapi.EpisodeFile, error) {
+func (c *cancellingSonarr) EpisodeFiles(context.Context, int) ([]arrapi.EpisodeFile, error) {
 	return nil, nil
 }
 
-func (c *cancellingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (c *cancellingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 

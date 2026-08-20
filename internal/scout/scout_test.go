@@ -34,30 +34,30 @@ type fakeSonarr struct {
 	series  []arrapi.Series
 }
 
-func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+func (f *fakeSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, f.listErr
 }
 
-func (f *fakeSonarr) GetEpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	return f.files[seriesID], nil
 }
 
-func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
-// flakySonarr wraps fakeSonarr but fails GetEpisodeFiles for the listed series
+// flakySonarr wraps fakeSonarr but fails EpisodeFiles for the listed series
 // IDs, so a walk succeeds while marking the snapshot partial.
 type flakySonarr struct {
 	failEpisodes map[int]bool
 	fakeSonarr
 }
 
-func (f *flakySonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *flakySonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	if f.failEpisodes[seriesID] {
 		return nil, errors.New("episode fetch failed")
 	}
-	return f.fakeSonarr.GetEpisodeFiles(ctx, seriesID)
+	return f.fakeSonarr.EpisodeFiles(ctx, seriesID)
 }
 
 // fakeSeaDex is an in-package SeaDexSource: it returns fixed entries or an
@@ -563,18 +563,18 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	}
 }
 
-// fakeRadarr is a scripted RadarrClient for orchestration tests: GetMovies
+// fakeRadarr is a scripted RadarrClient for orchestration tests: Movies
 // returns movies (or listErr); tags are unused here.
 type fakeRadarr struct {
 	listErr error
 	movies  []arrapi.Movie
 }
 
-func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
+func (f *fakeRadarr) Movies(context.Context) ([]arrapi.Movie, error) {
 	return f.movies, f.listErr
 }
 
-func (f *fakeRadarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *fakeRadarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 

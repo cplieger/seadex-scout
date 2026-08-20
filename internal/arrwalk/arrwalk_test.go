@@ -45,8 +45,8 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// fakeSonarr is a scripted SonarrClient: GetSeries returns series (or listErr),
-// GetEpisodeFiles returns files[id] (or epErr[id]), GetTags returns the canned
+// fakeSonarr is a scripted SonarrClient: Series returns series (or listErr),
+// EpisodeFiles returns files[id] (or epErr[id]), Tags returns the canned
 // tag list (or tagErr).
 type fakeSonarr struct {
 	files   map[int][]arrapi.EpisodeFile
@@ -57,18 +57,18 @@ type fakeSonarr struct {
 	tags    []arrapi.Tag
 }
 
-func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+func (f *fakeSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, f.listErr
 }
 
-func (f *fakeSonarr) GetEpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	if err := f.epErr[seriesID]; err != nil {
 		return nil, err
 	}
 	return f.files[seriesID], nil
 }
 
-func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return f.tags, f.tagErr
 }
 
@@ -163,7 +163,7 @@ func TestWalkSonarrFailureBudgetFailsWalk(t *testing.T) {
 // TestWalkSonarrTotalEpisodeFailureFailsWalk pins the sub-budget total-failure
 // rule: a library whose kept series count is below episodeFailureBudget can
 // never trip the absolute budget, so when EVERY kept series' episode fetch
-// fails (a total episode-endpoint outage: GetSeries ok, each per-series fetch
+// fails (a total episode-endpoint outage: Series ok, each per-series fetch
 // failing) the walk must fail as a whole - an ingest failure, so the cycle
 // goes unhealthy - instead of publishing a "partial" snapshot with zero
 // usable file data that would read healthy through the outage.
@@ -345,7 +345,7 @@ func TestKeepByTags(t *testing.T) {
 	}
 }
 
-// boundedSonarr blocks each GetEpisodeFiles until released, recording the peak
+// boundedSonarr blocks each EpisodeFiles until released, recording the peak
 // number of simultaneous in-flight fetches so a test can prove the walker
 // bounds concurrency at episodeConcurrency.
 type boundedSonarr struct {
@@ -357,11 +357,11 @@ type boundedSonarr struct {
 	maxActive int
 }
 
-func (f *boundedSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+func (f *boundedSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *boundedSonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	f.mu.Lock()
 	f.active++
 	if f.active > f.maxActive {
@@ -387,7 +387,7 @@ func (f *boundedSonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]ar
 	}
 }
 
-func (f *boundedSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *boundedSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -445,24 +445,24 @@ func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
 	})
 }
 
-// cancelingSonarr cancels the walk context from inside GetEpisodeFiles,
+// cancelingSonarr cancels the walk context from inside EpisodeFiles,
 // simulating a shutdown/timeout during the episode fetch.
 type cancelingSonarr struct {
 	cancel context.CancelFunc
 	series []arrapi.Series
 }
 
-func (f *cancelingSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+func (f *cancelingSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *cancelingSonarr) GetEpisodeFiles(ctx context.Context, _ int) ([]arrapi.EpisodeFile, error) {
+func (f *cancelingSonarr) EpisodeFiles(ctx context.Context, _ int) ([]arrapi.EpisodeFile, error) {
 	f.cancel()
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-func (f *cancelingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *cancelingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -492,11 +492,11 @@ type fakeRadarr struct {
 	tags    []arrapi.Tag
 }
 
-func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
+func (f *fakeRadarr) Movies(context.Context) ([]arrapi.Movie, error) {
 	return f.movies, f.listErr
 }
 
-func (f *fakeRadarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *fakeRadarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return f.tags, f.tagErr
 }
 
@@ -682,7 +682,7 @@ func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T)
 func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Monitored NoFiles", TvdbID: 42}},
-		// GetEpisodeFiles lists only episodes with files, so a fileless series
+		// EpisodeFiles lists only episodes with files, so a fileless series
 		// yields an empty list (the fetch itself succeeds).
 		files: map[int][]arrapi.EpisodeFile{1: {}},
 	}
@@ -806,7 +806,7 @@ func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
 
 // TestWalkSonarrLogsLiveContextTimeout pins the per-request-timeout behavior:
 // arrapi wraps each request in its own context.WithTimeout, so a slow
-// GetEpisodeFiles surfaces as context.DeadlineExceeded while the walk context
+// EpisodeFiles surfaces as context.DeadlineExceeded while the walk context
 // is still live. That is a real fetch failure, so the series becomes a Failed
 // placeholder AND the per-series warning is logged with the series identity -
 // not silently swallowed as shutdown noise. The walk as a whole still succeeds
@@ -1072,7 +1072,7 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	}
 }
 
-// budgetSonarr blocks each GetEpisodeFiles until released, then fails it, so a
+// budgetSonarr blocks each EpisodeFiles until released, then fails it, so a
 // test can trip the walk failure budget one fetch at a time and observe how
 // many fetches ever started.
 type budgetSonarr struct {
@@ -1081,11 +1081,11 @@ type budgetSonarr struct {
 	series  []arrapi.Series
 }
 
-func (f *budgetSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+func (f *budgetSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *budgetSonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	select {
 	case f.started <- seriesID:
 	case <-ctx.Done():
@@ -1099,14 +1099,14 @@ func (f *budgetSonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arr
 	}
 }
 
-func (f *budgetSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+func (f *budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
 // TestWalkSonarrBudgetTripSkipsQueuedFetches pins the cancel-on-budget
 // behavior of fetchEpisodeItems: once episodeFailureBudget fetches have
 // failed, the fan-out context is cancelled, so queued series never reach
-// GetEpisodeFiles. Exactly episodeConcurrency fetches start up front; each
+// EpisodeFiles. Exactly episodeConcurrency fetches start up front; each
 // released failure lets one more start, except the last, which trips the
 // budget — so the total started is episodeConcurrency + episodeFailureBudget
 // - 1 and the walk fails with the budget error. Deleting the cancelFan() call
