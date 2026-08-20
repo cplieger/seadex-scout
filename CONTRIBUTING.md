@@ -27,15 +27,22 @@ SeaDex's picks" fit; "push it to qBittorrent for me" does not.
 
 ## Architecture
 
-seadex-scout is a single Go binary. The daemon runs one compare cycle on start
-and then every `poll_interval` (or, when `poll_interval` is `off`, sits
-resident-idle while an external scheduler triggers cycles via the `poll`
-subcommand), emitting findings as JSON to stdout (slog, shipped to Loki), and,
-when a Prowlarr Torznab URL is configured, also serves the Torznab feed in the
-same process. It binds no HTTP port unless that feed is configured. Cross-cycle state is a
-single atomic JSON file (library snapshot, cached ID map, AniList memo, finding
-dedupe); when the feed is configured, the cycle also persists the materialized
-feed snapshot as a second atomic JSON file the server reads.
+seadex-scout is a single Go binary. The daemon runs one pass every
+`poll_interval` (or, when `poll_interval` is `off`, sits resident-idle while an
+external scheduler triggers passes through the `poll` subcommand), emitting findings
+as JSON to stdout (slog, shipped to Loki), and, when a Prowlarr Torznab URL is
+configured, also serves the Torznab feed in the same process. `scout.Cycle`
+dispatches between two kinds of pass: a **reconcile** (the whole catalogue, the
+whole arr walk, the whole compare and feed rebuild) on the first iteration and
+every 24 hours after that, and a **tick** (a bounded recent-changes window
+compared against the cached library snapshot) on every other iteration.
+It binds no HTTP port unless that feed is configured. Cross-cycle state is a
+single atomic JSON file (library snapshot, cached ID map, AniList memo,
+degradation streaks); when the feed is configured, the cycle also persists the
+materialized feed snapshot as a second atomic JSON file the server reads. The
+finding set is deliberately NOT part of it: findings are current state held in
+memory and re-emitted every pass, so a notification lost downstream is
+recoverable.
 
 `main.go` + `build.go` are the **composition root**: `main.go` installs logging,
 handles the `health`/`report`/`poll`/`daemon` subcommands, loads/validates the
@@ -51,9 +58,10 @@ direction (leaves have no internal imports):
 - `internal/appinfo`: the fixed identity constants (the shared User-Agent)
   every outbound HTTP client sends, so the app presents one consistent identity
   to every upstream instead of each client redeclaring it.
-- `internal/degradation`: the shared degradation-policy constants (the
-  persisted degradation-streak threshold that escalates repeated degraded
-  cycles from WARN to ERROR), consumed by both `mapping` and `scout`.
+- `internal/degradation`: the shared degradation policy: the two cadence-named
+  thresholds a persisted degradation streak escalates from WARN to ERROR at (a
+  tick's and a reconcile's), the streak transition rule, the shrink guards'
+  trigger fraction, and the library shrink guard's acceptance threshold.
 - `internal/titlekey`: the normalized-title key algorithm shared by the
   matcher's title index and the AniList payload gate.
 - `internal/seadex`: the releases.moe PocketBase client (paged entries with the
@@ -83,12 +91,14 @@ direction (leaves have no internal imports):
   the one place a `seadex.Torrent` is classified, so `compare` and `audit` build
   an identical release and `release` stays a seadex-free pure leaf.
 - `internal/compare`: the group-centric comparison producing `Finding`s (aligned
-  items emit nothing; the rest are warn/info findings, each with a dedupe key).
+  items emit nothing; the rest are warn/info findings).
 - `internal/audit`: the season-level report generator for report mode; a verdict
   per in-library match, rendered as Markdown + JSON + per-row slog.
-- `internal/notify`: the slog finding notifier with cross-cycle dedupe, the
-  daemon's alerting path (observability is slog-only; no metrics). Distinct
-  from the report FEATURE, which `internal/audit` generates.
+- `internal/notify`: the slog finding emitter, the daemon's alerting path
+  (observability is slog-only; no metrics). It holds the current finding set in
+  memory and re-states every row on every pass; nothing is persisted and nothing
+  is deduped across cycles. Distinct from the report FEATURE, which
+  `internal/audit` generates.
 - `internal/state`: the atomic JSON cache load/save (via `atomicfile`).
 - `internal/scout`: the cycle orchestrator that wires the above into one cycle.
 - `internal/indexer`: the Torznab feed server the daemon runs when a Prowlarr

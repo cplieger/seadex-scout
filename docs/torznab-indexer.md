@@ -90,10 +90,10 @@ non-anime libraries.
 
 To use a tracker for some search types only (for example Nyaa, which is public, on
 manual searches, and AnimeBytes on everything), set the arr's per-indexer flags.
-The arr already enforces the per-indexer
-per-indexer **Enable RSS / Enable Automatic Search / Enable Interactive Search**
-flags, and it is the only component that can: a Torznab request never carries the
-search _type_, and only RSS (the no-query "recent" feed) is distinguishable. So
+The arr already enforces the per-indexer **Enable RSS / Enable Automatic Search /
+Enable Interactive Search** flags, and it is the only component that can: a Torznab
+request never carries the search _type_, and only RSS (the no-query "recent" feed)
+is distinguishable. So
 the feed exposes each tracker on its own path and lets the arr decide when to hit
 each:
 
