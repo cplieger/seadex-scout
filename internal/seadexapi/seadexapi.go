@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsoncap"
+	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -875,7 +875,7 @@ func decodeList(d *jsoncap.Decoder) (pbList, error) {
 		switch {
 		case strings.EqualFold(k, "items"):
 			var err error
-			list.Items, err = jsoncap.Array(d, list.Items, perPage, "page items",
+			list.Items, err = d.Array(list.Items, perPage, "page items",
 				func(e *pbEntry) error { return decodeEntry(d, e) })
 			return err
 		case strings.EqualFold(k, "totalItems"):
@@ -929,7 +929,7 @@ func decodeExpand(d *jsoncap.Decoder, ex *pbExpand) error {
 	return d.Object(func(k string) error {
 		if strings.EqualFold(k, "trs") {
 			var err error
-			ex.Trs, err = jsoncap.Array(d, ex.Trs, maxTorrentsPerEntry, "torrents per entry",
+			ex.Trs, err = d.Array(ex.Trs, maxTorrentsPerEntry, "torrents per entry",
 				func(t *seadex.Torrent) error { return decodeTorrent(d, t) })
 			return err
 		}
@@ -962,12 +962,12 @@ func decodeTorrentField(d *jsoncap.Decoder, t *seadex.Torrent, key string) error
 		return d.Decode(&t.DualAudio)
 	case strings.EqualFold(key, "files"):
 		var err error
-		t.Files, err = jsoncap.Array(d, t.Files, maxFilesPerTorrent, "files per torrent",
+		t.Files, err = d.Array(t.Files, maxFilesPerTorrent, "files per torrent",
 			func(f *seadex.File) error { return d.Decode(f) })
 		return err
 	case strings.EqualFold(key, "tags"):
 		var err error
-		t.Tags, err = jsoncap.Array(d, t.Tags, maxTagsPerTorrent, "tags per torrent",
+		t.Tags, err = d.Array(t.Tags, maxTagsPerTorrent, "tags per torrent",
 			func(s *string) error { return d.Decode(s) })
 		return err
 	default:

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cplieger/jsoncap"
+	"github.com/cplieger/jsoncap/v2"
 )
 
 // FuzzDecodePage is a differential fuzz target for the schema-aware bounded

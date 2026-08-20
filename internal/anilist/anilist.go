@@ -27,7 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsoncap"
+	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
@@ -683,7 +683,7 @@ type gqlErrors []gqlError
 func (l *gqlErrors) UnmarshalJSON(data []byte) error {
 	*l = nil
 	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
-	records, err := jsoncap.Array(dec, nil, maxEnvelopeErrors, "errors",
+	records, err := dec.Array(nil, maxEnvelopeErrors, "errors",
 		func(e *gqlError) error { return dec.Decode(e) })
 	if err != nil {
 		return fmt.Errorf("errors: %w", err)
@@ -841,7 +841,7 @@ func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
-	records, err := jsoncap.Array(dec, nil, batchSize, "media",
+	records, err := dec.Array(nil, batchSize, "media",
 		func(m *json.RawMessage) error { return dec.Decode(m) })
 	if err != nil {
 		return fmt.Errorf("media: %w", err)

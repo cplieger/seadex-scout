@@ -21,7 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/atomicfile/v3"
-	"github.com/cplieger/jsoncap"
+	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"

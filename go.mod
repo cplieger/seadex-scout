@@ -8,7 +8,7 @@ require (
 	github.com/cplieger/envx/yamlenv/v2 v2.0.0
 	github.com/cplieger/health v1.5.2
 	github.com/cplieger/httpx/v5 v5.0.0
-	github.com/cplieger/jsoncap v1.0.0
+	github.com/cplieger/jsoncap/v2 v2.0.0
 	github.com/cplieger/jsonx v1.3.0
 	github.com/cplieger/keyenc v1.0.0
 	github.com/cplieger/runesafe/v2 v2.0.0

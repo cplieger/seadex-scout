@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v3"
-	"github.com/cplieger/jsoncap"
+	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
@@ -49,7 +49,7 @@ const (
 	// Movies); anything larger is a hand-edited snapshot.
 	maxPersistedCategories = 8
 	// maxPersistedItemBytes bounds ONE persisted feed item's serialized JSON - the
-	// bound the per-array cardinality caps cannot express, because jsoncap.Array bounds
+	// bound the per-array cardinality caps cannot express, because Decoder.Array bounds
 	// how many items decode while each item's interior arrays are still decoded by
 	// encoding/json.
 	maxPersistedItemBytes = 8 * 6 * maxPersistedFieldBytes
@@ -233,7 +233,7 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 		if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
 			return dst, chargeErr
 		}
-		releases, arrErr := jsoncap.Array(d, []ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
+		releases, arrErr := d.Array([]ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
 			if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
 				return chargeErr
 			}
@@ -253,7 +253,7 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 // stdlib-identical field handling; per-item validity (validPersistedItem,
 // validJournalRecord) is decodeSnapshot's separate prune.
 func decodeSnapshotFeed(d *jsoncap.Decoder, dst *[]journalItem, what string) error {
-	feed, err := jsoncap.Array(d, *dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
+	feed, err := d.Array(*dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
 		// The per-array cap bounds how many ITEMS decode, not what ONE item
 		// allocates: an item's own Categories array is decoded by
 		// encoding/json, so a single item can amplify the byte cap into a

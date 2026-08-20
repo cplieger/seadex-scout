@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v3"
-	"github.com/cplieger/jsoncap"
+	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx/capture"
