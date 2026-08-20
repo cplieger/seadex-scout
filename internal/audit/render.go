@@ -479,9 +479,35 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// orphans a .atomicfile-<digits>.tmp in the report dir forever otherwise. The
 	// caller holds report.lock, so no concurrent writer owns an in-flight temp, and
 	// a missing dir is not an error.
-	if _, err := atomicfile.CleanupStaleTemps(ctx, dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
+	//
+	// Failed is reported and Removed is not. A reclaimed orphan is a sweep doing
+	// its job; a candidate the sweep could not unlink means orphans are
+	// ACCUMULATING in a directory this app writes to every cycle, and only an
+	// operator can fix it. That is not implied by any louder failure here:
+	// _measured_ on a sticky (1777) directory holding a temp owned by another
+	// uid, the sweep reports Failed=1 while a normal atomic write in the same
+	// directory still succeeds, so nothing else would surface it. report.dir is
+	// an operator-supplied absolute path whose mode and ownership this app does
+	// not control, and the process is non-root, so that shape is reachable here.
+	// Unreadable is deliberately not read: it is only ever incremented below the
+	// swept directory, and this sweep is flat, so it is a structural zero.
+	sweep, cleanErr := atomicfile.CleanupStaleTemps(ctx, dir, time.Hour, atomicfile.WithLogger(log))
+	if cleanErr != nil {
 		// No dir attribute: the redacting logger would mask it anyway.
-		log.Warn("stale report temp cleanup failed", "error", err)
+		log.Warn("stale report temp cleanup failed", "error", cleanErr)
+	}
+	if sweep.Failed > 0 {
+		// WARN, not ERROR, and this is the one place the app's level rule needs
+		// its exception stated. The condition does NOT self-clear (a benign race
+		// is not counted: atomicfile returns ENOENT on either lstat or remove as
+		// neither removed nor failed, so a Failed is a permission or IO fault an
+		// operator must fix), which by the letter of the rule reads as ERROR.
+		// ERROR here is wired to the cycle-fault alert, and the cycle did its
+		// job — the report wrote. Paging a fault for a disk-fill precursor would
+		// misdirect exactly as escalating ErrRecordUnusable would have.
+		log.Warn("stale report temps could not be reclaimed; orphans are accumulating in the report dir",
+			"failed", sweep.Failed,
+			"remediation", "check ownership and mode on report.dir and on the temps named at debug level")
 	}
 	base, err := reportPairStem(ctx, dir, r.GeneratedAt)
 	if err != nil {
