@@ -467,7 +467,7 @@ func TestNotifierEmitLevelFollowsStatus(t *testing.T) {
 }
 
 // TestFindingLineCarriesDocumentedAttrs pins the finding line's attribute
-// contract: the README and steering doc document the exact keys the Loki
+// contract: the README documents the exact keys the Loki
 // dashboards and alert annotations key on (title, al_id, arr, current_group,
 // recommended_group, tracker, resolution, kind, classification_reason,
 // release_url, release_urls, plus the split nyaa_url/ab_url, info_hash,
