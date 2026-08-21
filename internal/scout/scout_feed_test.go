@@ -452,6 +452,19 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			if n := recorder.CountExact("mapping unusable; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 				t.Errorf("unusable-map WARN count = %d, want 1", n)
 			}
+			// Same signal the SeaDex-outage line carries: with a feed wired, the
+			// arrs keep being served the PREVIOUS curation through the outage, and
+			// this attribute is the only place the line says so.
+			if kept, ok := recordAttr(recorder, "mapping unusable; skipping comparison, findings re-stated unchanged this cycle", "feed_kept"); !ok || kept != "true" {
+				t.Errorf("unusable-map WARN feed_kept = %q (found=%t), want \"true\"", kept, ok)
+			}
+			// The persisted rejection streak is zero here (an unreachable Fribb is
+			// not a guard rejection), and the attribute names a condition with its
+			// own remedy, so a zero must not be attached: a Loki query for the
+			// guard-rejection incident would otherwise match every network blip.
+			if streak, ok := recordAttr(recorder, "mapping degraded", "stale_consecutive_rejections"); ok {
+				t.Errorf("mapping-degraded WARN carries stale_consecutive_rejections = %q with no rejection streak, want the attribute absent", streak)
+			}
 			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
 				t.Errorf("degraded reasons = %v, want [mapping-unusable]", reasons)
 			}

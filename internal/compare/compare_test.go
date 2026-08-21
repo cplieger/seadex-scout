@@ -130,6 +130,14 @@ func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 		t.Errorf("representative depends on upstream order: forward picked %q, reversed picked %q",
 			fwd.torrent.InfoHash, rev.torrent.InfoHash)
 	}
+	// Order independence alone does not pin the tie-break: the REVERSE order is
+	// equally deterministic, and a flip between builds re-keys every affected
+	// finding exactly as an order-dependent pick does. So the winner is named:
+	// the lower stable key takes the headline.
+	if fwd.torrent.InfoHash != "aaa" {
+		t.Errorf("equal-rank headline = %q, want %q (the lower stable key wins, so the pick survives a rebuild)",
+			fwd.torrent.InfoHash, "aaa")
+	}
 	findingFor := func(pool []candidate) Finding {
 		f := Finding{AniListID: 1}
 		fillBest(&f, pool, groupSet(pool))
@@ -137,6 +145,29 @@ func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(findingFor(forward), findingFor(reversed)) {
 		t.Error("findings built from opposite upstream orders must be identical (they seed the same dedupe key downstream)")
+	}
+}
+
+// TestBetterCandidateTiesBothWaysOnIdenticalContent pins that the tie-break is a
+// STRICT order: for two candidates the stable key cannot tell apart, neither
+// outranks the other. The single-pass max in representative is order-independent
+// only while that holds - a comparator answering "yes" in both directions makes
+// the last of an indistinguishable run win, so a pool that carries one release
+// twice (SeaDex admits up to 512 torrents per entry) would pick by position.
+func TestBetterCandidateTiesBothWaysOnIdenticalContent(t *testing.T) {
+	rel := release.Release{
+		Group: "SubsPlease", Tracker: "Nyaa", Resolution: "1080p", Codec: "x265",
+		Kind: release.KindEncode, Reason: "encode from name", TrackerType: tracker.Public,
+	}
+	torrent := seadex.Torrent{Tracker: "Nyaa", InfoHash: "aaaa", URL: "https://nyaa.si/view/1"}
+	a := candidate{rel: rel, torrent: torrent}
+	b := candidate{rel: rel, torrent: torrent}
+
+	if betterCandidate(&a, &b) {
+		t.Error("betterCandidate(a, b) = true for content-identical candidates, want false")
+	}
+	if betterCandidate(&b, &a) {
+		t.Error("betterCandidate(b, a) = true for content-identical candidates, want false")
 	}
 }
 

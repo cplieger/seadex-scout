@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +77,30 @@ func TestNormalizeClassifiesCauseOnlyForm(t *testing.T) {
 				t.Errorf("Normalize(%v) = %v, want the original error still in the chain", tt.err, got)
 			}
 		})
+	}
+}
+
+// TestWrapAsLeadsWithTheCallerStage pins the operator-facing half of WrapAs: the
+// caller's stage leads the message. The classification tokens are what the root
+// branches on, but they are identical for every interrupted stage, so the prefix
+// is the only thing in the line that says WHICH work was cut short - and it is
+// what an operator greps. Both tokens and the underlying failure ride along, so
+// the classification is unaffected by the wording.
+func TestWrapAsLeadsWithTheCallerStage(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New("terminated signal received")
+	cancel(cause)
+	const stage = "report write cut short by shutdown"
+	werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
+
+	err := WrapAs(ctx, stage, werr)
+
+	if got := err.Error(); !strings.HasPrefix(got, stage+": ") {
+		t.Errorf("WrapAs(%q, ...) = %q, want it to lead with the stage", stage, got)
+	}
+	for _, want := range []error{context.Canceled, cause, context.DeadlineExceeded} {
+		if !errors.Is(err, want) {
+			t.Errorf("errors.Is(err, %v) = false, want true; err = %v", want, err)
+		}
 	}
 }

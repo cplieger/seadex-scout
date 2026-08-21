@@ -1577,6 +1577,43 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		}
 	})
 
+	t.Run("both sides emptied by an exclude-only filter", func(t *testing.T) {
+		// An EXCLUDE filter with no include list: the arms above configure the
+		// include side, and either list alone already means "a filter is
+		// configured", so only this shape says the diagnostic reads the exclude
+		// list too. An operator who excludes one label and narrows nothing is a
+		// normal configuration, and every item here carries that label.
+		skip := []arrapi.Tag{{ID: 8, Label: "skip"}}
+		fs := &fakeSonarr{
+			series: []arrapi.Series{{ID: 1, Title: "Skipped", Tags: []int{8}}},
+			tags:   skip,
+		}
+		fr := &fakeRadarr{
+			movies: []arrapi.Movie{{ID: 10, Title: "Skipped Movie", Tags: []int{8}}},
+			tags:   skip,
+		}
+		logger, rec := capture.New()
+		w := NewWalker(&Config{
+			Sonarr: fs, Radarr: fr,
+			ExcludeTags: []string{"skip"},
+			Logger:      logger,
+		})
+
+		snap, err := w.Walk(t.Context())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if len(snap.Items) != 0 {
+			t.Errorf("items = %+v, want none (everything carries the excluded tag)", snap.Items)
+		}
+		if n := rec.CountExact(msg); n != 2 {
+			t.Fatalf("dead-filter warnings = %d, want 2 (one per emptied side); messages = %q", n, rec.Messages())
+		}
+		if !snap.FilteredEmpty {
+			t.Error("snapshot FilteredEmpty=false; an emptied side must degrade the cycle, not just WARN once per cycle forever")
+		}
+	})
+
 	t.Run("no warning when the filter keeps something", func(t *testing.T) {
 		fs := &fakeSonarr{
 			series: []arrapi.Series{
@@ -1601,6 +1638,13 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		}
 		if n := rec.CountExact(emptyMsg); n != 0 {
 			t.Errorf("empty-list warnings = %d, want none (the arr listed two series); messages = %q", n, rec.Messages())
+		}
+		// Every configured label resolved to a real tag id here, so the
+		// dead-LABEL diagnostic must stay quiet too: it names a config typo an
+		// operator has to fix, and one that fires on every healthy walk names
+		// nothing.
+		if n := rec.CountExact("configured tags matched no arr tag"); n != 0 {
+			t.Errorf("unmatched-label warnings = %d, want none (every label resolved); messages = %q", n, rec.Messages())
 		}
 		if snap.FilteredEmpty {
 			t.Error("snapshot FilteredEmpty=true on a filter that kept an item; the flag must not degrade every filtered cycle")

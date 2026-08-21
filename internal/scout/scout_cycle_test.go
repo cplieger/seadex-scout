@@ -891,6 +891,12 @@ func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
 	if n := recorder.CountExact("seadex returned zero entries; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 		t.Errorf("zero-entries WARN count = %d, want 1 (the outage evidence stays)", n)
 	}
+	// No feed is wired here, so the line must say the arrs are being served
+	// nothing rather than a kept snapshot: an inverted boolean sends an operator
+	// looking for a stale feed on an alert-only deployment.
+	if kept, ok := recordAttr(recorder, "seadex returned zero entries; skipping comparison, findings re-stated unchanged this cycle", "feed_kept"); !ok || kept != "false" {
+		t.Errorf("zero-entries WARN feed_kept = %q (found=%t), want \"false\"", kept, ok)
+	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
 		t.Errorf("'cycle degraded' count = %d, want 0 on a shutdown-interrupted cycle", n)
 	}

@@ -275,6 +275,40 @@ func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 	}
 }
 
+// TestPrefetchDoesNotReBatchAWholeAbandonedWorklist pins the termination side of
+// that rule: when the pass abandoned EVERY id it was given, re-batching would
+// send back the identical worklist, and the identical worklist is what just
+// aborted - so those ids take the per-id fallback instead. Only a SHRINKING
+// worklist is progress; re-asking the same one is a spin, and the ids are already
+// covered by the per-id path's own failure breaker.
+func TestPrefetchDoesNotReBatchAWholeAbandonedWorklist(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"},
+		{AniListID: 22, Type: "MOVIE"},
+		{AniListID: 33, Type: "MOVIE"},
+	})
+	fake := &abortingBatchAniList{
+		media: map[int]anilist.Media{
+			11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
+			22: {Titles: []string{"Movie B"}, Format: "MOVIE", Year: 2021},
+			33: {Titles: []string{"Movie C"}, Format: "MOVIE", Year: 2022},
+		},
+		// The very first chunk aborted, so nothing was ever asked.
+		abandoned: []int{11, 22, 33},
+	}
+
+	New(fake, nil).Match(t.Context(),
+		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
+		&library.Snapshot{}, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("batch calls = %d, want 1 (an unshrunk worklist is not re-batched); batch sizes = %v", fake.batchCalls, fake.batchSizes)
+	}
+	if fake.fetchCalls != 3 {
+		t.Errorf("single Fetch calls = %d, want 3 (every abandoned id keeps the per-id fallback)", fake.fetchCalls)
+	}
+}
+
 // TestPrefetchDoesNotReBatchRecordLocalIDs pins the other side of that rule: an
 // id whose chunk DID answer but answered untrustworthily is NOT re-batched - the
 // same poisoned record would come back - so it keeps the per-id Fetch that

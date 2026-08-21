@@ -300,6 +300,10 @@ func TestCapAlertTextAttrNeverEndsInADanglingEscape(t *testing.T) {
 	for name, in := range map[string]string{
 		"even offset": strings.Repeat("*", 2*maxAttrBytes),
 		"odd offset":  "a" + strings.Repeat("*", 2*maxAttrBytes),
+		// A value that is NOTHING but escapes: the run of backslashes then spans
+		// the whole body, so the parity decision rests on its very first byte -
+		// the one case the mixed values above never reach.
+		"all escapes": strings.Repeat(`\`, 2*maxAttrBytes),
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := capAlertTextAttr(in)

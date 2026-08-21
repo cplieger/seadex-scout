@@ -853,6 +853,22 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 		t.Errorf("legacy load = Version %d ShrunkWalksByArr[sonarr] %d, want 0/3 (absent version tolerated)", legacy.Version, legacy.ShrunkWalksByArr[library.ArrSonarr])
 	}
 
+	// The same envelope with the version stamped EXPLICITLY zero: the contract
+	// treats absent and zero alike, and zero is the one value that sits between
+	// the negative stamps quarantined as corruption and the versions this binary
+	// supports, so refusing it would quarantine a legitimate legacy file.
+	if err := os.WriteFile(path, []byte(`{"version":0,"shrunk_walks_by_arr":{"sonarr":4}}`), 0o644); err != nil {
+		t.Fatalf("write zero-version state: %v", err)
+	}
+	zeroStamped, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load of an explicitly zero-version file returned error: %v", err)
+	}
+	if zeroStamped.Version != 0 || zeroStamped.ShrunkWalksByArr[library.ArrSonarr] != 4 {
+		t.Errorf("zero-version load = Version %d ShrunkWalksByArr[sonarr] %d, want 0/4 (an explicit zero is the legacy shape)",
+			zeroStamped.Version, zeroStamped.ShrunkWalksByArr[library.ArrSonarr])
+	}
+
 	// A file stamped by a NEWER binary (an image rollback) must be refused,
 	// not field-by-field zero-loaded: its members may have moved. It is valid
 	// state, not corruption, so it stays at the live path (no .corrupt copy)
@@ -1488,6 +1504,70 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 			t.Errorf("pre-cliff WARN count = %d for a half-sized state, want 0 (a warning on every save is noise)", got)
 		}
 	})
+
+	t.Run("a state exactly at the threshold stays quiet", func(t *testing.T) {
+		// encodeState truncates the encoder's newline away and the staged count
+		// re-syncs with it, so the guard reads exactly the marshalled length.
+		// The threshold is the point the warning starts being warranted PAST,
+		// and only this row can say which side of it the equal case falls on.
+		logger, recorder := capture.New()
+		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+		if err := store.Save(t.Context(), sized(stateSizeWarnBytes)); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		if got := recorder.CountExact(wantMsg); got != 0 {
+			t.Errorf("pre-cliff WARN count = %d for a state exactly at the threshold, want 0 (the warning is for crossing it)", got)
+		}
+	})
+}
+
+// TestStoreSaveStaysQuietOnASuccessfulWrite pins the other side of Save's temp
+// lifecycle: Cleanup is a no-op after a successful Commit, so a healthy Save
+// warns about nothing. The deferred cleanup runs on EVERY save, so a warning
+// misread from its nil error would fire once per cycle and read as a permanent
+// temp-file leak in the state directory - the same alert-fatigue failure the
+// pre-cliff warning above is careful to avoid.
+func TestStoreSaveStaysQuietOnASuccessfulWrite(t *testing.T) {
+	logger, recorder := capture.New()
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+
+	if err := store.Save(t.Context(), &State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	if got := recorder.CountLevel(slog.LevelWarn, ""); got != 0 {
+		t.Errorf("WARN count after a successful Save = %d, want 0; captured messages: %q", got, recorder.Messages())
+	}
+}
+
+// TestStoreLoadStaysQuietOnAHealthyRead pins that a healthy Load narrates
+// itself and nothing else: it warns about neither the directory handle it
+// closes nor the stale-temp sweep it runs, and it reports a reclaim only when
+// one happened. Load runs once per cold start and on every report, so a line
+// that fires unconditionally is the one that buries the real one - the sweep's
+// Info exists precisely to name a reclaim an operator can act on.
+func TestStoreLoadStaysQuietOnAHealthyRead(t *testing.T) {
+	const reclaimMsg = "reclaimed stale atomic-write temp files"
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"shrunk_walks_by_arr":{"sonarr":3}}`), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	logger, recorder := capture.New()
+	store := NewStore(path, logger)
+
+	if _, err := store.Load(t.Context()); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if got := recorder.CountLevel(slog.LevelWarn, ""); got != 0 {
+		t.Errorf("WARN count after a healthy Load = %d, want 0; captured messages: %q", got, recorder.Messages())
+	}
+	if got := recorder.CountExact(reclaimMsg); got != 0 {
+		t.Errorf("reclaim INFO count = %d with no stale temp to reclaim, want 0", got)
+	}
+	if got := recorder.CountExact("state loaded"); got != 1 {
+		t.Errorf("state-loaded INFO count = %d, want 1; captured messages: %q", got, recorder.Messages())
+	}
 }
 
 // TestStoreLoadRefusesStatePathEscapingItsDirectory pins readState's

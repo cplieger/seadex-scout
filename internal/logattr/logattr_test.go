@@ -238,6 +238,37 @@ func TestJoinerPairLandsWholeWhenItFits(t *testing.T) {
 	}
 }
 
+// TestJoinerPairLandsAtExactlyTheRemainingBudget pins the inclusive edge of
+// that fit: a pair whose sanitized triple is exactly the budget's remainder
+// lands whole and unmarked. The refusal table cannot state this - every row
+// there is a refusal - so a budget read one byte tight would drop the last
+// honest pair of an aggregate and mark the whole attribute truncated, which
+// reads to an operator as a hostile entry rather than a full one.
+func TestJoinerPairLandsAtExactlyTheRemainingBudget(t *testing.T) {
+	const (
+		key   = "Nyaa"
+		sep   = "="
+		value = "https://nyaa.si/view/1"
+	)
+	room := len(key) + len(sep) + len(value)
+	j := NewJoiner()
+	head := strings.Repeat("h", MaxBytes-room)
+	if !j.Write(head) {
+		t.Fatalf("filling the budget to %d bytes of room reported a cut", room)
+	}
+
+	if !j.WritePair(key, sep, value) {
+		t.Errorf("WritePair(%q, %q, %q) refused a pair that exactly fills the remaining %d bytes", key, sep, value, room)
+	}
+	got := j.String()
+	if want := head + key + sep + value; got != want {
+		t.Errorf("aggregate = %d bytes ending %q, want the pair written whole (%d bytes)", len(got), got[min(len(got), len(head)):], len(want))
+	}
+	if strings.HasSuffix(got, TruncMarker) {
+		t.Errorf("aggregate carries the %q marker although nothing was cut or refused", TruncMarker)
+	}
+}
+
 // TestJoinerPairRefusesAValueThatGrowsPastTheBudget pins that the fit is
 // measured on the SANITIZED pieces: every invalid UTF-8 byte becomes the
 // three-byte U+FFFD, so a value that fits raw can triple past the budget. A

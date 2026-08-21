@@ -338,6 +338,36 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	}
 }
 
+// TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr is the same outage
+// against an entry Fribb DOES have a record for, only an id-less one: the arr is
+// already known from the record's type, so the failed lookup must count under
+// THAT arr rather than the unknown bucket the record-less twin above uses. The
+// per-arr unmapped counts are what an operator reads to tell "Sonarr coverage is
+// incomplete" from "these entries map nowhere at all", and a count moving the
+// wrong way makes a degraded cycle read as an improving one.
+func TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr(t *testing.T) {
+	// TvdbID 0 on a series record: Fribb knows the entry but carries no arr id.
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 42, Type: "TV"}})
+
+	res := New(degradedAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, &library.Snapshot{}, idx, Memo{})
+
+	if got := res.Coverage.Unmapped[library.ArrSonarr]; got != 1 {
+		t.Errorf("coverage unmapped[sonarr] = %d, want 1 (the record's own arr)", got)
+	}
+	if got := res.Coverage.Unmapped[arrUnknown]; got != 0 {
+		t.Errorf("coverage unmapped[unknown] = %d, want 0 (the record named the arr)", got)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when a needed AniList lookup fails transiently")
+	}
+	if _, ok := res.IncompleteIDs[42]; !ok || len(res.IncompleteIDs) != 1 {
+		t.Errorf("IncompleteIDs = %v, want exactly {42}", res.IncompleteIDs)
+	}
+	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped {
+		t.Errorf("matches = %+v, want one unmapped entry", res.Matches)
+	}
+}
+
 // TestMatchTitleFallbackAmbiguousIsUnmapped covers the conservative-match
 // invariant plus the no-Fribb-record resolution path: an entry with no mapping
 // record is resolved through the AniList title fallback (exercising matchEntry's

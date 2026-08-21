@@ -144,6 +144,11 @@ func TestReportScopedPreservesIncompleteWithinAuthority(t *testing.T) {
 	if carried, _ := summaryCounter(t, recorder, "carried"); carried != 0 {
 		t.Errorf("summary carried = %d, want 0 (every owner was inside the authority set)", carried)
 	}
+	// The in-authority row WAS resolved, and the count says which rule each
+	// survivor fell under only if the third counter agrees.
+	if resolved, seen := summaryCounter(t, recorder, "resolved"); !seen || resolved != 1 {
+		t.Errorf("summary resolved = %d (present %v), want 1 (the in-authority row with complete evidence)", resolved, seen)
+	}
 }
 
 // TestReportStillDeletesByOmission pins that adding the scoped path did not
@@ -172,6 +177,12 @@ func TestReportStillDeletesByOmission(t *testing.T) {
 	}
 	if carried, seen := summaryCounter(t, recorder, "carried"); !seen || carried != 0 {
 		t.Errorf("summary carried = %d (present %v), want 0 on a full pass", carried, seen)
+	}
+	// The third counter of the same summary: a full pass that deleted a row must
+	// SAY it resolved one, or the operator's "what changed this cycle" line
+	// reports a silent deletion as nothing having happened.
+	if resolved, seen := summaryCounter(t, recorder, "resolved"); !seen || resolved != 1 {
+		t.Errorf("summary resolved = %d (present %v), want 1 (the omitted row)", resolved, seen)
 	}
 	if total, _ := summaryCounter(t, recorder, "total"); total != 1 {
 		t.Errorf("summary total = %d, want 1", total)

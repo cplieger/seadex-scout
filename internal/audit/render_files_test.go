@@ -14,6 +14,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v3"
 	"github.com/cplieger/seadex-scout/internal/reportfs"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestWriteFilesWritesTimestampedPair pins the on-disk report contract the
@@ -644,7 +645,8 @@ func TestWriteFilesReapsStaleTempsKeepsReportFiles(t *testing.T) {
 	}
 
 	r := &Report{GeneratedAt: time.Date(2026, time.July, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
-	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	logger, recorder := capture.New()
+	if err := r.WriteFiles(t.Context(), dir, logger); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 
@@ -659,5 +661,16 @@ func TestWriteFilesReapsStaleTempsKeepsReportFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "report-2026-07-11T15-04-05Z.md")); err != nil {
 		t.Errorf("new report pair not written: %v", err)
+	}
+	// A sweep that did its job says nothing: the failure line names orphans an
+	// operator must go and unlink by hand, so firing it on every clean reap
+	// (this path runs once per report) makes the real one unfindable.
+	for _, msg := range []string{
+		"stale report temp cleanup failed",
+		"stale report temps could not be reclaimed; orphans are accumulating in the report dir",
+	} {
+		if got := recorder.CountExact(msg); got != 0 {
+			t.Errorf("WARN %q count = %d after a clean reap, want 0", msg, got)
+		}
 	}
 }
