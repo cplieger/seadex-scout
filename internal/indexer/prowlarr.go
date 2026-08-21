@@ -412,16 +412,20 @@ func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 // sanitizeItemDisplayURLs sanitizes one surviving item's two passthrough
 // display-URL fields in place, returning how many of them were INSPECTED and
 // how many were blanked (the counts filterDownloadURLs' onset ladder reads).
+// An admitted field is rewritten to the gate's vouched spelling, which is not a
+// blanking and must not be counted as one - the same accounting
+// sanitizeSnapshotInfoURLs applies on the persisted side.
 func (u *upstream) sanitizeItemDisplayURLs(it *item) (observed, blanked int) {
 	for _, field := range []*string{&it.InfoURL, &it.GUID} {
 		if *field == "" {
 			continue
 		}
 		observed++
-		if s := sanitizeDisplayURL(u.name, *field); s != *field {
+		cleaned, ok := sanitizeDisplayURL(u.name, *field)
+		if !ok {
 			blanked++
-			*field = s
 		}
+		*field = cleaned
 	}
 	return observed, blanked
 }
@@ -536,27 +540,19 @@ func effectiveHTTPPort(u *url.URL) string {
 	}
 }
 
-// httpDisplayHost admits a raw URL as a browser-destined DISPLAY link and
-// returns its host evidence: an absolute http(s) form, free of userinfo and of
-// the smuggling shapes a browser reads differently from net/url. It is the
-// shared admission prefix of BOTH its consumers: sanitizeDisplayURL
+// httpDisplayForm admits a raw URL as a browser-destined DISPLAY link and
+// returns the whole classified form: an absolute http(s) form, free of userinfo
+// and of the smuggling shapes a browser reads differently from net/url. It is
+// the shared admission prefix of BOTH its consumers: sanitizeDisplayURL
 // (search-path display links) and trackerKeyFromURL (match.go, the curation
 // IDENTITY gate), so relaxing it changes what mints a curation key, not only
 // what renders as a clickable link.
-func httpDisplayHost(raw string) (host string, ok bool) {
-	f, ok := httpDisplayForm(raw)
-	if !ok {
-		return "", false
-	}
-	return f.Host, true
-}
-
-// httpDisplayForm is httpDisplayHost returning the whole classified form, for a
-// caller that must parse the VOUCHED reading of the URL rather than its original
-// spelling (trackerKeyFromURL's id extraction; h-f8). Emitting or re-parsing
-// f.Trimmed is the point: it is the preprocessed string the vouch step actually
-// judged, so admission and the id extraction can no longer read two different
-// strings.
+//
+// Both consumers read f.Trimmed rather than the original spelling (h-f8): it is
+// the preprocessed string the vouch step actually judged, so admission, the id
+// extraction and the emitted link can no longer read three different strings.
+// A host-only variant used to sit in front of this one; it went when the last
+// caller that needed nothing else stopped existing.
 func httpDisplayForm(raw string) (f urlform.Form, ok bool) {
 	f = urlform.Classify(raw)
 	if !displaylink.VouchForm(&f) || f.Host == "" {
@@ -565,19 +561,28 @@ func httpDisplayForm(raw string) (f urlform.Form, ok bool) {
 	return f, true
 }
 
-// sanitizeDisplayURL returns raw when it is a display-admissible URL (httpDisplayHost)
+// sanitizeDisplayURL reports whether raw is a display-admissible URL (httpDisplayForm)
 // whose host belongs to the scope's own tracker (scopeOfHost, the single home of the
-// host->scope mapping), else "" - the item survives with the field blanked (writeItem
-// omits an empty <comments> and item.guid() falls back to InfoHash/DownloadURL).
-func sanitizeDisplayURL(scope, raw string) string {
-	host, ok := httpDisplayHost(raw)
+// host->scope mapping), and returns the VOUCHED spelling for the caller to emit:
+// urlform's WHATWG-preprocessed reading (Form.Trimmed), the string the gate actually
+// judged. On refusal the caller blanks the field and the item survives (writeItem omits
+// an empty <comments> and item.guid() falls back to InfoHash/DownloadURL).
+//
+// Returning the vouched reading rather than the original spelling is the h-f8 rule
+// trackerKeyFromURL and snapshotInfoURLAllowed already follow, and this gate was the
+// one display site left on the original: an edge-padded upstream value
+// ("http://nyaa.si  ") is vouched on the BROWSER's reading of it, so passing the padded
+// original through handed the arr UI a <comments> link net/url refuses to parse. It also
+// puts the emitted GUID on the same spelling trackerKeyFromURL keys the curation set by.
+func sanitizeDisplayURL(scope, raw string) (cleaned string, ok bool) {
+	f, ok := httpDisplayForm(raw)
 	if !ok {
-		return ""
+		return "", false
 	}
-	if scope == "" || scopeOfHost(host) != scope {
-		return ""
+	if scope == "" || scopeOfHost(f.Host) != scope {
+		return "", false
 	}
-	return raw
+	return f.Trimmed, true
 }
 
 // setHeaders sets the User-Agent, Accept, and the Prowlarr API key header.
