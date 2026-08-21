@@ -103,10 +103,20 @@ func TestTextKeepsShortSeparatorlessDirIntact(t *testing.T) {
 			want: "report written",
 		},
 		{
-			name: "separator-less dir at the length floor is masked",
+			name: "separator-less dir one byte above the length floor is masked",
 			dir:  "reportdir",
 			in:   "open reportdir/report.json: denied",
 			want: "open " + ReportDirMarker + "/report.json: denied",
+		},
+		{
+			// The floor is inclusive, and the row above it cannot say so: a dir
+			// standing exactly at it is the shortest value this masker still
+			// hides, so a floor read one byte too high leaks it verbatim into
+			// every record naming it.
+			name: "separator-less dir exactly at the length floor is masked",
+			dir:  "myreport",
+			in:   "open myreport/state.json: denied",
+			want: "open " + ReportDirMarker + "/state.json: denied",
 		},
 		{
 			name: "short dir carrying a separator is masked",

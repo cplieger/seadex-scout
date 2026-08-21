@@ -56,6 +56,11 @@ func TestParseMediaImplausibleYearFallsBack(t *testing.T) {
 		"both implausible yields unknown":                 {raw: `{"data":{"Media":{"format":"TV","seasonYear":20200,"startDate":{"year":-5},"title":{"romaji":"A"}}}}`, want: 0},
 		"implausible seasonYear with over-range fallback": {raw: `{"data":{"Media":{"format":"TV","seasonYear":-1,"startDate":{"year":10000},"title":{"romaji":"A"}}}}`, want: 0},
 		"plausible seasonYear is kept":                    {raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 2023},
+		// The four-digit range is inclusive at both ends, and the rows above only
+		// reach values outside it: a range read one year tight discards a real
+		// wire year and hands the matcher the unknown sentinel instead.
+		"lowest four-digit seasonYear is kept":  {raw: `{"data":{"Media":{"format":"TV","seasonYear":1000,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 1000},
+		"highest four-digit seasonYear is kept": {raw: `{"data":{"Media":{"format":"TV","seasonYear":9999,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 9999},
 	} {
 		t.Run(name, func(t *testing.T) {
 			m, err := parseMedia([]byte(tc.raw))

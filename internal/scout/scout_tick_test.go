@@ -29,6 +29,15 @@ func pollIntervalForEvery(every int) time.Duration {
 	return reconcileInterval / time.Duration(every)
 }
 
+// oversizeLatchAtDefaultCadence is how many CONSECUTIVE wedged ticks escalate at
+// the default 15-minute cadence the tick tests run at (every=96): the
+// frozen-fast-path tolerance is two hours, which that cadence spans in eight
+// ticks. Stated as a literal rather than read back from latchTicks, because a
+// test that derives its expectation from the conversion it is checking agrees
+// with every conversion - including one that pins the floor whatever the
+// interval, or one that escalates only after a span no deployment survives.
+const oversizeLatchAtDefaultCadence = 8
+
 // tickDeps assembles the cycle dependencies the tick tests share: a healthy
 // one-series arr walk (so the FIRST iteration's reconcile populates the cached
 // library snapshot every later tick compares against), a fresh in-memory
@@ -167,6 +176,45 @@ func TestCycleDispatchesReconcileThenTicks(t *testing.T) {
 	}
 	if n := recorder.CountExact("cycle complete"); n != wantReconciles {
 		t.Errorf("'cycle complete' count = %d, want %d (one per full pass)", n, wantReconciles)
+	}
+}
+
+// TestReconcileStartedNamesTheRealCadence pins the `interval` attribute of the
+// reconcile's start line: an operator sizes the reconcile deadman's absence
+// window off it, so it has to name the cadence a full pass ACTUALLY runs at -
+// the daily target quantized to whole loop iterations - and an external
+// scheduler has to be named as one rather than reported as some duration. A
+// value short of the truth arms the deadman inside a healthy gap and pages on
+// every quiet night.
+func TestReconcileStartedNamesTheRealCadence(t *testing.T) {
+	for name, tc := range map[string]struct {
+		interval time.Duration
+		want     string
+	}{
+		"an unwired interval is an external schedule":  {interval: 0, want: "external"},
+		"a negative interval is an external schedule":  {interval: -time.Hour, want: "external"},
+		"the default cadence reconciles daily":         {interval: 15 * time.Minute, want: "24h0m0s"},
+		"a five-hour loop quantizes down to 20 hours":  {interval: 5 * time.Hour, want: "20h0m0s"},
+		"an interval past a day still reconciles once": {interval: 48 * time.Hour, want: "48h0m0s"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			deps, _ := tickDeps(logger, &fakeSeaDex{entries: seadexFrierenEntry()}, nil, nil, 1)
+			deps.PollInterval = tc.interval
+			s := New(deps)
+
+			if healthy := s.Cycle(t.Context()); !healthy {
+				t.Fatal("Cycle healthy=false, want true")
+			}
+
+			got, ok := recordAttr(recorder, "reconcile started", "interval")
+			if !ok {
+				t.Fatalf("no interval attribute on the reconcile start line; captured messages: %q", recorder.Messages())
+			}
+			if got != tc.want {
+				t.Errorf("reconcile started interval = %q for a %s poll interval, want %q", got, tc.interval, tc.want)
+			}
+		})
 	}
 }
 
@@ -332,7 +380,7 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
-	latch := s.latchTicks()
+	latch := oversizeLatchAtDefaultCadence
 	const warnMsg = "SeaDex change window too large to fetch; deferring to the reconcile"
 	const errSub = "SeaDex change window has been too large to fetch repeatedly"
 	for i := 1; i <= latch; i++ {

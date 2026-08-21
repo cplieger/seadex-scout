@@ -185,6 +185,29 @@ func TestStartWedgeWatchdog(t *testing.T) {
 		}
 	})
 
+	t.Run("a wedge is reported within a fraction of the lease", func(t *testing.T) {
+		capture.Default(t)
+		marker, path := staleMarker(t)
+		// The re-check period is a FRACTION of the lease, and that is what bounds
+		// how long a wedge stays unreported (lease + lease/divisor). Derived the
+		// other way round it would be a MULTIPLE of the lease - 3.6s here, and 18h
+		// at the shipped 3h lease - so docker would keep a wedged container in
+		// service for most of a day. The deadline below sits an order of magnitude
+		// above the real period and well under that multiple, so it separates the
+		// two without racing either.
+		const lease = 600 * time.Millisecond
+		stop := StartWedgeWatchdog(t.Context(), marker, path, lease)
+		defer stop()
+
+		deadline := time.Now().Add(2 * time.Second)
+		for marker.Healthy() {
+			if time.Now().After(deadline) {
+				t.Fatalf("the wedge was still unreported after 2s with a %v lease; the re-check period must be a fraction of it", lease)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+
 	t.Run("the goroutine marks a wedged loop unhealthy and stops", func(t *testing.T) {
 		capture.Default(t)
 		marker, path := staleMarker(t)

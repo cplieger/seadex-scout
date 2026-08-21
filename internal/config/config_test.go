@@ -367,9 +367,9 @@ func TestLoadWarnsOnUnresolvedAllowlistedEnv(t *testing.T) {
 }
 
 // TestLoadStaysSilentWhenAllEnvResolved pins the absence side of Load's
-// unresolved-${VAR}-refs warning: when every allowlisted reference resolves,
-// the warning must not fire (kills the lived CONDITIONALS_BOUNDARY mutant on
-// the len(refs) > 0 guard).
+// unresolved-${VAR}-refs warning: when every allowlisted reference resolves, the
+// warning must not fire, so the one that does fire always means a real
+// unresolved reference.
 func TestLoadStaysSilentWhenAllEnvResolved(t *testing.T) {
 	rec := capture.Default(t)
 	t.Setenv("SONARR_API_KEY", "sk-123")
@@ -383,6 +383,29 @@ func TestLoadStaysSilentWhenAllEnvResolved(t *testing.T) {
 	}
 	if rec.Contains("config references environment variables") {
 		t.Errorf("Load logged the unresolved-env warning for a fully resolved config: %v", rec.Messages())
+	}
+}
+
+// TestLoadStaysSilentAboutTheConfigDirectoryHandle pins the same silence for the
+// confined read's own housekeeping: closing the config directory handle succeeds,
+// so a healthy startup says nothing about it. Load runs once per process, before
+// anything else is logged, so an inverted reading of that close would put a
+// permanent warning at the top of every container's log - the first thing an
+// operator reads when diagnosing something else entirely.
+func TestLoadStaysSilentAboutTheConfigDirectoryHandle(t *testing.T) {
+	rec := capture.Default(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: sk-123\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if rec.Contains("could not close config directory handle") {
+		t.Errorf("Load warned about the config directory handle on a healthy read: %v", rec.Messages())
 	}
 }
 
@@ -1852,6 +1875,49 @@ func TestToConfigTagFilterRejections(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestToConfigFilterBoundsAreInclusive pins the accepted edge of both
+// filters.* list bounds, which only the rejection tables above touch today. Both
+// errors say "more than", and the caps are what the README publishes as the
+// allowed size, so a bound read one entry tight refuses a config the operator
+// wrote to spec and stops the app at startup with a message that says the list is
+// too long when it is not.
+func TestToConfigFilterBoundsAreInclusive(t *testing.T) {
+	t.Run("an ignore list exactly at the bound is accepted", func(t *testing.T) {
+		ids := make([]int, 0, maxIgnoreIDs)
+		for i := range maxIgnoreIDs {
+			ids = append(ids, i+1)
+		}
+		fc := defaultFileConfig()
+		fc.Filters.Ignore = ids
+
+		c := fc.toConfig()
+
+		if c.ignoreErr != nil {
+			t.Fatalf("ignoreErr = %v for a list of exactly %d ids, want nil", c.ignoreErr, maxIgnoreIDs)
+		}
+		if len(c.IgnoreFindings) != maxIgnoreIDs {
+			t.Errorf("IgnoreFindings holds %d ids, want %d", len(c.IgnoreFindings), maxIgnoreIDs)
+		}
+	})
+	t.Run("an exclude_tags map exactly at the bound is accepted", func(t *testing.T) {
+		tags := make(map[string][]string, maxExcludeTags)
+		for i := range maxExcludeTags {
+			tags["tag"+strconv.Itoa(i)] = []string{"feed"}
+		}
+		fc := defaultFileConfig()
+		fc.Filters.ExcludeTags = tags
+
+		c := fc.toConfig()
+
+		if c.tagFilterErr != nil {
+			t.Fatalf("tagFilterErr = %v for a map of exactly %d tags, want nil", c.tagFilterErr, maxExcludeTags)
+		}
+		if !c.TagFilter.Excludes([]string{"tag0"}, tagfilter.SurfaceFeed) {
+			t.Error("a map exactly at the bound produced no exclusions")
+		}
+	})
 }
 
 // TestValidateSurfacesTagFilterError pins that a rejected filters.exclude_tags

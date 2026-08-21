@@ -99,6 +99,11 @@ func TestLiteral(t *testing.T) {
 		{"s", `[sS]`},
 		{"i", `[iI\x{0130}]`},
 		{"k", `[kK\x{212A}]`},
+		// Both ends of the ASCII uppercase range, spelled out: the fold that
+		// gives an uppercase token its case class is written as a range, and a
+		// letter outside it renders as a case-SENSITIVE literal instead.
+		{"A", `[aA]`},
+		{"Z", `[zZ]`},
 		{"CRF", `[cC][rR][fF]`},
 		{"crf", `[cC][rR][fF]`},
 		{"1080p", `1080[pP]`},

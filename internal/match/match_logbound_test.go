@@ -58,3 +58,60 @@ func TestFindByTitleBoundsAmbiguousTitleLog(t *testing.T) {
 		t.Errorf("titles attribute has no %q suffix despite truncation", logattr.TruncMarker)
 	}
 }
+
+// TestFindByTitleAmbiguousLogJoinsEveryTitleItSearched pins the CONTENT of that
+// same attribute: the ambiguous line is the only record of which titles the
+// fallback tried, and an operator reading it splits the value on the separator to
+// see them. One title cannot show a separator at all, so this is where the joined
+// shape is pinned - a value with a leading separator or with the titles run
+// together reads as a different title set than the one that was searched.
+func TestFindByTitleAmbiguousLogJoinsEveryTitleItSearched(t *testing.T) {
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Frieren"},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Frieren"},
+	}})
+	logger, recorder := capture.New()
+	titles := []string{"Frieren", "Sousou no Frieren"}
+
+	if got := li.findByTitle(titles, 0, library.ArrSonarr, logger); got != nil {
+		t.Errorf("findByTitle(%q) = %+v, want nil for an ambiguous title", titles, got)
+	}
+
+	const msg = "title fallback ambiguous, treating as unmapped"
+	got, ok := recorder.AttrValueExact(msg, "titles")
+	if !ok {
+		t.Fatalf("no titles attribute on the ambiguous line; captured messages: %q", recorder.Messages())
+	}
+	if want := "Frieren, Sousou no Frieren"; got != want {
+		t.Errorf("titles attribute = %q, want %q", got, want)
+	}
+}
+
+// TestFindByTitleYearMismatchLogFiresOnlyWhenTheYearEliminatedEverything pins
+// both sides of the year-narrowing diagnostic. It is the line that explains a
+// SILENT unmapped entry - the library holds the title, the AniList year disagrees,
+// and nothing else says so - so it has to fire exactly when that happened: on a
+// narrowing that kept the item it would explain a match that was never lost, and
+// an operator reading it would go looking for a year conflict that is not there.
+func TestFindByTitleYearMismatchLogFiresOnlyWhenTheYearEliminatedEverything(t *testing.T) {
+	const msg = "title fallback year mismatch, treating as unmapped"
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Frieren", Year: 2023},
+	}})
+
+	kept, keptRecorder := capture.New()
+	if got := li.findByTitle([]string{"Frieren"}, 2023, library.ArrSonarr, kept); got == nil {
+		t.Error("findByTitle() = nil for a matching year, want the library item")
+	}
+	if keptRecorder.Contains(msg) {
+		t.Errorf("the year-mismatch line fired for a year that kept the candidate: %q", keptRecorder.Messages())
+	}
+
+	eliminated, eliminatedRecorder := capture.New()
+	if got := li.findByTitle([]string{"Frieren"}, 1999, library.ArrSonarr, eliminated); got != nil {
+		t.Errorf("findByTitle() = %+v for a mismatched year, want nil", got)
+	}
+	if !eliminatedRecorder.Contains(msg) {
+		t.Errorf("no year-mismatch line after the year eliminated the only candidate: %q", eliminatedRecorder.Messages())
+	}
+}

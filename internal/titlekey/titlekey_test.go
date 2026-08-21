@@ -55,6 +55,14 @@ func TestContainsKey(t *testing.T) {
 		{"title-length key as a word suffix is refused", "[Grp] Propagate - S01 (BD 1080p)", "gate", false},
 		{"title-length key inside a CamelCase token is refused", "[Grp] ReZero - S01 (BD 1080p)", "zero", false},
 		{"key straddling token boundaries is refused", "[Grp] Sousou no Frieren - S01", "ousounofrier", false},
+		// The split class is the same [0-9a-z] alphabet Normalize keeps, and its
+		// range ends are where a rune silently leaves that alphabet: a rune read
+		// as a separator splits one token in two, so a key that really is a run
+		// of the candidate's tokens stops matching. ("a" is pinned by the
+		// adjacent-token case above.)
+		{"a leading-range digit continues a token", "[Grp] Mobile Suit Gundam 00 - S01", "gundam00", true},
+		{"a trailing-range digit continues a token", "[Grp] Show 99 - S01 (BD 1080p)", "show99", true},
+		{"the last letter continues a token", "[Grp] Re Zero - S01 (BD 1080p)", "rezero", true},
 		{"Unicode capital in the candidate lowercases into a token", "[Grp] \u0130stanbul - S01 (BD 1080p)", "istanbul", true},
 	}
 	for _, tt := range tests {

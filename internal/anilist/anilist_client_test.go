@@ -76,6 +76,33 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	}
 }
 
+// TestBackOffWarnsFromTheImplausibleWindowEdge pins the threshold of the
+// absurd-window trace, which the 24h tests above sit far above. The trace exists
+// because clamping silently leaves no evidence that the upstream stated a window
+// this app refused, and the threshold is where "long" becomes "not a rate-limit
+// window at all" - inclusive, so the stated value AT it is already absurd. The
+// edge is only reachable by calling the ceiling directly: the reset-header path
+// computes its wait from the clock, so it can never land on the constant exactly.
+func TestBackOffWarnsFromTheImplausibleWindowEdge(t *testing.T) {
+	const msg = "anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead"
+	rec := capture.Default(t)
+	c := NewClient(http.DefaultClient, "https://example.test")
+
+	if got := c.backOff(implausibleWindow - time.Nanosecond); got != maxThrottlePenalty {
+		t.Errorf("backOff(just below the implausible window) = %v, want the ceiling %v", got, maxThrottlePenalty)
+	}
+	if got := rec.CountExact(msg); got != 0 {
+		t.Errorf("absurd-window WARN count = %d for a window below the threshold, want 0", got)
+	}
+
+	if got := c.backOff(implausibleWindow); got != maxThrottlePenalty {
+		t.Errorf("backOff(the implausible window) = %v, want the ceiling %v", got, maxThrottlePenalty)
+	}
+	if got := rec.CountExact(msg); got != 1 {
+		t.Errorf("absurd-window WARN count = %d for a window exactly at the threshold, want 1", got)
+	}
+}
+
 // TestDo429WithoutRetryAfterUsesDefault pins the fallback wait when the 429
 // carries no Retry-After header, and the stable error message the retry loop
 // and degraded-lookup logs carry.
@@ -398,6 +425,53 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	if got := out[1].Titles; !slices.Equal(got, []string{"t1"}) {
 		t.Errorf("out[1].Titles = %v, want [t1] (valid sibling must survive)", got)
 	}
+}
+
+// TestParseMediaPageRejectionCountCharges pins the magnitude annotation itself,
+// which is the operator's only way to tell ONE poisoned record from a wholesale
+// schema drift. Two properties carry it. A duplicate charges the records the
+// conflict excluded - the offender plus the record it invalidated - and nothing
+// else, so the count stays a count of records and cannot exceed the batch. And a
+// SINGLE offender carries no annotation at all: the first offender's own message
+// already names it, so a "(1 of N)" suffix would make every ordinary poisoned
+// record read as a systemic failure. The existing duplicate table cannot see
+// either property: its conflicts all land with the accepted set already empty.
+func TestParseMediaPageRejectionCountCharges(t *testing.T) {
+	t.Run("a duplicate charges only what the conflict excluded", func(t *testing.T) {
+		raw := []byte(`{"data":{"Page":{"media":[` +
+			`{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"kept"}},` +
+			`{"id":2,"format":"TV","seasonYear":2021,"title":{"romaji":"first"}},` +
+			`{"id":2,"format":"TV","seasonYear":2022,"title":{"romaji":"second"}}]}}}`)
+
+		out, err := parseMediaPage(raw)
+
+		if err == nil {
+			t.Fatal("parseMediaPage must surface the duplicate id")
+		}
+		if want := "(2 of 3 records rejected)"; !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want magnitude %q (the duplicate and the record it invalidated)", err, want)
+		}
+		if got := out[1].Titles; !slices.Equal(got, []string{"kept"}) {
+			t.Errorf("out[1].Titles = %v, want [kept] (the unrelated record survives)", got)
+		}
+	})
+	t.Run("a single offender carries no magnitude", func(t *testing.T) {
+		raw := []byte(`{"data":{"Page":{"media":[` +
+			`{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"kept"}},` +
+			`{"id":0,"title":{"romaji":"poisoned"}}]}}}`)
+
+		out, err := parseMediaPage(raw)
+
+		if err == nil {
+			t.Fatal("parseMediaPage must surface the missing id")
+		}
+		if strings.Contains(err.Error(), "records rejected") {
+			t.Errorf("error = %v, want no magnitude suffix for a single rejected record", err)
+		}
+		if got := out[1].Titles; !slices.Equal(got, []string{"kept"}) {
+			t.Errorf("out[1].Titles = %v, want [kept]", got)
+		}
+	})
 }
 
 // TestParseMediaPageDuplicateIDExcluded pins the duplicate-id policy: records
@@ -1039,6 +1113,13 @@ func TestTransientEnvelopeStatusRetries(t *testing.T) {
 			body:      `{"data":{"Media":null},"errors":[{"message":"Not Found.","status":404}]}`,
 			wantCalls: 1,
 			wantFound: true,
+		},
+		// errors[].status is untrusted upstream JSON, not a status line: a value
+		// outside the HTTP range names no self-healing fault, so it must not buy
+		// the full retry budget. 600 is the first such value.
+		"out-of-range envelope status is terminal": {
+			body:      `{"data":{"Media":null},"errors":[{"message":"Internal Server Error","status":600}]}`,
+			wantCalls: 1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

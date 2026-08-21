@@ -142,6 +142,10 @@ func TestPublishRelativeShapeFloor(t *testing.T) {
 		"delimiter-only query drops":            {raw: "/view?", want: ""},
 		"delimiter-only fragment drops":         {raw: "/view#", want: ""},
 		"delimiter-only pair drops":             {raw: "/view?#", want: ""},
+		// The same rule with the fragment CARRYING content: the query is still
+		// empty, and a fragment behind it is resolved client-side, so the value
+		// still names the single-segment page the floor refuses.
+		"fragment content behind an empty query drops": {raw: "/view?#1167293", want: ""},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -268,14 +272,20 @@ func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 		"an encoded dot segment drops":             {"Nyaa", "https://nyaa.si/%2e", ""},
 		"an encoded double-dot segment drops":      {"Nyaa", "https://nyaa.si/%2e%2e/", ""},
 		"a dot segment before a target publishes":  {"Nyaa", "https://nyaa.si/../view/1", "https://nyaa.si/../view/1"},
-		"a targeted root query still publishes":    {"Nyaa", "nyaa.si/?page=view&tid=1", "https://nyaa.si/?page=view&tid=1"},
-		"a fragment-only root tail drops":          {"Nyaa", "nyaa.si/#1167293", ""},
-		"an absolute fragment-only tail drops":     {"Nyaa", "https://nyaa.si/#1167293", ""},
-		"a pathless fragment-only tail drops":      {"Nyaa", "https://nyaa.si#1167293", ""},
-		"a fragment cannot mask a dot-only path":   {"Nyaa", "nyaa.si/.#x", ""},
-		"a fragment on a real path publishes":      {"Nyaa", "nyaa.si/view/1#Frag", "https://nyaa.si/view/1#Frag"},
-		"a real torrent path still publishes":      {"Nyaa", "nyaa.si/view/1", "https://nyaa.si/view/1"},
-		"an absolute torrent path still publishes": {"Nyaa", "https://nyaa.si/view/1", "https://nyaa.si/view/1"},
+		// A dot segment names nothing once a client resolves it, so it can never
+		// make up the second segment the floor requires: both of these resolve
+		// to a page the floor refuses on its own ("/" and "/view").
+		"a dot segment cannot stand in for a segment":      {"Nyaa", "nyaa.si/view/..", ""},
+		"an encoded dot segment cannot stand in for one":   {"Nyaa", "https://nyaa.si/%2e/view", ""},
+		"a pathless fragment carrying slashes still drops": {"Nyaa", "https://nyaa.si#a/b", ""},
+		"a targeted root query still publishes":            {"Nyaa", "nyaa.si/?page=view&tid=1", "https://nyaa.si/?page=view&tid=1"},
+		"a fragment-only root tail drops":                  {"Nyaa", "nyaa.si/#1167293", ""},
+		"an absolute fragment-only tail drops":             {"Nyaa", "https://nyaa.si/#1167293", ""},
+		"a pathless fragment-only tail drops":              {"Nyaa", "https://nyaa.si#1167293", ""},
+		"a fragment cannot mask a dot-only path":           {"Nyaa", "nyaa.si/.#x", ""},
+		"a fragment on a real path publishes":              {"Nyaa", "nyaa.si/view/1#Frag", "https://nyaa.si/view/1#Frag"},
+		"a real torrent path still publishes":              {"Nyaa", "nyaa.si/view/1", "https://nyaa.si/view/1"},
+		"an absolute torrent path still publishes":         {"Nyaa", "https://nyaa.si/view/1", "https://nyaa.si/view/1"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

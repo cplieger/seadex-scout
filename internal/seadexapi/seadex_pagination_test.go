@@ -2,6 +2,7 @@ package seadexapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -321,6 +322,47 @@ func TestFetchEntriesWholeWalkDeadlineAborts(t *testing.T) {
 		}
 		if elapsed := time.Since(started); elapsed != maxFetchDuration {
 			t.Errorf("elapsed = %s, want the internal deadline %s", elapsed, maxFetchDuration)
+		}
+	})
+}
+
+// stalledTransport accepts a request and then never answers: it blocks until the
+// request's own context is done and reports that context's error, modelling an
+// upstream that took the connection and stopped talking mid-response. Unlike
+// staticPageTransport it makes the WALK's deadline land inside a request rather
+// than in the politeness sleep between two of them.
+type stalledTransport struct{}
+
+func (stalledTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestFetchEntriesWalkDeadlineInsideARequestNamesTheBudget pins the diagnostic
+// for the whole-walk deadline expiring INSIDE a request: a bare "context
+// deadline exceeded" is indistinguishable from the per-request client timeout and
+// names no remedy, so the walk's own budget - which no caller configured and no
+// caller can see - has to name itself and the page it died on. The caller's
+// context is live here, which is what separates this from a shutdown: a
+// shutdown-cancelled walk keeps its own error so the root still classifies it as
+// a routine stop rather than a stalled upstream.
+func TestFetchEntriesWalkDeadlineInsideARequestNamesTheBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := NewClient(&http.Client{Transport: stalledTransport{}}, "https://example.test")
+
+		entries, err := client.FetchEntries(t.Context(), Options{})
+
+		if err == nil {
+			t.Fatalf("FetchEntries = %d entries, want the walk-budget error", len(entries))
+		}
+		if entries != nil {
+			t.Errorf("entries = %+v, want nil (a stalled walk must never reach the comparison)", entries)
+		}
+		if want := fmt.Sprintf("catalogue walk exceeded its %s budget on page 1", maxFetchDuration); !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err.Error(), want)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("error = %v, want it to keep wrapping context.DeadlineExceeded", err)
 		}
 	})
 }
@@ -881,6 +923,12 @@ func TestFetchEntriesUnusableCursorAborts(t *testing.T) {
 	if !strings.Contains(err.Error(), "carries no usable keyset cursor") {
 		t.Errorf("error = %q, want the unusable-cursor refusal", err.Error())
 	}
+	// The refusal's whole job beyond aborting is naming WHICH record drifted -
+	// both key fields are blank in the message, so the position is the only
+	// handle an operator has on a 500-record chunk.
+	if want := fmt.Sprintf("record %d of %d", perPage, perPage); !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to name the offending record as %q", err.Error(), want)
+	}
 	if reqs != 1 {
 		t.Errorf("requests = %d, want 1 (the walk aborts instead of re-requesting the same chunk)", reqs)
 	}
@@ -942,5 +990,11 @@ func TestFetchEntriesDisorderedShortChunkAborts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "keyset cursor did not advance past") {
 		t.Errorf("error = %q, want the non-advancing-cursor refusal", err.Error())
+	}
+	// Two records, and it is the SECOND that regresses: the position is what
+	// tells an operator whether one record drifted or the upstream ignored the
+	// sort order from the start.
+	if want := "at record 2 of 2"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to name the offending record as %q", err.Error(), want)
 	}
 }
