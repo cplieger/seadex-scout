@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/jsoncap/v2"
-	"github.com/cplieger/jsonx"
+	"github.com/cplieger/jsonx/v2"
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )

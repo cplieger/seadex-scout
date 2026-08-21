@@ -9,7 +9,7 @@ require (
 	github.com/cplieger/health v1.6.0
 	github.com/cplieger/httpx/v5 v5.0.0
 	github.com/cplieger/jsoncap/v2 v2.0.0
-	github.com/cplieger/jsonx v1.4.2
+	github.com/cplieger/jsonx/v2 v2.0.0
 	github.com/cplieger/keyenc v1.0.5
 	github.com/cplieger/runesafe/v2 v2.0.0
 	github.com/cplieger/scheduler/v4 v4.0.0
