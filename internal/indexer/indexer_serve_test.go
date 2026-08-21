@@ -945,3 +945,40 @@ func TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt(t *testing.T) {
 		t.Errorf("warned about a parked passkey for a tracker with no ab_torznab_url: %v", offRec.Messages())
 	}
 }
+
+// TestServeCompleteFeedReportsNoDeliveryFault pins the absence side of the two
+// reports that qualify what the arr actually received. The request INFO line
+// reports what was rendered, so a partial write and a byte-budget truncation
+// each need their own line or the log claims a delivery it did not make - and
+// the inverse costs just as much: a complete feed delivered to a client that is
+// still there must claim neither, or the operator learns to discount both.
+func TestServeCompleteFeedReportsNoDeliveryFault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{},
+		NyaaFeed: []journalItem{
+			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", Key: "nyaa:42", FirstSeen: time.Now().UTC().Add(-time.Hour)},
+		},
+	})
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{SnapshotPath: path, APIKey: "k", NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
+
+	w := httptest.NewRecorder()
+	ix.serve(w, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("feed request status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "Show - S01 (1080p) [G]") {
+		t.Fatalf("feed body did not carry the journaled item: %q", w.Body.String())
+	}
+	for _, msg := range []string{
+		"indexer feed truncated by the render byte budget",
+		"indexer feed write failed; client received a partial feed",
+		"indexer feed write deadline expired mid-body; the arr received a partial feed",
+	} {
+		if n := rec.Count(msg); n != 0 {
+			t.Errorf("a complete feed response logged %q %d times, want 0:\n%s", msg, n, strings.Join(rec.Messages(), "\n"))
+		}
+	}
+}

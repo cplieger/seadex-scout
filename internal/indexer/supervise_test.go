@@ -171,3 +171,27 @@ func TestSuperviseStopForcesTheFeedDownUnderALiveParent(t *testing.T) {
 		t.Errorf("stop waited out the %v drain budget instead of stopping the feed: %v", stopWait, rec.Messages())
 	}
 }
+
+// TestSuperviseCleanReturnLogsNothing pins the silence of a feed that returns
+// without an error: there is no stop to classify, so nothing is logged at all.
+// Every classification arm logStop can pick is a WARN or an ERROR, and
+// SeadexScoutCycleError keys on level=ERROR, so routing a clean return into it
+// would page the operator on an ordinary exit - and once that fires routinely,
+// the same alert stops meaning anything when the feed really does fail.
+func TestSuperviseCleanReturnLogsNothing(t *testing.T) {
+	log, rec := capture.New()
+	done := make(chan struct{})
+	cleaned := make(chan struct{})
+
+	supervise(t.Context(), done, func(context.Context) error { return nil }, func() { close(cleaned) }, log)
+	<-done
+
+	select {
+	case <-cleaned:
+	default:
+		t.Error("cleanup did not run before done was closed")
+	}
+	if rec.Len() != 0 {
+		t.Errorf("a feed that returned cleanly logged %d records, want none: %v", rec.Len(), rec.Messages())
+	}
+}

@@ -1283,6 +1283,26 @@ func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
 	}
 }
 
+// TestParseCatsRejectsNonPositiveCategoryIDs pins the domain invariant the
+// parent leg of the category match rests on. categoryMatch derives an item's
+// parent as c-c%1000, which is 0 for every id below 1000, so a requested set
+// that ever contained 0 would match those items on the parent leg alone and
+// widen the feed the arr auto-grabs from. The cat list is client text, so a
+// stray 0 or a negative id has to drop out of the set rather than be trusted.
+func TestParseCatsRejectsNonPositiveCategoryIDs(t *testing.T) {
+	got := parseCats("0,-5,5070, 2000 ,abc,")
+	if len(got) != 2 || !got[catAnime] || !got[catMovies] {
+		t.Fatalf("parseCats = %v, want only {%d, %d}", got, catMovies, catAnime)
+	}
+
+	// The consequence: a requested 0 alongside a real category must not carry a
+	// sub-1000 item in on the parent leg.
+	items := []item{{Title: "sub-1000 tracker category", Categories: []int{42}}}
+	if kept := filterByCats(items, parseCats("0,5070")); len(kept) != 0 {
+		t.Errorf("filterByCats with a requested category 0 kept %#v, want no items", kept)
+	}
+}
+
 // TestFilterByCatsAppliesTorznabCategorySemantics pins the Torznab category
 // filter contract: an Anime item satisfies a TV-parent request, Movies excludes
 // Anime, and an uncategorized item always passes through (Prowlarr already

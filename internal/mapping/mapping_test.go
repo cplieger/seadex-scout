@@ -34,6 +34,20 @@ func TestRecord_IsSpecial(t *testing.T) {
 	}
 }
 
+// TestRecord_HasMappedSeason pins the season predicate to a POSITIVE Fribb
+// season. Season 0 is what an unmapped record and a Fribb-typed special both
+// carry, so admitting it would relabel a pack's season half to S00 on the
+// strength of a season the upstream never stated, and would count every
+// seasonless record toward the season-scoped population.
+func TestRecord_HasMappedSeason(t *testing.T) {
+	tests := map[int]bool{-1: false, 0: false, 1: true, 12: true}
+	for season, want := range tests {
+		if got := (&Record{SeasonTvdb: season}).HasMappedSeason(); got != want {
+			t.Errorf("Record{SeasonTvdb: %d}.HasMappedSeason() = %v, want %v", season, got, want)
+		}
+	}
+}
+
 // TestRecord_HasArrIdentifier pins the arr-routed identifier predicate: only
 // the fields the record's routed arr consumes count (TMDB-movie/IMDb for
 // movies, TVDB for series), so a wrong-arm identifier can neither satisfy the
@@ -540,5 +554,152 @@ func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
 	}
 	if n := belowRec.CountExact(approachingSizeCapMessage); n != 0 {
 		t.Errorf("a body one byte below the threshold warned %d times, want 0: %v", n, belowRec.Messages())
+	}
+}
+
+// censusBody is a four-record Fribb body whose populations are all distinct, so
+// a count attributed to the wrong population is visible: three records carry a
+// type, one carries a positive TVDB season, one is a special, three resolve in
+// their routed arr (one movie, two series), and the last record carries neither
+// a type nor an identifier.
+const censusBody = `[{"anilist_id":10,"type":"tv","tvdb_id":200},` +
+	`{"anilist_id":11,"type":"movie","themoviedb_id":{"movie":[5]}},` +
+	`{"anilist_id":12,"type":"ova","tvdb_id":300,"season":{"tvdb":2}},` +
+	`{"anilist_id":13}]`
+
+// TestAcceptRefresh_logsTheCandidateCensus pins the population census the
+// accepted-refresh line carries. Each guard refuses only a below-half collapse,
+// so a routing or type loss shallower than that is accepted, and these counts
+// are the ONLY operator-visible record that it happened: a count that drifts
+// from the records it describes retires the signal while still logging a line.
+func TestAcceptRefresh_logsTheCandidateCensus(t *testing.T) {
+	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+	logger, rec := capture.New()
+	at := &Loader{log: logger}
+	if _, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: []byte(censusBody)}); err != nil {
+		t.Fatalf("acceptRefresh(census body) = %v, want the refresh accepted", err)
+	}
+	if n := rec.CountExact("mapping: refreshed"); n != 1 {
+		t.Fatalf("accepted refresh logged %d refreshed lines, want 1: %v", n, rec.Messages())
+	}
+	for key, want := range map[string]string{
+		"records":               "4",
+		"typed_records":         "3",
+		"season_scoped_records": "1",
+		"special_records":       "1",
+		"routed_identifiers":    "3",
+		"movie_routed":          "1",
+		"series_routed":         "2",
+	} {
+		got, ok := rec.AttrValueExact("mapping: refreshed", key)
+		if !ok {
+			t.Errorf("refreshed log carries no %s attribute; logs = %v", key, rec.Messages())
+			continue
+		}
+		if got != want {
+			t.Errorf("refreshed log %s = %s, want %s", key, got, want)
+		}
+	}
+}
+
+// TestAcceptRefresh_revalidatableReportsAPersistedValidator pins the
+// revalidatable attribute on the accepted-refresh line: it tells the operator
+// whether the next cycle can revalidate cheaply or must re-download the whole
+// list, and EITHER validator alone is enough to make it true.
+func TestAcceptRefresh_revalidatableReportsAPersistedValidator(t *testing.T) {
+	for name, tc := range map[string]struct {
+		validators httpx.Validators
+		want       string
+	}{
+		"etag only":          {httpx.Validators{ETag: `"v9"`}, "true"},
+		"last-modified only": {httpx.Validators{LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"}, "true"},
+		"neither":            {httpx.Validators{}, "false"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+			logger, rec := capture.New()
+			at := &Loader{log: logger}
+			res := httpx.ConditionalResult{Body: []byte(censusBody), Validators: tc.validators}
+			if _, err := at.acceptRefresh(prev, res); err != nil {
+				t.Fatalf("acceptRefresh(%+v) = %v, want the refresh accepted", tc.validators, err)
+			}
+			got, ok := rec.AttrValueExact("mapping: refreshed", "revalidatable")
+			if !ok {
+				t.Fatalf("refreshed log carries no revalidatable attribute; logs = %v", rec.Messages())
+			}
+			if got != tc.want {
+				t.Errorf("acceptRefresh(%+v) logged revalidatable=%s, want %s", tc.validators, got, tc.want)
+			}
+		})
+	}
+}
+
+// shrinkingBody replaces a four-record cache with one record, which is below
+// half and so trips the shrink guard - a PERSISTENT refusal, because the same
+// upstream body is refused identically on every cycle.
+const shrinkingBody = `[{"anilist_id":9,"type":"tv","tvdb_id":900}]`
+
+// fourRecordCache is the usable stale cache the shrink guard measures against.
+func fourRecordCache() *Cache {
+	return &Cache{Records: []Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "TV", TvdbID: 200},
+		{AniListID: 3, Type: "TV", TvdbID: 300},
+		{AniListID: 4, Type: "TV", TvdbID: 400},
+	}}
+}
+
+// TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators pins the
+// suppression the refusal memory buys: a body the acceptance pipeline refuses
+// persistently is remembered by its validators, so the next cycle asks about
+// that body with a conditional GET instead of re-downloading ~5.9 MB for as
+// long as the refusal lasts. Both validators are remembered, since either one
+// alone is enough for the upstream to answer 304.
+func TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators(t *testing.T) {
+	const lastModified = "Mon, 02 Jan 2006 15:04:05 GMT"
+	prev := fourRecordCache()
+	at := &Loader{log: discardLogger()}
+	res := httpx.ConditionalResult{
+		Body:       []byte(shrinkingBody),
+		Validators: httpx.Validators{ETag: `"v9"`, LastModified: lastModified},
+	}
+	next, err := at.acceptRefresh(prev, res)
+	if err == nil {
+		t.Fatal("acceptRefresh(below-half body) = nil error, want the shrink-guard refusal")
+	}
+	if next.RejectedRefreshes != prev.RejectedRefreshes+1 {
+		t.Fatalf("acceptRefresh RejectedRefreshes = %d, want %d (a shrink refusal is persistent)", next.RejectedRefreshes, prev.RejectedRefreshes+1)
+	}
+	if next.RefusedETag != `"v9"` {
+		t.Errorf("acceptRefresh RefusedETag = %q, want %q", next.RefusedETag, `"v9"`)
+	}
+	if next.RefusedLastModified != lastModified {
+		t.Errorf("acceptRefresh RefusedLastModified = %q, want %q", next.RefusedLastModified, lastModified)
+	}
+}
+
+// TestAcceptRefresh_transientRefusalDoesNotRememberValidators pins the other
+// side: a body that failed for a reason which can self-heal next cycle (a
+// truncated download) must NOT be remembered as refused. Remembering it would
+// make the next cycle ask about a body the upstream still serves happily, so a
+// 304 would then classify as refused-unchanged and freeze the map stale on a
+// failure that was never the body's fault.
+func TestAcceptRefresh_transientRefusalDoesNotRememberValidators(t *testing.T) {
+	prev := fourRecordCache()
+	at := &Loader{log: discardLogger()}
+	res := httpx.ConditionalResult{
+		Body:       []byte(`[{"anilist_id":1,`), // truncated mid-record
+		Validators: httpx.Validators{ETag: `"v9"`, LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"},
+	}
+	next, err := at.acceptRefresh(prev, res)
+	if err == nil {
+		t.Fatal("acceptRefresh(truncated body) = nil error, want the stale-map refusal")
+	}
+	if next.RejectedRefreshes != prev.RejectedRefreshes {
+		t.Fatalf("acceptRefresh RejectedRefreshes = %d, want %d (a truncated body is transient)", next.RejectedRefreshes, prev.RejectedRefreshes)
+	}
+	if next.RefusedETag != "" || next.RefusedLastModified != "" {
+		t.Errorf("acceptRefresh remembered refused validators (%q, %q) for a transient failure, want neither",
+			next.RefusedETag, next.RefusedLastModified)
 	}
 }
