@@ -717,3 +717,56 @@ func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
 		t.Fatalf("fresh-but-unmappable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
 	}
 }
+
+// TestLoader_refreshCache_asksAboutTheRefusedBodyWithEitherValidator pins which
+// validators a cycle following a persistent refusal puts on the wire: the
+// REFUSED body's, so the upstream can answer 304 and the ~5.9 MB list is not
+// re-downloaded for as long as the refusal lasts. Either validator alone is
+// enough to ask with, and the upstream chooses which it honours - a cycle that
+// asked with neither would download the whole refused list again every time,
+// and the 304 that classifies the body as unchanged could never arrive.
+func TestLoader_refreshCache_asksAboutTheRefusedBodyWithEitherValidator(t *testing.T) {
+	const lastModified = "Mon, 02 Jan 2006 15:04:05 GMT"
+	for name, tc := range map[string]struct {
+		refusedETag         string
+		refusedLastModified string
+		wantIfNoneMatch     string
+		wantIfModifiedSince string
+	}{
+		"etag only":          {refusedETag: `"v9"`, wantIfNoneMatch: `"v9"`},
+		"last-modified only": {refusedLastModified: lastModified, wantIfModifiedSince: lastModified},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var requests atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if got := r.Header.Get("If-None-Match"); got != tc.wantIfNoneMatch {
+					t.Errorf("If-None-Match = %q, want %q", got, tc.wantIfNoneMatch)
+				}
+				if got := r.Header.Get("If-Modified-Since"); got != tc.wantIfModifiedSince {
+					t.Errorf("If-Modified-Since = %q, want %q", got, tc.wantIfModifiedSince)
+				}
+				w.WriteHeader(http.StatusNotModified)
+			}))
+			defer ts.Close()
+
+			prev := &Cache{
+				FetchedAt:           time.Now().Add(-2 * time.Hour),
+				Records:             []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+				RefusedETag:         tc.refusedETag,
+				RefusedLastModified: tc.refusedLastModified,
+			}
+			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
+			next, err := l.refreshCache(t.Context(), prev)
+			if err == nil {
+				t.Fatal("304 on the refused body returned nil error, want the stale map kept")
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("conditional requests = %d, want 1", requests.Load())
+			}
+			if next.RejectedRefreshes != 1 {
+				t.Errorf("RejectedRefreshes = %d, want 1 (an unchanged refused body is a persistent refusal)", next.RejectedRefreshes)
+			}
+		})
+	}
+}

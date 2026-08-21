@@ -2273,3 +2273,84 @@ func TestCensusMarkerIgnoresOccurrencesWithoutAMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestRebuildCountsNewlyJournaledItems pins journal_new, the counter the pass
+// line leads with: it is how an operator tells a rebuild that admitted curation
+// from one that admitted none, and it is the number every other journal counter
+// is read against. Two entries journal two items, so a count that does not track
+// what was actually added shows up here rather than being inferred from the feed
+// length on the same line.
+func TestRebuildCountsNewlyJournaledItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	log, rec := capture.New()
+	entries := []seadex.Entry{
+		nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv"),
+		nyaaEntry(8, 43, true, "Other - S01E01 (1080p) [G].mkv"),
+	}
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 2 {
+		t.Fatalf("nyaa feed = %+v, want the two new items journaled", snap.NyaaFeed)
+	}
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_new"); !ok || got != "2" {
+		t.Errorf("journal_new = %q (found=%v), want 2; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildPrunesAndCountsAnAgedCarriedItem pins journal_pruned. Expiry is the
+// journal's only bound, so this counter is what tells an operator the window is
+// turning over at all: a feed that stopped pruning grows until the snapshot hits
+// its byte cap and every later rebuild is refused, and until then the only signal
+// is this number staying at zero while items keep arriving.
+func TestRebuildPrunesAndCountsAnAgedCarriedItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	aged := time.Now().UTC().Add(-feedJournalMaxAge - time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:42": true},
+		NyaaFeed: []journalItem{
+			{Title: "Aged Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", PubDate: aged, Key: "nyaa:42", AniListID: 7, FirstSeen: aged},
+		},
+	})
+	log, rec := capture.New()
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want the aged item pruned", snap.NyaaFeed)
+	}
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_pruned"); !ok || got != "1" {
+		t.Errorf("journal_pruned = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildDropsACarriedItemNamingAnotherTrackerScope pins the scope binding a
+// carried item's key carries, and its count. A key naming the OTHER tracker
+// reaches only a corrupted or hand-edited snapshot, and carrying it would
+// re-render it with the wrong tracker's download link and spend a rate-paced
+// harvest query against the wrong upstream, so it is dropped on the feed it was
+// loaded from - counted, because a silent drop repeating every rebuild for the
+// item's whole journal window looks exactly like a feed that simply has no data.
+func TestRebuildDropsACarriedItemNamingAnotherTrackerScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{"ab:99": true},
+		NyaaFeed: []journalItem{
+			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", PubDate: first, Key: "ab:99", AniListID: 7, FirstSeen: first},
+		},
+	})
+	log, rec := capture.New()
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want the wrong-scope item dropped", snap.NyaaFeed)
+	}
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "1" {
+		t.Errorf("journal_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	}
+}

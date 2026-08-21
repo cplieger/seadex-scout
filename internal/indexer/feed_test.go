@@ -1191,3 +1191,38 @@ func TestPackFromTitleReadsSonarrCleanedTitles(t *testing.T) {
 		})
 	}
 }
+
+// TestLastSubmatchIndexFindsAMarkerAdjacentToThePrevious commits the boundary the
+// scan's rebased offsets turn on: an absolute marker that begins exactly where
+// the previous match ended, which happens whenever two delimiters sit between
+// two markers. Resuming one byte past the previous match instead of AT it still
+// finds every well-separated marker, so it returns the wrong - earlier - span
+// only for this shape, and every season and episode decision in this file reads
+// its title slice offsets from that span. The randomized sibling reaches this
+// only when its draw happens to place two markers adjacently, so the input is
+// pinned here rather than left to the draw.
+func TestLastSubmatchIndexFindsAMarkerAdjacentToThePrevious(t *testing.T) {
+	tests := map[string]struct {
+		name string
+		want []int
+	}{
+		// "Show - 07  - 1085 ": the first marker ends at 10 having consumed one
+		// space, and the second starts there on the other one.
+		"double-space separated markers": {"Show - 07  - 1085 ", []int{10, 18, 13, 17}},
+		// The underscore-named form of the same shape ("_Show_-_02__-_03_").
+		"double-underscore separated markers": {"Show_-_02__-_03_", []int{10, 16, 13, 15}},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := lastSubmatchIndex(absoluteEpisode, tc.name)
+			if len(got) != len(tc.want) {
+				t.Fatalf("lastSubmatchIndex(absoluteEpisode, %q) = %v, want %v", tc.name, got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("lastSubmatchIndex(absoluteEpisode, %q) = %v, want %v (index %d differs)", tc.name, got, tc.want, i)
+				}
+			}
+		})
+	}
+}

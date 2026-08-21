@@ -63,3 +63,32 @@ func TestValidateRefreshedRecordsRoutingMidBandCollapseRejected(t *testing.T) {
 		t.Error("mid-band series-routed collapse (1800 -> 800, above the 1% floor) returned nil error, want rejection")
 	}
 }
+
+// TestValidateRefreshedRecordsCollapseExactlyAtTheSignificanceFloorRejected
+// pins the inclusive end of the shrink guard's significance gate. The gate
+// exists so a SPARSE population keeps its exemption, and a population sitting
+// exactly on the previously accepted cache's own 1% floor is not sparse - it is
+// the smallest population the guard is defined over, so a below-half collapse
+// of it must still be refused. Movie-routed 3 -> 1 over a 300-record cache
+// (floor 3) is that boundary: one record short of the floor the same collapse
+// is exempt, so an exclusive gate would silently give the smallest guarded
+// population away.
+func TestValidateRefreshedRecordsCollapseExactlyAtTheSignificanceFloorRejected(t *testing.T) {
+	const body = 300
+	previous := make([]Record, 0, body)
+	for id := 1; id <= 3; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "MOVIE", TmdbMovies: []int{id}})
+	}
+	for id := 4; id <= body; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+
+	candidate := make([]Record, len(previous))
+	copy(candidate, previous)
+	candidate[1].TmdbMovies = nil
+	candidate[2].TmdbMovies = nil
+
+	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
+		t.Error("movie-routed collapse 3 -> 1 with the significance floor at 3 returned nil error, want rejection")
+	}
+}

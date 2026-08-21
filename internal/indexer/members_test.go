@@ -388,6 +388,40 @@ func TestOwnershipOfUnionsDuplicateRelationRows(t *testing.T) {
 	}
 }
 
+// TestOwnershipOfNeedsAKeyOrAHashToOwnARelease pins what makes a release
+// ownable at all. The ownership fold matches a stored release on its tracker key
+// or its info hash, so a torrent carrying EITHER is owned - including a hash-only
+// torrent, which is what an unrecognized tracker with a valid info hash produces
+// - while one carrying neither is nothing a search can ever match and drops out,
+// leaving the entry evaluated with no releases.
+func TestOwnershipOfNeedsAKeyOrAHashToOwnARelease(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	for name, tc := range map[string]struct {
+		torrent seadex.Torrent
+		want    int
+	}{
+		"hash only, on a tracker with no key form": {
+			seadex.Torrent{Tracker: "SomeOtherTracker", URL: "https://example.invalid/t/1", InfoHash: hash},
+			1,
+		},
+		"neither a key nor a hash": {
+			seadex.Torrent{Tracker: "SomeOtherTracker", URL: "https://example.invalid/t/1", InfoHash: "not-a-hash"},
+			0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := ownershipOf([]seadex.Entry{{AniListID: 9, Torrents: []seadex.Torrent{tc.torrent}}})
+			owned, present := got[ownerKey(9)]
+			if !present {
+				t.Fatalf("ownershipOf(%+v): entry 9 vanished from the evaluated set", tc.torrent)
+			}
+			if len(owned) != tc.want {
+				t.Errorf("ownershipOf(%+v) owns %d releases, want %d: %v", tc.torrent, len(owned), tc.want, owned)
+			}
+		})
+	}
+}
+
 // TestOwnershipOfKeepsAnEvaluatedEntryWithNoReleases: an entry evaluated down to
 // nothing must still APPEAR in the evaluated set, or upsertOwners cannot clear a
 // stored contribution that is no longer curated.

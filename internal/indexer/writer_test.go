@@ -1338,6 +1338,34 @@ func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
 	}
 }
 
+// TestLoadPreviousKeepsAHarvestCheckpointExactlyAtTheCap pins the inclusive end
+// of the cursor's size cap: maxPersistedCursorBytes is a value the writer itself
+// may legitimately have persisted, so a cursor of exactly that length is not
+// corruption and must survive the load. Resetting it there would restart the
+// harvest rotation from the head on every cycle, re-querying shows the previous
+// rebuild had already passed.
+func TestLoadPreviousKeepsAHarvestCheckpointExactlyAtTheCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	cursor := strings.Repeat("x", maxPersistedCursorBytes)
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:        owns(),
+		Published:     map[string]bool{"nyaa:42": true},
+		HarvestCursor: cursor,
+	})
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil)
+	prev, err := w.loadPrevious(t.Context())
+	if err != nil {
+		t.Fatalf("loadPrevious: %v", err)
+	}
+	if prev.cursor != cursor {
+		t.Errorf("loadPrevious cursor = %d bytes, want the %d-byte cursor kept (the cap is inclusive)", len(prev.cursor), maxPersistedCursorBytes)
+	}
+	if rec.Contains("previous feed snapshot harvest cursor exceeds size cap") {
+		t.Errorf("a cursor exactly at the cap warned as oversized; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
 // TestRebuildBaselinesFalseSeenLedgerValue pins the publication log's producer
 // invariant at ingress: the writer only ever records true membership, so a
 // false value can only come from corruption or hand-editing. Because
@@ -2030,5 +2058,47 @@ func TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey(t *testing.T) {
 	}
 	if _, _, reason, err := decodeSnapshot([]byte(doc)); err == nil {
 		t.Fatalf("decodeSnapshot accepted %d releases under ONE owner key (reason=%q), want a bounded-decode error before the releases are allocated", releases, reason)
+	}
+}
+
+// TestPassOverAHealthySnapshotEmitsNoDegradationDiagnostics pins the absence side
+// of the write path's four degradation reports. Each names a state the operator
+// has to act on - the snapshot approaching the byte cap that will freeze the
+// served feed, cached titles dropped from the previous snapshot, a stat or a
+// directory-handle close that failed around the write - and a cycle over a
+// healthy snapshot is in none of them. Every existing test for these asserts
+// presence only, so a guard that fires on every ordinary cycle would keep the
+// suite green while turning the operator's Loki view into noise and burying the
+// one line that means the feed is about to stop updating.
+func TestPassOverAHealthySnapshotEmitsNoDegradationDiagnostics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	log, rec := capture.New()
+	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
+	w := NewFeedWriter(&FeedWriterConfig{
+		Path:           path,
+		Server:         ix,
+		NyaaTorznabURL: "http://prowlarr/1/api",
+	}, log, nil)
+
+	// Two passes: the first writes the snapshot, the second LOADS it back, which
+	// is the only way the load-side reports below are reachable at all.
+	for pass := 1; pass <= 2; pass++ {
+		if err := w.Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+			t.Fatalf("Rebuild pass %d: %v", pass, err)
+		}
+	}
+	if got := len(ix.feedFor(upstreamNyaa)); got != 1 {
+		t.Fatalf("served feed = %d items, want 1 (the passes must have really run)", got)
+	}
+	for _, msg := range []string{
+		"indexer feed snapshot approaching the size limit",
+		"previous feed snapshot dropped over-limit cached titles",
+		"indexer feed snapshot stat after write failed",
+		"indexer: could not close feed snapshot directory handle",
+	} {
+		if n := rec.Count(msg); n != 0 {
+			t.Errorf("a healthy pass logged %q %d times, want 0:\n%s", msg, n, strings.Join(rec.Messages(), "\n"))
+		}
 	}
 }

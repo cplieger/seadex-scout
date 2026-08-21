@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1685,5 +1686,136 @@ func TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves(t *testing.T) {
 	}
 	if len(items) != 0 || !stats.answered || !stats.feed {
 		t.Errorf("fresh-install RSS = %d items, stats %+v, want an answered empty feed", len(items), stats)
+	}
+}
+
+// TestReloadHealthySnapshotEmitsNoScrubDiagnostics pins the absence side of
+// every load-time scrub warning. Each one names external corruption of feed.json
+// - a future timestamp, a non-SeaDex info URL, an item whose GUID yields no
+// download URL - so all four are silent on a healthy snapshot. Every existing
+// scrub test asserts presence only, and these are the counts an operator's Loki
+// rules read: one that fires on each of the ~90 loads a day of a perfectly good
+// file is a standing alert condition that also teaches the operator to ignore
+// the real thing.
+func TestReloadHealthySnapshotEmitsNoScrubDiagnostics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	past := time.Now().UTC().Add(-time.Hour)
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{},
+		NyaaFeed: []journalItem{
+			{Title: "nyaa healthy", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587", Key: "nyaa:42", FirstSeen: past},
+		},
+		ABFeed: []journalItem{
+			{Title: "ab healthy", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777", InfoURL: "https://releases.moe/154588", Key: "ab:777", FirstSeen: past},
+		},
+	})
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{
+		SnapshotPath:   path,
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ABTorznabURL:   "http://prowlarr/2/api",
+		ABPasskey:      "PASSKEY",
+	}, log, nil)
+
+	// The load happened and both journals survived it, so the absence below is
+	// the guards staying silent rather than the items never reaching them.
+	if got := len(ix.feedFor(upstreamNyaa)); got != 1 {
+		t.Fatalf("nyaa feed = %d items, want 1", got)
+	}
+	if got := len(ix.feedFor(upstreamAB)); got != 1 {
+		t.Fatalf("ab feed = %d items, want 1", got)
+	}
+	for _, msg := range []string{
+		"indexer feed snapshot: future item timestamps rebased to load time",
+		"indexer feed snapshot: non-SeaDex info URLs blanked",
+		"indexer feed snapshot: AnimeBytes items dropped; no download URL derivable from tracker page URL",
+		"indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL",
+	} {
+		if n := rec.Count(msg); n != 0 {
+			t.Errorf("a healthy snapshot logged %q %d times, want 0", msg, n)
+		}
+	}
+}
+
+// TestReloadCountsRebasedItemsAcrossBothJournals pins the scope of the rebase
+// count: the correction runs over BOTH journals and the warning reports their
+// sum, so an operator reading rebased=1 on a two-journal skew would act on half
+// the corruption. The existing rebase test carries Nyaa items only, which cannot
+// tell a sum from either journal's own count.
+func TestReloadCountsRebasedItemsAcrossBothJournals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	future := time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{},
+		NyaaFeed: []journalItem{
+			{Title: "nyaa skewed", GUID: "https://nyaa.si/view/42", Key: "nyaa:42", FirstSeen: future},
+		},
+		ABFeed: []journalItem{
+			{Title: "ab skewed", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777", Key: "ab:777", FirstSeen: future},
+		},
+	})
+	log, rec := capture.New()
+	warmedIndexer(&Config{
+		SnapshotPath:   path,
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ABTorznabURL:   "http://prowlarr/2/api",
+		ABPasskey:      "PASSKEY",
+	}, log, nil)
+
+	const msg = "indexer feed snapshot: future item timestamps rebased to load time"
+	if n := rec.Count(msg); n != 1 {
+		t.Fatalf("rebase warnings = %d, want 1; log:\n%s", n, strings.Join(rec.Messages(), "\n"))
+	}
+	got, ok := rec.AttrValue(msg, "rebased")
+	if !ok {
+		t.Fatalf("rebase warning carries no rebased attribute; log:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	if got != "2" {
+		t.Errorf("rebased = %s, want 2 (one skewed item in each journal)", got)
+	}
+}
+
+// TestReloadBoundsTheDroppedItemSampleList pins the sample bound on the
+// dropped-item warning. Every GUID in it comes from feed.json, so a corrupted or
+// hand-edited file decides how many there are: the count reports the true scale
+// while the samples stay at three, which is what keeps a file full of junk
+// identities from turning one warning into an unbounded log write. Four dropped
+// items are enough to see the bound hold and the count outrun it.
+func TestReloadBoundsTheDroppedItemSampleList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	past := time.Now().UTC().Add(-time.Hour)
+	feed := make([]journalItem, 0, 4)
+	for i := range 4 {
+		// A foreign-host GUID no longer proves the item's journal identity, so no
+		// download URL is derivable and the item drops.
+		dropped := item{
+			Title: "dropped " + strconv.Itoa(i),
+			GUID:  "https://evil.example/view/" + strconv.Itoa(i),
+		}
+		feed = append(feed, journalItem{item: dropped, Key: "nyaa:" + strconv.Itoa(i), FirstSeen: past})
+	}
+	writeSnapshotFile(t, path, &snapshot{Owners: owns(), Published: map[string]bool{}, NyaaFeed: feed})
+	log, rec := capture.New()
+	warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
+
+	const msg = "indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL"
+	if n := rec.Count(msg); n != 1 {
+		t.Fatalf("dropped-item warnings = %d, want 1; log:\n%s", n, strings.Join(rec.Messages(), "\n"))
+	}
+	if got, ok := rec.AttrValue(msg, "dropped"); !ok || got != "4" {
+		t.Errorf("dropped = %q (found=%v), want 4 (the count reports every drop)", got, ok)
+	}
+	value, ok := rec.Attr(msg, "sample_guids")
+	if !ok {
+		t.Fatalf("dropped-item warning carries no sample_guids attribute; log:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	samples, ok := value.Any().([]string)
+	if !ok {
+		t.Fatalf("sample_guids = %v, want a []string", value)
+	}
+	if len(samples) != 3 {
+		t.Errorf("sample_guids = %v (%d entries), want 3 (the sample list is bounded however many items drop)", samples, len(samples))
 	}
 }

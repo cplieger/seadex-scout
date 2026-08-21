@@ -1032,10 +1032,11 @@ func TestHarvestableGuards(t *testing.T) {
 
 // TestHarvestParams pins the per-tracker query form the title harvest sends:
 // Nyaa uses the season form (t=tvsearch, q + season) only for a non-movie
-// with a mapped season - a seasonless show and a movie stay a plain search -
-// while AnimeBytes is always a plain series-level search, and the q value is
-// the title candidate it was given (harvestTitleCandidates trims; the ladder
-// varies the title only, never the mode or the season).
+// with a mapped POSITIVE season - a seasonless show, a specials-bucket entry
+// (season 0) and a movie stay a plain search - while AnimeBytes is always a
+// plain series-level search, and the q value is the title candidate it was
+// given (harvestTitleCandidates trims; the ladder varies the title only, never
+// the mode or the season).
 func TestHarvestParams(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1046,6 +1047,7 @@ func TestHarvestParams(t *testing.T) {
 	}{
 		{"nyaa series with a mapped season uses the season form", EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true}, upstreamNyaa, "tvsearch", "1"},
 		{"nyaa seasonless series stays a plain search", EntryInfo{Title: "One Piece"}, upstreamNyaa, "search", ""},
+		{"nyaa specials bucket stays a plain search", EntryInfo{Title: "Frieren OVA", Season: 0, SeasonKnown: true}, upstreamNyaa, "search", ""},
 		{"nyaa movie stays a plain search even with a mapped season", EntryInfo{Title: "A Silent Voice", Season: 1, SeasonKnown: true, IsMovie: true}, upstreamNyaa, "search", ""},
 		{"ab is always a plain series-level search", EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true}, upstreamAB, "search", ""},
 		{"q is the trimmed synthesis title", EntryInfo{Title: "  Frieren  ", Season: 2, SeasonKnown: true}, upstreamNyaa, "tvsearch", "2"},
@@ -1995,6 +1997,18 @@ func TestPreferredHarvestTitlePicksTheArrsVocabulary(t *testing.T) {
 			showTitle:  "Frieren: Beyond Journey's End",
 			want:       jp,
 		},
+		// The cached title is served for the item's whole journal window, so an
+		// equal-score tie has to resolve the same way on every rebuild. Keeping
+		// the FIRST alias inherits the tracker's own ordering instead of
+		// re-deciding it, which is what makes the pick reproducible.
+		"an equally parseable tie keeps the first alias": {
+			candidates: []string{
+				"[Group] Alpha - S01 (BD 1080p)",
+				"[Group] Bravo - S01 (BD 1080p)",
+			},
+			showTitle: "",
+			want:      "[Group] Alpha - S01 (BD 1080p)",
+		},
 		// h-f36: a one- to three-character title key occurs inside ordinary
 		// release metadata ("x" in Remux/x265), so a normalized substring test
 		// admits the FIRST alias whatever its vocabulary. A short key needs
@@ -2668,6 +2682,34 @@ func TestHarvestCleanZeroMatchesNeverLatchTheScope(t *testing.T) {
 	} {
 		if rec.Contains(latch) {
 			t.Errorf("scope latched on clean zero-match shows: %q", latch)
+		}
+	}
+	// A clean empty answer carried no results at all, so nothing of this show's
+	// was stranded either: the stranding report names results the harvest could
+	// not use, and one per query on an ordinary empty answer would make the
+	// operator's view of a genuinely stranded show worthless.
+	if got := rec.Count("indexer title harvest encountered results it could not use for this show's releases"); got != 0 {
+		t.Errorf("clean zero-match shows reported stranding %d times, want 0:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestPermanentUpstreamCredentialErrorBandEdges pins both edges of the
+// credential band on a Torznab <error> document's code. The band is 100-199
+// (wrong or revoked API key, suspended account) and it latches the whole scope
+// at ERROR, while 200-299 is the request-scoped band that fails one show only.
+// Code 200 sits directly on the seam: classifying it as a credential failure
+// would condemn every remaining show on the tracker for what is really one
+// malformed query, and the end-to-end credential test only exercises 100.
+func TestPermanentUpstreamCredentialErrorBandEdges(t *testing.T) {
+	tests := map[int]bool{
+		-1: false, 0: false, 99: false,
+		100: true, 101: true, 199: true,
+		200: false, 201: false, 300: false, 900: false,
+	}
+	for code, want := range tests {
+		err := newUpstreamDocError(strconv.Itoa(code), "upstream said so")
+		if got := permanentUpstreamCredentialError(err); got != want {
+			t.Errorf("permanentUpstreamCredentialError(code=%d) = %v, want %v", code, got, want)
 		}
 	}
 }

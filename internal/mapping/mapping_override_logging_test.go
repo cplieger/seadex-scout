@@ -55,6 +55,7 @@ func TestLoader_Load_cleanOverridesEmitNoDiagnostics(t *testing.T) {
 	for _, msg := range []string{
 		"mapping: overrides with missing or invalid anilist_id skipped",
 		"mapping: overrides contain unknown keys, ignored",
+		unroutableOverrideMessage,
 	} {
 		if n := logs.CountExact(msg); n != 0 {
 			t.Errorf("clean overrides logged %q %d times, want 0", msg, n)
@@ -193,5 +194,41 @@ func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 				t.Errorf("RejectedRefreshes = %d, want %d unchanged (the upstream streak is not the overrides signal)", next.RejectedRefreshes, prev.RejectedRefreshes)
 			}
 		})
+	}
+}
+
+// unroutableOverrideMessage is applyOverrides' un-mapped-entry warning.
+const unroutableOverrideMessage = "mapping: overrides carry no arr identifier and un-map their entry; " +
+	"check for a mistyped tvdb_id/tmdb_movies/imdb_ids key, and restate the ids when overriding only a type or season"
+
+// TestLoader_Load_logsUnroutableOverrideCount pins the count on applyOverrides'
+// un-mapped-entry warning. The overlay is wholesale, so an override carrying no
+// identifier its routed arr consumes REPLACES a mapped Fribb record with one
+// that resolves to nothing - left applied by design, which makes this warning
+// the only thing standing between a mistyped id key and an entry that silently
+// stops matching. Both shapes count: an entry with no identifiers at all, and a
+// MOVIE entry carrying only a TVDB id, which the movie arm never consumes.
+func TestLoader_Load_logsUnroutableOverrideCount(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	data := []byte(`[{"anilist_id":2,"type":"tv"},` +
+		`{"anilist_id":3,"type":"movie","tvdb_id":9},` +
+		`{"anilist_id":4,"type":"tv","tvdb_id":7}]`)
+	if err := os.WriteFile(overrides, data, 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(logger))
+	if _, _, err := l.Load(t.Context(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if n := logs.CountExact(unroutableOverrideMessage); n != 1 {
+		t.Fatalf("unroutable-overrides warnings = %d, want 1; logs = %v", n, logs.Messages())
+	}
+	got, ok := logs.AttrValueExact(unroutableOverrideMessage, "count")
+	if !ok {
+		t.Fatalf("unroutable-overrides warning carries no count attribute; logs = %v", logs.Messages())
+	}
+	if got != "2" {
+		t.Errorf("unroutable-overrides count = %s, want 2 (the typeless entry and the movie carrying only a TVDB id)", got)
 	}
 }
