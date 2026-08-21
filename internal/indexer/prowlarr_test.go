@@ -116,38 +116,46 @@ func mustFeedURL(t *testing.T, u *upstream) *url.URL {
 
 // TestSanitizeDisplayURL pins the display-URL gate on the passthrough
 // InfoURL/GUID fields: only an absolute http(s) URL, free of userinfo, on the
-// served upstream's own tracker host survives. Non-http schemes
+// served upstream's own tracker host survives, and what survives is the gate's
+// VOUCHED spelling rather than the original. Non-http schemes
 // (javascript:/data:), relative forms, foreign hosts, userinfo tricks, and a
 // cross-tracker host are all blanked; the tracker's exact host and a
 // dot-delimited subdomain pass, and an unknown scope always blanks.
 func TestSanitizeDisplayURL(t *testing.T) {
 	tests := []struct {
 		name, scope, raw, want string
+		wantOK                 bool
 	}{
-		{"nyaa exact host kept", upstreamNyaa, "https://nyaa.si/view/1234567", "https://nyaa.si/view/1234567"},
-		{"nyaa subdomain kept", upstreamNyaa, "https://sukebei.nyaa.si/view/7", "https://sukebei.nyaa.si/view/7"},
-		{"ab exact host kept", upstreamAB, "https://animebytes.tv/torrent/1167293/group", "https://animebytes.tv/torrent/1167293/group"},
-		{"javascript scheme blanked", upstreamNyaa, "javascript:alert(1)", ""},
-		{"data scheme blanked", upstreamNyaa, "data:text/html,x", ""},
-		{"relative path blanked", upstreamNyaa, "/view/1234567", ""},
-		{"scheme-relative blanked", upstreamNyaa, "//nyaa.si/view/1234567", ""},
-		{"foreign host blanked", upstreamNyaa, "https://evil.example/phish", ""},
-		{"userinfo trick blanked", upstreamNyaa, "https://nyaa.si@evil.example/phish", ""},
-		{"userinfo on canonical host blanked", upstreamNyaa, "https://trusted@nyaa.si/view/1", ""},
-		{"cross-tracker host blanked under nyaa", upstreamNyaa, "https://animebytes.tv/torrent/1/group", ""},
-		{"cross-tracker host blanked under ab", upstreamAB, "https://nyaa.si/view/1", ""},
-		{"suffix-confusion host blanked", upstreamNyaa, "https://evilnyaa.si/view/1", ""},
-		{"non-http scheme on the canonical host blanked", upstreamNyaa, "ftp://nyaa.si/view/1", ""},
-		{"backslash-smuggled authority blanked", upstreamNyaa, "https://nyaa.si\\@evil.example/x", ""},
-		{"tab-smuggled host blanked", upstreamNyaa, "https://nya\ta.si/view/1", ""},
-		{"unknown scope blanks a canonical host", "other", "https://nyaa.si/view/1", ""},
-		{"empty input blanked", upstreamNyaa, "", ""},
-		{"unparseable blanked", upstreamNyaa, "http://[::1", ""},
+		{name: "nyaa exact host kept", scope: upstreamNyaa, raw: "https://nyaa.si/view/1234567", want: "https://nyaa.si/view/1234567", wantOK: true},
+		{name: "nyaa subdomain kept", scope: upstreamNyaa, raw: "https://sukebei.nyaa.si/view/7", want: "https://sukebei.nyaa.si/view/7", wantOK: true},
+		{name: "ab exact host kept", scope: upstreamAB, raw: "https://animebytes.tv/torrent/1167293/group", want: "https://animebytes.tv/torrent/1167293/group", wantOK: true},
+		// Edge padding is stripped by the WHATWG preprocessing the gate reads,
+		// so the padded original must not reach the arr UI: url.Parse refuses
+		// a space inside the host, which is what the weekly fuzz found.
+		{name: "edge-padded host kept in its vouched spelling", scope: upstreamNyaa, raw: "http://nYAA.si  ", want: "http://nYAA.si", wantOK: true},
+		{name: "javascript scheme blanked", scope: upstreamNyaa, raw: "javascript:alert(1)"},
+		{name: "data scheme blanked", scope: upstreamNyaa, raw: "data:text/html,x"},
+		{name: "relative path blanked", scope: upstreamNyaa, raw: "/view/1234567"},
+		{name: "scheme-relative blanked", scope: upstreamNyaa, raw: "//nyaa.si/view/1234567"},
+		{name: "foreign host blanked", scope: upstreamNyaa, raw: "https://evil.example/phish"},
+		{name: "userinfo trick blanked", scope: upstreamNyaa, raw: "https://nyaa.si@evil.example/phish"},
+		{name: "userinfo on canonical host blanked", scope: upstreamNyaa, raw: "https://trusted@nyaa.si/view/1"},
+		{name: "cross-tracker host blanked under nyaa", scope: upstreamNyaa, raw: "https://animebytes.tv/torrent/1/group"},
+		{name: "cross-tracker host blanked under ab", scope: upstreamAB, raw: "https://nyaa.si/view/1"},
+		{name: "suffix-confusion host blanked", scope: upstreamNyaa, raw: "https://evilnyaa.si/view/1"},
+		{name: "non-http scheme on the canonical host blanked", scope: upstreamNyaa, raw: "ftp://nyaa.si/view/1"},
+		{name: "backslash-smuggled authority blanked", scope: upstreamNyaa, raw: "https://nyaa.si\\@evil.example/x"},
+		{name: "tab-smuggled host blanked", scope: upstreamNyaa, raw: "https://nya\ta.si/view/1"},
+		{name: "unknown scope blanks a canonical host", scope: "other", raw: "https://nyaa.si/view/1"},
+		{name: "empty input blanked", scope: upstreamNyaa, raw: ""},
+		{name: "unparseable blanked", scope: upstreamNyaa, raw: "http://[::1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sanitizeDisplayURL(tc.scope, tc.raw); got != tc.want {
-				t.Errorf("sanitizeDisplayURL(%q, %q) = %q, want %q", tc.scope, tc.raw, got, tc.want)
+			got, ok := sanitizeDisplayURL(tc.scope, tc.raw)
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("sanitizeDisplayURL(%q, %q) = (%q, %v), want (%q, %v)",
+					tc.scope, tc.raw, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

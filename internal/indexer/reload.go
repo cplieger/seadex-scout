@@ -805,7 +805,7 @@ func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 func snapshotInfoURLAllowed(raw, host string) (cleaned string, ok bool) {
 	// An unresolved expected host vouches NOTHING, and this is the leg that says so:
 	// displaylink.VouchForm has no non-empty-host requirement of its own (its package
-	// doc assigns that leg to httpDisplayHost), so an absolute "http:///path" would
+	// doc assigns that leg to httpDisplayForm), so an absolute "http:///path" would
 	// otherwise byte-equal an empty expectation.
 	if host == "" {
 		return "", false
