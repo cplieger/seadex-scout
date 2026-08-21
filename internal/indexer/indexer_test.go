@@ -3,17 +3,21 @@ package indexer
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/seadex-scout/internal/mapping"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
 )
 
 // sampleFeed is a representative Prowlarr per-indexer Torznab response (one Nyaa
@@ -73,10 +77,67 @@ func TestParseTorznab(t *testing.T) {
 		t.Errorf("categories = %v, want [5070]", it.Categories)
 	}
 	if it.DownloadURL != "http://prowlarr:9696/1/download?apikey=x&link=abc" {
-		t.Errorf("downloadURL = %q", it.DownloadURL)
+		t.Errorf("downloadURLForScope = %q", it.DownloadURL)
 	}
 	if it.PubDate.IsZero() {
 		t.Error("pubDate not parsed")
+	}
+}
+
+// TestParseTorznabClampsNegativeCounts pins the numeric-domain normalization
+// of the untrusted Torznab decode (the sibling of totalSize's guard on the
+// SeaDex path): negative size/seeders/leechers values clamp to the feed's
+// zero-as-unknown representation, and a negative peers value cannot inflate
+// the derived leechers count via an unbounded negative seeders subtraction.
+func TestParseTorznabClampsNegativeCounts(t *testing.T) {
+	const feed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <item>
+      <title>all negative</title>
+      <size>-14352012572</size>
+      <torznab:attr name="seeders" value="-42"/>
+      <torznab:attr name="leechers" value="-3"/>
+    </item>
+    <item>
+      <title>negative seeders with positive peers</title>
+      <torznab:attr name="seeders" value="-5"/>
+      <torznab:attr name="peers" value="1"/>
+    </item>
+    <item>
+      <title>negative enclosure length</title>
+      <enclosure url="http://prowlarr:9696/1/download" length="-5" type="application/x-bittorrent"/>
+      <torznab:attr name="peers" value="-9"/>
+    </item>
+    <item>
+      <title>negative enclosure length falls through to size element</title>
+      <enclosure url="http://prowlarr:9696/1/download" length="-5" type="application/x-bittorrent"/>
+      <size>99</size>
+    </item>
+  </channel>
+</rss>`
+	items, err := parseTorznab([]byte(feed))
+	if err != nil {
+		t.Fatalf("parseTorznab: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("got %d items, want 4", len(items))
+	}
+	if it := items[0]; it.Size != 0 || it.Seeders != 0 || it.Leechers != 0 {
+		t.Errorf("all-negative item = size %d seeders %d leechers %d, want 0/0/0", it.Size, it.Seeders, it.Leechers)
+	}
+	// Clamped seeders (0) with peers 1 derives leechers 1, never 1-(-5)=6.
+	if it := items[1]; it.Seeders != 0 || it.Leechers != 1 {
+		t.Errorf("negative-seeders item = seeders %d leechers %d, want 0/1", it.Seeders, it.Leechers)
+	}
+	if it := items[2]; it.Size != 0 || it.Leechers != 0 {
+		t.Errorf("negative-enclosure item = size %d leechers %d, want 0/0", it.Size, it.Leechers)
+	}
+	// An invalid negative enclosure length is unset-or-invalid, not a
+	// distinct value: the chain falls through to the valid <size> element
+	// instead of clamping the whole item to 0.
+	if it := items[3]; it.Size != 99 {
+		t.Errorf("negative-enclosure-with-size item = size %d, want 99 (fall through to the <size> element)", it.Size)
 	}
 }
 
@@ -149,15 +210,15 @@ func TestTrackerKey(t *testing.T) {
 func TestMarkAndDedupe(t *testing.T) {
 	set := &curation{
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"ab:1143533": false},
+		byKey:  map[string]bool{"nyaa:1143533": false},
 	}
 	raw := []item{
 		{Title: "best by hash", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
-		{Title: "alt by key", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g2"},
+		{Title: "alt by key", InfoURL: "https://nyaa.si/view/1143533", GUID: "g2"},
 		{Title: "not curated", InfoURL: "https://nyaa.si/view/999", GUID: "g3"},
 		{Title: "dup of best", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
 	}
-	out := markAndDedupe(raw, set)
+	out, _ := markAndDedupe(raw, set, upstreamNyaa)
 	if len(out) != 2 {
 		t.Fatalf("got %d items, want 2 (best + alt, dup dropped, uncurated dropped)", len(out))
 	}
@@ -176,38 +237,252 @@ func TestMarkAndDedupe(t *testing.T) {
 // torrent (an alt entry, or a structurally valid but uncurated one) must be
 // dropped, never admitted on the first matching signal.
 func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
+	t.Run("best hash against an alt or uncurated key", func(t *testing.T) {
+		set := &curation{
+			byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
+			byKey:  map[string]bool{"nyaa:1143533": false},
+		}
+		raw := []item{
+			{
+				Title: "best hash + alt key", GUID: "g1",
+				InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
+				InfoURL:  "https://nyaa.si/view/1143533",
+			},
+			{
+				Title: "best hash + uncurated key", GUID: "g2",
+				InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
+				InfoURL:  "https://nyaa.si/view/999",
+			},
+		}
+		if out, _ := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
+			t.Errorf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
+		}
+	})
+
+	// Two curated keys that AGREE on best/alt but name DIFFERENT releases:
+	// healthy Prowlarr emits the same tracker id in comments and guid, so an
+	// item whose InfoURL and GUID resolve to distinct curated torrents is an
+	// invalid untrusted response and must fail closed - the same-marker
+	// coincidence must not admit it.
+	t.Run("two curated best ids on one item", func(t *testing.T) {
+		bothBest := &curation{
+			byHash: map[string]bool{},
+			byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		}
+		conflicting := []item{{
+			Title:   "two curated best ids",
+			InfoURL: "https://nyaa.si/view/100",
+			GUID:    "https://nyaa.si/view/200",
+		}}
+		if out, _ := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
+			t.Errorf("got %d items, want 0 (distinct tracker identities must drop the item even when both are best)", len(out))
+		}
+	})
+}
+
+// TestMarkAndDedupeRejectsCrossTorrentPair pins lookup's hash/key pair
+// relation: an item pairing torrent A's curated info hash with torrent B's
+// curated tracker key must be rejected even when both signals carry the same
+// best/alt marker, because byPair records only same-torrent hash/key
+// combinations. A hash-only Nyaa item still matches without a pair, and a
+// legacy snapshot (nil byPair, persisted before the relation existed) fails
+// closed for dual-signal items - the relation cannot be proven - while
+// single-signal matching keeps working until the next snapshot rebuild.
+func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
+	hashA := "abcdef1234567890abcdef1234567890abcdef12"
+	hashB := "0123456789012345678901234567890123456789"
+	set := &curation{
+		byHash: map[string]bool{hashA: true, hashB: true},
+		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		byPair: map[string]bool{
+			pairKey(hashA, "nyaa:100"): true,
+			pairKey(hashB, "nyaa:200"): true,
+		},
+	}
+	// A legacy snapshot (nil byPair, persisted before the relation existed)
+	// cannot PROVE any hash/key co-membership, so a dual-signal item fails
+	// closed - even a genuinely same-torrent pair - until the next cycle
+	// rewrites the snapshot with the relation; single-signal matching keeps
+	// working through the upgrade window.
+	legacy := &curation{byHash: set.byHash, byKey: set.byKey}
+
+	matching := []item{{
+		Title: "hash and key from one torrent", InfoHash: hashA,
+		InfoURL: "https://nyaa.si/view/100", GUID: "https://nyaa.si/view/100",
+	}}
+	crossWired := []item{{
+		Title: "torrent A hash + torrent B key", InfoHash: hashA,
+		InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
+	}}
+	hashOnly := []item{{Title: "hash only", InfoHash: hashA, GUID: "g1"}}
+
+	for _, tc := range []struct {
+		name  string
+		items []item
+		set   *curation
+		want  int
+		why   string
+	}{
+		{
+			"same-torrent pair matches", matching, set, 1,
+			"a same-torrent hash/key pair must match",
+		},
+		{
+			"cross-torrent pair rejected", crossWired, set, 0,
+			"a cross-torrent hash/key pair must not match even when both are best",
+		},
+		{
+			"hash-only item needs no pair", hashOnly, set, 1,
+			"a hash-only Nyaa item needs no pair",
+		},
+		{
+			"legacy snapshot rejects cross-torrent pair", crossWired, legacy, 0,
+			"a legacy nil-byPair snapshot must reject an unprovable dual-signal pair",
+		},
+		{
+			"legacy snapshot rejects same-torrent pair", matching, legacy, 0,
+			"even a same-torrent pair is unprovable against a nil byPair",
+		},
+		{
+			"legacy snapshot keeps single-signal matching", hashOnly, legacy, 1,
+			"single-signal matching survives a legacy nil-byPair snapshot",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if out, _ := markAndDedupe(tc.items, tc.set, upstreamNyaa); len(out) != tc.want {
+				t.Errorf("got %d items, want %d (%s)", len(out), tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// TestMarkAndDedupeKeyOnlyABNeedsNoPair pins that the pair gate does not
+// change AnimeBytes matching: AB exposes no info hash in Torznab, so a
+// key-only item matches on its scoped tracker key alone with no pair to
+// prove, even against a snapshot whose pair relation is empty.
+func TestMarkAndDedupeKeyOnlyABNeedsNoPair(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{},
+		byKey:  map[string]bool{"ab:300": true},
+		byPair: map[string]bool{},
+	}
+	raw := []item{{
+		Title:   "key only",
+		InfoURL: "https://animebytes.tv/torrent/300/group",
+		GUID:    "https://animebytes.tv/torrent/300/group",
+	}}
+	out, _ := markAndDedupe(raw, set, upstreamAB)
+	if len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (a key-only AB item needs no pair)", len(out))
+	}
+	if out[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q", out[0].DownloadVolumeFactor, dvfBest)
+	}
+}
+
+// TestMarkAndDedupeRejectsCrossScopeKey pins lookup's tracker-scope binding: a
+// tracker key parsed from an item's page URL must belong to the endpoint being
+// served, so a curated Nyaa item is rejected under the /ab scope (a swapped
+// upstream or cross-tracker item must not surface under the wrong per-tracker
+// indexer). It also pins the AB-specific rule that a scoped tracker key is
+// mandatory: AnimeBytes exposes no info hash in Torznab, so a hash-only item
+// cannot match under /ab even when its hash is curated.
+func TestMarkAndDedupeRejectsCrossScopeKey(t *testing.T) {
 	set := &curation{
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"ab:1143533": false},
+		byKey:  map[string]bool{"nyaa:1143533": false, "ab:1143533": false},
 	}
 	raw := []item{
-		{
-			Title: "best hash + alt key", GUID: "g1",
-			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
-			InfoURL:  "https://animebytes.tv/torrents.php?id=1&torrentid=1143533",
-		},
-		{
-			Title: "best hash + uncurated key", GUID: "g2",
-			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
-			InfoURL:  "https://nyaa.si/view/999",
-		},
+		{Title: "nyaa key under ab scope", InfoURL: "https://nyaa.si/view/1143533", GUID: "g1"},
+		{Title: "curated hash only under ab scope", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g2"},
 	}
-	if out := markAndDedupe(raw, set); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
+	if out, _ := markAndDedupe(raw, set, upstreamAB); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (cross-scope key and hash-only items must not match under /ab)", len(out))
+	}
+	abOnly := []item{{Title: "ab key under nyaa scope", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g3"}}
+	if out, _ := markAndDedupe(abOnly, set, upstreamNyaa); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (an AnimeBytes key must not match under /nyaa)", len(out))
 	}
 }
 
 // TestMarkAndDedupeRejectsUncuratedHash pins the miss leg of the curation
 // gate's info-hash arm: an item carrying a structurally valid 40-hex info hash
-// that is NOT in the SeaDex curation set must be dropped, never admitted or marked.
+// that is NOT in the SeaDex curation set is no identity signal, so an item
+// carrying nothing else must be dropped, never admitted or marked - and the
+// drop is an ordinary no-match, not an identity conflict.
 func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 	set := &curation{
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
 		byKey:  map[string]bool{},
 	}
 	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
-	if out := markAndDedupe(raw, set); len(out) != 0 {
-		t.Fatalf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	if len(out) != 0 {
+		t.Errorf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
+	}
+	if conflicts != 0 {
+		t.Errorf("identity conflicts = %d, want 0 (nothing curated was contradicted)", conflicts)
+	}
+}
+
+// TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey pins the hash-miss leg
+// lookup deliberately does NOT veto on (l-f30): a SeaDex record with no usable
+// info hash registers only its tracker key, while Prowlarr's Nyaa results
+// always carry the real hash - so the curated release arrives with a hash the
+// set has never seen beside its own curated page URL. Reading that miss as
+// "this hash names an uncurated release" made the release invisible to every
+// search. A hash the set DOES know still has to prove co-membership, which the
+// cross-torrent case below re-checks.
+func TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{},
+		byKey:  map[string]bool{"nyaa:1143533": true},
+		byPair: map[string]bool{},
+	}
+	raw := []item{{
+		Title:    "curated key, hash SeaDex never recorded",
+		InfoHash: "0123456789012345678901234567890123456789",
+		InfoURL:  "https://nyaa.si/view/1143533",
+		GUID:     "https://nyaa.si/view/1143533",
+	}}
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	if len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (an unknown hash must not veto a curated tracker key)", len(out))
+	}
+	if out[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (the key's own best/alt value)", out[0].DownloadVolumeFactor, dvfBest)
+	}
+	if conflicts != 0 {
+		t.Errorf("identity conflicts = %d, want 0 (an admitted item is no conflict)", conflicts)
+	}
+}
+
+// TestMarkAndDedupeCountsIdentityConflicts pins the accounting that keeps the
+// fail-closed class visible: an item whose CURATED signal is contradicted by
+// another signal (here torrent A's curated hash beside torrent B's curated
+// key) is dropped AND counted, so the per-request line distinguishes a
+// tampered or misbehaving upstream from a clean no-match. An item that simply
+// carries nothing curated is not counted.
+func TestMarkAndDedupeCountsIdentityConflicts(t *testing.T) {
+	hashA := "abcdef1234567890abcdef1234567890abcdef12"
+	set := &curation{
+		byHash: map[string]bool{hashA: true},
+		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		byPair: map[string]bool{pairKey(hashA, "nyaa:100"): true},
+	}
+	raw := []item{
+		{
+			Title: "torrent A hash + torrent B key", InfoHash: hashA,
+			InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
+		},
+		{Title: "nothing curated", InfoURL: "https://nyaa.si/view/999", GUID: "g2"},
+	}
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	if len(out) != 0 {
+		t.Errorf("got %d items, want 0", len(out))
+	}
+	if conflicts != 1 {
+		t.Errorf("identity conflicts = %d, want 1 (only the contradicted item counts)", conflicts)
 	}
 }
 
@@ -236,8 +511,11 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}}
 
 	// The compare cycle builds + persists the feed snapshot; the server reads it.
+	// The ledger is seeded empty so the pack journals (a fresh install would
+	// baseline and serve an empty journal).
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	seedEmptyFeed(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -254,15 +532,16 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}))
 	defer torznabSrv.Close()
 
-	ix := New(&Config{
+	ix := warmedIndexer(&Config{
+		SnapshotPath:   path,
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
-	}, Deps{HTTP: torznabSrv.Client()}, path)
+	}, nil, torznabSrv.Client())
 
 	// A real search (non-empty q) filters to the curation set loaded from the
 	// snapshot: the sample item matches by info hash, gets the best marker, and
 	// its real seeders pass through.
-	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
+	items, stats, _ := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -279,12 +558,19 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Errorf("upstream X-Api-Key = %q, want prowlarr-key", gotAPIKey)
 	}
 
-	// Per-tracker scoping (real search): the nyaa scope hits the only configured
-	// upstream; the ab scope has none, so it serves nothing.
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa"); len(got) != 1 {
-		t.Errorf("nyaa scope returned %d items, want 1", len(got))
+	// A Movies-category search is NOT re-filtered against the tracker's own
+	// categories: both proxied trackers are anime trackers, so a film arrives
+	// categorized Anime 5070 (as the fixture item is), and `cat` was already
+	// forwarded to Prowlarr. Re-applying the local filter here emptied every
+	// Movies search after a successful fetch and a successful curation match.
+	movieSearch := url.Values{"t": {"search"}, "q": {"Some Anime 2011"}, "cat": {"2000"}}
+	if got, st, _ := ix.query(t.Context(), movieSearch, "nyaa"); len(got) != 1 || st.feed {
+		t.Errorf("movie-category search returned %d items (feed=%v), want the 1 curated proxied item", len(got), st.feed)
 	}
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
+
+	// Per-tracker scoping (real search): the ab scope has no configured
+	// upstream, so it serves nothing (the nyaa scope is exercised above).
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
 		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
 	}
 
@@ -292,7 +578,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// the live search path: an empty-q request (an RSS "latest" fetch, or
 	// Prowlarr's save test) returns the curated Nyaa release, its title collapsed
 	// to the season, a directly-built .torrent link, and the best marker.
-	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	got, st, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("empty-q feed returned %d items (feed=%v), want 1 synthesized item", len(got), st.feed)
 	}
@@ -309,20 +595,268 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// TestMarkAndDedupe; the mock here returns the curated item for any query.)
 }
 
-// TestFeedWriterReload verifies the server picks up a newer snapshot the writer
-// persists after the server started (the cross-process poll -> resident daemon
-// path): an initially-absent snapshot serves an empty feed, and once the writer
-// writes one the server reloads it on the next request.
+// TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost pins the redirect policy of
+// the client the composition root supplies to the constructors (build.go passes
+// httpx.NewClient, so this test wires the production pairing): the Prowlarr API
+// key rides an X-Api-Key header, which net/http forwards across redirects, so a
+// cross-host hop must be refused before the credential can leave the configured
+// origin. Driving the real request path (rather than invoking CheckRedirect
+// directly) keeps the test on the contract instead of the mechanism, so an
+// equivalent policy moved into a RoundTripper still passes.
+func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
+	leaked := make(chan string, 1)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case leaked <- r.Header.Get("X-Api-Key"):
+		default:
+		}
+		_, _ = io.WriteString(w, `<rss><channel></channel></rss>`)
+	}))
+	defer sink.Close()
+
+	redirectTarget := strings.Replace(sink.URL, "127.0.0.1", "localhost", 1)
+	redirected := make(chan string, 1)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case redirected <- r.Header.Get("X-Api-Key"):
+		default:
+		}
+		http.Redirect(w, r, redirectTarget, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	ups := wireUpstreams(httpx.NewClient(upstreamAttemptTimeout), nil, UpstreamConfig{
+		NyaaTorznabURL: redirector.URL,
+		ProwlarrAPIKey: "prowlarr-key",
+	})
+	if len(ups) != 1 {
+		t.Fatalf("wired %d upstreams, want 1", len(ups))
+	}
+	_, err := ups[0].fetchAndParse(t.Context(), redirector.URL)
+	if err == nil {
+		t.Fatal("cross-host redirect returned nil, want the wired client to refuse it")
+	}
+	select {
+	case key := <-redirected:
+		if key != "prowlarr-key" {
+			t.Errorf("original Prowlarr request X-Api-Key = %q, want %q", key, "prowlarr-key")
+		}
+	default:
+		t.Fatal("Prowlarr endpoint was not requested; the test did not exercise redirect handling")
+	}
+	select {
+	case key := <-leaked:
+		t.Fatalf("redirect target received X-Api-Key %q, want no request to cross hosts", key)
+	default:
+	}
+}
+
+// TestNilClientProxiesNothing pins the no-client contract that replaced the old
+// nil-HTTP fallback: with no client the server wires no upstream and constructs
+// no client of its own, so an enabled tracker still serves its persisted RSS
+// feed while a search makes NO outbound request at all (there is no credential
+// to forward and no default client to pick a redirect policy for it).
+func TestNilClientProxiesNothing(t *testing.T) {
+	cfg := UpstreamConfig{NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "prowlarr-key"}
+	if ups := wireUpstreams(nil, nil, cfg); len(ups) != 0 {
+		t.Errorf("wireUpstreams with a nil client wired %d upstreams, want 0", len(ups))
+	}
+	ix := New(&Config{UpstreamConfig: cfg}, nil, nil)
+	if len(ix.upstreams) != 0 {
+		t.Errorf("a nil client wired %d upstreams, want 0", len(ix.upstreams))
+	}
+	items, fetched, failed := ix.fetchRaw(t.Context(), url.Values{"q": {"anything"}}, upstreamNyaa)
+	if items != nil || fetched != 0 || failed {
+		t.Errorf("fetchRaw with no wired upstream = (%v, %d, %v), want (nil, 0, false)", items, fetched, failed)
+	}
+}
+
+// TestConsumerWarningsStayIndependent pins why each constructor wires its own
+// upstreams: the per-upstream WARN-onset latches are per-instance, so a server
+// and a feed writer built from the SAME client and config must still hold their
+// own latch state. Sharing them would let the server's first filter warning arm
+// the writer's latch, silently demoting the writer's independently actionable
+// onset WARN to Debug.
+func TestConsumerWarningsStayIndependent(t *testing.T) {
+	const (
+		droppedMsg = "upstream items dropped: download URL not on the Prowlarr endpoint origin"
+		blankedMsg = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+	)
+	log, rec := capture.New()
+	cfg := UpstreamConfig{NyaaTorznabURL: "http://prowlarr:9696/1/api"}
+	client := &http.Client{}
+	ix := New(&Config{UpstreamConfig: cfg}, log, client)
+	writer := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: cfg}, log, client)
+	if len(ix.upstreams) != 1 || len(writer.harvest.upstreams) != 1 {
+		t.Fatalf("consumer upstream counts = (%d, %d), want (1, 1)", len(ix.upstreams), len(writer.harvest.upstreams))
+	}
+	if ix.upstreams[0] == writer.harvest.upstreams[0] {
+		t.Fatal("the two consumers share one upstream instance, so they share its WARN-onset latches")
+	}
+
+	for _, u := range []*upstream{ix.upstreams[0], writer.harvest.upstreams[0]} {
+		u.filterDownloadURLs([]item{
+			{Title: "foreign download", DownloadURL: "https://evil.example/steal"},
+			{
+				Title: "foreign display", DownloadURL: "http://prowlarr:9696/1/download?link=ok",
+				InfoURL: "https://evil.example/phish",
+			},
+		}, mustFeedURL(t, u))
+	}
+
+	warnCounts := map[string]int{droppedMsg: 0, blankedMsg: 0}
+	for _, record := range rec.Records() {
+		if record.Level == slog.LevelWarn {
+			warnCounts[record.Message]++
+		}
+	}
+	for message, got := range warnCounts {
+		if got != 2 {
+			t.Errorf("WARN count for %q = %d, want 2 (one onset per consumer)", message, got)
+		}
+	}
+}
+
+// TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty pins the startup window of
+// the cache's reload clock: until its first load resolves, nothing is installed
+// and the empty in-memory snapshot is indistinguishable from a fresh install, so
+// every request must answer the snapshot-unavailable Torznab fault rather than a
+// successful empty feed the arr would record as a clean no-match. It must answer
+// IMMEDIATELY - the request path performs no load and waits on nothing, which is
+// what a wedged /config mount used to be able to break - and serve normally once
+// the load resolves.
+//
+// The unresolved state is set directly rather than simulated with a wedged
+// filesystem: the loader owns the load, so there is nothing on the request path
+// left to block on, and this state machine is exactly what the fault reads.
+func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
+	// A loader is running and has not resolved its first load: exactly the state
+	// start leaves behind when the wait expires before the load returns.
+	ix.cache.watchStarted.Store(true)
+
+	served := make(chan *torznabFault, 1)
+	go func() {
+		_, _, fault := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
+		served <- fault
+	}()
+	select {
+	case fault := <-served:
+		if fault == nil || fault.summary != "feed snapshot unavailable" {
+			t.Errorf("fault while the first load is unresolved = %+v, want the snapshot-unavailable fault", fault)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request waited on the unresolved first load; want an immediate snapshot-unavailable fault")
+	}
+
+	// The loader resolves: requests serve the loaded snapshot.
+	ix.cache.loader.refresh(t.Context())
+	close(ix.cache.firstLoad)
+	items, _, fault := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
+	if fault != nil {
+		t.Errorf("post-load fault = %+v, want none", fault)
+	}
+	if len(items) != 1 {
+		t.Errorf("post-load feed = %d items, want 1", len(items))
+	}
+}
+
+// TestFirstLoadWaitIsBounded pins the startup bound on the initial snapshot load:
+// a slow or wedged /config mount cannot be interrupted mid-syscall, so
+// awaitFirstLoad must stop WAITING at warmLoadTimeout rather than hold the whole
+// daemon's startup down behind it. The WARN is the only signal that startup
+// stopped waiting and began serving without the persisted snapshot; unasserted,
+// it can be deleted or dropped to Debug with the whole suite still green.
+func TestFirstLoadWaitIsBounded(t *testing.T) {
+	prev := warmLoadTimeout
+	warmLoadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { warmLoadTimeout = prev })
+
+	log, rec := capture.New()
+	// firstLoad is never closed: the load is still running, which is the state
+	// the bound exists for.
+	c := newSnapshotCache(filepath.Join(t.TempDir(), "feed.json"), "", log)
+
+	done := make(chan struct{})
+	go func() { defer close(done); c.awaitFirstLoad(t.Context()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitFirstLoad still waiting on an unresolved load; want the wait bounded by warmLoadTimeout")
+	}
+	if got := rec.CountLevel(slog.LevelWarn, "feed snapshot warm load still running"); got != 1 {
+		t.Errorf("warm-load timeout WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestStartServesPublishedSnapshotWithoutRequestLoad pins the reload clock's own
+// cadence: start loads the persisted snapshot once, and a snapshot written
+// afterwards by ANOTHER process (the `poll` subcommand) is picked up by the
+// cache's own tick - never by a request, which does one lock-free read of
+// whatever is current.
+func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
+	prev := snapshotWatchInterval
+	snapshotWatchInterval = 10 * time.Millisecond
+	t.Cleanup(func() { snapshotWatchInterval = prev })
+
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	writer := newTestWriter(path, "", false)
+	if err := writer.Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
+	ix.cache.start(ctx)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("feed after start = %d items, want the persisted snapshot loaded (1)", len(got))
+	}
+
+	// A second process rewrote the snapshot: no request triggers the load, so the
+	// tick is what must pick it up.
+	if err := writer.Rebuild(t.Context(), nyaaTestEntries(3), nil); err != nil {
+		t.Fatalf("second Rebuild: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := ix.feedFor(upstreamNyaa); len(got) == 3 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("feed = %d items after the out-of-process rewrite, want 3 within a few ticks",
+				len(ix.feedFor(upstreamNyaa)))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestFeedWriterReload verifies the server picks up a newer snapshot a writer in
+// ANOTHER process persists after the server started (the cross-process poll ->
+// resident daemon path, the one case that still goes through the file): an
+// initially-absent snapshot serves an empty feed, and once the file is written
+// the cache's own reload clock installs it. The request path deliberately does
+// not - a request is a lock-free read of whatever is published - so the tick is
+// what makes the new feed servable.
 func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 
 	// No snapshot yet: the empty-q feed serves nothing.
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("pre-write feed = %d items, want 0", len(got))
 	}
 
-	// A cycle (here, the writer) persists a snapshot; the next request reloads it.
+	// A cycle in another process (here, a writer with no in-process server)
+	// persists a snapshot; the cache's next tick installs it. The pre-write
+	// empty-feed assertion above doubles as the fresh-install journal shape, so
+	// the ledger is seeded empty for the rebuild to journal.
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 7,
 		Torrents: []seadex.Torrent{{
@@ -331,10 +865,14 @@ func TestFeedWriterReload(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [GRP].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+		t.Fatalf("feed before the reload tick = %d items, want 0: a request must not load the snapshot itself", len(got))
+	}
+	tick(ix)
+	got, st, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("post-write feed = %d items (feed=%v), want 1 reloaded item", len(got), st.feed)
 	}
@@ -365,39 +903,43 @@ func TestAnimeBytesMatching(t *testing.T) {
 	// End to end: an AB item (no info hash) matches the SeaDex set by tracker key.
 	set := &curation{byHash: map[string]bool{}, byKey: map[string]bool{"ab:1167293": true}}
 	raw := []item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
-	out := markAndDedupe(raw, set)
+	out, _ := markAndDedupe(raw, set, upstreamAB)
 	if len(out) != 1 || out[0].DownloadVolumeFactor != dvfBest {
 		t.Fatalf("AB item did not match/mark best: %+v", out)
 	}
 }
 
 func TestServesQuery(t *testing.T) {
-	serves := []url.Values{
-		{"t": {"movie"}, "q": {"Totoro"}},                                       // movie
-		{"t": {"search"}, "q": {"From Up on Poppy Hill 2011"}, "cat": {"2000"}}, // movie search (Movies cat) ending in a year
-		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}},                  // season pack search
-		{"t": {"tvsearch"}},                     // bare tvsearch / RSS
-		{"t": {"search"}},                       // RSS (empty q)
-		{"t": {"search"}, "q": {"Frieren"}},     // generic series search
-		{"t": {"search"}, "q": {"Frieren OVA"}}, // special
-		{"t": {"caps"}},                         // (query() not called for caps, but classifies as serve)
-		{"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}}, // top of the Movies range still reads as a film
+	serves := map[string]url.Values{
+		"movie":                          {"t": {"movie"}, "q": {"Totoro"}},
+		"movie search in the Movies cat": {"t": {"search"}, "q": {"From Up on Poppy Hill 2011"}, "cat": {"2000"}},
+		"season pack search":             {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}},
+		"bare tvsearch (RSS)":            {"t": {"tvsearch"}},
+		"bare search (RSS, empty q)":     {"t": {"search"}},
+		"generic series search":          {"t": {"search"}, "q": {"Frieren"}},
+		"special":                        {"t": {"search"}, "q": {"Frieren OVA"}},
+		// query() is not called for caps, but caps still classifies as a serve.
+		"caps":                              {"t": {"caps"}},
+		"top of the Movies range is a film": {"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}},
+		// A single release, so it is always answered.
+		"season-0 special search": {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"0"}, "ep": {"1"}},
 	}
-	for _, q := range serves {
+	for name, q := range serves {
 		if !servesQuery(q) {
-			t.Errorf("servesQuery(%v) = false, want true", q)
+			t.Errorf("servesQuery(%s: %v) = false, want true", name, q)
 		}
 	}
 
-	skips := []url.Values{
-		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "ep": {"1"}}, // per-episode (season+ep)
-		{"t": {"search"}, "q": {"Frieren 01"}},                              // anime absolute episode
-		{"t": {"search"}, "q": {"One Piece 1085"}},                          // 4-digit absolute episode
-		{"t": {"search"}, "q": {"Frieren 01"}, "cat": {"3000"}},             // 3000 is past the Movies range; the episode skip applies
+	skips := map[string]url.Values{
+		"per-episode (season+ep)":  {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "ep": {"1"}},
+		"anime absolute episode":   {"t": {"search"}, "q": {"Frieren 01"}},
+		"4-digit absolute episode": {"t": {"search"}, "q": {"One Piece 1085"}},
+		// cat 3000 is past the Movies range, so the episode skip still applies.
+		"absolute episode outside the Movies range": {"t": {"search"}, "q": {"Frieren 01"}, "cat": {"3000"}},
 	}
-	for _, q := range skips {
+	for name, q := range skips {
 		if servesQuery(q) {
-			t.Errorf("servesQuery(%v) = true, want false (per-episode query)", q)
+			t.Errorf("servesQuery(%s: %v) = true, want false (per-episode query)", name, q)
 		}
 	}
 }
@@ -437,6 +979,10 @@ func TestUpstreamForScope(t *testing.T) {
 	}
 }
 
+// TestScopeFromHost pins the Host-fallback routing table. Since the gate reads
+// webhttp.CanonicalHost (the shared strict authority parser) rather than
+// splitting the raw Host on its first dot (l-f25), a bare tracker host carrying
+// a port routes correctly and malformed authorities no longer route at all.
 func TestScopeFromHost(t *testing.T) {
 	tests := []struct{ host, want string }{
 		{"nyaa.cplieger.com", "nyaa"},
@@ -447,6 +993,17 @@ func TestScopeFromHost(t *testing.T) {
 		{"seadex-scout:9118", ""},   // internal docker name + port
 		{"seadex-scout", ""},        // internal docker name
 		{"", ""},
+		// A bare tracker host with a port: the raw first-dot split left the port
+		// inside the label ("ab:9118"), so this failed to select any scope.
+		{"ab:9118", "ab"},
+		{"nyaa:9118", "nyaa"},
+		{"nyaa.example.com.", "nyaa"}, // one trailing FQDN dot is legal
+		// Malformed authorities the raw split accepted as a tracker.
+		{"ab..example", ""},
+		{"ab.example.com:", ""},
+		{"ab.example.com:notaport", ""},
+		{"nyaa.example.com..", ""},
+		{"[ab.example.com]", ""}, // bracketed non-IPv6
 	}
 	for _, tc := range tests {
 		if got := scopeFromHost(tc.host); got != tc.want {
@@ -472,129 +1029,10 @@ func TestScopeFor(t *testing.T) {
 	}
 }
 
-// findByGUID returns the feed item with the given guid (its tracker page URL),
-// or nil. Feed order is by update time, so tests look items up by identity.
-func findByGUID(items []item, guid string) *item {
-	for i := range items {
-		if items[i].GUID == guid {
-			return &items[i]
-		}
-	}
-	return nil
-}
-
-// TestBuildFeeds synthesizes the per-tracker RSS feeds from a real SeaDex entry
-// shape (Frieren, alID 154587: PMR best + LostYears alt, each on Nyaa and AB),
-// covering the tracker split, season-title collapse, best/alt markers, direct
-// download links (public Nyaa .torrent, AB via passkey), the dropped redacted AB
-// info hash, and the missing-passkey skip count.
-func TestBuildFeeds(t *testing.T) {
-	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
-	pmrFiles := []seadex.File{
-		// An extra (creditless) file first, to prove representativeFile skips it
-		// for a real episode when deriving the title.
-		{Length: 400_000_000, Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
-		{Length: 7_500_699_108, Name: "Frieren Beyond Journey's End - S01E01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
-		{Length: 7_497_267_058, Name: "Frieren Beyond Journey's End - S01E02 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
-	}
-	lostYearsFiles := []seadex.File{
-		{Length: 3_506_804_569, Name: "[LostYears] Frieren Beyond Journey's End - S01E01 (WEB 1080p x265 10-bit AAC Opus) [0F7F64F6].mkv"},
-		{Length: 3_535_154_954, Name: "[LostYears] Frieren Beyond Journey's End - S01E02 (WEB 1080p x265 10-bit AAC Opus) [E5ECA664].mkv"},
-	}
-	entries := []seadex.Entry{{
-		AniListID: 154587,
-		Updated:   updated,
-		Torrents: []seadex.Torrent{
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1961373", InfoHash: "143ed15e5e3df072ae91adaeb149973a887590dd", IsBest: true, ReleaseGroup: "PMR", Files: pmrFiles},
-			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>", IsBest: true, ReleaseGroup: "PMR", Files: pmrFiles},
-			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1162986", InfoHash: "<redacted>", IsBest: false, ReleaseGroup: "LostYears", Files: lostYearsFiles},
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1998171", InfoHash: "fb9ce1e001837de7662bd72b3fb79b3fea13d03f", IsBest: false, ReleaseGroup: "LostYears", Files: lostYearsFiles},
-		},
-	}}
-
-	// Frieren is a TV series, so classify every entry as anime (the category
-	// itself is exercised by TestMovieClassifier).
-	classifyAnime := func(int) []int { return []int{catAnime} }
-	nyaa, ab, abSkipped, _ := buildFeeds(entries, "PASSKEY123", classifyAnime)
-	if len(nyaa) != 2 || len(ab) != 2 {
-		t.Fatalf("feeds: got nyaa=%d ab=%d, want 2 and 2", len(nyaa), len(ab))
-	}
-	if abSkipped != 0 {
-		t.Errorf("abSkippedNoPasskey = %d, want 0 (passkey provided)", abSkipped)
-	}
-
-	// Nyaa best (PMR): season-collapsed title (extras skipped), public .torrent
-	// link, best marker, real info hash, anime category, SeaDex entry info URL,
-	// summed pack size, entry update time.
-	pmrNyaa := findByGUID(nyaa, "https://nyaa.si/view/1961373")
-	if pmrNyaa == nil {
-		t.Fatal("PMR nyaa item missing")
-	}
-	if want := "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]"; pmrNyaa.Title != want {
-		t.Errorf("PMR nyaa title = %q, want %q", pmrNyaa.Title, want)
-	}
-	if pmrNyaa.DownloadURL != "https://nyaa.si/download/1961373.torrent" {
-		t.Errorf("PMR nyaa download = %q", pmrNyaa.DownloadURL)
-	}
-	if pmrNyaa.DownloadVolumeFactor != dvfBest {
-		t.Errorf("PMR nyaa dvf = %q, want %q", pmrNyaa.DownloadVolumeFactor, dvfBest)
-	}
-	if pmrNyaa.InfoHash != "143ed15e5e3df072ae91adaeb149973a887590dd" {
-		t.Errorf("PMR nyaa infohash = %q", pmrNyaa.InfoHash)
-	}
-	if len(pmrNyaa.Categories) != 1 || pmrNyaa.Categories[0] != catAnime {
-		t.Errorf("PMR nyaa categories = %v, want [%d]", pmrNyaa.Categories, catAnime)
-	}
-	if pmrNyaa.InfoURL != "https://releases.moe/154587" {
-		t.Errorf("PMR nyaa infoURL = %q", pmrNyaa.InfoURL)
-	}
-	if pmrNyaa.Size != 400_000_000+7_500_699_108+7_497_267_058 {
-		t.Errorf("PMR nyaa size = %d, want summed pack size", pmrNyaa.Size)
-	}
-	if !pmrNyaa.PubDate.Equal(updated) {
-		t.Errorf("PMR nyaa pubDate = %v, want %v", pmrNyaa.PubDate, updated)
-	}
-
-	// AB best (PMR): passkey download link, best marker, redacted info hash
-	// dropped, guid is the usable (prefixed) AB page URL.
-	pmrAB := findByGUID(ab, "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293")
-	if pmrAB == nil {
-		t.Fatal("PMR ab item missing")
-	}
-	if pmrAB.DownloadURL != "https://animebytes.tv/torrent/1167293/download/PASSKEY123" {
-		t.Errorf("PMR ab download = %q", pmrAB.DownloadURL)
-	}
-	if pmrAB.InfoHash != "" {
-		t.Errorf("PMR ab infohash = %q, want empty (redacted dropped)", pmrAB.InfoHash)
-	}
-
-	// AB alt (LostYears): alt marker + its own passkey link.
-	lyAB := findByGUID(ab, "https://animebytes.tv/torrents.php?id=86576&torrentid=1162986")
-	if lyAB == nil {
-		t.Fatal("LostYears ab item missing")
-	}
-	if lyAB.DownloadVolumeFactor != dvfAlt {
-		t.Errorf("LostYears ab dvf = %q, want %q (alt)", lyAB.DownloadVolumeFactor, dvfAlt)
-	}
-	if lyAB.DownloadURL != "https://animebytes.tv/torrent/1162986/download/PASSKEY123" {
-		t.Errorf("LostYears ab download = %q", lyAB.DownloadURL)
-	}
-
-	// Without a passkey the AB feed carries nothing grabbable, and both AB
-	// releases are counted for the operator nudge; Nyaa is unaffected.
-	nyaa2, ab2, abSkipped2, _ := buildFeeds(entries, "", classifyAnime)
-	if len(nyaa2) != 2 {
-		t.Errorf("nyaa feed without passkey = %d, want 2", len(nyaa2))
-	}
-	if len(ab2) != 0 {
-		t.Errorf("ab feed without passkey = %d, want 0", len(ab2))
-	}
-	if abSkipped2 != 2 {
-		t.Errorf("abSkippedNoPasskey without passkey = %d, want 2", abSkipped2)
-	}
-}
-
-func TestFeedTitle(t *testing.T) {
+// TestDerivedTitle exercises the file-name-derived title synthesis (the permanent
+// last resort when no show title is known; see TestSynthesizeTitle for the
+// assembled-title path).
+func TestDerivedTitle(t *testing.T) {
 	tests := []struct {
 		name  string
 		group string
@@ -608,6 +1046,14 @@ func TestFeedTitle(t *testing.T) {
 				{Name: "Frieren Beyond Journey's End - S01E08 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
 			},
 			want: "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
+		},
+		{
+			name: "torrent directory is not part of the release title",
+			files: []seadex.File{
+				{Name: "Season 1/Taboo Tattoo S01E01 Tattoo [Bluray-1080p Remux-h264]-LazyRemux.mkv"},
+				{Name: "Season 1/Taboo Tattoo S01E02 Surprise Attack [Bluray-1080p Remux-h264]-LazyRemux.mkv"},
+			},
+			want: "Taboo Tattoo S01 Tattoo [Bluray-1080p Remux-h264]-LazyRemux",
 		},
 		{
 			name:  "single-episode torrent keeps its SxxExx (complete-but-unpacked season)",
@@ -678,61 +1124,20 @@ func TestFeedTitle(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := feedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group})
+			got := derivedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group}, EntryInfo{})
 			if got != tc.want {
-				t.Errorf("feedTitle = %q, want %q", got, tc.want)
+				t.Errorf("derivedTitle = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// TestMovieClassifier verifies the RSS category comes from the entry's real
-// media type (Fribb), not a guess from the file name: a movie routes to Radarr
-// (Movies), while a TV series, an OVA, a special, and an unmapped entry all
-// route to Sonarr (Anime). The OVA/special cases are the ones a file-name
-// heuristic gets wrong - a single-file special is indistinguishable from a film
-// by name - so classifying them as anime is the behavior that matters here.
-func TestMovieClassifier(t *testing.T) {
-	recs := map[int]mapping.Record{
-		1: {AniListID: 1, Type: "MOVIE"},
-		2: {AniListID: 2, Type: "OVA"},
-		3: {AniListID: 3, Type: "SPECIAL"},
-		4: {AniListID: 4, Type: "TV"},
-	}
-	classify := movieClassifier(func(alID int) bool {
-		r, ok := recs[alID]
-		return ok && r.IsMovie()
-	})
-	tests := []struct {
-		name string
-		alID int
-		want int
-	}{
-		{"movie routes to Radarr", 1, catMovies},
-		{"OVA is not a movie (Sonarr)", 2, catAnime},
-		{"special is not a movie (Sonarr)", 3, catAnime},
-		{"tv routes to Sonarr", 4, catAnime},
-		{"unmapped defaults to Sonarr", 999, catAnime},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := classify(tc.alID)
-			if len(got) != 1 || got[0] != tc.want {
-				t.Errorf("classify(%d) = %v, want [%d]", tc.alID, got, tc.want)
-			}
-		})
-	}
-
-	// A nil classifier (no mapping configured) is safe and defaults to anime.
-	if got := movieClassifier(nil)(1); len(got) != 1 || got[0] != catAnime {
-		t.Errorf("nil-mapping classify = %v, want [%d]", got, catAnime)
-	}
-}
-
-// TestABFeedRequiresPasskey verifies the /ab feed rejects an empty-q request
-// (Prowlarr's save-test or an RSS check) with a Torznab <error> when no passkey
-// is set, so the AnimeBytes indexer cannot be saved without one; the /nyaa feed
-// and an AB request once a passkey is set are unaffected.
+// TestABFeedRequiresPasskey verifies a CONFIGURED /ab feed (ab_torznab_url
+// set) rejects an empty-q request (Prowlarr's save-test or an RSS check) with
+// a Torznab <error> when no passkey is set, so the AnimeBytes indexer cannot
+// be saved without one; the /nyaa feed and an AB request once a passkey is set
+// are unaffected. An UNCONFIGURED AB tracker is a different contract - the
+// off-switch shape pinned by TestServeUnconfiguredABServesNoPasskeyItems.
 func TestABFeedRequiresPasskey(t *testing.T) {
 	serve := func(ix *Indexer, target string) string {
 		rec := httptest.NewRecorder()
@@ -740,7 +1145,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{APIKey: "k"}, Deps{}, "")
+	noKey := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
 	if body := serve(noKey, "/ab?t=search&apikey=k"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
@@ -748,10 +1153,56 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{APIKey: "k", ABPasskey: "PASSKEY"}, Deps{}, "")
+	withKey := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}, nil, nil)
 	if body := serve(withKey, "/ab?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
+}
+
+// TestServeUnconfiguredABServesNoPasskeyItems pins the README's per-tracker
+// off switch on the serve path: with ab_torznab_url EMPTY and ab_passkey still
+// set, an /ab empty-q request (the periodic RSS check) must serve NO
+// passkey-bearing items - even against a stale on-disk snapshot persisted
+// while AnimeBytes was still configured - and must answer with the same empty
+// feed shape as a tracker with no data, never the missing-passkey nudge (that
+// nudge is for a CONFIGURED tracker). The configured sibling subtest proves
+// the same snapshot serves normally once ab_torznab_url is set, so the gate
+// cannot dark-launch an always-off AB feed.
+func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
+	// A stale snapshot written before the operator blanked ab_torznab_url: its
+	// AB feed carries a credential-bearing download link.
+	stale := `{"version":2,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"ab:1167293","Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatalf("write stale snapshot: %v", err)
+	}
+	serve := func(ix *Indexer) string {
+		rec := httptest.NewRecorder()
+		ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?t=search&apikey=k", nil))
+		return rec.Body.String()
+	}
+
+	t.Run("unconfigured AB serves the empty-feed shape", func(t *testing.T) {
+		off := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABPasskey: "SECRETPASSKEY"}, nil, nil)
+		body := serve(off)
+		if strings.Contains(body, "SECRETPASSKEY") {
+			t.Errorf("unconfigured AB response leaks the passkey: %q", body)
+		}
+		if strings.Contains(body, "<item>") {
+			t.Errorf("unconfigured AB served feed items: %q", body)
+		}
+		if strings.Contains(body, "<error") {
+			t.Errorf("unconfigured AB answered with a Torznab <error>, want the plain empty feed: %q", body)
+		}
+	})
+
+	t.Run("configured AB serves the same snapshot", func(t *testing.T) {
+		on := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}, nil, nil)
+		body := serve(on)
+		if !strings.Contains(body, "<item>") || !strings.Contains(body, "Frieren - S01 (BD Remux 1080p) [PMR]") {
+			t.Errorf("configured AB did not serve the snapshot item: %q", body)
+		}
+	})
 }
 
 // TestRenderSynthesizedItem checks a synthesized RSS item renders in the live
@@ -760,7 +1211,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 // uploadvolumefactor 1), a floored seeders count, the SeaDex entry as comments,
 // and the info hash.
 func TestRenderSynthesizedItem(t *testing.T) {
-	out := renderFeed([]item{{
+	out, _ := renderFeed([]item{{
 		Title:                "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
 		GUID:                 "https://nyaa.si/view/1961373",
 		InfoURL:              "https://releases.moe/154587",
@@ -788,16 +1239,16 @@ func TestRenderSynthesizedItem(t *testing.T) {
 	}
 }
 
-// TestServe_requiresAPIKeyBeforeServingCaps verifies the API-key gate rejects a
+// TestServeRequiresAPIKeyBeforeServingCaps verifies the API-key gate rejects a
 // missing or wrong apikey before any capabilities document is served, and that a
 // correct key yields the exact caps shape the arrs expect.
-func TestServe_requiresAPIKeyBeforeServingCaps(t *testing.T) {
-	ix := New(&Config{APIKey: "secret"}, Deps{}, "")
+func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
+	ix := New(&Config{APIKey: "secret"}, nil, nil)
 
 	bad := httptest.NewRecorder()
 	ix.serve(bad, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil))
 	if bad.Code != http.StatusUnauthorized {
-		t.Fatalf("bad apikey status = %d, want %d", bad.Code, http.StatusUnauthorized)
+		t.Errorf("bad apikey status = %d, want %d", bad.Code, http.StatusUnauthorized)
 	}
 	if strings.Contains(bad.Body.String(), "<caps>") {
 		t.Errorf("bad apikey body contains caps response: %q", bad.Body.String())
@@ -806,13 +1257,13 @@ func TestServe_requiresAPIKeyBeforeServingCaps(t *testing.T) {
 	missing := httptest.NewRecorder()
 	ix.serve(missing, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps", nil))
 	if missing.Code != http.StatusUnauthorized {
-		t.Fatalf("missing apikey status = %d, want %d", missing.Code, http.StatusUnauthorized)
+		t.Errorf("missing apikey status = %d, want %d", missing.Code, http.StatusUnauthorized)
 	}
 
 	good := httptest.NewRecorder()
 	ix.serve(good, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=secret", nil))
 	if good.Code != http.StatusOK {
-		t.Fatalf("good apikey status = %d, want %d; body=%q", good.Code, http.StatusOK, good.Body.String())
+		t.Errorf("good apikey status = %d, want %d; body=%q", good.Code, http.StatusOK, good.Body.String())
 	}
 	if ct := good.Header().Get("Content-Type"); ct != "application/xml; charset=utf-8" {
 		t.Errorf("caps content type = %q, want application/xml; charset=utf-8", ct)
@@ -832,11 +1283,11 @@ func TestServe_requiresAPIKeyBeforeServingCaps(t *testing.T) {
 	}
 }
 
-// TestFilterByCats_appliesTorznabCategorySemantics pins the Torznab category
+// TestFilterByCatsAppliesTorznabCategorySemantics pins the Torznab category
 // filter contract: an Anime item satisfies a TV-parent request, Movies excludes
 // Anime, and an uncategorized item always passes through (Prowlarr already
 // applied the upstream category filter).
-func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
+func TestFilterByCatsAppliesTorznabCategorySemantics(t *testing.T) {
 	items := []item{
 		{Title: "anime", Categories: []int{catAnime}},
 		{Title: "movie", Categories: []int{catMovies}},
@@ -844,17 +1295,17 @@ func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
 	}
 
 	if got := filterByCats(items, nil); len(got) != 3 {
-		t.Fatalf("empty category filter returned %d items, want 3", len(got))
+		t.Errorf("empty category filter returned %d items, want 3", len(got))
 	}
 
 	anime := filterByCats(items, map[int]bool{catAnime: true})
 	if len(anime) != 2 || anime[0].Title != "anime" || anime[1].Title != "uncategorized" {
-		t.Fatalf("anime filter returned %#v, want anime plus uncategorized passthrough", anime)
+		t.Errorf("anime filter returned %#v, want anime plus uncategorized passthrough", anime)
 	}
 
 	tv := filterByCats(items, map[int]bool{catTV: true})
 	if len(tv) != 2 || tv[0].Title != "anime" || tv[1].Title != "uncategorized" {
-		t.Fatalf("TV parent filter returned %#v, want anime subcategory plus uncategorized passthrough", tv)
+		t.Errorf("TV parent filter returned %#v, want anime subcategory plus uncategorized passthrough", tv)
 	}
 
 	movies := filterByCats(items, map[int]bool{catMovies: true})
@@ -863,116 +1314,61 @@ func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
 	}
 }
 
-// TestReloadKeepsFeedOnMalformedSnapshot verifies reload's resilience contract: once a
-// good feed is loaded, a later malformed snapshot write (a partial/corrupt cycle write) is
-// logged and ignored, never blanking the live feed. A cross-process poll writes the file
-// non-atomically only in the failure case; the server must not serve an empty feed then.
-func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json")
-	entries := []seadex.Entry{{
-		AniListID: 7,
-		Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
-		t.Fatalf("Rebuild: %v", err)
+// TestFilterByCatsMatchesAnyTorznabParent pins the GENERALIZED parent-category
+// rule beyond the old Anime-under-TV special case: a Movies/HD 2040
+// subcategory item satisfies its 2000 Movies parent while staying excluded
+// from the unrelated TV parent, so a regression back to a hard-coded
+// anime-to-TV mapping fails here.
+func TestFilterByCatsMatchesAnyTorznabParent(t *testing.T) {
+	items := []item{{Title: "movie subcategory", Categories: []int{2040}}}
+	got := filterByCats(items, map[int]bool{catMovies: true})
+	if len(got) != 1 || got[0].Title != "movie subcategory" {
+		t.Errorf("Movies parent filter returned %#v, want the 2040 subcategory item", got)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
-		t.Fatalf("initial feed = %d items, want 1", len(got))
-	}
-	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
-		t.Fatalf("corrupt write: %v", err)
-	}
-	future := time.Now().Add(time.Hour)
-	if err := os.Chtimes(path, future, future); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
-		t.Errorf("after malformed rewrite feed = %d items, want 1 (a bad write must not blank a live feed)", len(got))
+	if got := filterByCats(items, map[int]bool{catTV: true}); len(got) != 0 {
+		t.Errorf("TV parent filter returned %#v, want no movie-subcategory items", got)
 	}
 }
 
-// TestReloadRetriesPreservedMtimeReplacementAfterFailure pins the failed-file
-// memo to file IDENTITY, not just mtime: after a malformed snapshot fails to
-// load at mtime T, a repaired valid snapshot installed on a NEW inode whose
-// mtime is reset to the same T (an atomic rename or backup restore preserving
-// timestamps) must be retried and installed - a mtime-only watermark would skip
-// it and wedge the server on the old feed until restart. Only the unchanged bad
-// inode itself stays memoized.
-func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "feed.json")
-	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
-		t.Fatalf("malformed write: %v", err)
+// nyaaTestEntries builds n distinct single-torrent Nyaa SeaDex entries, the
+// minimal input for a synthesized feed of n items in reload tests.
+func nyaaTestEntries(n int) []seadex.Entry {
+	entries := make([]seadex.Entry, 0, n)
+	for i := range n {
+		entries = append(entries, seadex.Entry{
+			AniListID: 7 + i,
+			Torrents: []seadex.Torrent{{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/" + strconv.Itoa(42+i), IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show " + strconv.Itoa(i) + " - S01E01 (1080p) [G].mkv"}},
+			}},
+		})
 	}
-	failedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
-	if err := os.Chtimes(path, failedAt, failedAt); err != nil {
+	return entries
+}
+
+// seedRebuild writes a journaled snapshot of entries at path: an empty-ledger
+// seed followed by one Rebuild, so every entry lands in the feed (the reload
+// tests need populated snapshots, not the first-run baseline).
+func seedRebuild(path string, entries []seadex.Entry) error {
+	if err := os.WriteFile(path, []byte(emptyFeedJSON), 0o600); err != nil {
+		return err
+	}
+	return newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil)
+}
+
+// setMtime sets path's mtime to when, the trigger reload's freshness check reads.
+func setMtime(t *testing.T, path string, when time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, when, when); err != nil {
 		t.Fatalf("chtimes: %v", err)
-	}
-	// New's warm-up reload reads the malformed file and memoizes it as failed.
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
-		t.Fatalf("initial feed = %d items, want 0 (malformed snapshot must not load)", len(got))
-	}
-	// Repair: a valid snapshot on a NEW inode, renamed over the bad file with
-	// the failed mtime preserved.
-	repaired := filepath.Join(dir, "feed-repaired.json")
-	entries := []seadex.Entry{{
-		AniListID: 7,
-		Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	if err := NewFeedWriter("", false, repaired, nil).Rebuild(context.Background(), entries, nil); err != nil {
-		t.Fatalf("Rebuild: %v", err)
-	}
-	if err := os.Rename(repaired, path); err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-	if err := os.Chtimes(path, failedAt, failedAt); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
-	ix.reload(context.Background())
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
-		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
 	}
 }
 
-// TestBuildFeedsCompleteUnpackedSeason pins the v1.7.2 behavior at the buildFeeds level: a
-// season SeaDex tracks as one torrent PER episode (each a single-file release) yields one
-// feed item per episode, each keeping its SxxExx - never collapsed to the season (which
-// would let the arr grab a single episode believing it was the whole season) and never
-// deduped away.
-func TestBuildFeedsCompleteUnpackedSeason(t *testing.T) {
-	entries := []seadex.Entry{{
-		AniListID: 187989,
-		Torrents: []seadex.Torrent{
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E01 (WEB 1080p) [G].mkv"}}},
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E02 (WEB 1080p) [G].mkv"}}},
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/3", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E03 (WEB 1080p) [G].mkv"}}},
-		},
-	}}
-	nyaa, _, _, _ := buildFeeds(entries, "", func(int) []int { return []int{catAnime} })
-	if len(nyaa) != 3 {
-		t.Fatalf("got %d items, want 3 (one per episode torrent, not collapsed/deduped)", len(nyaa))
-	}
-	titles := map[string]bool{}
-	for i := range nyaa {
-		titles[nyaa[i].Title] = true
-	}
-	for _, want := range []string{
-		"Scum of the Brave - S01E01 (WEB 1080p) [G]",
-		"Scum of the Brave - S01E02 (WEB 1080p) [G]",
-		"Scum of the Brave - S01E03 (WEB 1080p) [G]",
-	} {
-		if !titles[want] {
-			t.Errorf("missing per-episode title %q; got %v", want, titles)
-		}
-	}
+// bumpMtime pushes path's mtime an hour into the future so an in-place rewrite
+// (same inode, sub-granularity timestamp) is seen as changed by reload.
+func bumpMtime(t *testing.T, path string) {
+	t.Helper()
+	setMtime(t, path, time.Now().Add(time.Hour))
 }
 
 // TestDownloadURL pins the download-link builder that produces the AnimeBytes secret link:
@@ -993,9 +1389,9 @@ func TestDownloadURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotURL, gotOK := downloadURL(tc.tracker, tc.src, tc.passkey)
+			gotURL, gotOK := downloadURLForScope(trackerScope(tc.tracker), tc.src, tc.passkey)
 			if gotURL != tc.wantURL || gotOK != tc.wantOK {
-				t.Errorf("downloadURL(%q, %q, passkey) = (%q, %v), want (%q, %v)", tc.tracker, tc.src, gotURL, gotOK, tc.wantURL, tc.wantOK)
+				t.Errorf("downloadURLForScope(%q, %q, passkey) = (%q, %v), want (%q, %v)", tc.tracker, tc.src, gotURL, gotOK, tc.wantURL, tc.wantOK)
 			}
 		})
 	}
@@ -1024,150 +1420,50 @@ func TestValidInfoHash(t *testing.T) {
 	}
 }
 
-// TestReloadInstallsOlderMtimeSnapshot pins reload's inequality freshness
-// guard: an on-disk snapshot whose mtime is OLDER than the loaded copy's still
-// installs. A /config volume restored from backup, or a file replaced by an
-// atomic rename preserving an older mtime, is the current truth on disk; the
-// former strictly-After guard never installed it and wedged the server on the
-// stale in-memory snapshot until restart. Any mtime CHANGE reloads; only
-// equality skips (TestReloadSkipsUnchangedMtime). Driven single-threaded: the
-// pre-install holds the write lock exactly as a real cycle would, and the lone
-// reload runs after it, so there is no shared-state access outside the lock.
-func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json")
-	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	newerTime := oldTime.Add(time.Hour)
-	restoredJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"restored","GUID":"restored","DownloadURL":"restored"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(restoredJSON), 0o600); err != nil {
-		t.Fatalf("write restored snapshot: %v", err)
-	}
-	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
-		t.Fatalf("set restored snapshot mtime: %v", err)
-	}
-
-	ix := New(&Config{}, Deps{}, "")
-	ix.path = path
-
-	// Pre-install a newer-mtime snapshot the way a pre-restore cycle would,
-	// holding the write lock exactly as reload's install path does.
-	ix.mu.Lock()
-	ix.snap = snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "stale", GUID: "stale", DownloadURL: "stale"}},
-	}
-	ix.snapMod = newerTime
-	ix.mu.Unlock()
-
-	// Reloading against the older-mtime on-disk file must install it: the
-	// mtime differs from the loaded snapshot's, and the file is the truth.
-	ix.reload(context.Background())
-
-	got := ix.feedFor(upstreamNyaa)
-	if len(got) != 1 || got[0].Title != "restored" {
-		t.Fatalf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
-	}
-	if ix.snapMod.Equal(newerTime) {
-		t.Fatalf("snapMod after reloading an older-mtime snapshot = %v, want the on-disk mtime, not the stale %v", ix.snapMod, newerTime)
-	}
-}
-
-// TestReloadSkipsUnchangedMtime pins the equality leg of reload's freshness
-// guard: when the on-disk mtime equals the loaded snapshot's, reload leaves the
-// served feed untouched - even if the bytes changed - so the per-request mtime
-// check stays a cheap stat, never a read/unmarshal.
-func TestReloadSkipsUnchangedMtime(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json")
-	when := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	firstJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"first","GUID":"first","DownloadURL":"first"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
-		t.Fatalf("write first snapshot: %v", err)
-	}
-	if err := os.Chtimes(path, when, when); err != nil {
-		t.Fatalf("set first snapshot mtime: %v", err)
-	}
-	ix := New(&Config{}, Deps{}, path)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
-		t.Fatalf("initial feed = %#v, want the first snapshot", got)
-	}
-
-	// Rewrite the content but restore the identical mtime: reload must skip.
-	secondJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"second","GUID":"second","DownloadURL":"second"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(secondJSON), 0o600); err != nil {
-		t.Fatalf("write second snapshot: %v", err)
-	}
-	if err := os.Chtimes(path, when, when); err != nil {
-		t.Fatalf("restore mtime: %v", err)
-	}
-	ix.reload(context.Background())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
-		t.Fatalf("feed after unchanged-mtime rewrite = %#v, want the loaded first snapshot (equality skips)", got)
-	}
-}
-
-// TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract:
-// while one request holds the refresh (reloadMu, as a winning reload does for
-// its whole stat/read/unmarshal), a sibling reload returns immediately without
-// duplicating the read - it does not block and does not install the on-disk
-// snapshot itself - and feedFor keeps serving the current snapshot unblocked.
-// Once the refresh is released, the next reload installs the new snapshot.
-func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json")
-	newJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"new","GUID":"new","DownloadURL":"new"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
-		t.Fatalf("write snapshot: %v", err)
-	}
-	ix := New(&Config{}, Deps{}, "")
-	ix.path = path
-
-	// Simulate a refresh in progress: hold reloadMu exactly as the winning
-	// request does across its stat/read/unmarshal.
-	ix.reloadMu.Lock()
-
-	// A sibling reload must return immediately rather than queue behind the
-	// in-progress refresh or perform a duplicate read.
-	done := make(chan struct{})
-	go func() {
-		ix.reload(context.Background())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		ix.reloadMu.Unlock()
-		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return")
-	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
-		ix.reloadMu.Unlock()
-		t.Fatalf("sibling reload installed the snapshot itself = %#v; want the install left to the refresh holder", got)
-	}
-
-	// Once the winning request releases the refresh, the next reload installs
-	// the new snapshot as usual.
-	ix.reloadMu.Unlock()
-	ix.reload(context.Background())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "new" {
-		t.Fatalf("reload after the refresh released = %#v, want the new snapshot installed", got)
-	}
-}
-
 // TestApplyPaging pins the synthesized feed's Torznab paging contract (t=caps
-// advertises limit/offset): limit trims the window, offset advances it, an
-// offset past the end yields an empty page, and absent params leave the feed
-// untouched.
+// advertises limit/offset with default=defaultCapsLimit): limit trims the
+// window, offset advances it, an offset past the end yields an empty page, a
+// missing or invalid limit falls back to the advertised default (which leaves
+// a feed smaller than the default untouched and trims a larger one), and the
+// offset is applied before the limit. The substitution is silent to the
+// client, so the Debug line is the only signal a misconfigured limit was
+// ignored: each case also pins that it fires for a present-but-unusable value
+// and stays quiet for an absent one.
 func TestApplyPaging(t *testing.T) {
 	feed := []item{{GUID: "a"}, {GUID: "b"}, {GUID: "c"}}
+	big := make([]item, defaultCapsLimit+3)
+	for i := range big {
+		big[i] = item{GUID: strconv.Itoa(i)}
+	}
 	tests := []struct {
-		name  string
-		query string
-		want  []string
+		name                    string
+		feed                    []item
+		query                   string
+		want                    []string
+		wantUnusableLimitLogged bool
 	}{
-		{"no params leaves the feed unpaged", "", []string{"a", "b", "c"}},
-		{"limit trims the window", "limit=2", []string{"a", "b"}},
-		{"offset advances the window", "offset=2", []string{"c"}},
-		{"offset+limit page", "offset=1&limit=1", []string{"b"}},
-		{"offset past the end is an empty page", "offset=10", nil},
-		{"invalid params are ignored", "offset=x&limit=-1", []string{"a", "b", "c"}},
+		{"no params leave a feed below the default untouched", feed, "", []string{"a", "b", "c"}, false},
+		{"limit trims the window", feed, "limit=2", []string{"a", "b"}, false},
+		{"offset advances the window", feed, "offset=2", []string{"c"}, false},
+		{"offset+limit page", feed, "offset=1&limit=1", []string{"b"}, false},
+		{"offset past the end is an empty page", feed, "offset=10", nil, false},
+		{"invalid params fall back to the default window", feed, "offset=x&limit=-1", []string{"a", "b", "c"}, true},
+		{"zero limit falls back to the default window", feed, "limit=0", []string{"a", "b", "c"}, true},
+		{"zero offset leaves the window anchored", feed, "offset=0", []string{"a", "b", "c"}, false},
+		{"no limit applies the advertised default to a larger feed", big, "", func() []string {
+			want := make([]string, defaultCapsLimit)
+			for i := range want {
+				want[i] = strconv.Itoa(i)
+			}
+			return want
+		}(), false},
+		{"explicit limit beyond the default wins", big, "limit=" + strconv.Itoa(defaultCapsLimit+3), func() []string {
+			want := make([]string, defaultCapsLimit+3)
+			for i := range want {
+				want[i] = strconv.Itoa(i)
+			}
+			return want
+		}(), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1175,7 +1471,13 @@ func TestApplyPaging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseQuery(%q): %v", tc.query, err)
 			}
-			got := applyPaging(feed, q)
+			// Per-case recorder so the diagnostic assertion is per-case.
+			pagingLog, pagingRec := capture.New()
+			got := applyPaging(pagingLog, tc.feed, q)
+			if logged := pagingRec.Contains("unusable Torznab limit param; using the advertised default"); logged != tc.wantUnusableLimitLogged {
+				t.Errorf("unusable-limit diagnostic logged = %v, want %v; records: %v",
+					logged, tc.wantUnusableLimitLogged, pagingRec.Messages())
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("applyPaging(%q) returned %d items, want %d", tc.query, len(got), len(tc.want))
 			}
@@ -1191,10 +1493,7 @@ func TestApplyPaging(t *testing.T) {
 // TestParsePubDate pins the Torznab <pubDate> parser on the untrusted upstream
 // date string: each supported layout parses to the same instant, and any empty,
 // whitespace-only, or unparseable value yields the zero time (the failure signal
-// writeItem keys on to omit the pubDate element). Today only TestParseTorznab's
-// single RFC1123Z sample and the round-trip fuzz seed exercise this, so the
-// alternate layouts and the failure branch (the uncovered path, 85.7%) are
-// otherwise unpinned.
+// writeItem keys on to substitute the epoch for the pubDate element).
 func TestParsePubDate(t *testing.T) {
 	want := time.Date(2026, time.July, 6, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct{ name, in string }{
@@ -1221,5 +1520,239 @@ func TestParsePubDate(t *testing.T) {
 				t.Errorf("parsePubDate(%q) = %v, want the zero time", tc.in, got)
 			}
 		})
+	}
+}
+
+// TestServeFailsClosedWithoutConfiguredAPIKey pins serve's independent
+// fail-closed guard for an unconfigured feed_api_key: Run refuses to bind in
+// that state, but any other construction path reaching serve must get a 503,
+// never a served feed - an absent apikey param also hashes to sha256(""), so
+// skipping straight to the constant-time compare would OPEN the gate and serve
+// the passkey-bearing feed unauthenticated.
+func TestServeFailsClosedWithoutConfiguredAPIKey(t *testing.T) {
+	ix := New(&Config{}, nil, nil)
+	for _, target := range []string{
+		"/nyaa?t=caps",
+		"/nyaa?t=caps&apikey=",
+		"/ab?t=search&apikey=x",
+	} {
+		rec := httptest.NewRecorder()
+		ix.serve(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("serve(%q) with unconfigured feed_api_key = %d, want 503", target, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "<caps>") {
+			t.Errorf("serve(%q) leaked a caps response despite unconfigured feed_api_key", target)
+		}
+	}
+}
+
+// TestSearchUsesConfiguredABUpstream is the AB-side behavioral mirror of
+// TestIndexerEndToEnd's Nyaa search: an AB-only config must actually wire the
+// AnimeBytes upstream in New, so an /ab search proxies Prowlarr, matches the
+// curated AB torrent by tracker key (AB exposes no info hash in Torznab), and
+// marks it best - while the unconfigured nyaa scope serves nothing without an
+// upstream failure. Without the AB wiring in New, a valid snapshot and
+// Prowlarr response would still produce no curated search items.
+func TestSearchUsesConfiguredABUpstream(t *testing.T) {
+	// The compare cycle rebuilds the curation set from a SeaDex AB entry
+	// (torrentid 1167293, best). No passkey is needed: a search matches by
+	// tracker key and rides Prowlarr's own download link.
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := seedRebuild(path, entries); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	// Mock Prowlarr AB Torznab: one item whose guid/comments carry the
+	// /torrent/1167293/group permalink (the live AB shape), no info hash.
+	const abFeed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>AnimeBytes</title>
+    <item>
+      <title>[PMR] Frieren S01 [BD Remux 1080p]</title>
+      <guid>https://animebytes.tv/torrent/1167293/group?nh=709E38EC</guid>
+      <comments>https://animebytes.tv/torrent/1167293/group</comments>
+      <size>22497965274</size>
+      <link>http://prowlarr:9696/2/download?apikey=x&amp;link=abc</link>
+      <enclosure url="http://prowlarr:9696/2/download?apikey=x&amp;link=abc" length="22497965274" type="application/x-bittorrent"/>
+      <torznab:attr name="category" value="5070"/>
+      <torznab:attr name="seeders" value="7"/>
+    </item>
+  </channel>
+</rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		// Rewrite the fixture's download link onto this mock endpoint's own
+		// origin: search drops items whose download URL is off the configured
+		// Prowlarr origin, and a real Prowlarr hands out its own proxy links.
+		_, _ = io.WriteString(w, strings.ReplaceAll(abFeed, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	ix := warmedIndexer(&Config{SnapshotPath: path, ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, nil, srv.Client())
+
+	items, stats, fault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
+	if len(items) != 1 {
+		t.Fatalf("ab search returned %d items, want 1 (the AB upstream must be wired)", len(items))
+	}
+	if items[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (best)", items[0].DownloadVolumeFactor, dvfBest)
+	}
+	if !stats.answered || fault != nil || stats.upstream != 1 || stats.curated != 1 {
+		t.Errorf("ab stats = %+v (fault=%+v), want answered, no fault, upstream 1, curated 1", stats, fault)
+	}
+
+	// The nyaa scope has no configured upstream: an empty result (a standing
+	// misconfiguration), never reported as an upstream failure.
+	nyaaItems, _, nyaaFault := ix.query(t.Context(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
+	if len(nyaaItems) != 0 || nyaaFault != nil {
+		t.Errorf("nyaa scope = %d items (fault=%+v), want 0 items and no fault", len(nyaaItems), nyaaFault)
+	}
+}
+
+// TestFeedForUnknownScopeServesNothing pins feedFor's default arm: a scope
+// that names no tracker serves no feed even when both configured trackers
+// hold items, so a routing bug can never leak one tracker's feed (or the
+// in-memory credential-bearing AB items) under an unrecognized scope.
+func TestFeedForUnknownScopeServesNothing(t *testing.T) {
+	ix := New(&Config{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ABTorznabURL:   "http://prowlarr/2/api",
+		ABPasskey:      "PK",
+	}, nil, nil)
+	ix.cache.mu.Lock()
+	ix.cache.snap.NyaaFeed = []journalItem{
+		{Title: "n"},
+	}
+	ix.cache.snap.ABFeed = []journalItem{
+		{Title: "a"},
+	}
+	ix.cache.mu.Unlock()
+	if got := ix.feedFor("other"); got != nil {
+		t.Errorf("feedFor(unknown scope) = %+v, want nil", got)
+	}
+	if got := ix.feedFor(""); got != nil {
+		t.Errorf("feedFor(empty scope) = %+v, want nil", got)
+	}
+}
+
+// TestNewCopiesConfig pins New's defensive Config snapshot, the invariant the
+// unlocked per-request config reads rest on (server.go's feed_api_key /
+// ab_torznab_url gates, query.go's per-scope upstream checks, reload.go's AB
+// passkey rebuild all read the narrowed ix.apiKey / ix.enablement values with
+// no lock, safe only because they are by-value copies taken once in New). A caller that reuses or clears its Config
+// after construction must therefore change nothing the server serves: the
+// construction-time feed key still authorizes, and a CONFIGURED AnimeBytes
+// tracker still answers the missing-passkey nudge rather than the
+// unconfigured-tracker empty feed.
+func TestNewCopiesConfig(t *testing.T) {
+	cfg := &Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}
+	ix := New(cfg, nil, nil)
+
+	// The caller reuses (or clears) its Config after construction.
+	cfg.APIKey = ""
+	cfg.ABTorznabURL = ""
+
+	rec := httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("caps after the caller blanked its APIKey = %d, want 200 (New must snapshot the config values by value)", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?t=search&apikey=k", nil))
+	if body := rec.Body.String(); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
+		t.Errorf("ab empty-q body after the caller blanked ab_torznab_url = %q, want the configured-tracker missing-passkey <error>", body)
+	}
+}
+
+// TestRejectionLinesNameTheClientIP pins the Loki-visible contract of the two
+// request-rejection lines: the caller is identified by the fleet-standard
+// `client_ip` attribute (every webhttp consumer's spelling, so one shared query
+// over the fleet's security lines includes this app), resolved through
+// webhttp.ClientIP - which strips the port, so the value is an address the
+// operator can match against a firewall or DHCP lease rather than an
+// ephemeral-port socket string.
+func TestRejectionLinesNameTheClientIP(t *testing.T) {
+	log, rec := capture.New()
+	ix := New(&Config{
+		APIKey:         "secret",
+		NyaaTorznabURL: "http://prowlarr/1/api",
+	}, log, nil)
+
+	badKey := httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil)
+	badKey.RemoteAddr = "192.0.2.10:54321"
+	ix.serve(httptest.NewRecorder(), badKey)
+
+	noScope := httptest.NewRequest(http.MethodGet, "/other?t=caps&apikey=secret", nil)
+	noScope.RemoteAddr = "192.0.2.11:12345"
+	ix.serve(httptest.NewRecorder(), noScope)
+
+	// Both rejections share one message, so read the attrs record by record
+	// rather than through the first-match accessors.
+	var gotIPs []string
+	for _, r := range rec.Records() {
+		if r.Message != "indexer request rejected" {
+			continue
+		}
+		ip := ""
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "client_ip":
+				ip = a.Value.String()
+			case "remote":
+				t.Errorf("rejection line still carries the pre-adoption `remote` attr: %v", a.Value)
+			}
+			return true
+		})
+		gotIPs = append(gotIPs, ip)
+	}
+	// Host only, no port: webhttp.ClientIP strips it, so the value matches a
+	// firewall rule or a DHCP lease instead of an ephemeral socket string.
+	want := []string{"192.0.2.10", "192.0.2.11"}
+	if !slices.Equal(gotIPs, want) {
+		t.Errorf("client_ip values on the rejection lines = %q, want %q (messages: %v)", gotIPs, want, rec.Messages())
+	}
+}
+
+// TestDisabledTrackerFeedIsNotGatedBySnapshotState pins the off switch against
+// the snapshot state machine: an empty per-tracker Torznab URL is that tracker's
+// documented off switch, and its RSS answer is the plain empty feed - so it must
+// hold even while nothing has ever loaded (here a malformed first snapshot, the
+// startup-fault state). Answering the snapshot-unavailable Torznab error there
+// would fail an operator's Prowlarr save-test for a tracker they deliberately
+// turned off, on a fault that has nothing to do with it. An ENABLED tracker still
+// gets the fault, which is the assertion that keeps this from reading as "the
+// gate was simply removed".
+func TestDisabledTrackerFeedIsNotGatedBySnapshotState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+	// Nyaa on, AnimeBytes off.
+	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
+
+	rss := url.Values{}
+	items, stats, fault := ix.query(t.Context(), rss, upstreamAB)
+	if fault != nil {
+		t.Errorf("disabled tracker RSS fault = %+v, want none (the off switch is config, not snapshot state)", fault)
+	}
+	if len(items) != 0 {
+		t.Errorf("disabled tracker RSS items = %d, want 0", len(items))
+	}
+	if !stats.answered || !stats.feed {
+		t.Errorf("disabled tracker RSS stats = %+v, want an answered feed request", stats)
+	}
+	if _, _, fault := ix.query(t.Context(), rss, upstreamNyaa); fault == nil {
+		t.Error("configured tracker RSS fault = nil while nothing has loaded, want the snapshot-unavailable fault")
 	}
 }

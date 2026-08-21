@@ -1,0 +1,955 @@
+package indexer
+
+import (
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cplieger/xmlx"
+)
+
+// TestRenderFeed_usesStableGUIDFallback pins the documented GUID fallback
+// order (explicit GUID -> info hash -> download URL) independently of the
+// production guid() helper, which the round-trip fuzz oracle also calls.
+func TestRenderFeed_usesStableGUIDFallback(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	tests := map[string]struct {
+		want string
+		item item
+	}{
+		"explicit GUID wins": {
+			item: item{GUID: "explicit", InfoHash: hash, DownloadURL: "https://prowlarr.test/download/1"},
+			want: "explicit",
+		},
+		"info hash is the first fallback": {
+			item: item{InfoHash: hash, DownloadURL: "https://prowlarr.test/download/1"},
+			want: hash,
+		},
+		"download URL is the final fallback": {
+			item: item{DownloadURL: "https://prowlarr.test/download/1"},
+			want: "https://prowlarr.test/download/1",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			rendered, _ := renderFeed([]item{tc.item})
+			parsed, err := parseTorznab([]byte(rendered))
+			if err != nil {
+				t.Fatalf("parseTorznab(renderFeed(item)): %v", err)
+			}
+			if len(parsed) != 1 {
+				t.Fatalf("parsed item count = %d, want 1", len(parsed))
+			}
+			if got := parsed[0].GUID; got != tc.want {
+				t.Errorf("rendered GUID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteItemSaturatesPeerCount pins writeItem's overflow guard: attrInt
+// accepts counts through math.MaxInt, so a malformed-but-valid upstream item
+// with seeders and leechers both at math.MaxInt must render a peers attr
+// saturated at math.MaxInt - never a wrapped negative value, which would
+// contradict toItem's non-negative normalization.
+func TestWriteItemSaturatesPeerCount(t *testing.T) {
+	tests := map[string]struct {
+		wantPeers         int
+		seeders, leechers int
+	}{
+		"both at MaxInt saturate":        {seeders: math.MaxInt, leechers: math.MaxInt, wantPeers: math.MaxInt},
+		"sum just over MaxInt saturates": {seeders: math.MaxInt - 1, leechers: 2, wantPeers: math.MaxInt},
+		"ordinary counts sum exactly":    {seeders: 146, leechers: 3, wantPeers: 149},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var b strings.Builder
+			it := item{Title: "x", Seeders: tc.seeders, Leechers: tc.leechers}
+			writeItem(&b, &it)
+			out := b.String()
+			want := `<torznab:attr name="peers" value="` + strconv.Itoa(tc.wantPeers) + `"/>`
+			if !strings.Contains(out, want) {
+				t.Errorf("rendered item missing %s:\n%s", want, out)
+			}
+			if strings.Contains(out, `value="-`) {
+				t.Errorf("rendered a negative attribute value:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestUpstreamErrorDocMessageNamesCodeAndDescription pins the operator-facing
+// message of the Torznab <error>-document failure: the error string carries
+// both the upstream code and its description, since it is what fetchRaw's
+// "upstream query failed" WARN renders for the operator diagnosing a bad
+// Prowlarr credential or a named indexer failure.
+func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
+	_, err := parseTorznab([]byte(`<?xml version="1.0"?><error code="100" description="Incorrect user credentials"/>`))
+	if err == nil {
+		t.Fatal("parseTorznab on an <error> document returned nil error")
+	}
+	if _, ok := errors.AsType[*upstreamDocError](err); !ok {
+		t.Fatalf("error = %T, want *upstreamDocError", err)
+	}
+	got := err.Error()
+	if !strings.Contains(got, "code=100") || !strings.Contains(got, "Incorrect user credentials") {
+		t.Errorf("Error() = %q, want it to carry the upstream code and description", got)
+	}
+}
+
+// TestParseErrorDocumentBoundsFields pins the decode-time bound on the
+// fallback <error>-document parse: an over-cap code or description must NOT
+// be retained in an upstreamDocError (the previous unrestricted unmarshal
+// parked up to the transport cap (upstreamMaxBytes) in the error strings the retry loop
+// then redacted and logged on every attempt) - the breach surfaces as the
+// decoder's *torznabLimitError, which parseTorznab propagates so it
+// classifies like every other limit overflow. At-cap documents and the
+// <error>-root requirement keep working.
+func TestParseErrorDocumentBoundsFields(t *testing.T) {
+	over := strings.Repeat("d", maxUpstreamFieldBytes+1)
+	tests := map[string]struct {
+		body      string
+		wantDoc   bool
+		wantLimit bool
+	}{
+		"description over the cap rejected": {
+			body:      `<?xml version="1.0"?><error code="100" description="` + over + `"/>`,
+			wantLimit: true,
+		},
+		"code over the cap rejected": {
+			body:      `<?xml version="1.0"?><error code="` + over + `" description="x"/>`,
+			wantLimit: true,
+		},
+		"non-error root rejected": {
+			body: `<?xml version="1.0"?><failure code="100" description="x"/>`,
+		},
+		"at-cap description accepted": {
+			body:    `<?xml version="1.0"?><error code="100" description="` + strings.Repeat("d", maxUpstreamFieldBytes) + `"/>`,
+			wantDoc: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseTorznab([]byte(tc.body))
+			if err == nil {
+				t.Fatal("parseTorznab on a non-RSS document returned nil error")
+			}
+			var doc *upstreamDocError
+			if got := errors.As(err, &doc); got != tc.wantDoc {
+				t.Errorf("errors.As(err, *upstreamDocError) = %v (err = %T), want %v", got, err, tc.wantDoc)
+			}
+			var limitErr *torznabLimitError
+			if got := errors.As(err, &limitErr); got != tc.wantLimit {
+				t.Errorf("errors.As(err, *torznabLimitError) = %v (err = %T), want %v", got, err, tc.wantLimit)
+			}
+		})
+	}
+}
+
+// TestSanitizeUpstreamText_cleansAndBounds pins the emit-boundary policy on
+// untrusted Torznab <error> text: control characters (a newline that could
+// spoof a level=ERROR log line) are replaced with spaces, and the output is
+// capped at exactly 200 bytes plus the "..." truncation marker, so a multi-MB
+// <error> body can never flood a log line.
+func TestSanitizeUpstreamText_cleansAndBounds(t *testing.T) {
+	if got, want := sanitizeUpstreamText("ok\nlevel=ERROR fake"), "ok level=ERROR fake"; got != want {
+		t.Errorf("sanitizeUpstreamText(control text) = %q, want %q", got, want)
+	}
+	input := strings.Repeat("x", 201)
+	want := strings.Repeat("x", 200) + "..."
+	if got := sanitizeUpstreamText(input); got != want {
+		t.Errorf("sanitizeUpstreamText(201 bytes) = %q, want %q", got, want)
+	}
+}
+
+// TestParseTorznabDecodeLimits pins the fail-closed decode limits on an
+// untrusted upstream response: the transport byte cap alone cannot stop a
+// compromised Prowlarr from packing millions of tiny item/attr elements (or
+// one escape-heavy multi-megabyte field) into the budget, so the parser must
+// reject cardinality, per-field, and cumulative-text overflows with a
+// torznabLimitError - which fetchAndParse then retries as a malformed body -
+// while responses at or under the limits keep parsing.
+func TestParseTorznabDecodeLimits(t *testing.T) {
+	feedOf := func(inner string) []byte {
+		return []byte(`<?xml version="1.0"?><rss><channel>` + inner + `</channel></rss>`)
+	}
+	// An escape-heavy field: every source byte is a 5-byte entity, so the
+	// wire form is ~5x the decoded length the limit is measured against.
+	escapeHeavy := strings.Repeat("&amp;", maxUpstreamFieldBytes+1)
+
+	tests := map[string]struct {
+		inner    string
+		wantErr  bool
+		wantItem int
+	}{
+		"item count at the cap parses": {
+			inner:    strings.Repeat("<item><title>x</title></item>", maxUpstreamItems),
+			wantItem: maxUpstreamItems,
+		},
+		"item count over the cap rejected": {
+			inner:   strings.Repeat("<item/>", maxUpstreamItems+1),
+			wantErr: true,
+		},
+		"attr count over the cap rejected": {
+			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, maxUpstreamAttrs+1) + "</item>",
+			wantErr: true,
+		},
+		"nesting depth over the cap rejected": {
+			// An all-opens body of tiny start tags: each token passes the
+			// token cap and there are no text runs, but every StartElement
+			// would push an entry onto encoding/xml's unbounded open-element
+			// stack (~60-100 bytes per level), so the preflight must reject
+			// on cumulative depth before the decoder tokenizes.
+			inner:   strings.Repeat("<a>", 100000),
+			wantErr: true,
+		},
+		"nesting depth at the cap parses": {
+			// Balanced nesting that peaks exactly at maxUpstreamDepth (the
+			// rss/channel wrapper contributes 2); channelXML skips unknown
+			// children whole, so the document parses with zero items.
+			inner: strings.Repeat("<a>", maxUpstreamDepth-2) +
+				strings.Repeat("</a>", maxUpstreamDepth-2),
+			wantItem: 0,
+		},
+		"escape-heavy field over the cap rejected": {
+			inner:   "<item><title>" + escapeHeavy + "</title></item>",
+			wantErr: true,
+		},
+		"attr value over the cap rejected": {
+			inner:   `<item><torznab:attr name="a" value="` + strings.Repeat("v", maxUpstreamFieldBytes+1) + `"/></item>`,
+			wantErr: true,
+		},
+		"attr name over the cap rejected": {
+			inner:   `<item><torznab:attr name="` + strings.Repeat("n", maxUpstreamFieldBytes+1) + `" value="b"/></item>`,
+			wantErr: true,
+		},
+		"guid over the cap rejected": {
+			inner:   "<item><guid>" + strings.Repeat("g", maxUpstreamFieldBytes+1) + "</guid></item>",
+			wantErr: true,
+		},
+		"size text over the cap rejected": {
+			// <size> decodes through the bounded-text path before ParseInt,
+			// so a multi-kilobyte numeric field is charged to the budget
+			// (and rejected) instead of bypassing the accounting helper.
+			inner:   "<item><size>" + strings.Repeat("9", maxUpstreamFieldBytes+1) + "</size></item>",
+			wantErr: true,
+		},
+		"enclosure url over the cap rejected": {
+			inner:   `<item><enclosure url="http://x/` + strings.Repeat("u", maxUpstreamFieldBytes+1) + `" length="1"/></item>`,
+			wantErr: true,
+		},
+		"enclosure length over the cap rejected": {
+			// The length attribute is bounded and accounted BEFORE strconv,
+			// like every other recognized field; the struct decode it
+			// replaced materialized it outside the budget.
+			inner:   `<item><enclosure url="http://x/1" length="` + strings.Repeat("9", maxUpstreamFieldBytes+1) + `"/></item>`,
+			wantErr: true,
+		},
+		"repeated fields in one item over the budget rejected": {
+			// decodeField accounts EVERY occurrence of a repeated element, so
+			// 1025 x 4096-byte titles in ONE item cross the 4 MiB response budget
+			// even though each field and the item count stay under their own caps.
+			inner: "<item>" + strings.Repeat(
+				"<title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>",
+				maxUpstreamTextBytes/maxUpstreamFieldBytes+1,
+			) + "</item>",
+			wantErr: true,
+		},
+		"cumulative text over the budget rejected": {
+			// Each item stays under the per-field cap and the item count
+			// stays under maxUpstreamItems (513 < 1000), so ONLY the
+			// cumulative budget can reject: 513 items x (title+guid) 8192
+			// bytes = 4,202,496 > maxUpstreamTextBytes.
+			inner: strings.Repeat(
+				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
+					"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
+				maxUpstreamTextBytes/(2*maxUpstreamFieldBytes)+1,
+			),
+			wantErr: true,
+		},
+		"cumulative text across two channels rejected": {
+			// Each <channel> stays individually under the budget (~2 MiB of
+			// decoded text) but their aggregate crosses it. encoding/xml
+			// re-invokes channelXML.UnmarshalXML on the same value for each
+			// sibling, so the budget must persist across invocations with
+			// the accumulated Items - a per-invocation budget would accept
+			// this response.
+			inner: strings.Repeat(
+				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
+					"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
+				257,
+			) +
+				"</channel><channel>" +
+				strings.Repeat(
+					"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
+						"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
+					257,
+				),
+			wantErr: true,
+		},
+		"maximum-length field parses": {
+			inner:    "<item><title>" + strings.Repeat("t", maxUpstreamFieldBytes) + "</title></item>",
+			wantItem: 1,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab(feedOf(tc.inner))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseTorznab accepted an over-limit response (%d items)", len(items))
+				}
+				if _, ok := errors.AsType[*torznabLimitError](err); !ok {
+					t.Errorf("error = %T (%v), want *torznabLimitError", err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTorznab: %v", err)
+			}
+			if len(items) != tc.wantItem {
+				t.Errorf("parsed item count = %d, want %d", len(items), tc.wantItem)
+			}
+		})
+	}
+}
+
+// TestParseTorznabRejectsOversizedTokensAtLexicalGuard pins the allocation
+// gate that runs BEFORE encoding/xml tokenizes anything (preflightTorznab):
+// an upstreamMaxBytes-scale text node and a start tag packed with tiny XML
+// attributes must both fail at the lexical guard's own limits - proving the
+// rejection happened before DecodeElement/StartElement could materialize the
+// attacker-sized token - rather than at the post-allocation decode caps.
+func TestParseTorznabRejectsOversizedTokensAtLexicalGuard(t *testing.T) {
+	t.Run("8 MiB text node fails the text-run bound", func(t *testing.T) {
+		body := "<rss><channel><item><title>" + strings.Repeat("a", 8<<20) + "</title></item></channel></rss>"
+		_, err := parseTorznab([]byte(body))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindTextRun {
+			t.Errorf("bound = %v, want the lexical text-run bound, not a post-allocation decode cap", got)
+		}
+	})
+	t.Run("8 MiB start tag fails the per-tag attribute bound", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("<rss><channel><item ")
+		for i := 0; b.Len() < 8<<20; i++ {
+			fmt.Fprintf(&b, `a%d="x" `, i)
+		}
+		b.WriteString("></item></channel></rss>")
+		_, err := parseTorznab([]byte(b.String()))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindTagAttrs {
+			t.Errorf("bound = %v, want the lexical per-tag attribute bound", got)
+		}
+	})
+	t.Run("element flood fails the element-count bound", func(t *testing.T) {
+		// Amplification by COUNT rather than size: a run of tiny elements
+		// passes every per-token bound and charges nothing to the text
+		// budget, so maxUpstreamElements is the only thing that stops the
+		// decoded object graph from growing with the wire bytes. Built from
+		// the constant so the case cannot drift below the bound.
+		body := "<rss><channel><item>" +
+			strings.Repeat(`<torznab:attr name="a" value="b"/>`, maxUpstreamElements) +
+			"</item></channel></rss>"
+		_, err := parseTorznab([]byte(body))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindElements {
+			t.Errorf("bound = %v, want the lexical element-count bound", got)
+		}
+	})
+	t.Run("quoted '>' does not terminate a tag", func(t *testing.T) {
+		body := `<rss><channel><item><enclosure url="http://x/?q=a>b" length="1"/></item></channel></rss>`
+		items, err := parseTorznab([]byte(body))
+		if err != nil {
+			t.Fatalf("parseTorznab: %v (the preflight must honor quoted '>' bytes)", err)
+		}
+		if len(items) != 1 || items[0].DownloadURL != "http://x/?q=a>b" {
+			t.Errorf("items = %+v, want the quoted enclosure URL intact", items)
+		}
+	})
+}
+
+// TestParseTorznabRejectsSplitTextPastFieldCap pins the budgeted text decode
+// (xmlx.Budget.DecodeText): a field split across CDATA seams - each chunk
+// under the lexical text-run
+// cap and each CharData token under the per-field cap - must still be
+// rejected once the CUMULATIVE decoded bytes cross maxUpstreamFieldBytes,
+// closing the chunked bypass DecodeElement's whole-string materialization
+// allowed.
+func TestParseTorznabRejectsSplitTextPastFieldCap(t *testing.T) {
+	half := strings.Repeat("a", maxUpstreamFieldBytes/2+1)
+	body := "<rss><channel><item><title>" + half + "<![CDATA[" + half + "]]></title></item></channel></rss>"
+	_, err := parseTorznab([]byte(body))
+	limitErr, ok := errors.AsType[*torznabLimitError](err)
+	if !ok {
+		t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+	}
+	if got := limitKind(t, limitErr); got != xmlx.KindField {
+		t.Errorf("bound = %v, want the per-field cap on the cumulative decoded text", got)
+	}
+}
+
+// TestTorznabLimitErrorMessageNamesLimit pins the operator-facing message of a
+// decode-limit rejection (what fetchAndParse's retry logging + the harvest WARN
+// render), so it must name the decode limit that fired.
+func TestTorznabLimitErrorMessageNamesLimit(t *testing.T) {
+	_, err := parseTorznab([]byte(`<?xml version="1.0"?><rss><channel>` +
+		strings.Repeat("<item/>", maxUpstreamItems+1) + `</channel></rss>`))
+	if err == nil {
+		t.Fatal("parseTorznab accepted an over-limit response")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "torznab response exceeds decode limit") || !strings.Contains(got, "more than 1000 items") {
+		t.Errorf("Error() = %q, want it to name the decode limit that fired", got)
+	}
+}
+
+// TestParseTorznabRejectsTruncatedResponses pins error propagation at every
+// decode nesting level of the hand-rolled UnmarshalXML loops.
+func TestParseTorznabRejectsTruncatedResponses(t *testing.T) {
+	tests := map[string]string{
+		"EOF inside channel":        `<?xml version="1.0"?><rss><channel>`,
+		"EOF inside item":           `<?xml version="1.0"?><rss><channel><item>`,
+		"EOF after complete child":  `<?xml version="1.0"?><rss><channel><item><title>x</title>`,
+		"EOF inside open enclosure": `<?xml version="1.0"?><rss><channel><item><enclosure url="http://x/1">`,
+		"EOF inside open attr":      `<?xml version="1.0"?><rss><channel><item><torznab:attr name="seeders">`,
+		"EOF inside open guid":      `<?xml version="1.0"?><rss><channel><item><guid>x`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab([]byte(body))
+			if err == nil {
+				t.Errorf("parseTorznab accepted a truncated response (%d items); partial data must fail so the fetch retries", len(items))
+			}
+		})
+	}
+}
+
+// TestParseTorznabSkipsUnknownItemChildren pins the default d.Skip() arm of
+// itemXML.decodeChild: real Prowlarr responses carry item children the feed
+// does not consume, and the parser must skip them whole.
+func TestParseTorznabSkipsUnknownItemChildren(t *testing.T) {
+	body := `<?xml version="1.0"?><rss><channel><item>` +
+		`<title>x</title>` +
+		`<description>rendered by Prowlarr, ignored by the feed</description>` +
+		`<jackettindexer id="1">Nyaa</jackettindexer>` +
+		`<guid>https://nyaa.si/view/1</guid>` +
+		`</item></channel></rss>`
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab with unknown item children: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed item count = %d, want 1", len(items))
+	}
+	if items[0].Title != "x" || items[0].GUID != "https://nyaa.si/view/1" {
+		t.Errorf("recognized fields around unknown children = %q/%q, want x/https://nyaa.si/view/1", items[0].Title, items[0].GUID)
+	}
+}
+
+// TestRenderFeedSanitizesUnsafeRunes pins the emit-boundary rune policy
+// (escTo composes runesafe.Sanitize under the XML escaper): xml.EscapeText
+// alone passes C1 controls, bidi controls, and U+2028/U+2029 through raw,
+// and every text value here is upstream-controlled (tracker titles via
+// Prowlarr, SeaDex file names synthesized into titles) headed for arr web
+// UIs and operator terminals. The rendered document must never carry the
+// unsafe classes - whatever the item's origin (live search passthrough,
+// persisted journal, or a legacy snapshot written before this policy) -
+// while the in-memory value stays raw for matching and persistence.
+func TestRenderFeedSanitizesUnsafeRunes(t *testing.T) {
+	title := "Show \u202e[G]\u0085 \u2028S01"
+	got, _ := renderFeed([]item{{Title: title, GUID: "https://nyaa.si/view/1"}})
+	for _, bad := range []string{"\u202e", "\u0085", "\u2028"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("rendered feed carries unsafe rune %U; escTo must apply the shared rune policy", []rune(bad)[0])
+		}
+	}
+	if !strings.Contains(got, "Show") || !strings.Contains(got, "[G]") || !strings.Contains(got, "S01") {
+		t.Errorf("sanitizing damaged the safe text: %q", got)
+	}
+}
+
+// TestRenderFeedTruncatesOversizedDocument deterministically exercises
+// renderFeed's maxRenderedFeedBytes truncation branch - the render-side
+// memory guard the fuzz and rapid round-trip suites never reach - and pins
+// both of its guarantees: oversized output is truncated to fewer items than
+// requested (with the emitted count reporting exactly what survived) and the
+// truncated document remains parseable Torznab XML with at most one
+// bounded-item overshoot past the byte budget.
+func TestRenderFeedTruncatesOversizedDocument(t *testing.T) {
+	items := slices.Repeat([]item{{Title: strings.Repeat("&", maxPersistedFieldBytes), GUID: "g"}}, maxItems)
+	rendered, emitted := renderFeed(items)
+
+	got, err := parseTorznab([]byte(rendered))
+	if err != nil {
+		t.Fatalf("parseTorznab(renderFeed(oversized items)): %v", err)
+	}
+	if len(got) >= len(items) {
+		t.Errorf("rendered item count = %d, want fewer than %d after size-cap truncation", len(got), len(items))
+	}
+	if emitted != len(got) {
+		t.Errorf("renderFeed emitted count = %d, want %d (the parsed item count)", emitted, len(got))
+	}
+	if len(rendered) > maxRenderedFeedBytes+(128<<10) {
+		t.Errorf("rendered feed size = %d, want at most %d plus one bounded item", len(rendered), maxRenderedFeedBytes)
+	}
+}
+
+// TestItemXMLTitleProvenance pins the h-f20 wire-boundary design for
+// tracker-controlled titles: the decode struct tags Title as
+// runesafe.Untrusted, so any emission of the WIRE form (a bare slog attr,
+// an fmt.Errorf) is sanitized automatically, while toItem unwraps via Raw()
+// into the plain persisted/compute form — runesafe's machine-read
+// persistence rule (feed.json must round-trip raw bytes; the XML render's
+// escTo belt and capLogText own the emit-side policy there).
+func TestItemXMLTitleProvenance(t *testing.T) {
+	t.Parallel()
+	// The hostile runes are XML-legal on purpose: a raw C0 control (ESC)
+	// cannot even arrive through well-formed XML (encoding/xml rejects the
+	// document), so the classes that CAN reach the decode boundary are C1
+	// controls (U+009B CSI, a single-rune escape introducer) and bidi
+	// overrides (U+202E) — exactly what the Untrusted tag guards.
+	const hostile = "Show\u202e 01 [1080p]\u009b31m.mkv"
+	body := `<?xml version="1.0"?><rss><channel><item>` +
+		`<title>` + hostile + `</title>` +
+		`<guid>g1</guid><link>https://example.test/dl/1</link>` +
+		`</item></channel></rss>`
+
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed %d items, want 1", len(items))
+	}
+	if items[0].Title != hostile {
+		t.Errorf("item.Title = %q, want the RAW bytes preserved for persistence and matching (%q)", items[0].Title, hostile)
+	}
+
+	// The WIRE form keeps the raw bytes for matching and persistence, but every
+	// emission of it (%v/%s, fmt.Errorf, a bare slog attr) resolves through the
+	// Untrusted tag's sanitizing sinks - that is the half of the contract the
+	// item.Title assertion above cannot see.
+	var feed feedXML
+	if err := xml.Unmarshal([]byte(body), &feed); err != nil {
+		t.Fatalf("xml.Unmarshal into the wire struct: %v", err)
+	}
+	if len(feed.Channel.Items) != 1 {
+		t.Fatalf("decoded %d wire items, want 1", len(feed.Channel.Items))
+	}
+	wire := feed.Channel.Items[0].Title
+	if wire.Raw() != hostile {
+		t.Errorf("wire Title.Raw() = %q, want the raw decoded bytes (%q)", wire.Raw(), hostile)
+	}
+	for _, bad := range []string{"\u202e", "\u009b"} {
+		if strings.Contains(wire.String(), bad) {
+			t.Errorf("wire Title emits %U; the Untrusted tag must sanitize every emission of the wire form", []rune(bad)[0])
+		}
+	}
+}
+
+// TestWriteItemSkipsNonPositiveCategories pins writeItem's render-side clamp:
+// render-side validation is the final totality guard for direct/live item
+// values, independent of persistence and parse normalization, so a
+// non-positive category reaching the renderer (a search-path item never passes
+// the persistence gate) must be skipped rather than rendered as an invalid
+// Torznab category id.
+func TestWriteItemSkipsNonPositiveCategories(t *testing.T) {
+	var b strings.Builder
+	it := item{Title: "x", Categories: []int{-5, 0, catAnime}}
+	writeItem(&b, &it)
+	out := b.String()
+	if !strings.Contains(out, `<torznab:attr name="category" value="5070"/>`) {
+		t.Errorf("rendered item missing the positive category:\n%s", out)
+	}
+	if strings.Contains(out, `name="category" value="-5"`) || strings.Contains(out, `name="category" value="0"`) {
+		t.Errorf("rendered a non-positive category id:\n%s", out)
+	}
+}
+
+// TestParseErrorDocumentBoundsCumulativeAttrText pins the response-wide
+// budget arm of errorXML.UnmarshalXML: an <error> document whose attributes
+// each stay under maxUpstreamFieldBytes but whose cumulative attribute text
+// crosses maxUpstreamTextBytes must be rejected with a torznabLimitError -
+// never retained as an upstreamDocError - matching the per-item accounting
+// the feed decode applies (1025 attrs x 4096 bytes = 4,198,400 > the 4 MiB
+// budget, while every individual value passes the per-field cap).
+func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
+	// Built past the lexical per-tag attribute cap on purpose and fed to
+	// parseErrorDocument DIRECTLY: through parseTorznab the preflight
+	// rejects this tag first (pinned by
+	// TestParseTorznabRejectsOversizedTokensAtLexicalGuard), so this test
+	// keeps the errorXML decoder's own cumulative budget honest as defense
+	// in depth behind that gate.
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0"?><error code="100" `)
+	val := strings.Repeat("d", maxUpstreamFieldBytes)
+	for i := 0; i <= maxUpstreamTextBytes/maxUpstreamFieldBytes; i++ {
+		b.WriteString("a" + strconv.Itoa(i) + `="` + val + `" `)
+	}
+	b.WriteString(`/>`)
+	_, err := parseErrorDocument([]byte(b.String()))
+	if err == nil {
+		t.Fatal("parseErrorDocument accepted an <error> document with over-budget cumulative attribute text")
+	}
+	if _, ok := errors.AsType[*torznabLimitError](err); !ok {
+		t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+	}
+	if !strings.Contains(err.Error(), "cumulative decoded text") {
+		t.Errorf("Error() = %q, want the cumulative-text limit named", err)
+	}
+}
+
+// TestPreflightTorznabBoundsCommentsDirectivesAndCData pins the lexical
+// guard's comment/directive/CDATA arms, which real Prowlarr responses can
+// carry but no other test exercises: bounded comments pass through to
+// encoding/xml, directives are rejected outright, an overlong comment or
+// CDATA section is rejected AT the lexical guard with its own limit named, an
+// unterminated CDATA within the bound is left for encoding/xml to reject (a
+// parse error, never a limit error), and an unterminated quoted tag past the
+// token bound fails the markup-token limit.
+func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
+	wrap := func(inner string) []byte {
+		return []byte(`<rss><channel>` + inner + `<item><title>x</title></item></channel></rss>`)
+	}
+	t.Run("comment within bound parses", func(t *testing.T) {
+		items, err := parseTorznab(wrap("<!-- prowlarr comment -->"))
+		if err != nil || len(items) != 1 {
+			t.Fatalf("parseTorznab with a comment = %d items, err %v; want 1, nil", len(items), err)
+		}
+	})
+	t.Run("directive rejected: unboundable here and unused by torznab", func(t *testing.T) {
+		// encoding/xml accumulates a directive until a '>' at nesting depth
+		// zero, so a directive stuffed with balanced fragments would retain a
+		// token up to the transport cap while a first-unquoted-'>' scan saw
+		// only short shallow tags. Torznab RSS needs no DTD, so the class is
+		// rejected outright.
+		for _, body := range []string{
+			"<!DOCTYPE rss>",
+			"<!DOCTYPE x " + strings.Repeat("<a></a>", (128<<10)/7+1) + ">",
+		} {
+			_, err := parseTorznab(wrap(body))
+			limitErr, ok := errors.AsType[*torznabLimitError](err)
+			if !ok {
+				t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+			}
+			if got := limitKind(t, limitErr); got != xmlx.KindDirective {
+				t.Errorf("bound = %v, want the directive rejection", got)
+			}
+		}
+	})
+	t.Run("overlong comment rejected at the lexical guard", func(t *testing.T) {
+		_, err := parseTorznab(wrap("<!--" + strings.Repeat("c", maxUpstreamTokenBytes+4) + "-->"))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindComment {
+			t.Errorf("bound = %v, want the comment bound", got)
+		}
+	})
+	t.Run("overlong CDATA rejected at the lexical guard", func(t *testing.T) {
+		_, err := parseTorznab(wrap("<item><title><![CDATA[" + strings.Repeat("a", maxUpstreamTextRunBytes+4) + "]]></title></item>"))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindCDATA {
+			t.Errorf("bound = %v, want the CDATA bound", got)
+		}
+	})
+	t.Run("unterminated CDATA within bound left to encoding/xml", func(t *testing.T) {
+		items, err := parseTorznab([]byte("<rss><channel><item><title><![CDATA[never closed"))
+		if err == nil {
+			t.Fatalf("parseTorznab accepted an unterminated CDATA (%d items)", len(items))
+		}
+		if _, ok := errors.AsType[*torznabLimitError](err); ok {
+			t.Errorf("error = %v, want encoding/xml's own parse error, not a limit error", err)
+		}
+	})
+	t.Run("overlong quoted tag rejected at the token bound", func(t *testing.T) {
+		body := `<rss><channel><item a="` + strings.Repeat("v", maxUpstreamTokenBytes+2)
+		_, err := parseTorznab([]byte(body))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindToken {
+			t.Errorf("bound = %v, want the markup-token bound", got)
+		}
+	})
+}
+
+// TestParseTorznabSkipsNestedMarkupInTextFields pins the nested-markup arm
+// of the budgeted text decode (xmlx.Budget.DecodeText): markup nested inside
+// a plain text child is skipped whole (matching the DecodeElement behavior the
+// bounded decoder replaced), so only the field's own CharData accumulates; and
+// a response truncated inside that nested markup propagates the Skip error so
+// partial data fails the fetch instead of parsing.
+func TestParseTorznabSkipsNestedMarkupInTextFields(t *testing.T) {
+	body := `<?xml version="1.0"?><rss><channel><item>` +
+		`<guid>pre<b attr="v">nested</b>post</guid><title>x</title>` +
+		`</item></channel></rss>`
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab with nested markup in guid: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed %d items, want 1", len(items))
+	}
+	if got, want := items[0].GUID, "prepost"; got != want {
+		t.Errorf("guid = %q, want %q (nested markup skipped whole)", got, want)
+	}
+	t.Run("truncated inside nested markup fails", func(t *testing.T) {
+		if _, err := parseTorznab([]byte(`<rss><channel><item><guid>x<nested>`)); err == nil {
+			t.Error("parseTorznab accepted a response truncated inside nested markup")
+		}
+	})
+}
+
+// TestPreflightTorznabClampsStrayEndTagDepth pins the stray-end-tag arm of
+// preflightTorznab's depth accounting: a leading run of end tags must not bank
+// negative depth that later start tags spend, or an attacker could buy nesting
+// budget past maxUpstreamDepth - and with it encoding/xml's unbounded
+// open-element stack - simply by prefixing enough end tags.
+func TestPreflightTorznabClampsStrayEndTagDepth(t *testing.T) {
+	body := strings.Repeat("</a>", 100) + "<rss><channel>" +
+		strings.Repeat("<a>", maxUpstreamDepth-1) +
+		strings.Repeat("</a>", maxUpstreamDepth-1) + "</channel></rss>"
+	_, err := parseTorznab([]byte(body))
+	limitErr, ok := errors.AsType[*torznabLimitError](err)
+	if !ok {
+		t.Fatalf("error = %T (%v), want *torznabLimitError: stray end tags must not buy nesting budget", err, err)
+	}
+	if got := limitKind(t, limitErr); got != xmlx.KindDepth {
+		t.Errorf("bound = %v, want the nesting-depth bound", got)
+	}
+}
+
+// limitKind reports which xmlx bound a decode rejection names. The app wraps the
+// library's *xmlx.LimitError in its own torznabLimitError, so a test pins WHICH
+// bound fired through the library's Kind rather than by matching an error string:
+// that is the cross-library acceptance assertion, and it cannot drift on a
+// wording change.
+func limitKind(t *testing.T, err error) xmlx.Kind {
+	t.Helper()
+	var le *xmlx.LimitError
+	if !errors.As(err, &le) {
+		t.Fatalf("error = %T (%v), want a wrapped *xmlx.LimitError", err, err)
+	}
+	return le.Kind
+}
+
+// TestWriteItemOmitsOptionalElements pins writeItem's documented omissions on
+// an item whose optional fields are empty: no enclosure without a download
+// URL, no volume-factor attrs without a marker, and no comments element. The
+// render/parse round-trip cannot observe any of them. pubDate is NOT among the
+// omissions: Sonarr's RSS parser rejects a whole response over one element-less
+// item, so an unknown date renders the epoch instead.
+func TestWriteItemOmitsOptionalElements(t *testing.T) {
+	var b strings.Builder
+	writeItem(&b, &item{Title: "Show - S01", GUID: "https://nyaa.si/view/42"})
+	out := b.String()
+	for _, absent := range []string{"<enclosure", "downloadvolumefactor", "uploadvolumefactor", "<comments>"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("rendered %s for an item carrying no such value:\n%s", absent, out)
+		}
+	}
+	if want := "<pubDate>" + time.Unix(0, 0).UTC().Format(time.RFC1123Z) + "</pubDate>"; !strings.Contains(out, want) {
+		t.Errorf("rendered item lost the unknown-date pubDate %q:\n%s", want, out)
+	}
+	if !strings.Contains(out, `<torznab:attr name="size" value="0"/>`) {
+		t.Errorf("rendered item lost the unconditional size attr:\n%s", out)
+	}
+}
+
+// TestParseTorznabTrimsWhitespacePaddedFields pins toItem's TrimSpace on the
+// four upstream string fields. A pretty-printed Prowlarr response puts element
+// text on its own line, and an untrimmed value silently changes identity: the
+// GUID is the journal/dedupe key (a padded copy is a second item for the same
+// release), and the enclosure URL is what the arr hands its download client.
+func TestParseTorznabTrimsWhitespacePaddedFields(t *testing.T) {
+	body := `<?xml version="1.0"?><rss><channel><item>` + "\n" +
+		"  <title>\n    [Group] Some Anime S01\n  </title>\n" +
+		"  <guid>\n    https://nyaa.si/view/1234567\n  </guid>\n" +
+		"  <comments>\n    https://nyaa.si/view/1234567\n  </comments>\n" +
+		`  <enclosure url=" http://prowlarr:9696/1/download?link=abc " length="7"/>` + "\n" +
+		`</item></channel></rss>`
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed %d items, want 1", len(items))
+	}
+	got := items[0]
+	for _, tc := range []struct{ field, got, want string }{
+		{"title", got.Title, "[Group] Some Anime S01"},
+		{"guid", got.GUID, "https://nyaa.si/view/1234567"},
+		{"infoURL", got.InfoURL, "https://nyaa.si/view/1234567"},
+		{"downloadURL", got.DownloadURL, "http://prowlarr:9696/1/download?link=abc"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q (surrounding whitespace trimmed at the decode boundary)", tc.field, tc.got, tc.want)
+		}
+	}
+}
+
+// TestItemSizeResolutionChain pins itemSize's three-source resolution order
+// and its zero-as-unknown normalization. The size a Torznab item reports is
+// what the arr's size-based quality and limit rules judge, and the canonical
+// Torznab carrier is the size torznab:attr - the source no other test asserts,
+// so losing that arm renders a real release as a zero-byte one. The malformed
+// <size> case pins the package's documented fail-closed decode stance (the
+// same reason TestParseTorznabRejectsTruncatedResponses refuses partial data):
+// the whole response fails so the fetch retries. An EMPTY numeric is the
+// deliberate exception on both carriers (element and enclosure length): it
+// decodes as zero, exactly as encoding/xml's own numeric conversion does, so a
+// single empty numeric degrades into the zero-as-unknown domain this chain
+// falls through instead of rejecting every other curated item in the response.
+func TestItemSizeResolutionChain(t *testing.T) {
+	tests := map[string]struct {
+		inner   string
+		want    int64
+		wantErr bool
+	}{
+		"enclosure length wins over both fallbacks": {
+			inner: `<enclosure url="http://x/1" length="11"/><size>22</size><torznab:attr name="size" value="33"/>`,
+			want:  11,
+		},
+		"size element is the second source": {
+			inner: `<size>22</size><torznab:attr name="size" value="33"/>`,
+			want:  22,
+		},
+		"size attr is the last source": {
+			inner: `<torznab:attr name="size" value="33"/>`,
+			want:  33,
+		},
+		"padded size attr parses": {
+			inner: `<torznab:attr name="size" value=" 33 "/>`,
+			want:  33,
+		},
+		"negative size attr clamps to unknown": {
+			inner: `<torznab:attr name="size" value="-33"/>`,
+			want:  0,
+		},
+		"unparseable size attr is unknown": {
+			inner: `<torznab:attr name="size" value="huge"/>`,
+			want:  0,
+		},
+		"empty size element degrades to the next source": {
+			inner: `<size/><torznab:attr name="size" value="33"/>`,
+			want:  33,
+		},
+		"empty enclosure length degrades to the next source": {
+			inner: `<enclosure url="http://x/1" length=""/><size>22</size>`,
+			want:  22,
+		},
+		"whitespace-only size element still fails the whole response": {
+			inner:   `<size> </size><torznab:attr name="size" value="33"/>`,
+			wantErr: true,
+		},
+		"whitespace-only enclosure length still fails the whole response": {
+			inner:   `<enclosure url="http://x/1" length=" "/><size>22</size>`,
+			wantErr: true,
+		},
+		"unparseable size element still fails the whole response": {
+			inner:   `<size>notanumber</size><torznab:attr name="size" value="33"/>`,
+			wantErr: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab([]byte(`<?xml version="1.0"?><rss><channel><item><title>x</title>` +
+				tc.inner + `</item></channel></rss>`))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseTorznab accepted a malformed <size> element (%d items)", len(items))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTorznab: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("parsed %d items, want 1", len(items))
+			}
+			if got := items[0].Size; got != tc.want {
+				t.Errorf("size = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseTorznabNormalizesCategoryAttrs pins splitItemAttrs' category gate:
+// only positive ids are meaningful Torznab categories, so a tracker-controlled
+// negative, zero, or non-numeric value must be dropped at the decode boundary.
+// The last subtest pins why it matters end to end - writeItem substitutes the
+// anime default only when the item carries NO category, so a retained -5 makes
+// the rendered item category-less and Sonarr's category filter drops a curated
+// release.
+func TestParseTorznabNormalizesCategoryAttrs(t *testing.T) {
+	feedOf := func(attrs string) []byte {
+		return []byte(`<?xml version="1.0"?><rss><channel><item><title>x</title>` +
+			attrs + `</item></channel></rss>`)
+	}
+	tests := map[string]struct {
+		attrs string
+		want  []int
+	}{
+		"positive ids kept in document order": {
+			attrs: `<torznab:attr name="category" value="5070"/><torznab:attr name="category" value="2000"/>`,
+			want:  []int{5070, 2000},
+		},
+		"padded id parses": {
+			attrs: `<torznab:attr name="category" value=" 5070 "/>`,
+			want:  []int{5070},
+		},
+		"negative id dropped":    {attrs: `<torznab:attr name="category" value="-5"/>`},
+		"zero id dropped":        {attrs: `<torznab:attr name="category" value="0"/>`},
+		"non-numeric id dropped": {attrs: `<torznab:attr name="category" value="anime"/>`},
+		"mixed keeps the valid id": {
+			attrs: `<torznab:attr name="category" value="-5"/><torznab:attr name="category" value="2000"/>`,
+			want:  []int{2000},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab(feedOf(tc.attrs))
+			if err != nil {
+				t.Fatalf("parseTorznab: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("parsed %d items, want 1", len(items))
+			}
+			if got := items[0].Categories; !slices.Equal(got, tc.want) {
+				t.Errorf("categories = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("an item whose only category is invalid renders the anime default", func(t *testing.T) {
+		items, err := parseTorznab(feedOf(`<torznab:attr name="category" value="-5"/>`))
+		if err != nil {
+			t.Fatalf("parseTorznab: %v", err)
+		}
+		rendered, _ := renderFeed(items)
+		if !strings.Contains(rendered, `<torznab:attr name="category" value="5070"/>`) {
+			t.Errorf("rendered feed lost the anime default category:\n%s", rendered)
+		}
+	})
+}

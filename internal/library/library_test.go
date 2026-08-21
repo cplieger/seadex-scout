@@ -1,239 +1,48 @@
 package library
 
 import (
-	"context"
-	"errors"
-	"io"
-	"log/slog"
-	"slices"
-	"strings"
-	"sync"
 	"testing"
-	"testing/synctest"
 
-	"github.com/cplieger/arrapi"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+// diffItem builds a minimal comparable Item for the DiffSnapshots tests.
+func diffItem(arr string, id int, groups ...string) Item {
+	return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
 }
 
-// fakeSonarr is a scripted SonarrClient: GetSeries returns series (or listErr),
-// GetEpisodes returns episodes[id] (or epErr[id]), ResolveTagIDs returns the
-// canned tag set.
-type fakeSonarr struct {
-	episodes  map[int][]arrapi.Episode
-	epErr     map[int]error
-	tagIDs    map[int]struct{}
-	listErr   error
-	tagErr    error
-	series    []arrapi.Series
-	unmatched []string
+// placeholder builds a degraded Item: arr identity only, no file data, exactly
+// the shape internal/arrwalk publishes for a failed episode fetch or a movie
+// Radarr reports a file for without sending its payload.
+func placeholder(arr string, id int) Item {
+	return Item{Arr: arr, ArrID: id, Failed: true}
 }
 
-func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
-	return f.series, f.listErr
-}
-
-func (f *fakeSonarr) GetEpisodes(_ context.Context, seriesID int) ([]arrapi.Episode, error) {
-	if err := f.epErr[seriesID]; err != nil {
-		return nil, err
+// TestItemComparable pins the model's placeholder predicate, the one rule every
+// consumer that partitions a snapshot routes through: a placeholder's file data
+// is missing rather than empty, so it is not comparable, while an ordinary
+// fileless item is (its no-file state is real).
+func TestItemComparable(t *testing.T) {
+	fileless := Item{Arr: ArrRadarr, ArrID: 1}
+	if !fileless.Comparable() {
+		t.Error("a genuinely fileless item must be comparable: its no-file state is real")
 	}
-	return f.episodes[seriesID], nil
-}
-
-func (f *fakeSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return f.tagIDs, f.unmatched, f.tagErr
-}
-
-func epFile(group string) *arrapi.EpisodeFile {
-	return &arrapi.EpisodeFile{ReleaseGroup: group}
-}
-
-// TestWalkSonarrPartialEpisodeFailure pins the "ingest succeeded == healthy"
-// semantic: a sub-budget per-series episode-fetch failure keeps the series as
-// a Failed placeholder (identity only, no file data, so a transient fetch
-// failure is not misread as a real no-file item) while the walk as a whole
-// succeeds and the other series carry their groups. The Partial assertion also
-// pins the producer side of the Snapshot.Partial contract internal/scout's
-// pre-compare gate depends on. Run under -race, it also
-// exercises the bounded-concurrency episode fetch.
-func TestWalkSonarrPartialEpisodeFailure(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Alpha"},
-			{ID: 2, Title: "Bravo"},
-			{ID: 3, Title: "Charlie"},
-		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-			3: {{SeasonNumber: 1, EpisodeFile: epFile("LostYears")}},
-		},
-		epErr: map[int]error{2: errors.New("episode fetch boom")},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
-	}
-	if len(snap.Items) != 3 {
-		t.Fatalf("items = %d, want 3 (the failed series stays as a Failed placeholder)", len(snap.Items))
-	}
-	if !snap.Partial {
-		t.Error("Snapshot.Partial = false, want true")
-	}
-
-	byID := make(map[int]Item, len(snap.Items))
-	for _, it := range snap.Items {
-		byID[it.ArrID] = it
-	}
-	if got := byID[1].Groups; len(got) != 1 || got[0] != "pmr" {
-		t.Errorf("Alpha groups = %v, want [pmr]", got)
-	}
-	if !byID[1].HasFile {
-		t.Error("Alpha HasFile = false, want true")
-	}
-	if byID[1].Failed {
-		t.Error("Alpha Failed = true, want false (its fetch succeeded)")
-	}
-	bravo, ok := byID[2]
-	if !ok {
-		t.Fatal("Bravo (episode fetch failed) is absent, want a Failed placeholder item")
-	}
-	if !bravo.Failed || bravo.HasFile || len(bravo.Groups) != 0 || bravo.Title != "Bravo" {
-		t.Errorf("Bravo placeholder = %+v, want Failed=true with identity and no file data", bravo)
-	}
-	if got := byID[3].Groups; len(got) != 1 || got[0] != "lostyears" {
-		t.Errorf("Charlie groups = %v, want [lostyears]", got)
-	}
-}
-
-// TestWalkSonarrFailureBudgetFailsWalk pins the walk failure budget: once
-// episodeFailureBudget series have failed their episode fetch, the walk fails
-// as a whole (an arr outage is an ingest failure, so the cycle goes unhealthy)
-// instead of grinding through every remaining series, and no snapshot is
-// published.
-func TestWalkSonarrFailureBudgetFailsWalk(t *testing.T) {
-	fs := &fakeSonarr{epErr: map[int]error{}}
-	for id := 1; id <= episodeFailureBudget+3; id++ {
-		fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
-		fs.epErr[id] = errors.New("sonarr down")
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err == nil {
-		t.Fatal("Walk returned nil error, want the walk failure budget error")
-	}
-	if !strings.Contains(err.Error(), "failure budget") {
-		t.Errorf("error = %q, want it to name the walk failure budget", err.Error())
-	}
-	if len(snap.Items) != 0 || !snap.TakenAt.IsZero() {
-		t.Errorf("snapshot = %+v, want the zero Snapshot on a budget failure", snap)
-	}
-}
-
-// TestWalkTopLevelListErrorIsFatal covers the other half of the health
-// semantic: a failed top-level series list fails the whole walk.
-func TestWalkTopLevelListErrorIsFatal(t *testing.T) {
-	fs := &fakeSonarr{listErr: errors.New("sonarr unreachable")}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); err == nil {
-		t.Fatal("Walk returned nil error, want the GetSeries failure propagated")
-	}
-}
-
-// TestWalkAppliesIncludeTagFilter verifies the arr-side include-tag filter drops
-// series that lack an included tag before they enter the snapshot.
-func TestWalkAppliesIncludeTagFilter(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Kept", Tags: []int{7}},
-			{ID: 2, Title: "Dropped", Tags: []int{3}},
-		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-		tagIDs: map[int]struct{}{7: {}},
-	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
-		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
-	}
-}
-
-func TestIsDualAudio(t *testing.T) {
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		{"Japanese / English", true},
-		{"jpn/eng", true},
-		{"Japanese, English", true},
-		{"Japanese/English/Commentary", true},
-		{"Japanese", false},
-		{"", false},
-		{"jpn / jpn", false}, // same language repeated is not dual audio
-		{"  eng  /  eng ", false},
-	}
-	for _, tc := range tests {
-		if got := isDualAudio(tc.in); got != tc.want {
-			t.Errorf("isDualAudio(%q) = %v, want %v", tc.in, got, tc.want)
-		}
-	}
-}
-
-func TestKeepByTags(t *testing.T) {
-	set := func(ids ...int) map[int]struct{} {
-		m := make(map[int]struct{}, len(ids))
-		for _, id := range ids {
-			m[id] = struct{}{}
-		}
-		return m
-	}
-	tests := []struct {
-		name             string
-		include, exclude map[int]struct{}
-		itemTags         []int
-		want             bool
-	}{
-		{"no filters keeps all", nil, nil, []int{1}, true},
-		{"include match kept", set(2), nil, []int{1, 2}, true},
-		{"include miss dropped", set(9), nil, []int{1}, false},
-		{"exclude match dropped", nil, set(5), []int{5}, false},
-		{"exclude miss kept", nil, set(5), []int{1}, true},
-		{"exclude wins over include", set(2), set(5), []int{2, 5}, false},
-		{"configured include with no resolved IDs drops all", map[int]struct{}{}, nil, []int{1}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := keepByTags(tc.itemTags, tc.include, tc.exclude); got != tc.want {
-				t.Errorf("keepByTags(%v) = %v, want %v", tc.itemTags, got, tc.want)
-			}
-		})
+	degraded := placeholder(ArrRadarr, 1)
+	if degraded.Comparable() {
+		t.Error("a placeholder must not be comparable: its file data is missing, not empty")
 	}
 }
 
 func TestDiffSnapshots(t *testing.T) {
-	item := func(arr string, id int, groups ...string) Item {
-		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
-	}
 	prev := &Snapshot{Items: []Item{
-		item(ArrSonarr, 1, "pmr"),
-		item(ArrSonarr, 2, "grp"),
-		item(ArrRadarr, 3, "movgrp"),
+		diffItem(ArrSonarr, 1, "pmr"),
+		diffItem(ArrSonarr, 2, "grp"),
+		diffItem(ArrRadarr, 3, "movgrp"),
 	}}
 	cur := &Snapshot{Items: []Item{
-		item(ArrSonarr, 1, "pmr"),       // unchanged
-		item(ArrSonarr, 2, "lostyears"), // changed group set
-		item(ArrSonarr, 4, "newgrp"),    // added
+		diffItem(ArrSonarr, 1, "pmr"),       // unchanged
+		diffItem(ArrSonarr, 2, "lostyears"), // changed group set
+		diffItem(ArrSonarr, 4, "newgrp"),    // added
 		// Radarr id 3 removed
 	}}
 	d := DiffSnapshots(prev, cur)
@@ -242,765 +51,92 @@ func TestDiffSnapshots(t *testing.T) {
 	}
 }
 
-// TestDiffSnapshotsPartialAware pins the Snapshot.Partial contract on the diff
-// itself: an item absent from a partial snapshot must not be counted as removed
-// (partial cur) or added (partial prev), while changes to items present in both
-// snapshots still count.
+// TestDiffSnapshotsPartialAware pins the per-key partial suppression on the
+// diff: only a key that is a placeholder (in cur for removals, in prev
+// for additions) is suppressed, while an item genuinely absent from a Partial
+// snapshot still diffs - a published partial walk keeps every failed series
+// as a placeholder, so absence means the arr no longer lists it. The blanket
+// "partial suppresses every Sonarr addition/removal" behavior is retired: it
+// permanently masked real removals and additions once partial walks started
+// retaining placeholders.
 func TestDiffSnapshotsPartialAware(t *testing.T) {
-	item := func(arr string, id int, groups ...string) Item {
-		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
-	}
-	t.Run("partial cur suppresses removals but keeps changes", func(t *testing.T) {
+	t.Run("failed placeholder in cur suppresses only its own removal", func(t *testing.T) {
+		// Series A's episode fetch failed this walk (a placeholder);
+		// series B is truly gone from Sonarr. B reports removed even though
+		// cur is Partial; A does not, and a change on a clean item counts.
 		prev := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"), // skipped in the partial current walk
+			diffItem(ArrSonarr, 1, "pmr"),  // A: fetch failed this walk
+			diffItem(ArrSonarr, 2, "grp"),  // B: genuinely removed
+			diffItem(ArrSonarr, 3, "seed"), // C: group changed
 		}}
 		cur := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "lostyears"), // group changed
+			placeholder(ArrSonarr, 1),
+			diffItem(ArrSonarr, 3, "lostyears"),
 		}}
 		d := DiffSnapshots(prev, cur)
-		if d.Removed != 0 || d.Changed != 1 || d.Added != 0 {
-			t.Errorf("diff = %+v, want Removed=0 Changed=1 Added=0 for a partial cur", d)
+		if d.Removed != 1 || d.Changed != 1 || d.Added != 0 {
+			t.Errorf("diff = %+v, want Removed=1 (only the truly gone series) Changed=1 Added=0", d)
 		}
 	})
-	t.Run("partial prev suppresses additions on the next complete walk", func(t *testing.T) {
+	t.Run("failed placeholder in prev suppresses only its own addition", func(t *testing.T) {
 		prev := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
+			diffItem(ArrSonarr, 1, "pmr"),
+			placeholder(ArrSonarr, 2), // recovers this walk
 		}}
 		cur := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"), // returning series, only absent because prev was partial
-		}}
-		d := DiffSnapshots(prev, cur)
-		if d.Added != 0 || d.Removed != 0 || d.Changed != 0 {
-			t.Errorf("diff = %+v, want no counts when the item was only missing from a partial prev", d)
-		}
-	})
-	t.Run("partial cur still counts a radarr removal", func(t *testing.T) {
-		// Partial is set only by Sonarr episode-fetch failures, so a Radarr
-		// movie genuinely gone from a partial current walk is a real removal;
-		// the co-missing Sonarr item stays suppressed.
-		prev := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"),    // skipped in the partial current walk
-			item(ArrRadarr, 3, "movgrp"), // genuinely removed
-		}}
-		cur := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-		}}
-		d := DiffSnapshots(prev, cur)
-		if d.Removed != 1 || d.Added != 0 || d.Changed != 0 {
-			t.Errorf("diff = %+v, want Removed=1 (radarr) with the sonarr absence suppressed", d)
-		}
-	})
-	t.Run("partial prev still counts a radarr addition", func(t *testing.T) {
-		prev := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-		}}
-		cur := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"),    // returning series, only absent because prev was partial
-			item(ArrRadarr, 3, "movgrp"), // genuinely added
+			diffItem(ArrSonarr, 1, "pmr"),
+			diffItem(ArrSonarr, 2, "grp"),    // recovered, not an arrival
+			diffItem(ArrSonarr, 4, "newgrp"), // genuinely added
 		}}
 		d := DiffSnapshots(prev, cur)
 		if d.Added != 1 || d.Removed != 0 || d.Changed != 0 {
-			t.Errorf("diff = %+v, want Added=1 (radarr) with the sonarr return suppressed", d)
+			t.Errorf("diff = %+v, want Added=1 (only the genuinely new series) with the recovery suppressed", d)
 		}
 	})
-}
-
-// boundedSonarr blocks each GetEpisodes until released, recording the peak
-// number of simultaneous in-flight fetches so a test can prove the walker
-// bounds concurrency at episodeConcurrency.
-type boundedSonarr struct {
-	started   chan int
-	release   chan struct{}
-	series    []arrapi.Series
-	mu        sync.Mutex
-	active    int
-	maxActive int
-}
-
-func (f *boundedSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
-	return f.series, nil
-}
-
-func (f *boundedSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
-	f.mu.Lock()
-	f.active++
-	if f.active > f.maxActive {
-		f.maxActive = f.active
-	}
-	f.mu.Unlock()
-	defer func() {
-		f.mu.Lock()
-		f.active--
-		f.mu.Unlock()
-	}()
-
-	select {
-	case f.started <- seriesID:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	select {
-	case <-f.release:
-		return []arrapi.Episode{{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (f *boundedSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
-}
-
-func (f *boundedSonarr) max() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.maxActive
-}
-
-func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		seriesCount := episodeConcurrency + 3
-		fs := &boundedSonarr{
-			started: make(chan int, seriesCount),
-			release: make(chan struct{}, seriesCount),
-		}
-		for id := 1; id <= seriesCount; id++ {
-			fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
-		}
-		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-
-		done := make(chan error, 1)
-		go func() {
-			snap, err := w.Walk(context.Background())
-			if err == nil && len(snap.Items) != seriesCount {
-				err = errors.New("walk returned the wrong item count")
-			}
-			done <- err
-		}()
-
-		synctest.Wait()
-		if got := len(fs.started); got != episodeConcurrency {
-			t.Fatalf("started episode fetches = %d, want %d before release", got, episodeConcurrency)
-		}
-		if got := fs.max(); got != episodeConcurrency {
-			t.Fatalf("max concurrent episode fetches = %d, want %d", got, episodeConcurrency)
-		}
-
-		fs.release <- struct{}{}
-		synctest.Wait()
-		if got := len(fs.started); got != episodeConcurrency+1 {
-			t.Fatalf("started episode fetches after one release = %d, want %d", got, episodeConcurrency+1)
-		}
-
-		for range seriesCount - 1 {
-			fs.release <- struct{}{}
-		}
-		synctest.Wait()
-		if err := <-done; err != nil {
-			t.Fatalf("Walk: %v", err)
-		}
-		if got := fs.max(); got > episodeConcurrency {
-			t.Fatalf("max concurrent episode fetches = %d, want <= %d", got, episodeConcurrency)
+	t.Run("clean radarr transitions count during a sonarr partial", func(t *testing.T) {
+		// Partial is set only by Sonarr episode-fetch failures, and a Radarr
+		// item is a placeholder only for its own missing-file-payload
+		// degradation, so an ordinary movie's presence change always counts.
+		prev := &Snapshot{Items: []Item{
+			diffItem(ArrSonarr, 1, "pmr"),
+			diffItem(ArrRadarr, 3, "movgrp"), // genuinely removed
+		}}
+		cur := &Snapshot{Partial: true, Items: []Item{
+			placeholder(ArrSonarr, 1),
+			diffItem(ArrRadarr, 4, "newmov"), // genuinely added
+		}}
+		d := DiffSnapshots(prev, cur)
+		if d.Added != 1 || d.Removed != 1 || d.Changed != 0 {
+			t.Errorf("diff = %+v, want Added=1 Removed=1 (radarr transitions) with the sonarr failure suppressed", d)
 		}
 	})
-}
-
-// sawWarn reports whether any captured record was logged at WARN, so a test
-// can assert no warning was emitted.
-func sawWarn(rec *capture.Recorder) bool {
-	for _, r := range rec.Records() {
-		if r.Level == slog.LevelWarn {
-			return true
-		}
-	}
-	return false
-}
-
-// recordHasAttr reports whether any captured record whose Message contains
-// msgSub carries an attribute with the given key whose rendered value equals
-// want, so tests assert on structured records instead of rendered logfmt.
-func recordHasAttr(rec *capture.Recorder, msgSub, key, want string) bool {
-	for _, r := range rec.Records() {
-		if !strings.Contains(r.Message, msgSub) {
-			continue
-		}
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == key && a.Value.String() == want {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
-}
-
-// cancelingSonarr cancels the walk context from inside GetEpisodes, simulating a
-// shutdown/timeout during the episode fetch.
-type cancelingSonarr struct {
-	cancel context.CancelFunc
-	series []arrapi.Series
-}
-
-func (f *cancelingSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
-	return f.series, nil
-}
-
-func (f *cancelingSonarr) GetEpisodes(ctx context.Context, _ int) ([]arrapi.Episode, error) {
-	f.cancel()
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
-func (f *cancelingSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
-}
-
-func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	fs := &cancelingSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		cancel: cancel,
-	}
-	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-
-	_, err := w.Walk(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Walk error = %v, want context.Canceled", err)
-	}
-	if sawWarn(rec) {
-		t.Fatal("Walk logged a warning for context cancellation; want cancellation treated as shutdown, not an arr fault")
-	}
-}
-
-// fakeRadarr is a scripted RadarrClient.
-type fakeRadarr struct {
-	tagIDs    map[int]struct{}
-	listErr   error
-	tagErr    error
-	movies    []arrapi.Movie
-	unmatched []string
-}
-
-func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
-	return f.movies, f.listErr
-}
-
-func (f *fakeRadarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return f.tagIDs, f.unmatched, f.tagErr
-}
-
-func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
-	fr := &fakeRadarr{
-		movies: []arrapi.Movie{
-			{
-				ID:              10,
-				Title:           "Kept Movie",
-				ImdbID:          "tt0000010",
-				TmdbID:          1234,
-				Year:            2024,
-				Tags:            []int{1},
-				AlternateTitles: []arrapi.AlternateTitle{{Title: "Alt Movie"}, {Title: "   "}},
-				HasFile:         true,
-				MovieFile: &arrapi.MovieFile{
-					ReleaseGroup: "PMR",
-					SceneName:    "[PMR] Kept Movie (2024) [1080p][x265][Dual Audio]",
-					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: "Japanese / English"},
-				},
-			},
-			{ID: 20, Title: "Dropped Movie", Tags: []int{9}, HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "Other"}},
-		},
-		tagIDs: map[int]struct{}{9: {}},
-	}
-	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, RadarrURL: "https://radarr.example", Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 {
-		t.Fatalf("items = %+v, want only the movie without the excluded tag", snap.Items)
-	}
-	item := snap.Items[0]
-	if item.Arr != ArrRadarr || item.ArrID != 10 || item.Title != "Kept Movie" {
-		t.Fatalf("movie identity = %+v, want kept Radarr movie id 10", item)
-	}
-	if item.ArrURL != "https://radarr.example/movie/1234" {
-		t.Errorf("ArrURL = %q, want Radarr deep link", item.ArrURL)
-	}
-	if !item.HasFile {
-		t.Error("HasFile = false, want true")
-	}
-	if len(item.Groups) != 1 || item.Groups[0] != "pmr" {
-		t.Errorf("Groups = %v, want [pmr]", item.Groups)
-	}
-	if item.Current.Group != "pmr" || item.Current.Codec != "x265" || item.Current.Resolution != "1080p" || !item.Current.DualAudio {
-		t.Errorf("Current = %+v, want normalized pmr/x265/1080p dual-audio fingerprint", item.Current)
-	}
-	if len(item.AltTitles) != 1 || item.AltTitles[0] != "Alt Movie" {
-		t.Errorf("AltTitles = %v, want only the non-empty alternate title", item.AltTitles)
-	}
 }
 
 func TestDiffSnapshotsDetectsFingerprintChangeWithSameGroup(t *testing.T) {
+	x264 := release.Classify(&release.Input{
+		Names: []string{"[PMR] Example [1080p][x264]"}, Group: "pmr", VideoCodec: "AVC",
+	})
+	x265 := release.Classify(&release.Input{
+		Names: []string{"[PMR] Example [1080p][x265]"}, Group: "pmr", VideoCodec: "HEVC",
+	})
 	prev := &Snapshot{Items: []Item{{
 		Arr:     ArrSonarr,
 		ArrID:   1,
 		Groups:  []string{"pmr"},
-		Current: fingerprint(&fileInfo{group: "pmr", sceneName: "[PMR] Example [1080p][x264]", videoCodec: "AVC"}),
+		Current: x264,
 		HasFile: true,
 	}}}
 	cur := &Snapshot{Items: []Item{{
 		Arr:     ArrSonarr,
 		ArrID:   1,
 		Groups:  []string{"pmr"},
-		Current: fingerprint(&fileInfo{group: "pmr", sceneName: "[PMR] Example [1080p][x265]", videoCodec: "HEVC"}),
+		Current: x265,
 		HasFile: true,
 	}}}
 
 	d := DiffSnapshots(prev, cur)
 	if d.Added != 0 || d.Removed != 0 || d.Changed != 1 {
 		t.Errorf("diff = %+v, want exactly one changed item for same-group fingerprint drift", d)
-	}
-}
-
-// TestWalkSonarrTagResolutionCancellationIsFatal proves that a context
-// cancellation surfaced by ResolveTagIDs aborts the whole walk rather than
-// fail-opening the filter.
-func TestWalkSonarrTagResolutionCancellationIsFatal(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		tagErr: context.Canceled,
-	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Walk error = %v, want context.Canceled propagated from tag resolution", err)
-	}
-}
-
-// TestWalkRadarrTagResolutionCancellationIsFatal is the Radarr-side counterpart:
-// the Radarr walk previously had no post-resolution cancellation check, so a
-// cancellation during tag resolution must now propagate.
-func TestWalkRadarrTagResolutionCancellationIsFatal(t *testing.T) {
-	fr := &fakeRadarr{
-		movies: []arrapi.Movie{{ID: 1, Title: "Movie"}},
-		tagErr: context.Canceled,
-	}
-	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Walk error = %v, want context.Canceled propagated from tag resolution", err)
-	}
-}
-
-// TestWalkSonarrTagResolutionErrorFailsClosed proves an ordinary
-// (non-cancellation) tag-resolution failure fails the whole walk (fail
-// closed): silently disabling the filter would admit every item past the
-// configured arr_tags scoping for the cycle.
-func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
-	boom := errors.New("arr tag lookup boom")
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Alpha", Tags: []int{1}},
-			{ID: 2, Title: "Bravo", Tags: []int{2}},
-		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-			2: {{SeasonNumber: 1, EpisodeFile: epFile("LostYears")}},
-		},
-		tagErr: boom,
-	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	_, err := w.Walk(context.Background())
-	if !errors.Is(err, boom) {
-		t.Fatalf("Walk error = %v, want the tag-resolution failure propagated (fail closed)", err)
-	}
-	if !strings.Contains(err.Error(), "arr_tags.include") {
-		t.Errorf("error = %q, want it to name the failing label set", err.Error())
-	}
-}
-
-// TestWalkSonarrTagResolutionLiveTimeoutFailsClosed pins the
-// per-request-timeout contract: arrapi wraps each request in its own
-// context.WithTimeout, so a DeadlineExceeded surfaced by ResolveTagIDs while
-// the walk context is still live is a real resolution failure and fails the
-// walk closed like any other tag error.
-func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
-	fs := &fakeSonarr{
-		series:   []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{1}}},
-		episodes: map[int][]arrapi.Episode{1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}},
-		tagErr:   context.DeadlineExceeded,
-	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Walk error = %v, want the live-context timeout propagated (fail closed)", err)
-	}
-}
-
-// TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint exercises the
-// multi-episode aggregation seriesItem performs through the public Walk API: a
-// series with four episode files across two seasons and two groups (pmr x3,
-// lostyears x1) must expose the distinct groups, the mixed-group flag, the
-// per-season group sets, and a Current fingerprint derived from the dominant
-// group's episode MediaInfo (representative picks pmr, the most common group).
-func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Multi", TvdbID: 555, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			1: {
-				{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{
-					ReleaseGroup: "PMR",
-					SceneName:    "[PMR] Multi S01E01 [1080p][x265]",
-					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: "Japanese / English"},
-				}},
-				{SeasonNumber: 1, EpisodeFile: epFile("PMR")},
-				{SeasonNumber: 1, EpisodeFile: epFile("LostYears")},
-				{SeasonNumber: 2, EpisodeFile: epFile("PMR")},
-			},
-		},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 {
-		t.Fatalf("items = %d, want 1", len(snap.Items))
-	}
-	it := snap.Items[0]
-
-	if !slices.Equal(it.Groups, []string{"lostyears", "pmr"}) {
-		t.Errorf("Groups = %v, want [lostyears pmr]", it.Groups)
-	}
-	if !slices.Equal(it.SeasonGroups[1], []string{"lostyears", "pmr"}) {
-		t.Errorf("SeasonGroups[1] = %v, want [lostyears pmr]", it.SeasonGroups[1])
-	}
-	if !slices.Equal(it.SeasonGroups[2], []string{"pmr"}) {
-		t.Errorf("SeasonGroups[2] = %v, want [pmr]", it.SeasonGroups[2])
-	}
-	// representative picks the dominant group (pmr: 3 files, lostyears: 1) and the
-	// fingerprint is classified from that dominant file's episode MediaInfo.
-	if it.Current.Group != "pmr" {
-		t.Errorf("Current.Group = %q, want pmr (dominant group)", it.Current.Group)
-	}
-	if it.Current.Codec != "x265" || it.Current.Resolution != "1080p" || !it.Current.DualAudio {
-		t.Errorf("Current = %+v, want x265/1080p/dual-audio from the episode MediaInfo", it.Current)
-	}
-}
-
-func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Monitored NoFiles", TvdbID: 42}},
-		episodes: map[int][]arrapi.Episode{
-			1: {
-				{SeasonNumber: 1, EpisodeFile: nil},
-				{SeasonNumber: 2, EpisodeFile: nil},
-			},
-		},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 {
-		t.Fatalf("items = %d, want 1", len(snap.Items))
-	}
-	it := snap.Items[0]
-	if it.HasFile {
-		t.Error("HasFile = true, want false for a series with no episode files")
-	}
-	if len(it.Groups) != 0 {
-		t.Errorf("Groups = %v, want empty for a series with no files", it.Groups)
-	}
-	if it.SeasonGroups != nil {
-		t.Errorf("SeasonGroups = %v, want nil for a series with no files", it.SeasonGroups)
-	}
-	if it.Current.Group != "" {
-		t.Errorf("Current.Group = %q, want empty (fingerprint skipped for a fileless series, matching the fileless-movie shape)", it.Current.Group)
-	}
-}
-
-func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Kept", Tags: []int{7}},
-			{ID: 2, Title: "Dropped", Tags: []int{3}},
-		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-		tagIDs:    map[int]struct{}{7: {}},
-		unmatched: []string{"nonexistent"},
-	}
-	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", "nonexistent"}, Logger: logger})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
-		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
-	}
-	if !sawWarn(rec) {
-		t.Error("no warning logged, want a warning that a configured tag matched no arr tag")
-	}
-}
-
-func TestWalkRadarrContextCancellationAfterListIsFatal(t *testing.T) {
-	fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 1, Title: "Movie", HasFile: false}}}
-	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := w.Walk(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Walk error = %v, want context.Canceled surfaced by the post-walk guard", err)
-	}
-}
-
-func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
-	fr := &fakeRadarr{
-		movies: []arrapi.Movie{
-			{ID: 10, Title: "No File Movie", TmdbID: 99, HasFile: false},
-			{ID: 20, Title: "Flagged But Nil File", HasFile: true, MovieFile: nil},
-		},
-	}
-	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 2 {
-		t.Fatalf("items = %d, want 2", len(snap.Items))
-	}
-	for _, it := range snap.Items {
-		if it.HasFile {
-			t.Errorf("%s HasFile = true, want false for a movie with no file", it.Title)
-		}
-		if len(it.Groups) != 0 {
-			t.Errorf("%s Groups = %v, want empty", it.Title, it.Groups)
-		}
-		if it.Current.Group != "" {
-			t.Errorf("%s Current.Group = %q, want empty (fingerprint skipped for a fileless movie)", it.Title, it.Current.Group)
-		}
-	}
-}
-
-// TestWalkRadarrTopLevelListErrorIsFatal covers the Radarr side of the
-// health semantic: a failed top-level movie list fails the whole walk
-// (mirrors TestWalkTopLevelListErrorIsFatal for Sonarr).
-func TestWalkRadarrTopLevelListErrorIsFatal(t *testing.T) {
-	fr := &fakeRadarr{listErr: errors.New("radarr unreachable")}
-	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); err == nil {
-		t.Fatal("Walk returned nil error, want the GetMovies failure propagated")
-	}
-}
-
-// TestWalkSonarrLogsLiveContextTimeout pins the per-request-timeout behavior:
-// arrapi wraps each request in its own context.WithTimeout, so a slow
-// GetEpisodes surfaces as context.DeadlineExceeded while the walk context is
-// still live. That is a real fetch failure, so the series becomes a Failed
-// placeholder AND the per-series warning is logged with the series identity -
-// not silently swallowed as shutdown noise. The walk as a whole still succeeds
-// (a partial snapshot).
-func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Alpha"},
-			{ID: 2, Title: "Bravo"},
-		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-		epErr: map[int]error{2: context.DeadlineExceeded},
-	}
-	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk returned error, want nil (a live-context per-request timeout is not fatal): %v", err)
-	}
-	if len(snap.Items) != 2 {
-		t.Fatalf("items = %d, want 2 (the timed-out series stays as a Failed placeholder)", len(snap.Items))
-	}
-	if !rec.Contains("skipping series: episode fetch failed") {
-		t.Errorf("messages = %q, want a per-series episode-fetch-failed warning", rec.Messages())
-	}
-	if !recordHasAttr(rec, "skipping series: episode fetch failed", "series", "Bravo") {
-		t.Error("episode-fetch-failed warning does not name Bravo in its series attr")
-	}
-}
-
-// TestWalkSonarrSilentOnContextCancel is the companion: when the walk context
-// itself is cancelled (a shutdown/redeploy), a series whose fetch returns the
-// cancellation is omitted WITHOUT a per-series warning (the walk-level
-// cancellation is propagated by Walk instead), so a redeploy does not spam one
-// warning per in-flight series.
-func TestWalkSonarrSilentOnContextCancel(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		epErr:  map[int]error{1: context.Canceled},
-	}
-	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := w.Walk(ctx); err == nil {
-		t.Fatal("Walk returned nil error, want the walk-context cancellation propagated")
-	}
-	if rec.Contains("skipping series: episode fetch failed") {
-		t.Errorf("messages = %q, want no per-series warning on walk-context cancellation", rec.Messages())
-	}
-}
-
-// TestWalkNoArrsWithNilLoggerReturnsEmptySnapshot pins the NewWalker nil-Logger
-// default: a Config with no Logger (and no arrs) must produce a walker that
-// walks without panicking and stamps the snapshot time.
-func TestWalkNoArrsWithNilLoggerReturnsEmptySnapshot(t *testing.T) {
-	w := NewWalker(&Config{})
-	snap, err := w.Walk(t.Context())
-	if err != nil {
-		t.Fatalf("Walk with no arrs: %v", err)
-	}
-	if len(snap.Items) != 0 {
-		t.Fatalf("items = %d, want 0", len(snap.Items))
-	}
-	if snap.TakenAt.IsZero() {
-		t.Error("TakenAt is zero, want the walk timestamp set")
-	}
-}
-
-// TestWalkPreCancelledContextIsFatalWithNoArrs pins the final cancellation
-// guard: even with both arr sides disabled (so neither side-specific helper
-// runs its own ctx check), an already-cancelled context fails the walk instead
-// of returning a snapshot mislabelled as complete.
-func TestWalkPreCancelledContextIsFatalWithNoArrs(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	w := NewWalker(&Config{})
-	snap, err := w.Walk(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Walk error = %v, want context.Canceled", err)
-	}
-	if len(snap.Items) != 0 || !snap.TakenAt.IsZero() {
-		t.Errorf("snapshot = %+v, want the zero Snapshot on cancellation", snap)
-	}
-}
-
-// TestWalkSonarrPartialFailureLogsAggregateSkipWarning asserts the aggregate
-// "snapshot is partial" warning carries the skipped/kept counts when several
-// series fail their episode fetch.
-func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Alpha"},
-			{ID: 2, Title: "Bravo"},
-			{ID: 3, Title: "Charlie"},
-		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-		epErr: map[int]error{
-			2: errors.New("boom two"),
-			3: errors.New("boom three"),
-		},
-	}
-	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
-	}
-	if len(snap.Items) != 3 {
-		t.Fatalf("items = %d, want 3 (one clean item plus two Failed placeholders)", len(snap.Items))
-	}
-	if !rec.Contains("snapshot is partial") {
-		t.Fatalf("messages = %q, want an aggregate partial-snapshot warning", rec.Messages())
-	}
-	if !recordHasAttr(rec, "snapshot is partial", "skipped", "2") {
-		t.Error("partial-snapshot warning skipped attr != 2")
-	}
-	if !recordHasAttr(rec, "snapshot is partial", "kept", "3") {
-		t.Error("partial-snapshot warning kept attr != 3")
-	}
-}
-
-// TestWalkSonarrRepresentativeTieBreaksToFirstFile pins the documented
-// tie-break: when two groups are equally common on a series, the reported
-// fingerprint comes from the FIRST such file, not the last.
-func TestWalkSonarrRepresentativeTieBreaksToFirstFile(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Tie"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {
-				{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "AAA", SceneName: "[AAA] Tie S01E01 [1080p][x265]"}},
-				{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "BBB", SceneName: "[BBB] Tie S01E02 [720p][x264]"}},
-			},
-		},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	it := snap.Items[0]
-	if it.Current.Group != "aaa" {
-		t.Errorf("Current.Group = %q, want aaa (tie broken by the first file)", it.Current.Group)
-	}
-	if it.Current.Resolution != "1080p" || it.Current.Codec != "x265" {
-		t.Errorf("Current = %+v, want the first file's 1080p/x265 fingerprint", it.Current)
-	}
-}
-
-// TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup pins the NOGRP
-// library-side fallback: a file with an empty ReleaseGroup aggregates as the
-// comparable "nogrp" group (Groups, SeasonGroups, and the fingerprint) instead
-// of vanishing from the comparison.
-func TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "GroupLess"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{
-				ReleaseGroup: "",
-				RelativePath: "Season 01/GroupLess S01E01 1080p.mkv",
-			}}},
-		},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	it := snap.Items[0]
-	if !it.HasFile {
-		t.Error("HasFile = false, want true")
-	}
-	if !slices.Equal(it.Groups, []string{"nogrp"}) {
-		t.Errorf("Groups = %v, want [nogrp] (group-less file compares as NOGRP)", it.Groups)
-	}
-	if !slices.Equal(it.SeasonGroups[1], []string{"nogrp"}) {
-		t.Errorf("SeasonGroups[1] = %v, want [nogrp]", it.SeasonGroups[1])
-	}
-	if it.Current.Group != "nogrp" {
-		t.Errorf("Current.Group = %q, want nogrp", it.Current.Group)
-	}
-	if it.Current.Resolution != "1080p" {
-		t.Errorf("Current.Resolution = %q, want 1080p (classified from the relative path)", it.Current.Resolution)
 	}
 }
 
@@ -1047,120 +183,53 @@ func TestDiffSnapshotsKeysByArrAndID(t *testing.T) {
 	}
 }
 
-// TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink pins the identity
-// fields seriesItem copies from the arr record - the IDs and titles the
-// matcher keys on (byTvdb/byImdb/title fallback) - plus the Sonarr web deep
-// link built from SonarrURL and the series title slug.
-func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{
-			ID:              7,
-			Title:           "Ident",
-			TitleSlug:       "ident-slug",
-			TvdbID:          555,
-			TmdbID:          777,
-			ImdbID:          "tt0000555",
-			Year:            2023,
-			AlternateTitles: []arrapi.AlternateTitle{{Title: "Alt Ident"}, {Title: "   "}},
-		}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-	}
-	w := NewWalker(&Config{Sonarr: fs, SonarrURL: "https://sonarr.example", Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 {
-		t.Fatalf("items = %d, want 1", len(snap.Items))
-	}
-	it := snap.Items[0]
-	if it.Arr != ArrSonarr || it.ArrID != 7 || it.Title != "Ident" {
-		t.Errorf("identity = arr %q id %d title %q, want sonarr/7/Ident", it.Arr, it.ArrID, it.Title)
-	}
-	if it.TvdbID != 555 || it.TmdbID != 777 || it.ImdbID != "tt0000555" || it.Year != 2023 {
-		t.Errorf("ids = tvdb %d tmdb %d imdb %q year %d, want 555/777/tt0000555/2023", it.TvdbID, it.TmdbID, it.ImdbID, it.Year)
-	}
-	if !slices.Equal(it.AltTitles, []string{"Alt Ident"}) {
-		t.Errorf("AltTitles = %v, want only the non-empty alternate title", it.AltTitles)
-	}
-	if it.ArrURL != "https://sonarr.example/series/ident-slug" {
-		t.Errorf("ArrURL = %q, want the Sonarr /series/{titleSlug} deep link", it.ArrURL)
-	}
-}
-
-// TestWalkCleanSonarrWalkIsNotPartial pins the negative side of the
-// Snapshot.Partial producer contract: a walk where every kept series fetches
-// its episodes successfully must publish Partial=false, so the diff's
-// partial-suppression logic is not permanently engaged.
-func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if snap.Partial {
-		t.Error("Snapshot.Partial = true, want false for a clean walk with no skipped series")
-	}
-}
-
-// TestWalkCombinesBothArrsIntoOneSnapshot pins Walk's both-sides contract: a
-// walker configured with Sonarr AND Radarr merges both item sets into one
-// snapshot, each item labelled with its source arr.
-func TestWalkCombinesBothArrsIntoOneSnapshot(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Series"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-	}
-	fr := &fakeRadarr{
-		movies: []arrapi.Movie{{ID: 2, Title: "Movie", HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "LostYears"}}},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 2 {
-		t.Fatalf("items = %d, want 2 (one per arr side)", len(snap.Items))
-	}
-	arrs := map[string]int{}
-	for _, it := range snap.Items {
-		arrs[it.Arr]++
-	}
-	if arrs[ArrSonarr] != 1 || arrs[ArrRadarr] != 1 {
-		t.Errorf("arr distribution = %v, want one sonarr and one radarr item", arrs)
-	}
-}
-
-// TestDiffSnapshotsSkipsFailedPlaceholders pins indexByKey's Failed-placeholder
-// skip: a Failed item carries no comparable file state, so the diff treats it
-// as absent, with the Partial suppression rules deciding added/removed.
+// TestDiffSnapshotsSkipsFailedPlaceholders pins the placeholder keys' exclusion
+// from comparison: a placeholder carries no comparable file state, so
+// its key is never Changed, its own removal is suppressed while it is a
+// placeholder in cur, and its recovery is not an addition when it was one in
+// prev. The Radarr row covers the missing-file-payload degradation, which is a
+// placeholder inside a COMPLETE walk (no Partial).
 func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
-	item := func(arr string, id int, groups ...string) Item {
-		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
-	}
 	t.Run("failed placeholder in cur is not a change or removal", func(t *testing.T) {
-		prev := &Snapshot{Items: []Item{item(ArrSonarr, 1, "pmr")}}
-		cur := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
+		prev := &Snapshot{Items: []Item{diffItem(ArrSonarr, 1, "pmr")}}
+		cur := &Snapshot{Partial: true, Items: []Item{placeholder(ArrSonarr, 1)}}
 		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
-			t.Errorf("diff = %+v, want zero Diff (a Failed placeholder carries no comparable state)", d)
+			t.Errorf("diff = %+v, want zero Diff (a placeholder carries no comparable state)", d)
+		}
+	})
+	t.Run("radarr placeholder in a complete walk is not a change or removal", func(t *testing.T) {
+		prev := &Snapshot{Items: []Item{diffItem(ArrRadarr, 9, "movgrp")}}
+		cur := &Snapshot{Items: []Item{placeholder(ArrRadarr, 9)}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
+			t.Errorf("diff = %+v, want zero Diff (a movie with no file payload is a placeholder, not a removal)", d)
 		}
 	})
 	t.Run("failed placeholder in prev is not an addition when the series returns", func(t *testing.T) {
-		prev := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
-		cur := &Snapshot{Items: []Item{item(ArrSonarr, 1, "pmr")}}
+		prev := &Snapshot{Partial: true, Items: []Item{placeholder(ArrSonarr, 1)}}
+		cur := &Snapshot{Items: []Item{diffItem(ArrSonarr, 1, "pmr")}}
 		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
-			t.Errorf("diff = %+v, want zero Diff (a returning series after a Failed walk is not added)", d)
+			t.Errorf("diff = %+v, want zero Diff (a returning series after a failed walk is not added)", d)
+		}
+	})
+	t.Run("failed placeholder gone from cur is a removal", func(t *testing.T) {
+		prev := &Snapshot{Partial: true, Items: []Item{placeholder(ArrSonarr, 1)}}
+		cur := &Snapshot{}
+		if d := DiffSnapshots(prev, cur); d != (Diff{Removed: 1}) {
+			t.Errorf("diff = %+v, want Removed=1 (a placeholder still carries arr presence)", d)
+		}
+	})
+	t.Run("key debuting as a failed placeholder is an addition", func(t *testing.T) {
+		prev := &Snapshot{}
+		cur := &Snapshot{Partial: true, Items: []Item{placeholder(ArrSonarr, 2)}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{Added: 1}) {
+			t.Errorf("diff = %+v, want Added=1 (a new series whose first fetch failed is still an arrival)", d)
+		}
+	})
+	t.Run("failed placeholder on both sides is no transition", func(t *testing.T) {
+		prev := &Snapshot{Partial: true, Items: []Item{placeholder(ArrSonarr, 3)}}
+		cur := &Snapshot{Partial: true, Items: []Item{placeholder(ArrSonarr, 3)}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
+			t.Errorf("diff = %+v, want zero Diff (a placeholder on both sides is no transition)", d)
 		}
 	})
 }

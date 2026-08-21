@@ -1,10 +1,16 @@
 package mapping
 
 import (
-	"reflect"
+	"errors"
+	"fmt"
+	"log/slog"
 	"slices"
-	"sort"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/slogx/capture"
 )
 
 func TestRecord_IsMovie(t *testing.T) {
@@ -44,6 +50,8 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 		{"movie with imdb", Record{Type: "MOVIE", IMDbIDs: []string{"tt1"}}, true},
 		{"movie with only tvdb", Record{Type: "MOVIE", TvdbID: 100}, false},
 		{"no ids", Record{Type: "TV"}, false},
+		{"series with negative tvdb", Record{Type: "TV", TvdbID: -1}, false},
+		{"movie with a canonicalized tmdb list", Record{Type: "MOVIE", TmdbMovies: []int{4}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,10 +62,24 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 	}
 }
 
+// TestRecord_CrossTypeMovieIDDoesNotWidenRouting guards the seam the ID bridge
+// keeps: exposing cross-type movie evidence must NOT make a non-MOVIE record read as
+// id-ful, because HasArrIdentifier is what gates the AniList title fallback -
+// widening it there would strand such a record with no fallback at all.
+func TestRecord_CrossTypeMovieIDDoesNotWidenRouting(t *testing.T) {
+	rec := Record{Type: "OVA", TmdbMovies: []int{4}}
+	if rec.HasArrIdentifier() {
+		t.Error("HasArrIdentifier() = true for a non-MOVIE record carrying only movie ids, want false")
+	}
+	if tvdb, movies, imdb := rec.RoutedIDs(); tvdb != 0 || movies != nil || imdb != nil {
+		t.Errorf("RoutedIDs() = (%d, %v, %v), want the empty series routing", tvdb, movies, imdb)
+	}
+}
+
 // TestArrIdentifierCountIgnoresWrongArmIdentifiers pins the refresh coverage
 // guard to the same arr-routed predicate the matcher uses: a TV record
 // carrying only movie ids (or a MOVIE record carrying only a TVDB id) cannot
-// count toward the acceptance floor, because findByID would never consume
+// count toward the acceptance floor, because FindByID would never consume
 // those fields for that record's arr.
 func TestArrIdentifierCountIgnoresWrongArmIdentifiers(t *testing.T) {
 	records := []Record{
@@ -68,24 +90,6 @@ func TestArrIdentifierCountIgnoresWrongArmIdentifiers(t *testing.T) {
 	}
 	if got := arrIdentifierCount(records); got != 2 {
 		t.Errorf("arrIdentifierCount = %d, want 2 (wrong-arm identifiers must not count)", got)
-	}
-}
-
-func TestBuildIndex_dedupAndZeroSkip(t *testing.T) {
-	idx := buildIndex([]Record{
-		{AniListID: 1, Type: "TV"},
-		{AniListID: 0, Type: "TV"},
-		{AniListID: 1, Type: "MOVIE"},
-	})
-	if idx.Len() != 1 {
-		t.Fatalf("buildIndex Len = %d, want 1 (zero-id skipped, dup collapsed)", idx.Len())
-	}
-	rec, ok := idx.Lookup(1)
-	if !ok {
-		t.Fatal("Lookup(1) not found")
-	}
-	if rec.Type != "MOVIE" {
-		t.Errorf("Lookup(1).Type = %q, want MOVIE (last write wins)", rec.Type)
 	}
 }
 
@@ -108,44 +112,61 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 	idx := NewIndex([]Record{{AniListID: 1}, {AniListID: 2}})
 	var got []int
 	idx.ForEachRecord(func(r Record) { got = append(got, r.AniListID) })
-	sort.Ints(got)
-	if !reflect.DeepEqual(got, []int{1, 2}) {
+	slices.Sort(got)
+	if !slices.Equal(got, []int{1, 2}) {
 		t.Errorf("ForEachRecord visited %v, want [1 2]", got)
 	}
 }
 
 func TestParseOverrides(t *testing.T) {
-	recs, unknown, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
+	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  ","imdb_ids":[" tt2222222 ",""],"tmdb_movies":[0,42,-5]}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(recs) != 1 || recs[0].Type != "MOVIE" {
-		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", recs)
+	if len(set.records) != 1 || set.records[0].Type != "MOVIE" {
+		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", set.records)
 	}
-	if len(unknown) != 0 {
-		t.Errorf("unknown keys = %v, want none for a well-formed override", unknown)
+	// IMDb ids must be normalized like Fribb's (trimmed, blanks dropped) so
+	// HasArrIdentifier, findMovie, and the report catalogue agree on the
+	// exact lookup key.
+	if got := set.records[0].IMDbIDs; !slices.Equal(got, []string{"tt2222222"}) {
+		t.Errorf("IMDbIDs = %v, want [tt2222222] (trimmed, blank dropped)", got)
 	}
-	if _, _, err := parseOverrides([]byte(`{bad`)); err == nil {
+	// TMDB movie ids likewise: non-positive entries are dropped to match the
+	// canonical form flexInt+intSlice guarantee on the Fribb path, so an
+	// override cannot introduce a phantom zero/negative lookup key.
+	if got := set.records[0].TmdbMovies; !slices.Equal(got, []int{42}) {
+		t.Errorf("TmdbMovies = %v, want [42] (non-positive entries dropped)", got)
+	}
+	if set.unknown != 0 {
+		t.Errorf("unknown keys = %d, want none for a well-formed override", set.unknown)
+	}
+	if _, err := parseOverrides([]byte(`{bad`)); err == nil {
 		t.Error("parseOverrides(malformed) = nil error, want error")
+	}
+	if _, err := parseOverrides([]byte(`null`)); err == nil {
+		t.Error("parseOverrides(null) = nil error, want error (a non-array top level must not read as an empty overlay)")
+	}
+	if _, err := parseOverrides([]byte(`[] trailing`)); err == nil {
+		t.Error("parseOverrides(trailing data) = nil error, want error (json.Unmarshal parity)")
 	}
 }
 
 // TestParseOverridesReportsUnknownKeys pins the unknown-key detection: an
 // operator writing the upstream Fribb field names (imdb_id, themoviedb_id,
-// season) instead of the override names gets them reported (sorted, deduped)
-// while the records still parse.
+// season) instead of the override names gets them counted while the records
+// still parse.
 func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 	data := []byte(`[{"anilist_id":5,"imdb_id":"tt1","season":1},{"anilist_id":6,"imdb_id":"tt2","themoviedb_id":9}]`)
-	recs, unknown, err := parseOverrides(data)
+	set, err := parseOverrides(data)
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(recs) != 2 {
-		t.Fatalf("records = %d, want 2 (unknown keys do not reject the record)", len(recs))
+	if len(set.records) != 2 {
+		t.Errorf("records = %d, want 2 (unknown keys do not reject the record)", len(set.records))
 	}
-	want := []string{"imdb_id", "season", "themoviedb_id"}
-	if !slices.Equal(unknown, want) {
-		t.Errorf("unknown keys = %v, want %v (sorted, deduped)", unknown, want)
+	if set.unknown != 4 {
+		t.Errorf("unknown keys = %d, want 4 (every non-canonical key counted)", set.unknown)
 	}
 }
 
@@ -155,14 +176,369 @@ func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 // unknown and "ignored" - that would tell the operator an accepted field was
 // discarded.
 func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
-	recs, unknown, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TYPE":"movie"}]`))
+	set, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TYPE":"movie"}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(recs) != 1 || recs[0].AniListID != 5 || recs[0].Type != "MOVIE" {
-		t.Fatalf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", recs)
+	if len(set.records) != 1 || set.records[0].AniListID != 5 || set.records[0].Type != "MOVIE" {
+		t.Errorf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", set.records)
 	}
-	if len(unknown) != 0 {
-		t.Errorf("unknown keys = %v, want none for case-variant canonical keys (encoding/json accepts them)", unknown)
+	if set.unknown != 0 {
+		t.Errorf("unknown keys = %d, want none for case-variant canonical keys (encoding/json accepts them)", set.unknown)
+	}
+}
+
+// TestNewIndex_ignoresZeroAndKeepsLastDuplicate pins the public NewIndex
+// contract consumers rely on: non-positive AniList IDs are omitted
+// (unkeyable; real AniList IDs are positive) and the last duplicate wins, so
+// upstream ordering cannot silently retain a stale record.
+func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
+	idx := NewIndex([]Record{
+		{AniListID: 0, Type: "TV", TvdbID: 99},
+		{AniListID: -7, Type: "TV", TvdbID: 77},
+		{AniListID: 42, Type: "TV", TvdbID: 100},
+		{AniListID: 42, Type: "TV", TvdbID: 200},
+	})
+
+	if got := idx.Len(); got != 1 {
+		t.Errorf("NewIndex length = %d, want 1", got)
+	}
+	got, ok := idx.Lookup(42)
+	if !ok {
+		t.Fatal("NewIndex lookup 42 missing")
+	}
+	if got.TvdbID != 200 {
+		t.Errorf("NewIndex duplicate TVDB ID = %d, want last value 200", got.TvdbID)
+	}
+	if _, ok := idx.Lookup(0); ok {
+		t.Error("NewIndex retained zero AniList ID")
+	}
+	if _, ok := idx.Lookup(-7); ok {
+		t.Error("NewIndex retained negative AniList ID")
+	}
+}
+
+// TestParseOverrides_duplicateIDKeepsLastRecord pins the effective set's
+// duplicate rule: a repeated AniList ID replaces its earlier record during the
+// stream, so the overlay is deduplicated last-record-wins while applied still
+// counts every keyed transport row.
+func TestParseOverrides_duplicateIDKeepsLastRecord(t *testing.T) {
+	set, err := parseOverrides([]byte(`[
+		{"anilist_id":1,"type":"TV","tvdb_id":10},
+		{"anilist_id":1,"type":"TV","tvdb_id":11},
+		{"anilist_id":1,"type":"TV","tvdb_id":12},
+		{"anilist_id":2,"type":"TV","tvdb_id":20},
+		{"anilist_id":2,"type":"TV","tvdb_id":21}
+	]`))
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if set.applied != 5 {
+		t.Errorf("applied = %d, want 5 (every keyed record applies)", set.applied)
+	}
+	if len(set.records) != 2 {
+		t.Errorf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
+	}
+	idx := NewIndex(set.records)
+	if got, ok := idx.Lookup(1); !ok || got.TvdbID != 12 {
+		t.Errorf("Lookup(1) = %+v, %v, want last record with TvdbID 12", got, ok)
+	}
+	if got, ok := idx.Lookup(2); !ok || got.TvdbID != 21 {
+		t.Errorf("Lookup(2) = %+v, %v, want last record with TvdbID 21", got, ok)
+	}
+}
+
+// TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream pins the
+// memory-amplification regression (a valid compact array of empty objects
+// fits under maxOverrideBytes but used to be materialized whole three times
+// before every row was discarded): a large all-empty-object array parses to
+// an EMPTY effective overlay with the exact skipped count, allocating no
+// []Record growth per transport row.
+func TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream(t *testing.T) {
+	const rows = 100_000
+	data := []byte("[" + strings.Repeat("{},", rows-1) + "{}]")
+	set, err := parseOverrides(data)
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(set.records) != 0 || cap(set.records) != 0 {
+		t.Errorf("effective records len=%d cap=%d, want 0/0 (zero-ID rows discarded during the stream)", len(set.records), cap(set.records))
+	}
+	if set.skipped != rows {
+		t.Errorf("skipped = %d, want the exact discarded row count %d", set.skipped, rows)
+	}
+	if set.applied != 0 || set.unknown != 0 {
+		t.Errorf("applied=%d unknown=%d, want both zero", set.applied, set.unknown)
+	}
+}
+
+// TestRecord_RoutedIDsRoutesToTheSelectedArrArm pins the exported output
+// contract internal/match's matcher and catalogue consume. The existing
+// HasArrIdentifier test only observes a boolean, so it cannot see ids escaping
+// from the wrong arr arm. Usability is NOT re-checked here: canonicalize owns it
+// at both producers and again on insertion into the index, so the movie arm
+// returns the record's own already-canonical lists.
+func TestRecord_RoutedIDsRoutesToTheSelectedArrArm(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      Record
+		wantTVDB    int
+		wantTMDB    []int
+		wantIMDbIDs []string
+	}{
+		{
+			name:        "movie returns its canonical id lists and ignores the series arm",
+			record:      Record{Type: "MOVIE", TvdbID: 100, TmdbMovies: []int{42}, IMDbIDs: []string{"tt1"}},
+			wantTMDB:    []int{42},
+			wantIMDbIDs: []string{"tt1"},
+		},
+		{
+			name:     "series returns only a positive TVDB id",
+			record:   Record{Type: "TV", TvdbID: 100, TmdbMovies: []int{42}, IMDbIDs: []string{"tt1"}},
+			wantTVDB: 100,
+		},
+		{
+			name:   "series drops a non-positive TVDB id",
+			record: Record{Type: "TV", TvdbID: -1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTVDB, gotTMDB, gotIMDbIDs := tt.record.RoutedIDs()
+			if gotTVDB != tt.wantTVDB || !slices.Equal(gotTMDB, tt.wantTMDB) || !slices.Equal(gotIMDbIDs, tt.wantIMDbIDs) {
+				t.Errorf("RoutedIDs() = (%d, %v, %v), want (%d, %v, %v)", gotTVDB, gotTMDB, gotIMDbIDs, tt.wantTVDB, tt.wantTMDB, tt.wantIMDbIDs)
+			}
+		})
+	}
+}
+
+// TestBuildIndexCanonicalizesRecords pins the boundary that now OWNS the
+// id-usability rule (h-f25): the accessors no longer filter on read, so a record
+// reaching buildIndex through plain encoding/json - the persisted mapping cache
+// replayed on the 304 and stale-on-error paths - must be canonicalized on
+// insertion, which is what makes RoutedIDs' presence check sound.
+func TestBuildIndexCanonicalizesRecords(t *testing.T) {
+	idx := NewIndex([]Record{{
+		AniListID:  7,
+		Type:       "movie",
+		TvdbID:     -3,
+		SeasonTvdb: -1,
+		TmdbMovies: []int{0, -1, 42},
+		IMDbIDs:    []string{"", "  ", " tt1 "},
+	}})
+	rec, ok := idx.Lookup(7)
+	if !ok {
+		t.Fatal("Lookup(7) = not found, want the indexed record")
+	}
+	if !slices.Equal(rec.TmdbMovies, []int{42}) {
+		t.Errorf("TmdbMovies = %v, want [42] (canonicalized on insertion)", rec.TmdbMovies)
+	}
+	if !slices.Equal(rec.IMDbIDs, []string{"tt1"}) {
+		t.Errorf("IMDbIDs = %v, want [tt1] (canonicalized on insertion)", rec.IMDbIDs)
+	}
+	if rec.TvdbID != 0 || rec.SeasonTvdb != 0 {
+		t.Errorf("TvdbID/SeasonTvdb = %d/%d, want 0/0 (canonicalized on insertion)", rec.TvdbID, rec.SeasonTvdb)
+	}
+	if _, tmdb, imdb := rec.RoutedIDs(); !slices.Equal(tmdb, []int{42}) || !slices.Equal(imdb, []string{"tt1"}) {
+		t.Errorf("RoutedIDs() = (_, %v, %v), want ([42], [tt1]) over the canonical record", tmdb, imdb)
+	}
+}
+
+// overIdentifierBudgetFribbBody builds the smallest valid Fribb array that
+// exceeds the aggregate identifier budget: every record retains both capped
+// identifier lists (maxFribbIdentifiers each), so one record past
+// maxFribbIdentifiersTotal/(2*maxFribbIdentifiers) trips the budget while the
+// element count (16385 records) stays well under maxFribbRecords (65536) - the
+// per-record caps and the record cap must not be what refuses this body.
+func overIdentifierBudgetFribbBody() []byte {
+	perRecord := 2 * maxFribbIdentifiers
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range maxFribbIdentifiersTotal/perRecord + 1 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"MOVIE","imdb_id":[`, i+1)
+		for j := range maxFribbIdentifiers {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `"tt%d"`, j+1)
+		}
+		b.WriteString(`],"themoviedb_id":{"movie":[`)
+		for j := range maxFribbIdentifiers {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `%d`, j+1)
+		}
+		b.WriteString(`]}}`)
+	}
+	b.WriteByte(']')
+	return []byte(b.String())
+}
+
+// TestAcceptRefresh_identifierBudgetFailsClosed pins the fail-closed contract
+// of the aggregate identifier budget across the whole decode-to-acceptance
+// path, which the counter-level fribbDecodeCounts.add test cannot reach: a
+// body that trips the budget is refused WHOLE (the truncated prefix is never
+// published) with the errIdentifierBudgetExceeded sentinel, and acceptRefresh
+// routes that sentinel through rejectRefresh - a first boot publishes no
+// index, a usable previous cache is returned stale rather than replaced, and
+// the persisted rejection streak advances toward the scout's escalation
+// threshold instead of staying frozen as a transient parse failure would.
+func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
+	body := overIdentifierBudgetFribbBody()
+
+	t.Run("parse refuses the whole body", func(t *testing.T) {
+		parsed, err := parseFribbForRefresh(body, discardLogger())
+		if !errors.Is(err, errIdentifierBudgetExceeded) {
+			t.Fatalf("parseFribbForRefresh error = %v, want errIdentifierBudgetExceeded", err)
+		}
+		if len(parsed.records) != 0 {
+			t.Errorf("budget breach retained %d records, want the whole body refused", len(parsed.records))
+		}
+	})
+
+	t.Run("first boot publishes nothing", func(t *testing.T) {
+		l := &Loader{log: discardLogger()}
+		next, err := l.acceptRefresh(&Cache{}, httpx.ConditionalResult{Body: body})
+		if !errors.Is(err, errIdentifierBudgetExceeded) {
+			t.Fatalf("first-boot error = %v, want errIdentifierBudgetExceeded", err)
+		}
+		if _, ok := errors.AsType[*StaleMapError](err); ok {
+			t.Errorf("first-boot error = %v, want the no-cache error rather than a *StaleMapError", err)
+		}
+		if len(next.Records) != 0 {
+			t.Errorf("first boot published %d records, want none", len(next.Records))
+		}
+		if next.RejectedRefreshes != 1 {
+			t.Errorf("first-boot RejectedRefreshes = %d, want 1 (a budget breach is a persistent guard refusal)", next.RejectedRefreshes)
+		}
+	})
+
+	t.Run("usable cache is kept stale", func(t *testing.T) {
+		prev := &Cache{
+			Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+			RejectedRefreshes: 2,
+		}
+		l := &Loader{log: discardLogger()}
+		next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body})
+		if _, ok := errors.AsType[*StaleMapError](err); !ok {
+			t.Fatalf("budget-breach error = %v, want a *StaleMapError guard rejection", err)
+		}
+		if !errors.Is(err, errIdentifierBudgetExceeded) {
+			t.Errorf("budget-breach error does not match errIdentifierBudgetExceeded through the StaleMapError wrap: %v", err)
+		}
+		if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+			t.Errorf("budget-breach records = %+v, want the stale record id 1 retained", next.Records)
+		}
+		if next.RejectedRefreshes != 3 {
+			t.Errorf("budget-breach RejectedRefreshes = %d, want 3 (the prior streak advances)", next.RejectedRefreshes)
+		}
+	})
+}
+
+// TestAcceptRefresh_staleReasonClassVocabulary pins stale_reason as the
+// fixed-cardinality degradation CLASS the operator queries in Loki (the
+// discriminator StaleMapError deliberately keeps live counts out of, so the
+// attribute stays equality-queryable). Five of the classes acceptRefresh can
+// emit have no assertion anywhere - only "refresh failed", "refresh exceeded
+// size cap" and the shrunk form are pinned - so a swapped or merged reason
+// string would silently file a never-self-heals refusal (record cap,
+// identifier budget, validation floor, moved schema) under the transient
+// vocabulary, and the escalation runbook keys on exactly that distinction.
+func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
+	var capBody strings.Builder
+	capBody.WriteByte('[')
+	for i := 0; i <= maxFribbRecords; i++ {
+		if i > 0 {
+			capBody.WriteByte(',')
+		}
+		fmt.Fprintf(&capBody, `{"anilist_id":%d}`, i+1)
+	}
+	capBody.WriteByte(']')
+
+	tests := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{name: "record cap", body: []byte(capBody.String()), want: "refresh exceeded record cap"},
+		{name: "identifier budget", body: overIdentifierBudgetFribbBody(), want: "refresh exceeded identifier budget"},
+		{name: "validation floor", body: []byte(`[{"anilist_id":1,"type":"tv"}]`), want: "refresh validation failed"},
+		{name: "non-array document", body: []byte(`{"data":[]}`), want: "refresh not a JSON array"},
+		{name: "malformed body", body: []byte(`[{"anilist_id":1,`), want: "parse failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+			l := &Loader{log: discardLogger()}
+			_, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: tc.body})
+			stale, ok := errors.AsType[*StaleMapError](err)
+			if !ok {
+				t.Fatalf("acceptRefresh error = %v, want a *StaleMapError over a usable cache", err)
+			}
+			if got := stale.LogAttrs(); !attrsContain(got, "stale_reason", tc.want) {
+				t.Errorf("stale_reason attrs = %v, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// approachingSizeCapMessage is the fixed WARN message acceptRefresh emits
+// before the download size cap becomes a hard refusal. It is a Loki-queryable
+// log contract (the class is the message, the facts ride as structured
+// fields), so the test pins it verbatim.
+const approachingSizeCapMessage = "mapping: Fribb body approaching the download size cap; " +
+	"a body past it refuses every refresh and freezes the map stale"
+
+// TestAcceptRefresh_approachingDownloadSizeCapWarns pins the operator's only
+// advance notice before maxMapBytes becomes a permanent refusal - the third
+// member of a family whose other two are already pinned
+// (TestParseFribb_approachingRecordCapWarns and
+// TestParseFribb_approachingIdentifierBudgetWarns). A body past the download
+// cap grades PERSISTENT (isPersistentRefreshFailure over
+// *httpx.ResponseTooLargeError), so every later cycle re-downloads the
+// multi-MB body, re-refuses it, and the map stays frozen stale while the
+// persisted rejection streak escalates to ERROR - with no signal at all while
+// refreshes were still succeeding.
+//
+// At exactly mapSizeWarnBytes the WARN fires once (the guard is inclusive) and
+// carries the body size and the cap; one byte below it stays silent. It drives
+// acceptRefresh directly, like the identifier-budget sibling, because the
+// threshold arithmetic is what is under test rather than the transport that
+// delivers the body - and the body's CONTENT is deliberately irrelevant: the
+// guard reads len(res.Body) before the parse, so the refresh is refused either
+// way and the usable stale cache is kept.
+func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
+	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+
+	logger, rec := capture.New()
+	at := &Loader{log: logger}
+	next, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, mapSizeWarnBytes)})
+	if err == nil {
+		t.Fatal("acceptRefresh(at-threshold body) = nil error, want the stale-map refusal")
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Fatalf("acceptRefresh kept %+v, want the stale record id 1", next.Records)
+	}
+	if n := rec.CountLevel(slog.LevelWarn, approachingSizeCapMessage); n != 1 {
+		t.Fatalf("a body at the threshold warned %d times at WARN, want exactly 1 (the guard is inclusive, and a demoted level vanishes from the deployed info-level stream): %v", n, rec.Messages())
+	}
+	if !rec.HasAttr(approachingSizeCapMessage, "bytes", strconv.Itoa(mapSizeWarnBytes)) {
+		t.Errorf("approaching-cap log = %v, want bytes=%d", rec.Messages(), mapSizeWarnBytes)
+	}
+	if !rec.HasAttr(approachingSizeCapMessage, "cap", strconv.Itoa(maxMapBytes)) {
+		t.Errorf("approaching-cap log = %v, want cap=%d", rec.Messages(), maxMapBytes)
+	}
+
+	belowLogger, belowRec := capture.New()
+	below := &Loader{log: belowLogger}
+	if _, err := below.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, mapSizeWarnBytes-1)}); err == nil {
+		t.Fatal("acceptRefresh(below-threshold body) = nil error, want the stale-map refusal")
+	}
+	if n := belowRec.CountExact(approachingSizeCapMessage); n != 0 {
+		t.Errorf("a body one byte below the threshold warned %d times, want 0: %v", n, belowRec.Messages())
 	}
 }

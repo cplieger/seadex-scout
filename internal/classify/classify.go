@@ -9,19 +9,49 @@ package classify
 
 import (
 	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
-// ABVisible reports whether a SeaDex torrent may surface under the operator's
-// AnimeBytes toggle. It owns the raw-URL invariant shared by compare and audit:
-// the guard inspects the RAW upstream URL (t.URL), never t.UsableURL(), because
-// that normalization trusts the tracker label and would rewrite or erase the
-// very host evidence the cross-check needs. Obtainability re-checks the label
-// downstream as defense in depth.
-func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
-	return filter.ABVisible(t.Tracker, t.URL, includeAnimeBytes)
+// --- AB visibility gates (adapters over filter) ---
+
+// PublishURL returns the clickable tracker link for a SeaDex torrent, or "" when
+// the publisher refused the raw upstream value (see trackerlink.Publish).
+func PublishURL(t *seadex.Torrent) string {
+	return trackerlink.Publish(t.Tracker, t.URL)
 }
+
+// PublishRefusal is PublishURL plus the publisher's refusal reason, for the
+// consumers that DIAGNOSE a drop rather than just render a link: the audit
+// report's row marker and the SeaDex client's aggregate catalogue WARN both
+// have to name a remedy, and an unknown tracker's remedy (an internal/tracker
+// table entry, shipped in a release) is not the SeaDex record's.
+func PublishRefusal(t *seadex.Torrent) (string, trackerlink.Refusal) {
+	return trackerlink.PublishReason(t.Tracker, t.URL)
+}
+
+// Obtainable reports whether a classified SeaDex release is obtainability
+// evidence under the operator's AnimeBytes toggle. It owns the argument
+// invariant shared by compare and audit (mirroring ABEvidence's adapter
+// pattern): the RAW upstream URL (t.URL) feeds the tracker cross-check while
+// the published link (PublishURL) is the grabbable one, in that order.
+func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
+	return filter.Obtainable(rel, t.URL, PublishURL(t), animeBytes)
+}
+
+// ABEvidence grades the AnimeBytes evidence in a SeaDex torrent. Like
+// filter.ABVisible it reads the RAW upstream URL (t.URL), never the published
+// link, because publishing trusts the tracker label and would rewrite or erase
+// the very host evidence the grading needs; the adapter owns that invariant for
+// compare and audit alike.
+func ABEvidence(t *seadex.Torrent) tracker.ABEvidence {
+	return tracker.ClassifyAB(t.Tracker, t.URL)
+}
+
+// --- Torrent classification ---
 
 // Torrent classifies one SeaDex torrent, in the context of its entry (for the
 // shared notes), into a normalized release.Release. This is the one place the
@@ -29,7 +59,7 @@ func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
 // the same release identically.
 func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 	return release.Classify(&release.Input{
-		Names:     torrentFileNames(t.Files),
+		Names:     payload.Names(t.Files),
 		Notes:     entry.Notes,
 		Group:     t.ReleaseGroup,
 		Tracker:   t.Tracker,
@@ -37,17 +67,16 @@ func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 	})
 }
 
-// torrentFileNames returns the non-empty file names of a SeaDex torrent, the
-// name list the classifier parses.
-func torrentFileNames(files []seadex.File) []string {
-	names := make([]string, 0, len(files))
-	for i := range files {
-		if files[i].Name != "" {
-			names = append(names, files[i].Name)
-		}
-	}
-	return names
+// FileResolution classifies a torrent's resolution from its file names
+// alone, over the shared payload.Names eligibility rule. The entry notes are
+// deliberately excluded: they are entry-wide and routinely describe sibling
+// releases, so they must not stamp a per-torrent title (the indexer's RSS
+// title synthesis is the consumer).
+func FileResolution(files []seadex.File) string {
+	return release.Classify(&release.Input{Names: payload.Names(files)}).Resolution
 }
+
+// --- Shared entry-state verdict rules ---
 
 // EntryFallback classifies an entry that lists no recommended releases.
 // Theoretical beats incomplete - the one precedence compare's emptyResult

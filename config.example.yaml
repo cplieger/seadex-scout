@@ -4,10 +4,16 @@
 # Connections & schedule
 # ----------------------------------------------------------------------------
 # At least one arr must be enabled with a url + api_key.
+#
+# api_key shape: the arrs generate a 32-character hex key (Settings -> General ->
+# API Key). Any other shape is accepted with a startup warning naming the field -
+# they honour whatever key you set - but a value containing a '$' is REFUSED,
+# because it means a ${VAR} reference that was never expanded and starting with
+# the literal placeholder would 401 every call.
 sonarr:
   enabled: true
   url: "http://sonarr:8989" # where seadex-scout reaches Sonarr (internal is fine)
-  api_key: "" # required when enabled
+  api_key: "" # required when enabled; 32 hex chars, or a ${SONARR_API_KEY}-style env ref (see README)
   public_url: "" # browser base for the report's deep-links; empty = use url
 radarr:
   enabled: false
@@ -17,9 +23,21 @@ radarr:
 
 mode: "daemon" # daemon (scheduled) | report (one-shot, exit)
 # One cadence for BOTH the alert engine and the Torznab feed, so a notification
-# and what the arrs grab from the feed come from the same refresh. Runs on start;
-# off/disabled/0 = no internal timer, trigger each cycle with the `poll` subcommand.
-poll_interval: "3h"
+# and what the arrs grab from the feed come from the same refresh.
+#
+# This is the FRESHNESS knob, not the cost knob. Most iterations are a cheap
+# check of what changed upstream recently (one small request, and usually one
+# tiny one when nothing changed); every 24h worth of them is a full pass that
+# re-reads the whole catalogue, re-walks Sonarr/Radarr and rebuilds the search
+# index. So upstream load tracks how often SeaDex actually changes, not how
+# often you poll. 15m matches Sonarr's own default RSS interval — polling faster
+# cannot reach the arrs any sooner. Minimum 15m.
+#
+# Runs on start (the first iteration is always a full pass);
+# off/disabled/0 = no internal timer, trigger each pass with the `poll`
+# subcommand. In that mode every `poll` is a separate process, so schedule it
+# around 24h apart rather than every 15m — each one is a full pass.
+poll_interval: "15m"
 
 log:
   level: "info" # debug | info | warn | error
@@ -34,6 +52,28 @@ filters:
   exclude_remux: false # true drops remuxes (default keeps them)
   require_dual_audio: false # true drops non-dual-audio releases
   exclude_specials: false # true drops OVA/ONA/specials
+  # Per-tag, per-surface exclusions keyed on SeaDex's own release tags.
+  # EMPTY (the default) MEANS NOTHING IS FILTERED: a release SeaDex tagged
+  # "Broken" is still alerted on as a better release available, still counts as a
+  # best in the report, and is still served in the Torznab feed. The report
+  # annotates it "(broken)" either way. List the tags you want gone, and on which
+  # surfaces — surfaces are exactly findings (the alerts), report, feed (Torznab
+  # search + RSS); an unknown surface name or a tag with no surfaces is a startup
+  # error. Tag matching is exact and case-insensitive.
+  exclude_tags: {}
+  # exclude_tags:
+  #   broken: [findings, report, feed]
+  #   incomplete: [feed]
+
+  # AniList IDs whose findings are never alerted on. Findings are reported
+  # continuously for as long as they are true, so your alerting stack keeps
+  # reminding you until you act — which is what makes a lost notification
+  # recoverable. Put a show here when you have decided NOT to upgrade it and
+  # want the reminders to stop. It suppresses the alert only: the show still
+  # appears in report mode, and the RSS feed is untouched (this app never
+  # withholds a release from Sonarr/Radarr). [] = alert on everything.
+  ignore: []
+  # ignore: [154587, 21519]
 
 arr_tags:
   include: [] # scan only items with one of these tags; [] = all
@@ -48,8 +88,8 @@ report:
 # Served by the daemon whenever a Torznab URL is set (both empty = off, no port).
 # Its curation set + RSS feed rebuild together with the alert loop on poll_interval.
 indexer:
-  feed_api_key: "" # the arrs send this, the feed checks it (openssl rand -hex 16)
+  feed_api_key: "" # the arrs send this, the feed checks it; no spaces and no '$'; the first-boot starter fills this with a generated key (${SEADEX_SCOUT_FEED_KEY} ref also works)
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
-  prowlarr_api_key: "" # Prowlarr API key; secret, never logged
-  ab_passkey: "" # AnimeBytes passkey for the AB RSS feed download links ("" = AB RSS off; Nyaa needs none)
+  prowlarr_api_key: "" # Prowlarr API key; secret, never logged; "" is valid with Prowlarr auth disabled for local addresses, otherwise 32 hex chars (same shape rule as the arr keys) (${SEADEX_SCOUT_PROWLARR_KEY} ref works)
+  ab_passkey: "" # AnimeBytes passkey for AB RSS download links ("" = AB RSS off); 32/48/56 chars; ${SEADEX_SCOUT_AB_PASSKEY} ref works

@@ -1,0 +1,115 @@
+package mapping
+
+import (
+	"reflect"
+	"slices"
+	"testing"
+
+	"pgregory.net/rapid"
+)
+
+// TestDeduplicateRecordsIndexOracle property-checks deduplicateRecords against
+// buildIndex, the consumer whose semantics it exists to mirror: for any record
+// list, the deduplicated slice must index bijectively (len == index len) and
+// produce exactly the same effective index as the raw input, every surviving
+// ID must be positive and unique, each survivor must be the WHOLE last
+// occurrence of its ID (every field, not a projection - routing and refresh
+// acceptance consume Type, TmdbMovies, IMDbIDs, and SeasonTvdb too), and the
+// operation must be idempotent. This is the invariant the acceptance guards
+// depend on (row counts and identifier coverage are measured on the
+// deduplicated set so they match what consumers receive).
+func TestDeduplicateRecordsIndexOracle(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		records := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
+			return Record{
+				// A small ID range forces duplicate, zero, and negative IDs.
+				AniListID:  rapid.IntRange(-2, 5).Draw(t, "anilist_id"),
+				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
+				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
+				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
+				TmdbMovies: rapid.SliceOfN(rapid.IntRange(1, 9), 0, 3).Draw(t, "tmdb_movies"),
+				IMDbIDs:    rapid.SliceOfN(rapid.SampledFrom([]string{"tt1", "tt2", "tt3"}), 0, 3).Draw(t, "imdb_ids"),
+			}
+		}), 0, 20).Draw(t, "records")
+
+		// Freeze the oracle BEFORE the call under test, from a deep copy:
+		// the Record copies would otherwise alias the generated TmdbMovies/
+		// IMDbIDs backing arrays, so an in-place deduplicator regression that
+		// mutates a survivor's fields could contaminate the oracle and the
+		// output alike, and the parity check would still pass.
+		frozen := make([]Record, len(records))
+		for i, r := range records {
+			r.TmdbMovies = slices.Clone(r.TmdbMovies)
+			r.IMDbIDs = slices.Clone(r.IMDbIDs)
+			frozen[i] = r
+		}
+		rawIdx := buildIndex(frozen)
+
+		out := deduplicateRecords(records)
+
+		if got, want := buildIndex(out).Len(), len(out); got != want {
+			t.Fatalf("deduplicated set indexes to %d entries, want bijective %d", got, want)
+		}
+		outIdx := buildIndex(out)
+		if rawIdx.Len() != outIdx.Len() {
+			t.Fatalf("index size diverged: raw %d, deduplicated %d", rawIdx.Len(), outIdx.Len())
+		}
+		seen := make(map[int]struct{}, len(out))
+		for _, r := range out {
+			if r.AniListID <= 0 {
+				t.Fatalf("deduplicated set retained a non-positive-ID record: %+v", r)
+			}
+			if _, dup := seen[r.AniListID]; dup {
+				t.Fatalf("deduplicated set repeats ID %d", r.AniListID)
+			}
+			seen[r.AniListID] = struct{}{}
+			// buildIndex is the last-write-wins oracle: the survivor must be
+			// the WHOLE last occurrence, every field intact. buildIndex also
+			// canonicalizes on insertion (h-f25 moved the id-usability rule to
+			// that boundary), so the comparison is against the canonical form of
+			// the survivor - canonicalize allocates fresh slices, so this cannot
+			// disturb the deduplicated set.
+			got, ok := rawIdx.Lookup(r.AniListID)
+			want := r
+			want.TmdbMovies = slices.Clone(r.TmdbMovies)
+			want.IMDbIDs = slices.Clone(r.IMDbIDs)
+			want.canonicalize()
+			if !ok || !reflect.DeepEqual(got, want) {
+				t.Fatalf("raw index disagrees for ID %d: index %+v ok=%v, deduplicated %+v", r.AniListID, got, ok, want)
+			}
+		}
+		again := deduplicateRecords(out)
+		if !reflect.DeepEqual(again, out) {
+			t.Fatalf("deduplicateRecords not idempotent: %+v -> %+v", out, again)
+		}
+	})
+}
+
+// TestValidateRefreshedRecordsUnchangedRefreshAlwaysAccepted property-checks
+// the steady-state acceptance invariant none of the instance tests generalize:
+// for ANY previously accepted cache shape (a deduplicated, cacheUsable record
+// set), a byte-identical upstream refresh must always be accepted. A rejection
+// here would be a self-inflicted permanent rejection loop (the stale map is
+// kept every cycle and the streak escalates to ERROR) with a healthy upstream,
+// so no floor, shrink guard, or population guard may fire when nothing changed.
+func TestValidateRefreshedRecordsUnchangedRefreshAlwaysAccepted(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		raw := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
+			return Record{
+				AniListID:  rapid.IntRange(-2, 50).Draw(t, "anilist_id"),
+				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
+				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
+				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
+				TmdbMovies: rapid.SliceOfN(rapid.IntRange(1, 9), 0, 3).Draw(t, "tmdb_movies"),
+				IMDbIDs:    rapid.SliceOfN(rapid.SampledFrom([]string{"tt1", "tt2", "tt3"}), 0, 3).Draw(t, "imdb_ids"),
+			}
+		}), 0, 30).Draw(t, "records")
+		cache := deduplicateRecords(raw)
+		if !cacheUsable(cache) {
+			t.Skip("not a usable accepted-cache shape")
+		}
+		if err := validateRefreshedRecords(cache, cache, len(cache)); err != nil {
+			t.Fatalf("unchanged refresh rejected: %v (records %+v)", err, cache)
+		}
+	})
+}

@@ -5,17 +5,27 @@ import (
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
+	"github.com/cplieger/urlform"
 )
 
-// abLabel shapes fuzz input into a DNS-label-ish string (letters and digits
-// only) so constructed hosts stay hosts instead of sprouting path/userinfo
-// separators that would move the AnimeBytes suffix out of the host position.
+// abLabel shapes fuzz input into a guaranteed-valid DNS label (letters and
+// digits only, never empty) so constructed hosts stay hosts instead of
+// sprouting path/userinfo separators that would move the AnimeBytes suffix
+// out of the host position - and so the subdomain invariant below never
+// constructs an empty-labeled host (".animebytes.tv"), which the shared
+// tracker predicate deliberately does not classify as AnimeBytes (no
+// resolvable DNS name has an empty label).
 func abLabel(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 		}
+	}
+	if b.Len() == 0 {
+		return "sub"
 	}
 	return b.String()
 }
@@ -27,6 +37,7 @@ func abLabel(s string) string {
 func FuzzABVisible(f *testing.F) {
 	f.Add("Nyaa", "https://nyaa.si/view/1")
 	f.Add("AB", "/torrents.php?id=1&torrentid=2")
+	f.Add("Nyaa", "torrents.php?id=1&torrentid=2")
 	f.Add("animebytes", "")
 	f.Add("Nyaa", "https://animebytes.tv/torrents.php?id=1")
 	f.Add("Nyaa", "https://ANIMEBYTES.TV/t/1")
@@ -41,22 +52,38 @@ func FuzzABVisible(f *testing.F) {
 	f.Add("Nyaa", `\\animebytes.tv/x`)
 	f.Add("Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1")
 	f.Add("unknown", "/local/path")
-	f.Fuzz(func(t *testing.T, tracker, rawURL string) {
+	f.Fuzz(func(t *testing.T, trackerName, rawURL string) {
 		// Toggle on shows everything: the operator has AB access, nothing hides.
-		if !ABVisible(tracker, rawURL, true) {
-			t.Errorf("ABVisible(%q, %q, true) = false, want true", tracker, rawURL)
+		if !ABVisible(trackerName, rawURL, true) {
+			t.Errorf("ABVisible(%q, %q, true) = false, want true", trackerName, rawURL)
 		}
-		off := ABVisible(tracker, rawURL, false)
+		off := ABVisible(trackerName, rawURL, false)
 		// An AB-labeled tracker is always hidden when the toggle is off,
 		// whatever the URL says (cross-function consistency with
-		// release.IsAnimeBytes).
-		if release.IsAnimeBytes(tracker) && off {
-			t.Errorf("ABVisible(%q, %q, false) = true, want false for an AB label", tracker, rawURL)
+		// tracker.IsAnimeBytes).
+		if tracker.IsAnimeBytes(trackerName) && off {
+			t.Errorf("ABVisible(%q, %q, false) = true, want false for an AB label", trackerName, rawURL)
 		}
 		// Metamorphic: production trims the URL, so whitespace padding must not
 		// change the verdict (a padded AB URL must not slip past the gate).
-		if padded := ABVisible(tracker, " "+rawURL+"\t", false); padded != off {
-			t.Errorf("ABVisible(%q, padded, false) = %v, want %v (url %q)", tracker, padded, off, rawURL)
+		if padded := ABVisible(trackerName, " "+rawURL+"\t", false); padded != off {
+			t.Errorf("ABVisible(%q, padded, false) = %v, want %v (url %q)", trackerName, padded, off, rawURL)
+		}
+		// Cross-function consistency: ABVisible must be exactly the grade
+		// comparison, with no second reading of the evidence. The old
+		// definite-is-a-subset-of-gated property is structural now (one value
+		// cannot be two grades), so what is worth fuzzing is that the policy
+		// function and the grader never disagree.
+		if want := tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone; off != want {
+			t.Errorf("ABVisible(%q, %q, false) = %v but tracker.ClassifyAB = %d; the gate must be exactly the ABNone comparison", trackerName, rawURL, off, tracker.ClassifyAB(trackerName, rawURL))
+		}
+		// Totality: every input lands in one of the three named grades, so an
+		// exhaustive consumer switch (notify.classifyTrackerLink) cannot fall
+		// through to its unreachable default.
+		switch g := tracker.ClassifyAB(trackerName, rawURL); g {
+		case tracker.ABNone, tracker.ABAmbiguous, tracker.ABDefinite:
+		default:
+			t.Errorf("tracker.ClassifyAB(%q, %q) = %d, outside the three named grades", trackerName, rawURL, g)
 		}
 		// Security: no fuzzer-built subdomain of the AB host may surface while
 		// the toggle is off, and a lookalike suffix host must not be hidden as
@@ -67,6 +94,55 @@ func FuzzABVisible(f *testing.F) {
 		}
 		if !ABVisible("Nyaa", "https://"+label+"animebytes.tv.example/x", false) {
 			t.Errorf("lookalike host %sanimebytes.tv.example was hidden as AnimeBytes", label)
+		}
+	})
+}
+
+// FuzzABToggleNeverPublishesAnimeBytes pins the COMPOSED toggle invariant this
+// package owns only half of: with the operator's animebytes toggle off, no
+// release the daemon's obtainability gate admits - and no row the audit report
+// keeps (its gate is tracker.ClassifyAB != tracker.ABDefinite) - may carry a
+// published animebytes.tv link. The hide half is this package's toggle policy
+// (ABVisible) over internal/tracker's grade (tracker.ClassifyAB) and the publish
+// half is trackerlink.Publish; the two agree today only because every publish
+// path that can emit an AnimeBytes base (an AB label, an AB URL host, the AB
+// torrent-page relative shape) also grades tracker.ABDefinite. Nothing asserted
+// that, so a change to either ladder could open a leak silently.
+func FuzzABToggleNeverPublishesAnimeBytes(f *testing.F) {
+	for _, seed := range [][2]string{
+		{"Nyaa", "https://nyaa.si/view/1"},
+		{"Nyaa", "/torrents.php?id=1&torrentid=2"},
+		{"Nyaa", "torrents.php?id=1&torrentid=2"},
+		{"Nyaa", "/TORRENTS.PHP?TORRENTID=2"},
+		{"Nyaa", "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+		{"Nyaa", "http://animebytes.tv/t/1"},
+		{"Nyaa", "animebytes.tv/torrents.php?id=1&torrentid=2"},
+		{"Nyaa", "https:/animebytes.tv/t/1"},
+		{"Nyaa", "https:animebytes.tv/t/1"},
+		{"Nyaa", "animebytes.tv:443/t/1"},
+		{"Nyaa", "/animebytes.tv/torrents.php?torrentid=2"},
+		{"Nyaa", "https://cdn.animebytes.tv/t/1"},
+		{"AB", "Chihiro"},
+		{"unknown", "/torrents.php?id=1&torrentid=2"},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	f.Fuzz(func(t *testing.T, trackerName, rawURL string) {
+		published := trackerlink.Publish(trackerName, rawURL)
+		if !tracker.IsAnimeBytesHost(urlform.Classify(published).Host) {
+			return
+		}
+		// The daemon direction (fail closed): an obtainable release with the
+		// toggle off must never resolve to an AnimeBytes link.
+		rel := release.Classify(&release.Input{Tracker: trackerName})
+		if Obtainable(&rel, rawURL, published, false) {
+			t.Errorf("Obtainable(%q, %q, toggle off) = true but publishes AnimeBytes link %q", trackerName, rawURL, published)
+		}
+		// The report direction (fail open on listing, but never on identity):
+		// a row the audit keeps with the toggle off must not carry an
+		// AnimeBytes link, so an AB-publishing pair must grade ABDefinite.
+		if g := tracker.ClassifyAB(trackerName, rawURL); g != tracker.ABDefinite {
+			t.Errorf("tracker.ClassifyAB(%q, %q) = %d but the pair publishes AnimeBytes link %q; the audit report would keep the row", trackerName, rawURL, g, published)
 		}
 	})
 }

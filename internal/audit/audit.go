@@ -2,31 +2,24 @@
 // every anime that has a matching SeaDex entry, what release you have and
 // whether it is SeaDex's best, an alt, or unlisted. Unlike the daemon's
 // report-by-exception findings, this enumerates everything.
-//
-// Matching is season-level: a SeaDex entry (one AniList ID = one cour/movie/
-// special) is scoped to its TVDB season via the Fribb mapping and compared
-// against that season's on-disk release groups. Specials without a positive
-// TVDB season compare against Sonarr's season-0 bucket, and seasonless
-// non-special series are compared conservatively across the real seasons on
-// disk. A row is unverified only when files are present but no comparable
-// release group can be identified.
 package audit
 
 import (
-	"log/slog"
-	"sort"
-	"strconv"
+	"cmp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
-	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
+	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 // Verdict is the SeaDex-alignment classification of a library item's release.
@@ -41,14 +34,12 @@ const (
 	VerdictUnlisted Verdict = "have_unlisted"
 	// VerdictNoFile means the item (or the mapped season) has no file on disk.
 	VerdictNoFile Verdict = "no_file"
-	// VerdictUnverified means the item has files on disk but none carried an
-	// identifiable release group, so there was nothing to compare. Most former
-	// unverified rows (specials, absolute-numbered runs) now resolve via the
-	// season-0 and whole-series fallbacks in scope.
+	// VerdictUnverified means the item has files on disk but the comparison is
+	// unverifiable: the release-group evidence on at least one side is unknown,
+	// so neither alignment nor a divergence can honestly be claimed.
 	VerdictUnverified Verdict = "unverified"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
-	// (present in the Fribb map) but SeaDex lists no entry for it, so there is no
-	// recommendation to compare against. These rows carry no SeaDex entry.
+	// (present in the Fribb map) but SeaDex lists no entry for it.
 	VerdictNotOnSeaDex Verdict = "not_on_seadex"
 )
 
@@ -57,34 +48,49 @@ const (
 var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictUnverified, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
 
 // Qualifier annotates a row's verdict with the daemon's finding vocabulary for
-// the same (item, entry), so the report and the daemon's compare pass tell one
-// story. A qualifier annotates; it never forks the verdict enum - the verdict
-// stays what the group comparison said.
+// the same (item, entry). It annotates; it never forks the verdict enum.
 type Qualifier string
 
 const (
-	// QualifierMixed marks a row where the daemon would emit
-	// mixed_group_manual: the scoped on-disk groups span more than one group
-	// and none of them is a SeaDex best, so the row is a manual review rather
-	// than a clean single-group divergence.
+	// QualifierMixed marks a row where the daemon would emit mixed_group_manual:
+	// the scoped on-disk groups span more than one group and none is a SeaDex best.
 	QualifierMixed Qualifier = "mixed"
-	// QualifierTheoretical marks a row whose SeaDex entry names only a
-	// theoretical best (no isBest torrents), so its verdict means "SeaDex
-	// lists nothing concrete to compare against", not "you have something
-	// better than what SeaDex lists" - the daemon's theoretical_best.
+	// QualifierTheoretical marks a row whose SeaDex entry names only a theoretical
+	// best (no isBest torrents), so nothing concrete is listed to compare against.
 	QualifierTheoretical Qualifier = "theoretical"
-	// QualifierIncomplete marks a row whose SeaDex entry is incomplete and
-	// lists no isBest torrents at all (nothing recommended) - the daemon's
-	// incomplete status.
+	// QualifierIncomplete marks a row whose SeaDex entry is incomplete: it lists no
+	// isBest torrents, or a listed best is not aligned with the on-disk group.
 	QualifierIncomplete Qualifier = "incomplete"
 )
 
-// Release is one SeaDex torrent in a report row (best or alt), with a usable link.
+// Release is one SeaDex torrent in a report row (best or alt). URL is
+// empty when the upstream link fails usable-link validation.
 type Release struct {
 	Tracker string `json:"tracker"`
 	Group   string `json:"group,omitempty"`
 	URL     string `json:"url,omitempty"`
-	Best    bool   `json:"best"`
+	// Warnings carries the canonical curation-warning tags (broken, incomplete)
+	// SeaDex curators put on the release. Display vocabulary only: a warned
+	// release is always listed and always annotated.
+	Warnings []string `json:"warnings,omitempty"`
+	Best     bool     `json:"best"`
+	// Filtered marks a release the operator's filters.exclude_tags policy excludes
+	// from the REPORT surface. Such a release stays listed and annotated but
+	// forfeits the verdict's BEST group set (see groupSets).
+	Filtered bool `json:"filtered,omitempty"`
+	// Unobtainable marks a release the obtainability rule rejects as verdict
+	// evidence: no usable link, or a tracker the operator cannot use. It stays
+	// listed, drives neither the BEST group set nor the grab links, and does still
+	// count on the descriptive ALT rung.
+	Unobtainable bool `json:"unobtainable,omitempty"`
+	// URLError marks a release whose SeaDex record carries a NON-EMPTY url that the
+	// publisher refused. Reported separately from Unobtainable because this is an
+	// upstream DATA defect to fix at the source, not the operator's configuration.
+	URLError bool `json:"url_error,omitempty"`
+	// UnknownTracker marks a release whose record names a tracker this app's
+	// canonical table does not carry, so no link could be built. The remedy is the
+	// opposite direction from URLError's: a seadex-scout change, not a SeaDex one.
+	UnknownTracker bool `json:"unknown_tracker,omitempty"`
 }
 
 // Row is one anime's alignment record.
@@ -102,18 +108,36 @@ type Row struct {
 	Releases      []Release `json:"releases,omitempty"`
 	AniListID     int       `json:"al_id"`
 	Season        int       `json:"season,omitempty"`
-	// scope is the comparison scope align.Scope resolved, recorded at build
-	// time and read by the renderer (align.ScopeWholeSeries, the zero value,
-	// renders as "series"). Unexported: in-process only, absent from the JSON
-	// wire shape.
-	scope      align.ScopeKind
-	Special    bool `json:"special,omitempty"`
-	Incomplete bool `json:"incomplete,omitempty"`
+	// Scope is the comparison scope resolved for the row: the shared decision's
+	// kind on a matched row (align.Decide), align.ItemKind on an uncovered one.
+	// align.ScopeWholeSeries, the zero value, encodes and renders as "series".
+	Scope      align.ScopeKind `json:"scope"`
+	Special    bool            `json:"special,omitempty"`
+	Incomplete bool            `json:"incomplete,omitempty"`
+	// GroupsUnknown marks CurrentGroups as MISSING rather than empty: the library
+	// walk could not establish this item's file data, so no group was ever read.
+	// A not_on_seadex row never reaches align.Decide, so this is where it says so.
+	GroupsUnknown bool `json:"groups_unknown,omitempty"`
 	// Approx marks a coarse comparison: the season-0 specials bucket held more
 	// than one group, or the whole-series fallback compared more than one real
-	// season, so the verdict reflects "this group is present somewhere in the
-	// series/specials" rather than an exact per-season/per-special attribution.
+	// season, so the verdict is not an exact per-season attribution.
 	Approx bool `json:"approx,omitempty"`
+	// HiddenAnimeBytes counts the entry's releases withheld by the operator's
+	// AnimeBytes toggle. Without it a row whose only bests are AnimeBytes releases
+	// is indistinguishable from an entry SeaDex lists no best for.
+	HiddenAnimeBytes int `json:"hidden_animebytes,omitempty"`
+	// HiddenAnimeBytesBest counts only the withheld releases SeaDex marks BEST. It
+	// is a separate key rather than a re-reading of HiddenAnimeBytes, because a
+	// hidden ALT says nothing about whether a best exists.
+	HiddenAnimeBytesBest int `json:"hidden_animebytes_best,omitempty"`
+}
+
+// IncompleteEntry is one SeaDex entry whose AniList lookup failed transiently
+// this run, so its library mapping is unconfirmed: left unmapped, or resolved
+// from an expired memo entry. It renders in the incomplete-mapping section.
+type IncompleteEntry struct {
+	SeaDexURL string `json:"seadex_url"`
+	AniListID int    `json:"al_id"`
 }
 
 // Report is the full audit result.
@@ -121,33 +145,32 @@ type Report struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	Totals      map[string]int `json:"totals"`
 	Rows        []Row          `json:"rows"`
+	// Incomplete lists the SeaDex entries whose library mapping could not be
+	// resolved this run (a transient AniList failure), sorted by AniList id.
+	// Empty on a fully resolved run, and omitted from the JSON.
+	Incomplete []IncompleteEntry `json:"incomplete_mappings,omitempty"`
 }
 
 // Config configures an Auditor.
 type Config struct {
-	Logger          *slog.Logger
-	SeaDexBaseURL   string
+	// TagFilter is the operator's filters.exclude_tags policy, asked about the
+	// report surface. Its zero value excludes nothing.
+	TagFilter       tagfilter.Filter
 	ExcludeSpecials bool
 	AnimeBytes      bool
 }
 
 // Auditor builds alignment reports from matches.
 type Auditor struct {
-	log               *slog.Logger
-	seadexBaseURL     string
+	tags              tagfilter.Filter
 	excludeSpecials   bool
 	includeAnimeBytes bool
 }
 
-// NewAuditor builds an Auditor from cfg.
-func NewAuditor(cfg Config) *Auditor {
-	log := cfg.Logger
-	if log == nil {
-		log = slog.Default()
-	}
+// New builds an Auditor from cfg.
+func New(cfg Config) *Auditor {
 	return &Auditor{
-		log:               log,
-		seadexBaseURL:     cfg.SeaDexBaseURL,
+		tags:              cfg.TagFilter,
 		excludeSpecials:   cfg.ExcludeSpecials,
 		includeAnimeBytes: cfg.AnimeBytes,
 	}
@@ -155,9 +178,10 @@ func NewAuditor(cfg Config) *Auditor {
 
 // Audit produces the report: one row per in-library SeaDex match (specials
 // skipped when disabled), plus one not_on_seadex row per library item that is
-// recognized anime (in the Fribb map) but has no SeaDex entry. snap and idx may
-// be nil, in which case the not_on_seadex section is empty.
-func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index) Report {
+// recognized anime but has no SeaDex entry. snap and idx may be nil, in which
+// case the not_on_seadex section is empty. incompleteIDs carries the AniList ids
+// whose needed lookup failed transiently this run.
+func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index, incompleteIDs map[int]struct{}) Report {
 	rows := make([]Row, 0, len(matches))
 	covered := make(map[string]struct{})
 	for i := range matches {
@@ -165,8 +189,8 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		if !m.InLibrary() {
 			continue
 		}
-		covered[itemKey(m.Item)] = struct{}{}
-		if filter.ExcludeSpecial(m.Record.IsSpecial(), a.excludeSpecials) {
+		covered[m.Item.Key()] = struct{}{}
+		if a.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		rows = append(rows, a.assess(m))
@@ -178,113 +202,60 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		totals[string(rows[i].Verdict)]++
 	}
 	sortRows(rows)
-	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows}
+	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows, Incomplete: incompleteEntries(incompleteIDs)}
 }
 
-// itemKey identifies a library item by arr and arr id.
-func itemKey(it *library.Item) string {
-	return it.Arr + ":" + strconv.Itoa(it.ArrID)
+// incompleteEntries renders the transiently-unresolved AniList ids as the
+// report's incomplete-mapping section, sorted by id. Nil on a resolved run.
+func incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]IncompleteEntry, 0, len(ids))
+	for id := range ids {
+		out = append(out, IncompleteEntry{AniListID: id, SeaDexURL: seadex.EntryURL(id)})
+	}
+	slices.SortFunc(out, func(x, y IncompleteEntry) int { return cmp.Compare(x.AniListID, y.AniListID) })
+	return out
 }
 
 // uncoveredRows lists library items that are recognized anime (present in the
-// Fribb map) but were not covered by any SeaDex match. The Fribb catalogue
-// filter is what keeps this to genuine anime gaps rather than every non-anime
-// item in the arrs.
+// Fribb map) but were not covered by any SeaDex match.
 func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) []Row {
 	if snap == nil {
 		return nil
 	}
-	cat := newCatalogue(idx, excludeSpecials)
+	// audit contributes only its specials policy: with the filter on, a special
+	// record catalogues nothing, so a specials-only item cannot surface as
+	// not_on_seadex, while a mixed series stays catalogued through its siblings.
+	cat := match.NewCatalogue(idx, func(r mapping.Record) bool {
+		return !excludeSpecials || !r.IsSpecial()
+	})
 	var rows []Row
 	for i := range snap.Items {
 		it := &snap.Items[i]
-		if _, ok := covered[itemKey(it)]; ok {
+		if _, ok := covered[it.Key()]; ok {
 			continue
 		}
-		if !cat.has(it) {
+		if !cat.Has(it) {
 			continue
 		}
-		// An uncovered item has no Fribb record, so its scope label resolves
-		// through the shared align.Scope dispatch with the zero record (Radarr
-		// -> movie; a seasonless non-special Sonarr series -> whole-series),
-		// rather than re-deriving that arm choice locally where it could drift
-		// from the protocol align owns.
+		// An uncovered item has no SeaDex-associated record to supply a scope.
 		rows = append(rows, Row{
 			Title:         it.Title,
 			Arr:           it.Arr,
 			ArrURL:        it.ArrURL,
 			Verdict:       VerdictNotOnSeaDex,
-			CurrentGroups: it.Groups,
-			scope:         align.Scope(it, &mapping.Record{}).Kind,
+			CurrentGroups: slices.Clone(it.Groups),
+			GroupsUnknown: !it.Comparable(),
+			Scope:         align.ItemKind(it),
 		})
 	}
 	return rows
 }
 
-// catalogue is a reverse (arr-ID) lookup over the Fribb map: the set of TVDB,
-// TMDB-movie, and IMDb IDs any record references, used to tell a recognized
-// anime from an arbitrary library entry.
-type catalogue struct {
-	tvdb map[int]struct{}
-	tmdb map[int]struct{}
-	imdb map[string]struct{}
-}
-
-// newCatalogue builds the reverse ID sets from the mapping records. A nil index
-// yields an empty catalogue (nothing is considered catalogued). When
-// excludeSpecials is on, special (OVA/ONA/SPECIAL) records are skipped, so a
-// specials-only item is not catalogued and cannot surface as not_on_seadex —
-// mirroring the matched-rows arm's specials filter. A mixed series stays
-// catalogued through its non-special records sharing the same TVDB id.
-func newCatalogue(idx *mapping.Index, excludeSpecials bool) *catalogue {
-	c := &catalogue{tvdb: map[int]struct{}{}, tmdb: map[int]struct{}{}, imdb: map[string]struct{}{}}
-	idx.ForEachRecord(func(r mapping.Record) {
-		if filter.ExcludeSpecial(r.IsSpecial(), excludeSpecials) {
-			return
-		}
-		// Insert only the identifiers the record's routed arr consumes
-		// (mapping.Record.RoutedIDs): a MOVIE record must not catalogue a
-		// Sonarr item through a stray TVDB id, nor a series record a Radarr
-		// item through its movie ids.
-		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-		if tvdb != 0 {
-			c.tvdb[tvdb] = struct{}{}
-		}
-		for _, id := range tmdbMovies {
-			c.tmdb[id] = struct{}{}
-		}
-		for _, im := range imdbIDs {
-			c.imdb[im] = struct{}{}
-		}
-	})
-	return c
-}
-
-// has reports whether a library item corresponds to any Fribb record: a Radarr
-// movie by its TMDB or IMDb id, a Sonarr series by its TVDB id.
-func (c *catalogue) has(it *library.Item) bool {
-	if it.Arr == library.ArrRadarr {
-		if it.TmdbID != 0 {
-			if _, ok := c.tmdb[it.TmdbID]; ok {
-				return true
-			}
-		}
-		if it.ImdbID != "" {
-			if _, ok := c.imdb[it.ImdbID]; ok {
-				return true
-			}
-		}
-		return false
-	}
-	if it.TvdbID == 0 {
-		return false
-	}
-	_, ok := c.tvdb[it.TvdbID]
-	return ok
-}
-
-// assess builds one row: classify the entry's releases, scope the on-disk
-// groups to the mapped season, and derive the verdict.
+// assess builds one row: classify the entry's releases, resolve the shared
+// comparison decision (align.Decide), and render it as verdict and qualifier.
 func (a *Auditor) assess(m *match.Match) Row {
 	releases := a.classifyReleases(&m.Entry)
 	best, alt := groupSets(releases)
@@ -294,38 +265,55 @@ func (a *Auditor) assess(m *match.Match) Row {
 		Title:       m.Item.Title,
 		Arr:         m.Arr,
 		ArrURL:      m.Item.ArrURL,
-		SeaDexURL:   a.seadexURL(m.Entry.AniListID),
+		SeaDexURL:   seadex.EntryURL(m.Entry.AniListID),
 		MatchSource: string(m.Source),
 		AniListID:   m.Entry.AniListID,
-		Season:      max(0, m.Record.SeasonTvdb),
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
-	scoped := align.Scope(m.Item, &m.Record)
-	row.scope = scoped.Kind
-	if scoped.Kind == align.ScopeWholeSeries {
-		// Absolute-numbered run / title-only match: apply the single whole-series
-		// recommendation to each real season (season 0 excluded), conservatively.
-		row.Verdict, row.CurrentGroups, row.Approx = wholeSeriesVerdict(m.Item, best, alt)
-	} else {
-		row.CurrentGroups, row.Approx = scoped.Groups, scoped.Approx
-		row.Verdict = verdict(scoped.HasFile, scoped.Groups, best, alt)
+	for i := range m.Entry.Torrents {
+		if a.hiddenByABToggle(&m.Entry.Torrents[i]) {
+			row.HiddenAnimeBytes++
+			if m.Entry.Torrents[i].IsBest {
+				row.HiddenAnimeBytesBest++
+			}
+		}
 	}
-	row.Qualifier = rowQualifier(&m.Entry, best, row.Verdict, row.CurrentGroups)
+	d := align.Decide(m.Item, &m.Record, best, alt)
+	row.Scope = d.Kind
+	row.Season = d.Season
+	row.GroupsUnknown = !m.Item.Comparable()
+	// align.Decision.Groups is caller-owned, so the row can take it without cloning.
+	row.CurrentGroups, row.Approx = d.Groups, d.Approx
+	row.Verdict = verdictFor(d.Standing)
+	row.Qualifier = rowQualifier(&m.Entry, &d)
 	return row
 }
 
-// rowQualifier derives the daemon-vocabulary qualifier for a row, so the report
-// distinguishes the states the daemon's compare pass distinguishes. With no
-// best release listed at all, a theoretical-best-only entry is "theoretical"
-// and an incomplete one "incomplete" (the classify.Fallback precedence shared
-// with the daemon's emptyResult) - the row's verdict would otherwise imply an
-// unlisted-better state that does not exist. With best releases listed, a
-// not-aligned row (have_alt / have_unlisted) whose scoped groups span more
-// than one group is "mixed", where the daemon emits mixed_group_manual. An
-// aligned row is never mixed, matching the daemon's alignment-wins ordering.
-func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []string) Qualifier {
-	if len(best) == 0 {
+// verdictFor renders the shared decision core's group-ladder standing in the
+// report's verdict vocabulary, 1:1.
+func verdictFor(s align.Standing) Verdict {
+	switch s {
+	case align.StandingNoFile:
+		return VerdictNoFile
+	case align.StandingUnverified:
+		return VerdictUnverified
+	case align.StandingBest:
+		return VerdictBest
+	case align.StandingAlt:
+		return VerdictAlt
+	default:
+		return VerdictUnlisted
+	}
+}
+
+// rowQualifier derives the daemon-vocabulary qualifier for a row from the shared
+// decision. With no best release listed at all (d.NoBest, read independently of
+// the outcome), the classify.Fallback precedence picks theoretical or incomplete;
+// an aligned row is never qualified, and neither is an unverifiable row of an
+// entry that still lists a best.
+func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
+	if d.NoBest {
 		switch classify.Fallback(entry) {
 		case classify.FallbackTheoretical:
 			return QualifierTheoretical
@@ -334,101 +322,85 @@ func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []strin
 		}
 		return ""
 	}
-	if (v == VerdictAlt || v == VerdictUnlisted) && len(current) > 1 {
+	switch {
+	case d.Outcome == align.OutcomeMixed:
 		return QualifierMixed
-	}
-	return ""
-}
-
-// verdict derives the alignment verdict from the scoped group set. No file is
-// no_file; a file with no identifiable group is unverified; otherwise the
-// current group is matched against the best then the alt release groups.
-func verdict(hasFile bool, current, best, alt []string) Verdict {
-	switch {
-	case !hasFile:
-		return VerdictNoFile
-	case len(current) == 0:
-		return VerdictUnverified
-	case release.GroupsIntersect(current, best):
-		return VerdictBest
-	case release.GroupsIntersect(current, alt):
-		return VerdictAlt
+	case d.Outcome == align.OutcomeDiverged && entry.Incomplete:
+		return QualifierIncomplete
 	default:
-		return VerdictUnlisted
+		return ""
 	}
 }
 
-// wholeSeriesVerdict applies the entry's single recommendation to each real
-// season (season 0 specials excluded) and returns the most conservative
-// verdict: have_best only when every on-disk season carries a best group,
-// have_alt when all are best-or-alt with at least one alt, and have_unlisted
-// when any season matches neither. It also returns the union of those seasons'
-// groups for display and marks the comparison approximate when it spans more
-// than one season or more than one release group (either way the single
-// whole-series recommendation applies to a coarse aggregate). With no real
-// season on disk it is no_file.
-func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []string, bool) {
-	s := align.SummarizeWholeSeries(item, best, alt)
-	if s.Seasons == 0 {
-		return VerdictNoFile, nil, false
-	}
-	switch {
-	case s.AnyUnlisted:
-		return VerdictUnlisted, s.Groups, s.Approx
-	case s.AnyAlt:
-		return VerdictAlt, s.Groups, s.Approx
-	default:
-		return VerdictBest, s.Groups, s.Approx
-	}
-}
-
-// classifyReleases turns every SeaDex torrent into a report Release (group
-// normalized via the shared classifier, tracker, usable URL, best flag).
-// AnimeBytes torrents are dropped when the operator has AnimeBytes off —
-// whether identified by the tracker label OR by the URL host, since the label
-// is untrusted upstream data — so the report never surfaces AB releases or
-// links they cannot use (and cannot leak them), mirroring the daemon's
-// obtainability rule.
+// classifyReleases turns every SeaDex torrent into a report Release (group,
+// tracker, usable URL, best flag, curation warnings). DEFINITIVELY AnimeBytes
+// torrents are dropped when the operator has AnimeBytes off. A public-labeled
+// release whose URL evidence is malformed or ambiguous is NOT dropped: it stays
+// listed with Unobtainable set, so a release that drove no verdict is explained.
 func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	out := make([]Release, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
-		// AB guard on the raw upstream URL; the invariant lives in
-		// classify.ABVisible (the rendered Release below still carries the
-		// usable link).
-		if !classify.ABVisible(t, a.includeAnimeBytes) {
+		// Hide only a DEFINITIVELY AB torrent when the toggle is off; ambiguous
+		// evidence stays listed and is annotated unobtainable instead.
+		if a.hiddenByABToggle(t) {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
+		// One evaluation of the publisher: URL, URLError and UnknownTracker are three
+		// readings of the same decision, so "a refusal means no link" is structural.
+		// The refusal REASON comes from the publisher rather than being re-derived.
+		published, refusal := classify.PublishRefusal(t)
 		out = append(out, Release{
-			Tracker: t.Tracker,
-			Group:   rel.Group,
-			URL:     t.UsableURL(),
-			Best:    t.IsBest,
+			Tracker:        rel.Tracker,
+			Group:          rel.Group,
+			URL:            published,
+			Best:           t.IsBest,
+			URLError:       refusal == trackerlink.RefusalUnvouchableURL,
+			UnknownTracker: refusal == trackerlink.RefusalUnknownTracker,
+			Warnings:       curationWarnings(t.Tags),
+			Filtered:       a.tags.Excludes(t.Tags, tagfilter.SurfaceReport),
+			Unobtainable:   !classify.Obtainable(&rel, t, a.includeAnimeBytes),
 		})
 	}
 	return out
 }
 
-// seadexURL builds the releases.moe entry link for an AniList ID.
-func (a *Auditor) seadexURL(aniListID int) string {
-	base := strings.TrimRight(a.seadexBaseURL, "/")
-	return base + "/" + strconv.Itoa(aniListID)
+// hiddenByABToggle reports whether the operator's AnimeBytes toggle withholds t
+// from the report. It is the ONE expression of that gate, so the per-row hidden
+// count cannot drift from the drop it accounts for.
+func (a *Auditor) hiddenByABToggle(t *seadex.Torrent) bool {
+	return !a.includeAnimeBytes && classify.ABEvidence(t) == tracker.ABDefinite
 }
 
 // groupSets returns the distinct normalized groups among the best and the alt
-// releases.
+// releases. The two rungs answer DIFFERENT questions: BEST is prescriptive, so a
+// release that forfeits best evidence (forfeitsBest) contributes nothing, while
+// ALT is descriptive - "is what I already have something SeaDex lists?" - and
+// gates nothing. Both classes stay visible in the row's release list, annotated.
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		g := release.NormalizeGroup(releases[i].Group)
-		if releases[i].Best {
+		rel := &releases[i]
+		g := release.NormalizeGroup(rel.Group)
+		if rel.Best {
+			if forfeitsBest(rel) {
+				continue
+			}
 			addUnique(bestSeen, &best, g)
 		} else {
 			addUnique(altSeen, &alt, g)
 		}
 	}
 	return best, alt
+}
+
+// forfeitsBest reports whether a best release contributes no BEST evidence to
+// the verdict: the operator's tag policy excludes it from the report surface, or
+// it is unreachable. Deliberately NARROWER than the render layer's annotated():
+// a curation warning is display, this is policy.
+func forfeitsBest(rel *Release) bool {
+	return rel.Filtered || rel.Unobtainable
 }
 
 // addUnique appends g to out if not already seen.
@@ -440,16 +412,23 @@ func addUnique(seen map[string]struct{}, out *[]string, g string) {
 	*out = append(*out, g)
 }
 
-// sortRows orders rows by verdict actionability, then title.
+// sortRows orders rows by verdict actionability, then title, then season and
+// AniList id for same-title rows.
 func sortRows(rows []Row) {
 	rank := make(map[Verdict]int, len(verdictOrder))
 	for i, v := range verdictOrder {
 		rank[v] = i
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Verdict != rows[j].Verdict {
-			return rank[rows[i].Verdict] < rank[rows[j].Verdict]
+	slices.SortStableFunc(rows, func(a, b Row) int {
+		if c := cmp.Compare(rank[a.Verdict], rank[b.Verdict]); c != 0 {
+			return c
 		}
-		return strings.ToLower(rows[i].Title) < strings.ToLower(rows[j].Title)
+		if c := cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title)); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Season, b.Season); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.AniListID, b.AniListID)
 	})
 }

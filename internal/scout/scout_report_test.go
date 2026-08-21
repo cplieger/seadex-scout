@@ -3,18 +3,23 @@ package scout
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi"
+	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
 )
@@ -26,27 +31,26 @@ import (
 func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	logger := scoutTestLogger()
 	store := &fakeStore{st: state.State{
-		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
-		Baselined: true,
+		Mapping: frierenMappingCache(),
 	}}
 
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.NewMatcher(notFoundAniList{}, logger),
-		Auditor: audit.NewAuditor(audit.Config{Logger: logger, SeaDexBaseURL: "https://releases.moe"}),
+		Matcher: match.New(notFoundAniList{}, logger),
+		Auditor: audit.New(audit.Config{}),
 	})
 
-	rep, err := s.Report(context.Background())
+	rep, err := s.Report(t.Context())
 	if err != nil {
 		t.Fatalf("Report returned error: %v", err)
 	}
@@ -68,57 +72,82 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	}
 }
 
+// TestReportSummaryLineCarriesCounts pins the one-shot report's summary line:
+// seadex_entries, library_items, rows, and incomplete_mappings are the
+// operator's only per-run account of what the report covered, so each must
+// carry its own count. The scenario separates the two pairs a swap could hide:
+// seadex_entries (2) from library_items (1), and rows (1) from
+// incomplete_mappings (0). library_items and rows are both 1 here, so a swap
+// of THAT pair stays invisible - a second Fribb-catalogued library item would
+// add its own not_on_seadex row and move both together.
+func TestReportSummaryLineCarriesCounts(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	// A second entry with no Fribb record keeps seadex_entries (2) distinct
+	// from library_items (1) and rows (1); its definitive not-found answer
+	// leaves incomplete_mappings at 0.
+	entries := append(seadexFrierenEntry(), seadex.Entry{AniListID: 999})
+	s := NewReporter(&ReportDeps{
+		Logger:  logger,
+		Store:   store,
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: fakeMapping{},
+		SeaDex:  &fakeSeaDex{entries: entries},
+		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.New(audit.Config{}),
+	})
+
+	if _, err := s.Report(t.Context()); err != nil {
+		t.Fatalf("Report returned error: %v", err)
+	}
+	wantAttrs := map[string]string{
+		"seadex_entries":      "2",
+		"library_items":       "1",
+		"rows":                "1",
+		"incomplete_mappings": "0",
+	}
+	for key, want := range wantAttrs {
+		if got, ok := recordAttr(recorder, "report generated", key); !ok || got != want {
+			t.Errorf("'report generated' %s = %q (found=%t), want %q", key, got, ok, want)
+		}
+	}
+}
+
 // TestReportPartialSnapshotErrors pins Report's completeness gate: a walk that
 // skipped series after episode-fetch failures (Partial=true, nil error) must
 // fail the one-shot report rather than publish a successful, timestamped audit
-// that silently omits the skipped series - the whole-library contract the
-// daemon cycle already enforces via its partial-snapshot gate.
+// that silently omits skipped series. Report mode requires a complete snapshot;
+// the daemon instead compares the clean subset and preserves failed items' findings.
 func TestReportPartialSnapshotErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &flakySonarr{
-		fakeSonarr: fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-				{ID: 8, Title: "Skipped Series", TvdbID: 124, Year: 2024},
-			},
-			episodes: map[int][]arrapi.Episode{
-				7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
-			},
+		series: []arrapi.Series{
+			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+			{ID: 8, Title: "Skipped Series", TvdbID: 124, Year: 2024},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a partial-snapshot error")
 	}
 	if !strings.Contains(err.Error(), "partial") {
 		t.Errorf("error = %q, want partial-snapshot context", err.Error())
-	}
-}
-
-// TestReportLibraryWalkFailureErrors pins Report's first error arm: a failed
-// arr walk aborts the report with an error naming the walk (there is nothing
-// to report against).
-func TestReportLibraryWalkFailureErrors(t *testing.T) {
-	logger := scoutTestLogger()
-	s := New(&Deps{
-		Logger:  logger,
-		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
-	})
-
-	_, err := s.Report(context.Background())
-	if err == nil {
-		t.Fatal("Report returned nil error, want a library-walk error")
-	}
-	if !strings.Contains(err.Error(), "library walk") {
-		t.Errorf("error = %q, want library-walk context", err.Error())
 	}
 }
 
@@ -131,17 +160,17 @@ func TestReportLibraryWalkFailureErrors(t *testing.T) {
 func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		Store: &fakeStore{st: state.State{
-			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+			Mapping: frierenMappingCache(),
 		}},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{},
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a zero-entries error")
 	}
@@ -156,24 +185,86 @@ func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 func TestReportSeaDexFailureErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
-		// A cached mapping keeps the loader usable so the report reaches the
+		// A cached mapping keeps the map usable so the report reaches the
 		// SeaDex arm (an unusable map is its own hard error, gated earlier).
 		Store: &fakeStore{st: state.State{
-			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+			Mapping: frierenMappingCache(),
 		}},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a seadex fetch error")
 	}
 	if !strings.Contains(err.Error(), "seadex fetch") {
 		t.Errorf("error = %q, want seadex-fetch context", err.Error())
+	}
+}
+
+// cancelingSeaDex cancels the run context from inside FetchEntries and then
+// fails, reproducing a shutdown that races an upstream failure whose error text
+// embeds unbounded upstream bytes.
+type cancelingSeaDex struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (c *cancelingSeaDex) FetchEntries(context.Context, seadexapi.Options) ([]seadex.Entry, error) {
+	c.cancel()
+	return nil, c.err
+}
+
+func (c *cancelingSeaDex) CountWindow(context.Context, time.Time) (int, error) {
+	c.cancel()
+	return 0, c.err
+}
+
+// TestReportSeaDexCancellationBoundsErrorText pins Report's SeaDex arm on the
+// shutdown path: the log-boundary reduction is unconditional, so a cancelled
+// fetch whose error carries raw upstream bytes still yields a bounded,
+// single-line error, while the wrap keeps context.Canceled matchable for main's
+// WARN-not-ERROR shutdown classification.
+func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
+	logger := scoutTestLogger()
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	oversized := strings.Repeat("A", 4*maxLoggedErrorBytes) + "\nsecond line"
+	s := NewReporter(&ReportDeps{
+		Logger: logger,
+		Store: &fakeStore{st: state.State{
+			Mapping: frierenMappingCache(),
+		}},
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
+		SeaDex: &cancelingSeaDex{
+			cancel: cancel,
+			err:    fmt.Errorf("seadex page: %s: %w", oversized, context.Canceled),
+		},
+	})
+
+	_, err := s.Report(ctx)
+	if err == nil {
+		t.Fatal("Report returned nil error, want a cancelled seadex fetch error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Report error = %v, want it to wrap context.Canceled", err)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "seadex fetch: ") {
+		t.Errorf("Report error = %q, want seadex-fetch stage context", msg)
+	}
+	if strings.ContainsAny(msg, "\n\r") {
+		t.Error("Report error text contains a newline, want a single line")
+	}
+	if len(msg) > maxLoggedErrorBytes+128 {
+		t.Errorf("Report error text is %d bytes, want it bounded near maxLoggedErrorBytes (%d)", len(msg), maxLoggedErrorBytes)
 	}
 }
 
@@ -185,17 +276,17 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 func TestReportMappingUnusableErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		// Empty state + unreachable Fribb: the load fails with nothing stale
 		// to fall back on, so the map is unusable (not a StaleMapError).
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: unreachableMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 	})
 
-	_, err := s.Report(context.Background())
+	_, err := s.Report(t.Context())
 	if err == nil {
 		t.Fatal("Report returned nil error, want a mapping-unusable error")
 	}
@@ -219,21 +310,21 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{Logger: scoutTestLogger(), SeaDexBaseURL: "https://releases.moe"}),
+		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.New(audit.Config{}),
 	})
 
-	rep, err := s.Report(context.Background())
+	rep, err := s.Report(t.Context())
 	if err != nil {
 		t.Fatalf("Report with a stale-but-usable map returned error: %v", err)
 	}
@@ -243,61 +334,63 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	if n := recorder.CountExact("report: mapping degraded"); n != 1 {
 		t.Errorf("'report: mapping degraded' WARN count = %d, want 1", n)
 	}
-	staleAttr := false
-	for _, r := range recorder.Records() {
-		if r.Message != "report: mapping degraded" {
-			continue
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "stale_reason" {
-				staleAttr = true
-				return false
-			}
-			return true
-		})
-	}
-	if !staleAttr {
+	if _, ok := recordAttr(recorder, "report: mapping degraded", "stale_reason"); !ok {
 		t.Error("\"report: mapping degraded\" WARN carries no stale_reason attribute; StaleMapError.LogAttrs was not appended")
 	}
 }
 
-// TestReportDegradedMatchingErrors pins Report's match-completeness gate: an
-// incomplete match result must fail the one-shot report - naming AniList when
-// the degradation is a transient upstream failure, and naming the shutdown
-// interruption (not AniList) when the context was cancelled mid-match.
-func TestReportDegradedMatchingErrors(t *testing.T) {
-	t.Run("anilist transiently degraded", func(t *testing.T) {
-		logger := scoutTestLogger()
+// TestReportDegradedMatching pins report mode's two degraded-match arms
+// (test c of mc-degradation-scoping): a transient AniList failure no longer
+// aborts the one-shot report - it renders the audit with the affected entries
+// listed in the incomplete-mapping section (the unaffected rows still audit,
+// and the run exits through the normal success path) - while a shutdown
+// mid-match still errors, since a truncated match set has no complete audit
+// to render.
+func TestReportDegradedMatching(t *testing.T) {
+	t.Run("anilist transiently degraded renders incomplete section", func(t *testing.T) {
+		logger, recorder := capture.New()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-		s := New(&Deps{
+		s := NewReporter(&ReportDeps{
 			Logger:  logger,
-			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
-			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
+			Matcher: match.New(degradedMatcherAniList{}, logger),
+			Auditor: audit.New(audit.Config{}),
 		})
 
-		_, err := s.Report(context.Background())
-		if err == nil {
-			t.Fatal("Report returned nil error, want an anilist-degraded error")
+		rep, err := s.Report(t.Context())
+		if err != nil {
+			t.Fatalf("Report with a transient AniList failure returned error %v, want a rendered report with the incomplete section", err)
 		}
-		if !strings.Contains(err.Error(), "anilist lookups degraded") {
-			t.Errorf("error = %q, want anilist-degraded context", err.Error())
+		if len(rep.Incomplete) != 1 || rep.Incomplete[0].AniListID != 999 {
+			t.Fatalf("rep.Incomplete = %+v, want the one affected entry (al_id 999)", rep.Incomplete)
+		}
+		if rep.Incomplete[0].SeaDexURL != "https://releases.moe/999" {
+			t.Errorf("incomplete entry SeaDexURL = %q, want the releases.moe link", rep.Incomplete[0].SeaDexURL)
+		}
+		// The unaffected majority still audits: the Fribb-catalogued library
+		// item (covered by no SeaDex match) renders as its not_on_seadex row.
+		if len(rep.Rows) != 1 || rep.Rows[0].Verdict != audit.VerdictNotOnSeaDex {
+			t.Errorf("rows = %+v, want the one not_on_seadex row for the unaffected library item", rep.Rows)
+		}
+		if n := recorder.CountExact("report: anilist degraded; affected entries listed in the incomplete section"); n != 1 {
+			t.Errorf("report anilist-degraded WARN count = %d, want 1", n)
 		}
 	})
-	t.Run("shutdown during matching", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+	t.Run("shutdown during matching still errors", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		logger := scoutTestLogger()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-		s := New(&Deps{
+		s := NewReporter(&ReportDeps{
 			Logger:  logger,
-			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
-			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-			Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, logger),
+			Matcher: match.New(&ctxCancellingAniList{cancel: cancel}, logger),
 		})
 
 		_, err := s.Report(ctx)
@@ -308,4 +401,191 @@ func TestReportDegradedMatchingErrors(t *testing.T) {
 			t.Errorf("error = %q, want report-interrupted context", err.Error())
 		}
 	})
+}
+
+// TestReportShutdownDuringMappingLoadNotMisattributed pins Report's half of
+// the shutdown-misattribution contract: a SIGTERM landing during the report's
+// Fribb refresh must neither log "report: mapping degraded" (blaming a healthy
+// upstream; the WARN backs a Loki query) nor fail with "mapping unusable" -
+// the report proceeds on the cached map and the cancellation surfaces from the
+// SeaDex fetch instead.
+func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := NewReporter(&ReportDeps{
+		Logger:  logger,
+		Store:   store,
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
+		SeaDex:  &cancellingSeaDex{cancel: cancel},
+	})
+
+	_, err := s.Report(ctx)
+	if err == nil {
+		t.Fatal("Report returned nil error, want the cancellation surfaced")
+	}
+	if strings.Contains(err.Error(), "mapping unusable") {
+		t.Errorf("error = %q, want the cancelled load NOT misattributed to an unusable map", err.Error())
+	}
+	if n := recorder.CountExact("report: mapping degraded"); n != 0 {
+		t.Errorf("'report: mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
+	}
+}
+
+// TestReportCanceledBeforeWalkPreservesCancellation pins reportSnapshot's
+// side-less walk-error branch: a context already cancelled when a no-arr walk
+// reaches library.Walk's final cancellation guard must surface an error that
+// still wraps context.Canceled (so main's shutdown classification logs WARN,
+// not the ERROR that trips the cycle-fault alert) AND carries the "library
+// walk" stage context operators read. The existing report tests cover
+// arr-tagged walk failures and cancellation during matching, not this branch.
+func TestReportCanceledBeforeWalkPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := NewReporter(&ReportDeps{
+		Logger:  scoutTestLogger(),
+		Store:   &fakeStore{},
+		Library: arrwalk.NewWalker(&arrwalk.Config{Logger: scoutTestLogger()}),
+	})
+
+	_, err := s.Report(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Report error = %v, want it to wrap context.Canceled", err)
+	}
+	if !strings.HasPrefix(err.Error(), "library walk: ") {
+		t.Errorf("Report error = %q, want library-walk stage context", err)
+	}
+}
+
+// TestReportSurfacesOverridesRefusalAndMappingDegraded pins that the one-shot
+// report gets the same two mapping diagnostics the daemon cycle does, because
+// both run the same shared loader: the l-f69 overrides-refusal ERROR (an opt-in
+// file the operator's pinned mappings are inert without) and the contextual
+// "report: mapping degraded" record for the failed refresh. The two are
+// independent signals - a broken overrides file is an operator-config fault
+// while a failed refresh is an upstream one - so a run hitting both must emit
+// both.
+func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
+	logger, recorder := capture.New()
+	// A stale-but-usable cached map, so the refresh is attempted (and fails at
+	// the transport) rather than skipped as fresh.
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+	}}
+	// A directory at the overrides path fails the bounded read with a
+	// non-ErrNotExist error whatever the test user's privileges.
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	if err := os.Mkdir(overrides, 0o750); err != nil {
+		t.Fatalf("mkdir overrides dir: %v", err)
+	}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	s := NewReporter(&ReportDeps{
+		Logger:  logger,
+		Store:   store,
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(overrides), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger)),
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.New(audit.Config{}),
+	})
+
+	if _, err := s.Report(t.Context()); err != nil {
+		t.Fatalf("Report returned error: %v (neither a refused overrides file nor a stale map blocks the report)", err)
+	}
+	if n := recorder.CountLevel(slog.LevelError, "overrides.json unreadable"); n != 1 {
+		t.Errorf("overrides-refusal ERROR count in report mode = %d, want 1; logs = %v", n, recorder.Messages())
+	}
+	if n := recorder.CountExact("report: mapping degraded"); n != 1 {
+		t.Errorf("'report: mapping degraded' fired %d times, want 1 (the failed refresh is still reported); logs = %v", n, recorder.Messages())
+	}
+}
+
+// TestReportWarnsWhenTheWalkShrankBelowHalf pins the one-shot report's shrink
+// disclosure, which is the only thing that stops a silently-incomplete artifact.
+//
+// The daemon GATES its whole compare on this exact shape (handleLibraryGate's
+// shrink guard): a non-failed walk retaining under half the last persisted
+// snapshot is a suspicious truncation, not a real change. The report cannot
+// gate - it is read-only and it is the operator's fallback view while the cycle
+// is stuck - so it renders and must SAY so instead. Without the line the
+// timestamped report omits every missing series and reads as authoritative,
+// which is the same incompleteness reportSnapshot refuses a partial snapshot
+// over. The complementary case matters as much: a prior-snapshot-less run (a
+// report-only deployment never persists one) has no baseline and must stay
+// quiet rather than guess.
+func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
+	const shrinkWarn = "report: library walk shrank below half the last persisted snapshot; " +
+		"the audit covers the smaller library - inspect the arrs and arr_tags"
+	// priorItems is the persisted baseline; the walk below returns ONE series,
+	// so 1*2 < 4 trips degradation.Shrunk while 1*2 >= 2 does not.
+	priorItems := func(n int) []library.Item {
+		items := make([]library.Item, 0, n)
+		for i := range n {
+			items = append(items, library.Item{Arr: library.ArrSonarr, ArrID: i + 1, TvdbID: 900 + i})
+		}
+		return items
+	}
+	for name, tc := range map[string]struct {
+		prior    []library.Item
+		wantWarn int
+	}{
+		"a walk retaining under half the prior snapshot discloses it": {priorItems(4), 1},
+		"a walk retaining half or more stays quiet":                   {priorItems(2), 0},
+		"no prior snapshot means no baseline to compare against":      {nil, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			store := &fakeStore{st: state.State{
+				Mapping: frierenMappingCache(),
+				Library: library.Snapshot{Items: tc.prior},
+			}}
+			sonarr := &fakeSonarr{
+				series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+				files: map[int][]arrapi.EpisodeFile{
+					7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				},
+			}
+			s := NewReporter(&ReportDeps{
+				Logger:  logger,
+				Store:   store,
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping: fakeMapping{},
+				SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+				Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+				Auditor: audit.New(audit.Config{}),
+			})
+
+			rep, err := s.Report(t.Context())
+			if err != nil {
+				t.Fatalf("Report returned error: %v", err)
+			}
+			// The report must still be PRODUCED either way: it is the fallback
+			// view, so disclosing the shrink must never become a refusal.
+			if len(rep.Rows) == 0 {
+				t.Error("Report produced 0 rows; a disclosed shrink must not withhold the artifact")
+			}
+			if n := recorder.CountExact(shrinkWarn); n != tc.wantWarn {
+				t.Errorf("shrink WARN count = %d, want %d: %v", n, tc.wantWarn, recorder.Messages())
+			}
+			if tc.wantWarn == 0 {
+				return
+			}
+			for key, want := range map[string]string{"items": "1", "prior_items": "4"} {
+				if got, ok := recordAttr(recorder, shrinkWarn, key); !ok || got != want {
+					t.Errorf("shrink WARN %s = %q (found=%t), want %q; the operator sizes the gap from these two counts",
+						key, got, ok, want)
+				}
+			}
+		})
+	}
 }

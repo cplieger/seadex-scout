@@ -1,0 +1,107 @@
+package match
+
+import (
+	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/mapping"
+)
+
+// TestCatalogueHas covers the reverse-catalogue predicate directly (moved from
+// audit alongside the catalogue itself), exercising every id path: the Sonarr
+// TVDB match and zero-TVDB short-circuit, and the Radarr TMDB-match plus IMDb
+// fallback. audit only ever reaches Has through the TMDB/TVDB paths, so the
+// IMDb fallback and the zero-TVDB guard are otherwise untested.
+func TestCatalogueHas(t *testing.T) {
+	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
+		// Wrong-arm identifiers must not be catalogued (the HasArrIdentifier
+		// contract): a MOVIE record's stray TVDB id must not recognize a
+		// Sonarr item, nor a series record's IMDb id a Radarr item (TVDB
+		// reuses a film's IMDb id on the parent series). A series-typed
+		// record's unambiguous movie TMDB ids DO claim a Radarr movie when the
+		// record routes no series id (h-f9/l-f73, mirroring FindByID's
+		// secondary movie lookup); a record that routes a TVDB id keeps series
+		// routing as its only claim.
+		{AniListID: 3, Type: "MOVIE", TvdbID: 555},
+		{AniListID: 4, Type: "OVA", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
+		{AniListID: 5, Type: "TV", TvdbID: 700, TmdbMovies: []int{800}},
+	}), nil)
+	tests := []struct {
+		name string
+		item library.Item
+		want bool
+	}{
+		{"sonarr tvdb matches", library.Item{Arr: library.ArrSonarr, TvdbID: 100}, true},
+		{"sonarr tvdb absent", library.Item{Arr: library.ArrSonarr, TvdbID: 999}, false},
+		{"sonarr tvdb zero is not catalogued", library.Item{Arr: library.ArrSonarr, TvdbID: 0}, false},
+		{"radarr tmdb matches", library.Item{Arr: library.ArrRadarr, TmdbID: 400}, true},
+		{"radarr tmdb miss falls through to imdb match", library.Item{Arr: library.ArrRadarr, TmdbID: 401, ImdbID: "tt777"}, true},
+		{"radarr imdb only matches", library.Item{Arr: library.ArrRadarr, ImdbID: "tt777"}, true},
+		{"radarr neither id matches", library.Item{Arr: library.ArrRadarr, TmdbID: 402, ImdbID: "tt000"}, false},
+		{"radarr no ids is not catalogued", library.Item{Arr: library.ArrRadarr}, false},
+		{"sonarr not catalogued via a movie record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 555}, false},
+		{"radarr catalogued via a seriesless record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 600}, true},
+		{"radarr not catalogued via a series record's imdb id", library.Item{Arr: library.ArrRadarr, ImdbID: "tt888"}, false},
+		{"radarr not catalogued via a tvdb-routed record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 800}, false},
+		{"sonarr still catalogued by the tvdb-routed record", library.Item{Arr: library.ArrSonarr, TvdbID: 700}, true},
+		{"unknown arr never matches even a catalogued tvdb id", library.Item{Arr: "lidarr", TvdbID: 100}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			it := tt.item
+			if got := cat.Has(&it); got != tt.want {
+				t.Errorf("Has() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCatalogueIgnoresBlankMovieIMDbIDs pins the whitespace-only IMDb
+// rejection in the reverse catalogue: operator overrides can supply blank IDs
+// and Catalogue.Has accepts any non-empty library IMDb string, so a blank
+// override id must never be indexed (it would recognize every Radarr item
+// carrying the same whitespace value as anime).
+func TestCatalogueIgnoresBlankMovieIMDbIDs(t *testing.T) {
+	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{{
+		AniListID: 1,
+		Type:      "MOVIE",
+		IMDbIDs:   []string{" ", "\t"},
+	}}), nil)
+	for _, imdb := range []string{" ", "\t"} {
+		item := library.Item{Arr: library.ArrRadarr, ImdbID: imdb}
+		if cat.Has(&item) {
+			t.Errorf("Catalogue.Has() = true for blank IMDb id %q, want false", imdb)
+		}
+	}
+}
+
+// TestCatalogueKeep pins the keep predicate: a rejected record contributes no
+// IDs, a kept sibling sharing the same TVDB id still catalogues the item, and
+// a nil predicate keeps everything. The caller-facing policy this predicate
+// carries (audit's exclude_specials symmetry) stays pinned end to end in
+// audit's TestAuditNotOnSeaDexHonorsExcludeSpecials.
+func TestCatalogueKeep(t *testing.T) {
+	records := []mapping.Record{
+		{AniListID: 1, Type: "OVA", TvdbID: 500},
+		{AniListID: 2, Type: "OVA", TvdbID: 600},
+		{AniListID: 3, Type: "TV", TvdbID: 600},
+	}
+	keepTV := func(r mapping.Record) bool { return r.Type == "TV" }
+	cat := NewCatalogue(mapping.NewIndex(records), keepTV)
+
+	ovaOnly := library.Item{Arr: library.ArrSonarr, TvdbID: 500}
+	if cat.Has(&ovaOnly) {
+		t.Error("an item whose only records are rejected by keep must not be catalogued")
+	}
+	mixed := library.Item{Arr: library.ArrSonarr, TvdbID: 600}
+	if !cat.Has(&mixed) {
+		t.Error("a kept sibling record sharing the TVDB id must keep the item catalogued")
+	}
+
+	all := NewCatalogue(mapping.NewIndex(records), nil)
+	if !all.Has(&ovaOnly) {
+		t.Error("a nil keep predicate must catalogue every record")
+	}
+}

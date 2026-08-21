@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
-	"strconv"
 	"strings"
+
+	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/jsonx"
+	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
-// Fribb type strings. MOVIE routes to Radarr (TMDB movie / IMDb); every other
-// type routes to Sonarr (TVDB).
-const typeMovie = "MOVIE"
+// Fribb type strings route the arr: MOVIE goes to Radarr (TMDB movie / IMDb);
+// every other type goes to Sonarr (TVDB). The token vocabulary and its
+// canonicalization live in the dependency-free internal/mediatype leaf.
 
-// NormalizeType canonicalizes a raw Fribb/AniList type/format string to the
-// upper-cased, trimmed form Record.Type invariants (IsMovie/IsSpecial) rely on.
-func NormalizeType(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
+// RecordFromFormat builds the type-only Record a consumer uses to reuse the
+// arr/season routing decisions for an AniList format that has no Fribb record.
+func RecordFromFormat(format string) Record { return Record{Type: mediatype.Normalize(format)} }
 
 // nullLiteral is the JSON null token, checked before decoding tolerant fields.
 const nullLiteral = "null"
@@ -29,137 +32,243 @@ func isNullOrEmpty(b []byte) bool {
 }
 
 // fribbRecord mirrors one element of the Fribb anime-list-mini.json array.
-// Every field whose upstream shape varies (an id that may be a number or a
-// string, an imdb id that may be a scalar or an array, a themoviedb id that
-// may be a {tv}/{movie[]} object, a season object or type string of an odd
-// shape) uses a tolerant decoder so one odd field zeroes that field rather
-// than failing the record - and one odd record cannot break the whole map.
+// Every field whose upstream shape varies uses a tolerant decoder, so one odd
+// field zeroes that field rather than failing the record.
 type fribbRecord struct {
-	Type      flexString `json:"type"`
-	IMDbID    stringList `json:"imdb_id"`
-	TmdbID    tmdbID     `json:"themoviedb_id"`
-	Season    offsetPair `json:"season"`
-	AniListID flexInt    `json:"anilist_id"`
-	TvdbID    flexInt    `json:"tvdb_id"`
+	Type      flexString   `json:"type"`
+	IMDbID    stringList   `json:"imdb_id"`
+	TmdbID    tmdbID       `json:"themoviedb_id"`
+	Season    seasonObject `json:"season"`
+	AniListID flexInt      `json:"anilist_id"`
+	TvdbID    flexInt      `json:"tvdb_id"`
 }
 
 // toRecord converts a decoded Fribb record into a public Record, normalizing
-// the type to upper case. It returns ok=false when the record has no AniList
-// ID (nothing to key the SeaDex lookup on).
+// the type to upper case and consuming a bare-number themoviedb_id as the movie
+// TMDB id when the record's own type is MOVIE (see tmdbID.movieIDs). It returns
+// ok=false when the record has no positive AniList ID.
 func (r *fribbRecord) toRecord() (Record, bool) {
-	if r.AniListID == 0 {
+	if r.AniListID <= 0 {
 		return Record{}, false
 	}
-	return Record{
+	typ := mediatype.Normalize(string(r.Type))
+	rec := Record{
 		IMDbIDs:    r.IMDbID,
-		TmdbMovies: intSlice(r.TmdbID.Movie),
-		Type:       NormalizeType(string(r.Type)),
+		TmdbMovies: r.TmdbID.movieIDs(typ == mediatype.Movie),
+		Type:       typ,
 		AniListID:  int(r.AniListID),
 		TvdbID:     int(r.TvdbID),
 		SeasonTvdb: r.Season.tvdbOrZero(),
-	}, true
+	}
+	rec.canonicalize() // idempotent here; pins both producers to one rule
+	return rec, true
 }
 
 // maxFribbRecords is a hard acceptance cap on the number of top-level Fribb
-// array elements, not merely a preallocation hint. The 16MB body limit still
-// admits ~1M tiny valid records, so without this guard an upstream-controlled
-// body could amplify into a much larger in-memory record set. Real Fribb has
-// ~40k records, leaving ample headroom below ~65k.
+// array elements, not merely a preallocation hint: the 16MB body limit still
+// admits ~1M tiny valid records. Real Fribb has ~40k, leaving headroom.
 const maxFribbRecords = 1 << 16
 
+// errRecordCapExceeded rejects a Fribb list exceeding maxFribbRecords. It is a
+// sentinel (errors.Is-matched in acceptRefresh) because a permanently over-cap
+// list never self-heals: it must advance the consecutive-rejection streak
+// instead of degrading at WARN forever.
+var errRecordCapExceeded = fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
+
+// errNotJSONArray rejects a Fribb body whose top-level value is not a JSON
+// array. It is a sentinel because the class is CONTENT-SHAPE evidence, not
+// transport damage: truncating a valid array body in flight cannot change its
+// FIRST token, so a non-'[' document never self-heals. Mid-stream truncation
+// stays transient - a partial download of an array-shaped body can succeed.
+var errNotJSONArray = errors.New("mapping: Fribb list is not a JSON array")
+
 // maxFribbRecordBytes bounds one encoded Fribb record before its tolerant
-// decode. The document-level maxMapBytes cap plus maxFribbRecords still admit
-// a single record whose nested identifier arrays decode into a working set far
-// larger than their wire size; a real record is well under 1 KiB, so 64 KiB
-// leaves ample headroom while keeping the per-record decode allocation bounded.
-// An oversized record is skipped as malformed, like any other bad element.
+// decode: the document-level caps still admit a single record whose nested
+// identifier arrays decode into a working set far larger than their wire size.
+// A real record is well under 1 KiB; an oversized one is skipped as malformed.
 const maxFribbRecordBytes = 64 << 10
 
 // maxFribbIdentifiers caps the nested identifier lists retained per record
-// (imdb_id entries, themoviedb_id.movie entries). Real records carry a
-// handful at most; a list above the cap rejects its record so a hostile body
-// cannot amplify compact wire-size arrays into a large retained working set.
+// (imdb_id entries, themoviedb_id.movie entries). A list above the cap rejects
+// its record, so a compact wire-size array cannot amplify what is retained.
 const maxFribbIdentifiers = 32
 
-// parseFribb decodes the Fribb list resiliently: it streams the top-level
-// array element by element (never materializing all raw messages at once, so a
-// bounded body of tiny elements cannot amplify into a huge transient
-// allocation), decoding each element on its own so a single malformed record
-// is skipped (counted) rather than failing the whole map. A list that exceeds
-// maxFribbRecords is rejected outright — before the excess elements are ever
-// decoded — so the caller keeps the stale cache rather than admitting an
-// amplified record set. Trailing data after the closing bracket is rejected,
-// matching the strictness of a whole-document json.Unmarshal.
-func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
+// maxFribbIdentifiersTotal bounds the identifiers retained across the WHOLE
+// list. The per-record caps alone still admit ~4.2M retained ids from a body
+// under maxMapBytes; this aggregate budget bounds that product.
+const maxFribbIdentifiersTotal = 1 << 20
+
+// errIdentifierBudgetExceeded rejects a Fribb list whose retained identifiers
+// exceed maxFribbIdentifiersTotal. A sentinel, because this ceiling truncates
+// the TAIL of the list: retaining the prefix publishes a knowably incomplete map
+// that every count floor still passes, and it never self-heals.
+var errIdentifierBudgetExceeded = fmt.Errorf("mapping: Fribb identifiers exceed cap %d", maxFribbIdentifiersTotal)
+
+// fribbParseResult is parseFribbForRefresh's counted decode result: the
+// surviving AniList-keyed records plus the number of top-level array elements
+// they were distilled from, whatever each element's outcome. acceptRefresh
+// validates identifier coverage against elements rather than len(records), so
+// filtering and deduplication cannot shrink the denominator with the numerator.
+type fribbParseResult struct {
+	records  []Record
+	elements int
+}
+
+// parseFribbForRefresh decodes the Fribb list resiliently: it streams the
+// top-level array element by element, decoding each on its own so a single
+// malformed record is skipped (counted) rather than failing the whole map. A
+// list exceeding maxFribbRecords is rejected with the errRecordCapExceeded
+// sentinel before the excess elements are decoded, and trailing data after the
+// closing bracket is rejected. It also reports the top-level element count.
+func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, error) {
+	// Element budget 0 disables bounded's own aggregate cap deliberately:
+	// maxFribbRecords below is the app-level ceiling, and it must reject with the
+	// errRecordCapExceeded sentinel acceptRefresh matches on.
+	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
+	ok, err := dec.Open('[')
 	if err != nil {
-		return nil, err
+		if errors.Is(err, io.EOF) {
+			// An empty body has NO first token, so it is not the content-shape
+			// evidence errNotJSONArray stands for: a zero-length 200 CAN succeed on
+			// the next attempt, so it stays a transient parse failure.
+			return fribbParseResult{}, fmt.Errorf("mapping: Fribb list body is empty: %w", err)
+		}
+		return fribbParseResult{}, fmt.Errorf("%w: %w", errNotJSONArray, err)
 	}
-	if d, ok := tok.(json.Delim); !ok || d != '[' {
-		return nil, fmt.Errorf("mapping: Fribb list is not a JSON array (got %T)", tok)
+	if !ok {
+		// jsoncap.Open reports a JSON null as ok=false without error; for the Fribb
+		// map an absent list is as unusable as a non-array.
+		return fribbParseResult{}, fmt.Errorf("%w (got null)", errNotJSONArray)
 	}
-	records, skipped, dropped, firstErr, err := decodeFribbRecords(dec)
+	counts, err := decodeFribbRecords(dec)
 	if err != nil {
-		return nil, err
+		return fribbParseResult{}, err
 	}
-	if _, err := dec.Token(); err != nil { // consume the closing ']'
-		return nil, err
+	if err := dec.Close(); err != nil { // consume the closing ']'
+		return fribbParseResult{}, fmt.Errorf("mapping: Fribb list truncated or malformed at close: %w", err)
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, errors.New("mapping: trailing data after Fribb list")
+	if err := dec.End(); err != nil {
+		return fribbParseResult{}, fmt.Errorf("mapping: trailing data after Fribb list: %w", err)
 	}
-	if skipped > 0 {
-		attrs := []any{"skipped", skipped, "parsed", len(records)}
-		if firstErr != nil {
-			attrs = append(attrs, "error", firstErr)
+	logFribbParseDiagnostics(log, &counts)
+	return fribbParseResult{records: counts.records, elements: counts.elements}, nil
+}
+
+// logFribbParseDiagnostics emits the decode's tolerated-outcome diagnostics: the
+// skipped-malformed WARN, the keyless-record Debug line, and the two advance
+// warnings for the approaching record cap and identifier budget.
+func logFribbParseDiagnostics(log *slog.Logger, counts *fribbDecodeCounts) {
+	if counts.skipped > 0 {
+		attrs := []any{"skipped", counts.skipped, "parsed", len(counts.records)}
+		if counts.firstErr != nil {
+			// The first skipped record's error is untrusted-input-derived, so it
+			// passes the package's log-boundary policy (see maxLoggedErrorBytes).
+			attrs = append(attrs, "error",
+				errors.New(runesafe.SanitizeSingleLineBounded(counts.firstErr.Error(), maxLoggedErrorBytes)))
 		}
 		log.Warn("mapping: skipped malformed records", attrs...)
 	}
-	if dropped > 0 {
-		log.Debug("mapping: dropped records without anilist_id", "dropped", dropped, "parsed", len(records))
+	if counts.dropped > 0 {
+		log.Debug("mapping: dropped records without anilist_id", "dropped", counts.dropped, "parsed", len(counts.records))
 	}
-	return records, nil
+	// Advance warning before the cap becomes a hard refusal: real Fribb is already
+	// ~43k of the 65,536-element cap, and a breach is NOT self-healing - the map
+	// stays frozen stale until the cap is raised.
+	if counts.elements >= maxFribbRecords/4*3 {
+		log.Warn("mapping: Fribb list approaching record cap", "elements", counts.elements, "cap", maxFribbRecords)
+	}
+	// Same advance-notice contract as the record cap above: an identifier-budget
+	// breach never self-heals either.
+	if counts.identifiers >= maxFribbIdentifiersTotal/4*3 {
+		log.Warn("mapping: Fribb identifiers approaching budget", "identifiers", counts.identifiers, "cap", maxFribbIdentifiersTotal)
+	}
 }
 
-// decodeFribbRecords streams the array body element-by-element, decoding each
-// on its own so one malformed record is skipped (counted) rather than failing
-// the whole map, and rejecting a list that exceeds maxFribbRecords before the
-// excess elements are decoded. It leaves the decoder positioned on the array's
-// closing token.
-func decodeFribbRecords(dec *json.Decoder) (records []Record, skipped, dropped int, firstErr, err error) {
-	seen := 0
-	for dec.More() {
+// decodeFribbRecords streams the array body element-by-element, decoding each on
+// its own so one malformed record is skipped (counted) rather than failing the
+// whole map, and rejecting a list over maxFribbRecords or over
+// maxFribbIdentifiersTotal. It leaves the decoder on the array's closing token.
+func decodeFribbRecords(dec *jsoncap.Decoder) (fribbDecodeCounts, error) {
+	var counts fribbDecodeCounts
+	// The ordering is load-bearing: dec.More observes another element, the cap
+	// guard fires on it, and only then is that element read and decoded.
+	for seen := 0; dec.More(); seen++ {
 		if seen == maxFribbRecords {
-			return nil, 0, 0, nil, fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
+			return fribbDecodeCounts{}, errRecordCapExceeded
 		}
-		seen++
-		var msg json.RawMessage
-		if err := dec.Decode(&msg); err != nil {
-			return nil, 0, 0, nil, err
+		counts.elements++
+		rec, ok, decodeErr, streamErr := decodeNextFribbRecord(dec)
+		if streamErr != nil {
+			return fribbDecodeCounts{}, streamErr
 		}
-		rec, ok, decodeErr := decodeFribbRecord(msg)
-		if decodeErr != nil {
-			skipped++
-			if firstErr == nil {
-				firstErr = decodeErr
-			}
-			continue
-		}
-		if ok {
-			records = append(records, rec)
-		} else {
-			dropped++
+		if err := counts.add(&rec, ok, decodeErr); err != nil {
+			// Fail closed at the point the budget trips and let acceptRefresh
+			// keep the stale cache.
+			return fribbDecodeCounts{}, err
 		}
 	}
-	return records, skipped, dropped, firstErr, nil
+	return counts, nil
+}
+
+// fribbDecodeCounts accumulates decodeFribbRecords' TOLERATED per-record
+// outcomes: the accepted records, the first skipped record's decode error, and
+// the skipped/dropped counts the caller logs. Fatal outcomes are never counted.
+type fribbDecodeCounts struct {
+	firstErr error
+	records  []Record
+	// elements counts every top-level array element the loop OBSERVED - the
+	// acceptance denominator (see fribbParseResult). The loop counts it rather
+	// than the caller re-deriving it, so a new outcome class cannot shrink it.
+	elements    int
+	skipped     int
+	dropped     int
+	identifiers int
+}
+
+// add folds one record's decode outcome in: a tolerated decode failure counts as
+// skipped (keeping the first error), a record without an AniList ID counts as
+// dropped, a record breaching the aggregate identifier budget returns
+// errIdentifierBudgetExceeded (fatal to the whole document), and anything else
+// is accepted. rec is by pointer only because Record is a heavy value.
+func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) error {
+	if decodeErr != nil {
+		c.skipped++
+		if c.firstErr == nil {
+			c.firstErr = decodeErr
+		}
+		return nil
+	}
+	if !ok {
+		c.dropped++
+		return nil
+	}
+	n := len(rec.IMDbIDs) + len(rec.TmdbMovies)
+	if c.identifiers+n > maxFribbIdentifiersTotal {
+		// The aggregate identifier budget is a whole-document guarantee, not a
+		// per-record tolerance: retaining the prefix would publish a knowably
+		// truncated map. Returned rather than counted, so it cannot be forgotten.
+		return errIdentifierBudgetExceeded
+	}
+	c.identifiers += n
+	c.records = append(c.records, *rec)
+	return nil
+}
+
+// decodeNextFribbRecord reads the next array element off the stream and decodes
+// it. The two error results separate the tolerance boundary: decodeErr is a
+// tolerated per-record failure the caller skips and counts; streamErr is fatal.
+func decodeNextFribbRecord(dec *jsoncap.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
+	var msg json.RawMessage
+	if err := dec.Decode(&msg); err != nil {
+		return Record{}, false, nil, fmt.Errorf("mapping: Fribb stream decode: %w", err)
+	}
+	rec, ok, decodeErr = decodeFribbRecord(msg)
+	return rec, ok, decodeErr, nil
 }
 
 // decodeFribbRecord validates and decodes one raw Fribb array element. An
-// oversized record is a decoded-size amplification risk (millions of tiny
-// nested identifiers fit under maxMapBytes), so it is rejected as malformed
-// before the tolerant per-record decode ever allocates for it. ok=false with a
-// nil error means the record decoded but carries no AniList ID.
+// oversized record is rejected as malformed before the tolerant decode ever
+// allocates for it. ok=false with a nil error means it carries no AniList ID.
 func decodeFribbRecord(msg json.RawMessage) (Record, bool, error) {
 	if len(msg) > maxFribbRecordBytes {
 		return Record{}, false, fmt.Errorf("record exceeds %d bytes", maxFribbRecordBytes)
@@ -172,44 +281,44 @@ func decodeFribbRecord(msg json.RawMessage) (Record, bool, error) {
 	return rec, ok, nil
 }
 
-// offsetPair is the {tvdb, tmdb} shape of the season field (the upstream
-// episode_offset field shares it but is not decoded - no consumer reads it).
-// It sits inside the record's tolerance boundary: the object itself decodes
-// tolerantly and the interior ids reuse flexInt, so an odd upstream season
-// shape (a bare number, a quoted interior value, a float) zeroes the field -
-// SeasonTvdb 0 falls back to whole-series/season-0 scoping - while the record
-// survives.
-type offsetPair struct {
+// seasonObject decodes the tvdb member of the season object; the unused tmdb
+// member and the upstream episode_offset are deliberately not decoded. An odd
+// season SHAPE zeroes the field - SeasonTvdb 0 falls back to whole-series or
+// season-0 scoping - while the record survives. The interior flexInt is
+// narrower: "2", " 2 " and 2.0 still decode, only 1.5 or negative zeroes.
+type seasonObject struct {
 	Tvdb flexInt `json:"tvdb"`
-	Tmdb flexInt `json:"tmdb"`
 }
 
-// UnmarshalJSON decodes the object form and tolerates any other shape as
-// absent (the interior flexInt fields already tolerate odd id shapes).
-func (o *offsetPair) UnmarshalJSON(b []byte) error {
+// UnmarshalJSON decodes the object form and tolerates any other shape as absent.
+// The receiver is reset first: encoding/json reuses the same field receiver for
+// duplicate object keys, so a later odd value must clear an earlier decode.
+func (o *seasonObject) UnmarshalJSON(b []byte) error {
+	*o = seasonObject{}
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) || b[0] != '{' {
 		return nil
 	}
-	type alias offsetPair
+	type alias seasonObject
 	var a alias
 	if err := json.Unmarshal(b, &a); err != nil {
 		return nil //nolint:nilerr // tolerate an odd season shape rather than fail the record
 	}
-	*o = offsetPair(a)
+	*o = seasonObject(a)
 	return nil
 }
 
 // tvdbOrZero returns the tvdb season or 0 when absent or odd-shaped.
-func (o offsetPair) tvdbOrZero() int { return int(o.Tvdb) }
+func (o seasonObject) tvdbOrZero() int { return int(o.Tvdb) }
 
-// flexString decodes a JSON string; any other shape (a bare number, a float,
-// an object) is tolerated as empty rather than failing the record. An empty
-// Fribb type routes the record as a non-movie series, the safe default.
+// flexString decodes a JSON string; any other shape is tolerated as empty rather
+// than failing the record. An empty Fribb type routes as a non-movie series.
 type flexString string
 
-// UnmarshalJSON implements the tolerant string decode.
+// UnmarshalJSON implements the tolerant string decode. The receiver is reset
+// first so a duplicate key's later odd value clears an earlier decode.
 func (s *flexString) UnmarshalJSON(b []byte) error {
+	*s = ""
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) || b[0] != '"' {
 		return nil
@@ -222,123 +331,137 @@ func (s *flexString) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// tmdbID decodes the themoviedb_id field, which is a {"tv":int} or
-// {"movie":[int]} object in the merged list; only the movie half feeds a
-// lookup path (the unknown "tv" key is ignored on decode). A non-object shape
-// (a bare number or the "unknown" string that appears in some upstream rows)
-// is tolerated and left empty, since it cannot be disambiguated into a
-// tv-vs-movie id; such an entry still matches via tvdb_id (TV) or imdb_id
-// (movie).
+// tmdbID decodes the themoviedb_id field, a {"tv":int} or {"movie":[int]}
+// object in the merged list; only the movie half feeds a lookup path. A
+// bare-number scalar is retained as the untyped Scalar and consumed only for a
+// MOVIE-typed record, whose own type disambiguates it into a movie id. Any other
+// shape (the "unknown" string some rows carry) is tolerated and left empty.
 type tmdbID struct {
-	Movie []flexInt `json:"movie"`
+	// Movie holds the object form's movie ids. Neither field carries a json tag:
+	// UnmarshalJSON below owns the whole decode, so a tag here would be inert.
+	Movie []flexInt
+	// Scalar is the retained bare-number form; consumed only via movieIDs.
+	Scalar flexInt
 }
 
-// UnmarshalJSON decodes the object form and tolerates any other shape as empty.
+// UnmarshalJSON decodes the object form, retains a numeric scalar as Scalar (see
+// the type comment), and tolerates any other shape as empty. Receiver reset.
 func (t *tmdbID) UnmarshalJSON(b []byte) error {
-	b = bytes.TrimSpace(b)
-	if isNullOrEmpty(b) || b[0] != '{' {
-		return nil
-	}
-	type alias tmdbID
-	var a alias
-	if err := json.Unmarshal(b, &a); err != nil {
-		return nil //nolint:nilerr // tolerate an odd themoviedb_id shape rather than fail the record
-	}
-	// The transient decode above is bounded by maxFribbRecordBytes; the cap
-	// here bounds what is RETAINED, rejecting the record so a hostile body
-	// cannot accumulate huge per-record identifier sets.
-	if len(a.Movie) > maxFribbIdentifiers {
-		return fmt.Errorf("themoviedb_id.movie list exceeds cap %d", maxFribbIdentifiers)
-	}
-	*t = tmdbID(a)
-	return nil
-}
-
-// flexInt decodes a JSON number or numeric string into an int. A null, empty,
-// "unknown", non-numeric, fractional, or negative value decodes to 0 rather
-// than erroring or truncating (see setNumber), so an upstream placeholder or
-// odd value does not break the record or masquerade as a valid id.
-type flexInt int
-
-// UnmarshalJSON implements the tolerant number-or-string decode.
-func (f *flexInt) UnmarshalJSON(b []byte) error {
+	*t = tmdbID{}
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) {
 		return nil
 	}
-	if b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
-			return err
-		}
-		if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
-			f.setNumber(float64(n))
-		}
+	if b[0] != '{' {
+		// The tolerant flexInt decode zeroes every non-numeric scalar shape, so an
+		// "unknown" placeholder stays empty.
+		return t.Scalar.UnmarshalJSON(b)
+	}
+	// Capture the movie member as RAW bytes first. encoding/json continues past a
+	// type mismatch, so decoding straight into []flexInt let a duplicate movie key
+	// whose EARLIER value has the wrong shape return a type error ALONGSIDE the
+	// valid later value, which the tolerant arm then threw away. A json.RawMessage
+	// member has no shape to mismatch, so the last value always wins.
+	var wire struct {
+		Movie json.RawMessage `json:"movie"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return nil //nolint:nilerr // tolerate an odd themoviedb_id shape rather than fail the record
+	}
+	movie := bytes.TrimSpace(wire.Movie)
+	if isNullOrEmpty(movie) || movie[0] != '[' {
+		// Absent, null, or a non-array last value: tolerated as empty.
 		return nil
 	}
-	var n float64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return nil //nolint:nilerr // tolerate a non-numeric id placeholder
+	var movies []flexInt
+	if err := json.Unmarshal(movie, &movies); err != nil {
+		return nil //nolint:nilerr // tolerate an odd themoviedb_id.movie shape rather than fail the record
 	}
-	f.setNumber(n)
+	// The transient decode above is bounded by maxFribbRecordBytes; the cap here
+	// bounds what is RETAINED, rejecting the record instead.
+	if len(movies) > maxFribbIdentifiers {
+		return fmt.Errorf("themoviedb_id.movie list exceeds cap %d", maxFribbIdentifiers)
+	}
+	t.Movie = movies
 	return nil
 }
 
-// setNumber applies the shared validity invariant: real AniList/TVDB/TMDB ids
-// are non-negative integers within int32 range, so a NaN, fractional,
-// negative, or out-of-range value is treated as absent (0) rather than
-// truncated or kept - 9.9 truncated to 9 would silently point at a different
-// anime, and a negative id would falsely count toward the arr-identifier
-// acceptance floor. Applies whether the value arrived as a bare number or a
-// quoted numeric string.
-func (f *flexInt) setNumber(n float64) {
-	if math.IsNaN(n) || n != math.Trunc(n) || n < 0 || n > math.MaxInt32 {
-		return
+// movieIDs returns the movie TMDB ids a record contributes: the object form's
+// movie list, or - only when the record's own type is MOVIE - the retained
+// untyped Scalar. The two forms are mutually exclusive per decode.
+func (t tmdbID) movieIDs(isMovie bool) []int {
+	if ids := intSlice(t.Movie); len(ids) > 0 {
+		return ids
 	}
-	*f = flexInt(int(n))
+	if isMovie && t.Scalar != 0 {
+		return []int{int(t.Scalar)}
+	}
+	return nil
 }
 
+// flexInt decodes a JSON number or numeric string into an int. A null, empty,
+// non-numeric, fractional, negative or out-of-range value decodes to 0 rather
+// than erroring or truncating (9.9 truncated to 9 would silently point at a
+// different anime). An alias of jsonx.TolerantInt, the policy this originated.
+type flexInt = jsonx.TolerantInt
+
 // stringList decodes a JSON array of strings, a single string, or null into a
-// []string, trimming blanks. The imdb_id field is an array in the merged list
-// but a scalar in some upstream rows. Both branches are tolerant (matching the
-// sibling flexInt/tmdbID decoders): a mixed-type array keeps its valid string
-// entries and drops the rest, so an odd entry never fails the whole record.
+// []string, trimming blanks: imdb_id is an array in the merged list but a scalar
+// in some upstream rows. A mixed-type array keeps its valid string entries.
 type stringList []string
 
-// UnmarshalJSON implements the array-or-scalar decode.
+// UnmarshalJSON implements the array-or-scalar decode. The receiver is reset
+// first so a duplicate key's later odd value clears an earlier decode.
 func (s *stringList) UnmarshalJSON(b []byte) error {
+	*s = nil
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) {
 		return nil
 	}
 	if b[0] == '[' {
-		var arr []json.RawMessage
-		if err := json.Unmarshal(b, &arr); err != nil {
-			return nil //nolint:nilerr // tolerate an odd imdb_id array rather than fail the record
+		out, err := decodeStringArray(b)
+		if err != nil {
+			return err
 		}
-		// The transient decode above is bounded by maxFribbRecordBytes; the cap
-		// here bounds what is RETAINED, rejecting the record so a hostile body
-		// cannot accumulate huge per-record identifier sets.
-		if len(arr) > maxFribbIdentifiers {
-			return fmt.Errorf("imdb_id list exceeds cap %d", maxFribbIdentifiers)
-		}
-		out := make([]string, 0, len(arr))
-		for _, el := range arr {
-			var v string
-			if err := json.Unmarshal(el, &v); err != nil {
-				continue // drop a non-string entry, keep the valid siblings
-			}
-			out = append(out, v)
-		}
-		*s = trimmed(out)
+		*s = out
 		return nil
 	}
+	*s = decodeStringScalar(b)
+	return nil
+}
+
+// decodeStringArray decodes the array form tolerantly: a malformed array yields
+// nil, a non-string entry is dropped while its valid siblings survive, and a
+// list over maxFribbIdentifiers errors so the record is rejected.
+func decodeStringArray(b []byte) ([]string, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return nil, nil //nolint:nilerr // tolerate an odd imdb_id array rather than fail the record
+	}
+	// The transient decode above is bounded by maxFribbRecordBytes; the cap here
+	// bounds what is RETAINED, rejecting the record instead.
+	if len(arr) > maxFribbIdentifiers {
+		return nil, fmt.Errorf("imdb_id list exceeds cap %d", maxFribbIdentifiers)
+	}
+	out := make([]string, 0, len(arr))
+	for _, el := range arr {
+		var v string
+		if err := json.Unmarshal(el, &v); err != nil {
+			continue // drop a non-string entry, keep the valid siblings
+		}
+		out = append(out, v)
+	}
+	return trimmed(out), nil
+}
+
+// decodeStringScalar decodes the tolerant single-string form; a malformed
+// scalar yields nil rather than failing the record.
+func decodeStringScalar(b []byte) []string {
 	var one string
 	if err := json.Unmarshal(b, &one); err != nil {
 		return nil //nolint:nilerr // tolerate an odd imdb_id shape rather than fail the record
 	}
-	*s = trimmed([]string{one})
-	return nil
+	return trimmed([]string{one})
 }
 
 // trimmed returns in with entries trimmed and blanks dropped.
@@ -352,11 +475,12 @@ func trimmed(in []string) []string {
 	return out
 }
 
-// intSlice converts a []flexInt to a []int, dropping zero entries.
+// intSlice converts a []flexInt to a []int, dropping non-positive entries - the
+// same canonical positive-ids form the overrides path enforces.
 func intSlice(in []flexInt) []int {
 	var out []int
 	for _, v := range in {
-		if int(v) != 0 {
+		if v > 0 {
 			out = append(out, int(v))
 		}
 	}

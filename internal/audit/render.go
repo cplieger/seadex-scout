@@ -6,45 +6,59 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/logattr"
+	"github.com/cplieger/seadex-scout/internal/pathredact"
+	"github.com/cplieger/seadex-scout/internal/reportfs"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
+	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/urlform"
 )
 
 const (
-	reportDirMode  = 0o755
-	reportFileMode = 0o644
 	// linkSep joins the links within a table cell (a middle dot, not an em dash).
 	linkSep = " \u00b7 "
 	// emptyCell is shown for a column with no value.
 	emptyCell = "-"
+	// unknownCell marks a column whose fact was never established, as distinct
+	// from emptyCell's positive "there is nothing here". The angle brackets are
+	// load-bearing: escapeCell entity-encodes < and >, so no upstream release
+	// group can render this cell's bytes.
+	unknownCell = "<unknown>"
 )
 
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
 	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
-	VerdictUnverified:  "Files are present but no release group could be identified, so no comparison was possible.",
-	VerdictNoFile:      "The mapped season or movie has no file on disk, or a whole-series comparison found no real season with files.",
+	VerdictUnverified:  "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all, so alignment could not be verified.",
+	VerdictNoFile:      "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
 	VerdictBest:        "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
 }
 
 // renderJSON renders the report as indented JSON (the machine-ingestible copy).
+// It serializes a sanitized copy (sanitizeOutput): encoding/json escapes C0
+// controls but passes C1 and bidi controls through as raw UTF-8.
 func renderJSON(r *Report) ([]byte, error) {
-	return json.MarshalIndent(r, "", "  ")
+	return json.MarshalIndent(sanitizeOutput(r), "", "  ")
 }
 
 // renderMarkdown renders the report as human-readable Markdown, grouped into a
-// section per verdict (most actionable first) with a compact links column.
+// section per verdict (most actionable first) with a compact links column. A
+// degraded run additionally carries the completeness caveat in the header and
+// the incomplete-mapping section after the verdict sections.
 func renderMarkdown(r *Report) string {
 	var b strings.Builder
 	b.WriteString("# SeaDex alignment report\n\n")
@@ -56,12 +70,14 @@ func renderMarkdown(r *Report) string {
 		fmt.Fprintf(&b, "; %d more in your library that SeaDex does not list", notOnSeaDex)
 	}
 	b.WriteString(".\n\n")
+	writeIncompleteCaveat(&b, len(r.Incomplete))
 
 	b.WriteString("## Summary\n\n| Verdict | Count |\n| --- | --- |\n")
 	for _, v := range verdictOrder {
 		fmt.Fprintf(&b, "| %s | %d |\n", v, r.Totals[string(v)])
 	}
 	b.WriteByte('\n')
+	b.WriteString(annotationLegend)
 
 	for _, v := range verdictOrder {
 		rows := rowsWithVerdict(r.Rows, v)
@@ -72,148 +88,147 @@ func renderMarkdown(r *Report) string {
 		if desc := verdictDesc[v]; desc != "" {
 			fmt.Fprintf(&b, "%s\n\n", desc)
 		}
-		b.WriteString("| Title | Scope | Your group | SeaDex best | Links |\n")
-		b.WriteString("| --- | --- | --- | --- | --- |\n")
+		b.WriteString("| Title | Scope | Your group | SeaDex best | Notes | Links |\n")
+		b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
 		for i := range rows {
 			writeRow(&b, &rows[i])
 		}
 		b.WriteByte('\n')
 	}
+	writeIncompleteSection(&b, r.Incomplete)
 	return b.String()
+}
+
+// annotationLegend explains the parenthesized Scope annotations and the Notes
+// column, so the report file stays self-explanatory for a reader who has only
+// the file.
+const annotationLegend = "Scope annotations: `approx` - the comparison used a coarse bucket " +
+	"(the season-0 specials bucket, or a whole-series aggregate spanning more than one season or group), " +
+	"so the verdict means \"present somewhere in the series\" rather than an exact per-season attribution; " +
+	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
+	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
+	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
+	"SeaDex best annotations: the `SeaDex best` column holds ONLY upstream SeaDex group text, and " +
+	"everything this report has to say about those releases is in the `Notes` column - so a release group " +
+	"literally named `SEV (broken)` upstream cannot be read as a warning from us, and a warning from us " +
+	"cannot be mistaken for part of a group's name. A Notes entry associates with a best group BY " +
+	"POSITION: one `;`-separated entry per group listed in the SeaDex best column, in the same order, " +
+	"with `-` for a group we have nothing to say about (a row with no annotations at all shows a single " +
+	"`-`). The note words: " +
+	"`broken` / `incomplete` are SeaDex curation warnings, `url error` means " +
+	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), " +
+	"`unknown tracker` means the record names a tracker this build does not know, so no link could be " +
+	"built (report it as a seadex-scout gap, not as bad SeaDex data), " +
+	"`filtered` means one of the release's SeaDex tags is listed for the `report` " +
+	"surface in your `filters.exclude_tags`, so you asked for it not to count, and " +
+	"`unobtainable` means the release has no usable link or sits on a tracker you do not use. An " +
+	"annotated release stays listed. `filtered`, `url error`, `unknown tracker`, and `unobtainable` " +
+	"releases never drive the verdict; `broken` / `incomplete` releases still drive it unless their tags " +
+	"are configured under `filters.exclude_tags`. Annotated releases are never offered as a link. " +
+	"`(N best hidden: animebytes)` means N of the entry's SeaDex BEST releases were withheld because you " +
+	"have `animebytes` off, so an empty best column there means \"not on a tracker you use\", not \"SeaDex " +
+	"lists no best\". An entry whose withheld releases are only alts carries no marker: SeaDex really lists " +
+	"no best for it.\n\n"
+
+// incompleteHeader is the incomplete-mapping section's Markdown heading text,
+// also named by the header caveat so a reader can find the section.
+const incompleteHeader = "incomplete (transient AniList failure)"
+
+// writeIncompleteCaveat states the completeness caveat in the report header
+// when the run left SeaDex entries unmapped. Silent on a fully resolved run.
+func writeIncompleteCaveat(b *strings.Builder, n int) {
+	if n == 0 {
+		return
+	}
+	noun := "entries"
+	if n == 1 {
+		noun = "entry"
+	}
+	fmt.Fprintf(b, "**Caveat: this report is incomplete.** %d SeaDex %s could not be resolved against AniList this run because of a transient failure; each was either left unmapped or mapped from a stale cached title, so the affected rows may be missing, misfiled, or resting on stale evidence. See the %q section below.\n\n",
+		n, noun, incompleteHeader)
+}
+
+// writeIncompleteSection renders the incomplete-mapping section: one row per
+// SeaDex entry whose library mapping could not be resolved this run, listed by
+// AniList id with its releases.moe link. Omitted on a fully resolved run.
+func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
+	if len(incomplete) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "## %s (%d)\n\n", incompleteHeader, len(incomplete))
+	b.WriteString("The AniList lookup that would link these SeaDex entries to the library failed transiently this run. Where a cached answer still existed the entry was mapped from it, so a row for it may appear above with a verdict resting on stale titles; otherwise it has no row at all. Either way its alignment is unconfirmed; re-run the report once AniList recovers.\n\n")
+	b.WriteString("| AniList ID | SeaDex |\n| --- | --- |\n")
+	for i := range incomplete {
+		fmt.Fprintf(b, "| %d | %s |\n", incomplete[i].AniListID, mdLink("seadex", incomplete[i].SeaDexURL))
+	}
+	b.WriteByte('\n')
 }
 
 // writeRow writes one Markdown table row for a report row.
 func writeRow(b *strings.Builder, row *Row) {
-	fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n",
+	fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n",
 		escapeCell(row.Title),
 		scopeCell(row),
-		escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", "))),
-		escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", "))),
+		groupsCell(row),
+		bestCell(row),
+		notesCell(row),
 		links(row))
 }
 
-// Log emits the report to slog: a summary line then one INFO line per row, so
-// the report is queryable in Loki alongside the human-readable Markdown. The
-// summary's msg is "report summary", deliberately distinct from Scout.Report's
-// "report generated" completion line, so a Loki query or counter keyed on
-// either message never double-counts a report run.
-func (r *Report) Log(log *slog.Logger) {
-	stamp := r.GeneratedAt.UTC().Format(time.RFC3339)
-	log.Info("report summary",
-		"generated_at", stamp,
-		"rows", len(r.Rows),
-		"have_best", r.Totals[string(VerdictBest)],
-		"have_alt", r.Totals[string(VerdictAlt)],
-		"have_unlisted", r.Totals[string(VerdictUnlisted)],
-		"no_file", r.Totals[string(VerdictNoFile)],
-		"unverified", r.Totals[string(VerdictUnverified)],
-		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)])
-	for i := range r.Rows {
-		row := &r.Rows[i]
-		log.Info("report item",
-			"generated_at", stamp,
-			"title", row.Title,
-			"al_id", row.AniListID,
-			"arr", row.Arr,
-			"verdict", string(row.Verdict),
-			"qualifier", string(row.Qualifier),
-			"scope", scopeLabel(row),
-			"approx", row.Approx,
-			"current_group", strings.Join(row.CurrentGroups, ","),
-			"seadex_best", strings.Join(displayBestGroups(row.Releases), ","),
-			"arr_url", library.SafeLogURL(row.ArrURL),
-			"seadex_url", row.SeaDexURL,
-			"match_source", row.MatchSource)
+// groupsCell renders the on-disk groups column. A row whose group evidence was
+// never established (Row.GroupsUnknown) renders unknownCell rather than the
+// empty marker: emptyCell is the positive claim "nothing identifiable is here".
+func groupsCell(row *Row) string {
+	if row.GroupsUnknown {
+		return unknownCell
 	}
+	return escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", ")))
 }
 
-// reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
-// filesystem-safe (no colons), second precision.
-const reportStampLayout = "2006-01-02T15-04-05Z"
-
-// reportLockName is the flock target inside the report dir that serializes
-// report runs (see AcquireReportLock).
-const reportLockName = "report.lock"
-
-// ErrReportRunning is returned by AcquireReportLock when another report run
-// already holds the report lock. The report subcommand refuses to run rather
-// than racing the other run onto the same timestamped filename pair.
-var ErrReportRunning = errors.New("another report is already running")
-
-// AcquireReportLock takes an exclusive, non-blocking flock on report.lock in
-// dir (creating dir as needed) and returns a release func. It is held for a
-// report run's whole generate+write, so two concurrent report runs - which
-// could finish within the same UTC second and target the same
-// report-<timestamp>.{md,json} pair - cannot interleave: the second run gets
-// ErrReportRunning and refuses (never blocks or waits). A strictly-sequential
-// same-second rerun overwriting the same pair is accepted by design (the same
-// GeneratedAt second means the same content basis). The lock file is left in
-// place on release; unlinking it would open a window where two runs flock
-// different inodes and both proceed.
-func AcquireReportLock(dir string) (func(), error) {
-	if err := os.MkdirAll(dir, reportDirMode); err != nil {
-		return nil, fmt.Errorf("audit: create report dir %s: %w", dir, err)
+// bestCell renders the SeaDex best column: the displayed best groups, plus the
+// count of BEST releases the operator's AnimeBytes toggle withheld
+// (Row.HiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes), so a
+// row whose only bests are AnimeBytes releases is distinguishable from an entry
+// SeaDex lists no best for. The count leaks no group, tracker, or link.
+func bestCell(row *Row) string {
+	shown := displayBestGroups(row.Releases)
+	for i := range shown {
+		shown[i] = escapeBestGroup(shown[i])
 	}
-	path := filepath.Join(dir, reportLockName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, reportFileMode)
-	if err != nil {
-		return nil, fmt.Errorf("audit: open report lock %s: %w", path, err)
+	groups := orEmpty(strings.Join(shown, ", "))
+	if row.HiddenAnimeBytesBest == 0 {
+		return groups
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrReportRunning
+	return groups + " (" + strconv.Itoa(row.HiddenAnimeBytesBest) + " best hidden: animebytes)"
+}
+
+// notesCell renders the Notes column: this report's annotations of the best
+// releases the SeaDex-best column lists, kept out of the upstream group text so
+// no group name can be read as a curation warning from us. Association is
+// POSITIONAL: one entry per group the best column lists (same selectBestGroups
+// order), `;`-separated, with emptyCell for a group carrying no note.
+func notesCell(row *Row) string {
+	var entries []string
+	annotatedAny := false
+	selectBestGroups(row.Releases, func(rel *Release, isAnnotated bool) bool {
+		if !isAnnotated {
+			entries = append(entries, emptyCell)
+			return true
 		}
-		return nil, fmt.Errorf("audit: lock %s: %w", path, err)
+		annotatedAny = true
+		entries = append(entries, strings.Join(releaseNotes(rel), ", "))
+		return true
+	})
+	if !annotatedAny {
+		return emptyCell
 	}
-	// Closing the file releases the flock; the closure also keeps f reachable
-	// so a finalizer cannot close the descriptor (and drop the lock) early.
-	return func() { _ = f.Close() }, nil
-}
-
-// WriteFiles renders the report and atomically writes a timestamped JSON +
-// Markdown pair into dir (report-<UTC timestamp>.json and .md), creating dir
-// as needed. The timestamp (the report's GeneratedAt) keeps successive reports
-// from overwriting one another.
-func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
-	base := filepath.Join(dir, "report-"+r.GeneratedAt.UTC().Format(reportStampLayout))
-	mdPath, jsonPath := base+".md", base+".json"
-	// The JSON half is written FIRST, deliberately: a run interrupted between
-	// the two writes can leave a .json without its .md, but never a dangling
-	// .md without its machine-readable pair.
-	data, err := renderJSON(r)
-	if err != nil {
-		return fmt.Errorf("audit: encode json: %w", err)
-	}
-	if err := writeAtomic(ctx, jsonPath, data, log); err != nil {
-		return fmt.Errorf("audit: write json %s: %w", jsonPath, err)
-	}
-	if err := writeAtomic(ctx, mdPath, []byte(renderMarkdown(r)), log); err != nil {
-		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
-	}
-	log.Info("report written", "markdown", mdPath, "json", jsonPath, "anime", len(r.Rows))
-	return nil
-}
-
-// writeAtomic writes data to path atomically, warning (not failing) on a
-// non-durable write, matching the state store's policy.
-func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) error {
-	res, err := atomicfile.WriteFile(ctx, path, data,
-		atomicfile.WithMkdirMode(reportDirMode),
-		atomicfile.WithMode(reportFileMode))
-	if err != nil {
-		return err
-	}
-	if !res.Durable {
-		log.Warn("report written but not durable", "path", path)
-	}
-	return nil
+	// The note words are this app's own vocabulary; escapeCell is applied anyway.
+	return escapeCell(strings.Join(entries, "; "))
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison
-// annotations in parentheses: "approx" when the comparison used a coarse
-// multi-group bucket, and the daemon-vocabulary qualifier
-// (mixed/theoretical/incomplete) when one applies - e.g. "S2 (approx, mixed)".
+// annotations in parentheses: "approx" for a coarse multi-group bucket and the
+// qualifier when one applies - e.g. "S2 (approx, mixed)".
 func scopeCell(row *Row) string {
 	var notes []string
 	if row.Approx {
@@ -230,21 +245,21 @@ func scopeCell(row *Row) string {
 
 // scopeLabel renders the comparison scope recorded on the row at build time:
 // "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
-// comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
-// library item). It is a pure reader of Row.scope — the classification itself
-// is the align.Scope decision recorded on the Row, so the label cannot drift
-// from the comparison actually performed.
+// comparison. A pure reader of Row.Scope, so the label cannot drift from the
+// comparison actually performed; the JSON renderer publishes the same value
+// through align.ScopeKind.MarshalJSON, keeping kind and number separable.
 func scopeLabel(row *Row) string {
-	switch row.scope {
-	case align.ScopeMovie:
-		return "movie"
-	case align.ScopeSeason:
+	if row.Scope == align.ScopeSeason {
 		return "S" + strconv.Itoa(row.Season)
-	case align.ScopeSpecial:
-		return "special"
-	default:
-		return "series"
 	}
+	return row.Scope.String()
+}
+
+// releaseLinkKey is the structural dedupe identity for a links-cell entry: a
+// comparable tuple, not a joined string, so a crafted tracker or URL carrying
+// the would-be delimiter cannot collide two distinct pairs.
+type releaseLinkKey struct {
+	tracker, url string
 }
 
 // links builds the compact links cell: the arr deep-link, the SeaDex entry, and
@@ -257,18 +272,21 @@ func links(row *Row) string {
 	if row.SeaDexURL != "" {
 		parts = append(parts, mdLink("seadex", row.SeaDexURL))
 	}
-	seen := make(map[string]struct{}, len(row.Releases))
+	seen := make(map[releaseLinkKey]struct{}, len(row.Releases))
 	for i := range row.Releases {
 		rel := &row.Releases[i]
-		if !rel.Best || rel.URL == "" {
+		// A curation-warned or unobtainable best is not offered as a grab link: the
+		// cell is an action affordance, and the release is annotated in the Notes
+		// column instead. Deliberately annotation-driven, not verdict-driven.
+		if !rel.Best || rel.URL == "" || annotated(rel) {
 			continue
 		}
-		key := rel.Tracker + "|" + rel.URL
+		key := releaseLinkKey{tracker: rel.Tracker, url: rel.URL}
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
-		parts = append(parts, mdLink(orTracker(rel.Tracker), rel.URL))
+		parts = append(parts, mdLink(orTracker(tracker.CanonicalName(rel.Tracker, rel.URL)), rel.URL))
 	}
 	if len(parts) == 0 {
 		return emptyCell
@@ -276,87 +294,81 @@ func links(row *Row) string {
 	return strings.Join(parts, linkSep)
 }
 
-// linkURLEscaper backs escapeLinkURL; built once, safe for concurrent use.
-var linkURLEscaper = strings.NewReplacer(
-	" ", "%20",
-	"\t", "%09",
-	"\\", "%5C",
-	"`", "%60",
-	"\v", "%0B",
-	"\f", "%0C",
-	"(", "%28",
-	")", "%29",
-	"<", "%3C",
-	">", "%3E",
-	"|", "%7C",
-	"\n", "%0A",
-	"\r", "%0D",
-)
-
-// escapeLinkURL percent-encodes the characters in a URL that would break out
-// of a Markdown link's ](...) destination or the surrounding table cell/row:
-// parentheses, angle brackets, pipes, backslash and backtick (the CommonMark
-// inline metacharacters still active inside a link destination), and every
-// ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). It also
-// percent-encodes the non-ASCII control ranges url.Parse accepts but a
-// terminal or Markdown viewer must never receive raw: C1 controls
-// (U+0080-U+009F, terminal-escape introducers), the Unicode bidi
-// override/isolate runes (U+202A-U+202E, U+2066-U+2069, visual reordering of
-// the rendered links cell), and the U+2028/U+2029 line separators.
-// Percent-encoding is semantically transparent for a URL, so an ordinary
-// destination is unchanged.
-func escapeLinkURL(u string) string {
-	u = linkURLEscaper.Replace(u)
-	var b strings.Builder
-	for _, r := range u {
-		switch {
-		case (r >= 0x80 && r <= 0x9f) || (r >= 0x202a && r <= 0x202e) ||
-			(r >= 0x2066 && r <= 0x2069) || r == 0x2028 || r == 0x2029:
-			for _, byt := range []byte(string(r)) {
-				fmt.Fprintf(&b, "%%%02X", byt)
+// selectBestGroups streams the distinct best-release groups in the report's
+// clean-before-annotated precedence, calling fn once per survivor and stopping
+// early when fn returns false. It is the ONE home for the selection rule both
+// best-group renderings share, and it never builds a slice, so a bounded
+// consumer still caps before any untrusted aggregate is materialized.
+func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool) bool) {
+	seen := make(map[string]struct{}, len(releases))
+	for _, annotatedPass := range []bool{false, true} {
+		for i := range releases {
+			rel := &releases[i]
+			if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
+				continue
 			}
-		default:
-			b.WriteRune(r)
+			key := strings.ToLower(rel.Group)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			if !fn(rel, annotatedPass) {
+				return
+			}
 		}
 	}
-	return b.String()
-}
-
-// mdLink builds a Markdown link with a table-cell-safe label and a
-// metacharacter-escaped destination. It emits a link only when the destination
-// parses as an http/https URL; any other scheme (javascript:, data:, …) or an
-// unparseable destination degrades to the escaped label as plain text, so an
-// untrusted tracker URL cannot inject an active non-http link.
-func mdLink(label, rawURL string) string {
-	safeLabel := escapeCell(label)
-	trimmed := strings.TrimSpace(rawURL)
-	if u, err := url.Parse(trimmed); err == nil {
-		switch strings.ToLower(u.Scheme) {
-		case "http", "https":
-			return "[" + safeLabel + "](" + escapeLinkURL(trimmed) + ")"
-		}
-	}
-	return safeLabel
 }
 
 // displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display.
+// case (deduped case-insensitively), for display. The returned text is UPSTREAM
+// SeaDex data and nothing else; this app's annotations are notesCell's column.
+// Clean bests are collected first and win the dedupe, which is also what makes
+// the positional Notes association stable.
 func displayBestGroups(releases []Release) []string {
 	var out []string
-	seen := make(map[string]struct{}, len(releases))
-	for i := range releases {
-		g := releases[i].Group
-		if !releases[i].Best || g == "" {
-			continue
-		}
-		key := strings.ToLower(g)
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, g)
-	}
+	selectBestGroups(releases, func(rel *Release, _ bool) bool {
+		out = append(out, rel.Group)
+		return true
+	})
 	return out
+}
+
+// releaseNotes returns a release's display annotations: its canonical
+// curation-warning tags, plus "unobtainable", "url error" and "unknown tracker"
+// for the corresponding refusals. The returned slice is always a fresh
+// allocation, so callers can append without aliasing Release.Warnings.
+func releaseNotes(rel *Release) []string {
+	notes := append([]string(nil), rel.Warnings...)
+	if rel.URLError {
+		// Listed BEFORE "unobtainable": the record itself is wrong upstream, which is
+		// also usually WHY the release reads unobtainable.
+		notes = append(notes, "url error")
+	}
+	if rel.UnknownTracker {
+		// The other refusal, mutually exclusive with "url error" by construction (one
+		// refusal grade per release), and deliberately not spelled as a url error.
+		notes = append(notes, "unknown tracker")
+	}
+	if rel.Unobtainable {
+		notes = append(notes, "unobtainable")
+	}
+	if rel.Filtered {
+		// The operator's own tag policy excluded this release, which forfeits its BEST
+		// evidence. Without a note the row self-contradicts whenever the excluded tag
+		// is not a curation warning.
+		notes = append(notes, "filtered")
+	}
+	return notes
+}
+
+// annotated reports whether a release carries display annotations - curation
+// warnings, a publisher refusal, the obtainability rule's rejection, or the
+// operator's tag policy. It READS releaseNotes rather than restating its class
+// list, which is what stops a new annotation class from rendering a note while
+// still being offered as a grab link. DISPLAY only: verdict eligibility is
+// audit.go's forfeitsBest.
+func annotated(rel *Release) bool {
+	return len(releaseNotes(rel)) > 0
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.
@@ -370,6 +382,341 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 	return out
 }
 
+// Log emits the report to slog: a summary line then one INFO line per row, so
+// the report is queryable in Loki alongside the Markdown. The summary's msg is
+// "report summary", deliberately distinct from Scout.Report's "report
+// generated", so a Loki counter keyed on either never double-counts a run.
+// Cancellation is observed before the summary and between row records, so a
+// shutdown neither emits a rowless summary nor spends its grace on row lines.
+// Every untrusted string passes through capDisplayText; the three aggregate
+// attributes stream through logattr.Joiner instead of being materialized.
+func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
+	if err := interrupted(ctx, "report log"); err != nil {
+		return err
+	}
+	stamp := r.GeneratedAt.UTC().Format(time.RFC3339)
+	log.Info("report summary",
+		"generated_at", stamp,
+		"rows", len(r.Rows),
+		"have_best", r.Totals[string(VerdictBest)],
+		"have_alt", r.Totals[string(VerdictAlt)],
+		"have_unlisted", r.Totals[string(VerdictUnlisted)],
+		"no_file", r.Totals[string(VerdictNoFile)],
+		"unverified", r.Totals[string(VerdictUnverified)],
+		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
+		"incomplete_mappings", len(r.Incomplete))
+	for i := range r.Rows {
+		if err := interrupted(ctx, "report log"); err != nil {
+			return err
+		}
+		row := &r.Rows[i]
+		bestGroups, bestNotes := joinBestAttrs(row.Releases)
+		log.Info("report item",
+			"generated_at", stamp,
+			"title", capDisplayText(row.Title),
+			"al_id", row.AniListID,
+			"arr", capDisplayText(row.Arr),
+			"verdict", string(row.Verdict),
+			"qualifier", string(row.Qualifier),
+			"scope", scopeLabel(row),
+			"approx", row.Approx,
+			"hidden_animebytes", row.HiddenAnimeBytes,
+			"hidden_animebytes_best", row.HiddenAnimeBytesBest,
+			"current_group", joinGroupsAttr(row.CurrentGroups),
+			"groups_unknown", row.GroupsUnknown,
+			"seadex_best", bestGroups,
+			"seadex_best_notes", bestNotes,
+			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
+			"seadex_url", capDisplayText(row.SeaDexURL),
+			"match_source", capDisplayText(row.MatchSource))
+	}
+	for i := range r.Incomplete {
+		if err := interrupted(ctx, "report log"); err != nil {
+			return err
+		}
+		log.Info("report incomplete mapping",
+			"generated_at", stamp,
+			"al_id", r.Incomplete[i].AniListID,
+			"seadex_url", capDisplayText(r.Incomplete[i].SeaDexURL))
+	}
+	return nil
+}
+
+// interrupted maps a done context to the audit-interrupted error for stage,
+// wrapping ctx.Err() as the classification token main's shutdown handling keys
+// on (errors.Is context.Canceled) plus the signal cause for display. It returns
+// nil while the context is live, so callers can gate each stage on one budget.
+func interrupted(ctx context.Context, stage string) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	return shutdown.InterruptedAs(ctx, "audit: "+stage+" interrupted")
+}
+
+// reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
+// filesystem-safe (no colons), second precision.
+const reportStampLayout = "2006-01-02T15-04-05Z"
+
+// WriteFiles renders the report and atomically writes a timestamped JSON +
+// Markdown pair into dir (report-<UTC timestamp>.json and .md), creating dir as
+// needed. A same-second pair takes a deterministic -2/-3/... suffix
+// (reportPairStem), so an earlier report is never silently replaced.
+//
+// Interruption contract: every stage up to and including the JSON write observes
+// ctx. Publishing the JSON half is the point of no return, so the Markdown write
+// runs on a short detached budget rather than being abandoned mid-pair.
+func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
+	// dir is the secret-capable report.dir config value: every record below rides
+	// the redacting logger, and every returned error carries only the stage plus a
+	// redacted cause. Filesystem calls keep the real path.
+	log = pathredact.Logger(log, dir)
+	// The signal context is one report-wide budget: check it before each stage, so
+	// a shutdown stops the pipeline instead of spending its grace on lost work.
+	if err := interrupted(ctx, "report write"); err != nil {
+		return err
+	}
+	// Reap stale atomicfile temps first: a crash between temp create and rename
+	// orphans a .atomicfile-<digits>.tmp in the report dir forever otherwise. The
+	// caller holds report.lock, so no concurrent writer owns an in-flight temp, and
+	// a missing dir is not an error.
+	//
+	// Failed is reported and Removed is not. A reclaimed orphan is a sweep doing
+	// its job; a candidate the sweep could not unlink means orphans are
+	// ACCUMULATING in a directory this app writes to every cycle, and only an
+	// operator can fix it. That is not implied by any louder failure here:
+	// _measured_ on a sticky (1777) directory holding a temp owned by another
+	// uid, the sweep reports Failed=1 while a normal atomic write in the same
+	// directory still succeeds, so nothing else would surface it. report.dir is
+	// an operator-supplied absolute path whose mode and ownership this app does
+	// not control, and the process is non-root, so that shape is reachable here.
+	// Unreadable is deliberately not read: it is only ever incremented below the
+	// swept directory, and this sweep is flat, so it is a structural zero.
+	sweep, cleanErr := atomicfile.CleanupStaleTemps(ctx, dir, time.Hour, atomicfile.WithLogger(log))
+	if cleanErr != nil {
+		// No dir attribute: the redacting logger would mask it anyway.
+		log.Warn("stale report temp cleanup failed", "error", cleanErr)
+	}
+	if sweep.Failed > 0 {
+		// WARN, not ERROR, and this is the one place the app's level rule needs
+		// its exception stated. The condition does NOT self-clear (a benign race
+		// is not counted: atomicfile returns ENOENT on either lstat or remove as
+		// neither removed nor failed, so a Failed is a permission or IO fault an
+		// operator must fix), which by the letter of the rule reads as ERROR.
+		// ERROR here is wired to the cycle-fault alert, and the cycle did its
+		// job — the report wrote. Paging a fault for a disk-fill precursor would
+		// misdirect exactly as escalating ErrRecordUnusable would have.
+		log.Warn("stale report temps could not be reclaimed; orphans are accumulating in the report dir",
+			"failed", sweep.Failed,
+			"remediation", "check ownership and mode on report.dir and on the temps named at debug level")
+	}
+	base, err := reportPairStem(ctx, dir, r.GeneratedAt)
+	if err != nil {
+		return err
+	}
+	mdPath, jsonPath := base+".md", base+".json"
+	if interruptErr := interrupted(ctx, "report render"); interruptErr != nil {
+		return interruptErr
+	}
+	// Render from a credential-redacted copy: report rows carry ArrURLs from the
+	// raw library snapshot, so a credentialed public_url would otherwise persist
+	// verbatim into the report pair.
+	safe := redactReportURLs(r)
+	// The JSON half is written FIRST, deliberately: every failure mode from here
+	// leaves a .json without its .md, never a .md without its readable pair.
+	data, err := renderJSON(safe)
+	if err != nil {
+		return fmt.Errorf("audit: encode json: %w", err)
+	}
+	// BOTH halves are rendered here, before either is published: once the JSON
+	// rename commits, the pair's completeness depends on the Markdown WRITE alone,
+	// which runs on a detached budget, so nothing expensive may be left for it.
+	markdown := []byte(renderMarkdown(safe))
+	// The pair ordering only holds when the JSON half's directory entry is
+	// crash-durable: atomicfile reports a rename whose parent-dir fsync failed as
+	// Durable=false with a NIL error, so stop with the JSON half only - as a
+	// degradation, not a failure, since the bytes and the next action are the same.
+	jsonDurable, err := writeReportHalf(ctx, "json", dir, jsonPath, data, log)
+	if err != nil {
+		return err
+	}
+	if !jsonDurable {
+		log.Warn("report json written but not crash-durable; skipping the markdown half to keep the pair ordering",
+			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", false)
+		// The run published an artifact and returns success, so it still emits the
+		// success record alerts.yaml's SeadexScoutReportWritten rule keys on. The
+		// empty markdown name is what tells the operator only one half landed.
+		reportWritten(log, "", jsonPath, len(r.Rows), false)
+		return nil
+	}
+	// The Markdown half rides a detached context: the JSON rename has committed, so
+	// from here a cancellation would half-publish permanently - the next run probes
+	// a fresh stem (reportPairStem needs BOTH halves free), orphaning the .json.
+	// The extra grace is armed ONLY once a shutdown has landed: an unconditional
+	// ceiling would cap the SECOND half of the pair below the budget the FIRST half
+	// just had, so on a slow mount every report would half-publish permanently.
+	mdCtx := context.WithoutCancel(ctx)
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		mdCtx, cancel = context.WithTimeout(mdCtx, markdownWriteGrace)
+		defer cancel()
+	}
+	// A non-durable Markdown half cannot create a dangling .md (the .json is
+	// already durably committed), so the pair is complete and the success record
+	// must still be emitted; the durable attribute keeps the line honest.
+	mdDurable, err := writeReportHalf(mdCtx, "markdown", dir, mdPath, markdown, log)
+	if err != nil {
+		// The JSON half is already durably committed, so this failure publishes half a
+		// pair: name the surviving basename.
+		log.Warn("report markdown half failed; the json half is published without it",
+			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "error", err)
+		return err
+	}
+	reportWritten(log, mdPath, jsonPath, len(r.Rows), mdDurable)
+	return nil
+}
+
+// markdownWriteGrace bounds the detached Markdown write AFTER A SHUTDOWN, and
+// only then: with no signal pending the caller's context carries no deadline and
+// the JSON half is written under exactly that context, so a ceiling on the
+// markdown half alone could only lose the pair. It is deliberately short because
+// it is spent ON TOP of a budget that has already run out - the bytes are
+// rendered, so it covers one atomic write+rename+fsync inside Docker's 10s stop
+// grace.
+const markdownWriteGrace = 2 * time.Second
+
+// reportWritten emits the report pair's success record. It is the ONE call site
+// of the alert-keyed "report written" message: markdown is the empty string when
+// only the JSON half landed, and durable reports whether the last published
+// half's directory entry is crash-durable. Basenames only, so the record never
+// ships the secret-capable report.dir value.
+func reportWritten(log *slog.Logger, mdPath, jsonPath string, anime int, durable bool) {
+	markdown := ""
+	if mdPath != "" {
+		markdown = filepath.Base(mdPath)
+	}
+	log.Info("report written", "markdown", markdown, "json", filepath.Base(jsonPath), "anime", anime, "durable", durable)
+}
+
+// redactReportURLs returns a shallow copy of the report whose rows carry
+// credential-free ArrURLs, so a credentialed arr public_url never lands in the
+// persisted report files. The canonical Report is never mutated.
+func redactReportURLs(r *Report) *Report {
+	out := *r
+	out.Rows = slices.Clone(r.Rows)
+	for i := range out.Rows {
+		out.Rows[i].ArrURL = library.SafeLogURL(out.Rows[i].ArrURL)
+	}
+	return &out
+}
+
+// reportPairStem selects a collision-free filename stem for the report pair: the
+// second-precision GeneratedAt stem when neither half exists, otherwise the
+// first deterministic "-N" suffix (N >= 2) where both halves are free. A
+// non-NotExist stat error is surfaced rather than risking an overwrite. The loop
+// terminates because every probed stem must be occupied on disk to advance, and
+// each round observes the report-wide context.
+func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (string, error) {
+	base := filepath.Join(dir, "report-"+generatedAt.UTC().Format(reportStampLayout))
+	stem := base
+	for n := 2; ; n++ {
+		if err := interrupted(ctx, "report stem probe"); err != nil {
+			return "", err
+		}
+		free := true
+		for _, path := range []string{stem + ".json", stem + ".md"} {
+			if _, err := os.Stat(path); err == nil {
+				free = false
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				// Basename plus redacted cause only: dir is secret-capable.
+				return "", fmt.Errorf("audit: probe report path %s: %w", filepath.Base(path), pathredact.Err(dir, err))
+			}
+		}
+		if free {
+			return stem, nil
+		}
+		stem = base + "-" + strconv.Itoa(n)
+	}
+}
+
+// atomicWriteFile is atomicfile.WriteFile behind a package variable so the
+// durability gates in WriteFiles can be exercised with a Durable=false result;
+// a parent-directory fsync failure cannot be induced on a test filesystem.
+var atomicWriteFile = atomicfile.WriteFile
+
+// writeAtomic writes data to path atomically under the report pair's fixed
+// option set and returns atomicfile's whole Result rather than just an error,
+// because the caller gates the pair ORDERING on Result.Durable.
+//
+// Reports enumerate the operator's library and can carry private-tracker page
+// links, so the directory and every written half are owner-only (CWE-732).
+func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
+	// The directory's privacy rule has one home (internal/reportfs): WithMkdirMode
+	// goes through MkdirAll's perm argument, which a umask or default ACL filters.
+	if err := reportfs.MakeDir(filepath.Dir(path)); err != nil {
+		return atomicfile.Result{}, err
+	}
+	return atomicWriteFile(ctx, path, data,
+		atomicfile.WithLogger(log),
+		atomicfile.WithMode(reportfs.FileMode))
+}
+
+// writeReportHalf persists one report half and applies the two policies both
+// halves share: a hard write failure is wrapped with the stage and the basename
+// only (the cause is redacted) and returned as an error, while a rename whose
+// parent-directory fsync failed - atomicfile's Durable=false with a NIL error -
+// is reported through the durable return value, NOT as an error. A non-durable
+// write SUCCEEDED, so there is nothing for the operator to do; it still matters
+// for ORDERING, which is why the flag is returned rather than swallowed.
+func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, log *slog.Logger) (durable bool, err error) {
+	res, err := writeAtomic(ctx, path, data, log)
+	if err != nil {
+		return false, fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), pathredact.Err(dir, err))
+	}
+	return res.Durable, nil
+}
+
+// escapeLinkURL percent-encodes the characters in a URL that would break out of
+// a Markdown link's ](...) destination or the surrounding table cell/row. The
+// ASCII half is logattr.EscapeLinkDestination, the one home this policy shares
+// with internal/notify's alert attributes; on top of it this percent-encodes the
+// above-ASCII policy runes url.Parse accepts but a terminal or Markdown viewer
+// must never receive raw (C1 controls, the Bidi_Control set, U+2028/U+2029),
+// classified by runesafe.IsUnsafeNonASCII. Percent-encoding is semantically
+// transparent, so an ordinary destination is unchanged.
+func escapeLinkURL(u string) string {
+	u = logattr.EscapeLinkDestination(u)
+	var b strings.Builder
+	for _, r := range u {
+		switch {
+		case runesafe.IsUnsafeNonASCII(r):
+			for _, byt := range []byte(string(r)) {
+				fmt.Fprintf(&b, "%%%02X", byt)
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// mdLink builds a Markdown link with a table-cell-safe label and a
+// metacharacter-escaped destination. It emits a link only when the destination
+// passes the app's ONE structural vouch step for a browser-destined URL
+// (internal/displaylink): an absolute http(s) URL, free of a userinfo authority
+// and of the smuggling shapes a browser reads differently from net/url.
+// Anything else degrades to the escaped label as plain text. The emitted
+// destination is the classified form's Trimmed string - the value the vouch step
+// actually judged, not a spelling a browser would silently rewrite.
+func mdLink(label, rawURL string) string {
+	safeLabel := escapeCell(label)
+	f := urlform.Classify(rawURL)
+	if !displaylink.VouchForm(&f) {
+		return safeLabel
+	}
+	return "[" + safeLabel + "](" + escapeLinkURL(f.Trimmed) + ")"
+}
+
 // cellEscaper backs escapeCell; built once, safe for concurrent use.
 var cellEscaper = strings.NewReplacer(
 	"&", "&amp;",
@@ -379,48 +726,225 @@ var cellEscaper = strings.NewReplacer(
 	"|", "&#124;",
 	"[", "&#91;",
 	"]", "&#93;",
-	"\n", " ",
-	"\r", " ",
 )
 
-// stripControl replaces C0 control characters, DEL, the C1 control range
-// (U+0080-U+009F, single-rune terminal-escape introducers), and the Unicode
-// bidirectional override/isolate characters with a space, so untrusted
-// text cannot smuggle terminal escape sequences or visual reordering
-// into the rendered Markdown report. CR/LF are already flattened by
-// cellEscaper; this catches the rest.
-func stripControl(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r < 0x20 && r != '\n' && r != '\r':
-			return ' '
-		case r == 0x7f:
-			return ' '
-		case r >= 0x80 && r <= 0x9f: // C1 controls (CSI U+009B, OSC U+009D, DCS U+0090): single-rune terminal-escape introducers some UTF-8 terminals honor
-			return ' '
-		case r >= 0x202a && r <= 0x202e: // LRE/RLE/PDF/LRO/RLO
-			return ' '
-		case r >= 0x2066 && r <= 0x2069: // LRI/RLI/FSI/PDI
-			return ' '
+// bestGroupEscaper encodes the characters the SeaDex-best column's own structure
+// uses, on top of escapeCell's cell escapes: the comma separating the listed
+// groups - the positional key notesCell and joinBestAttrs bind to - and the
+// parentheses delimiting the "(N best hidden: animebytes)" marker. Without it a
+// group named "SEV, PMR" reads as two listed groups, shifting every later note.
+var bestGroupEscaper = strings.NewReplacer(",", "&#44;", "(", "&#40;", ")", "&#41;")
+
+// escapeBestGroup renders one upstream group for the SeaDex-best column.
+func escapeBestGroup(group string) string {
+	return bestGroupEscaper.Replace(escapeCell(group))
+}
+
+// sanitizeDisplayText makes an untrusted string safe for the machine-readable
+// outputs (the JSON report file and slog attributes): the unsafe-rune set is the
+// shared runesafe policy, each replaced with a space. Markdown output has its own
+// context-aware sanitizers (escapeCell, escapeLinkURL).
+func sanitizeDisplayText(s string) string {
+	return runesafe.Sanitize(s)
+}
+
+// maxAttrBytes is the per-attribute volume budget the report's slog path
+// enforces on every untrusted value. The policy itself lives in internal/logattr,
+// shared with the daemon's notify emit path; this alias keeps the bound readable.
+const maxAttrBytes = logattr.MaxBytes
+
+// capDisplayText is sanitizeDisplayText plus a volume cap: an honest value passes
+// byte-identical, an oversized one is capped on a rune boundary with a "..."
+// marker, before the per-rune sanitize so it is never fully copied. A
+// MULTI-SOURCE attribute must never be materialized and handed to it: those
+// stream through a logattr.Joiner (joinGroupsAttr / joinBestAttrs).
+func capDisplayText(s string) string { return logattr.Cap(s) }
+
+// joinGroupsAttr renders a row's group list as the comma-separated current_group
+// attribute through the bounded joiner: the list is untrusted and must not be
+// materialized before the cap applies.
+func joinGroupsAttr(groups []string) string {
+	j := logattr.NewJoiner()
+	for i := range groups {
+		if i > 0 && !j.WriteSep(",") {
+			break
 		}
-		return r
-	}, s)
+		if !j.Write(groups[i]) {
+			break
+		}
+	}
+	return j.String()
+}
+
+// joinBestAttrs renders the seadex_best and seadex_best_notes attributes in ONE
+// pass over selectBestGroups, under a COUPLED stop: a piece is admitted only when
+// both joiners can take it, so the two attributes always carry the same number of
+// positional slots. Two independent budgets cut at different indices, silently
+// re-binding a note to a group the line did not carry. groups carries ONLY
+// upstream group text, and notes is the empty string when no annotated best
+// exists, so a Loki query can test it for emptiness.
+func joinBestAttrs(releases []Release) (groups, notes string) {
+	gj, nj := logattr.NewJoiner(), logattr.NewJoiner()
+	first := true
+	annotatedAny := false
+	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
+		// Both SEPARATORS are charged together, so one budget refusing a
+		// separator stops both attributes at the same element count.
+		//
+		// The values are not: writeBestGroupAttr cuts incrementally (see its
+		// doc for why), so a budget exhausted INSIDE a group leaves
+		// seadex_best holding a partial trailing slot that seadex_best_notes
+		// never gained. The pairs before it still align, and String() marks
+		// the aggregate truncated, so the trailing unpaired fragment is
+		// visible as one — this is the accepted scope of the coupling, not a
+		// claim that the two attributes can never differ in length.
+		if !first && (!gj.WriteSep(",") || !nj.WriteSep(";")) {
+			return false
+		}
+		first = false
+		if !writeBestGroupAttr(gj, rel.Group) {
+			return false
+		}
+		if !isAnnotated {
+			// emptyCell is a positional VALUE, not a separator: it occupies this
+			// group's slot exactly as notesCell's placeholder does.
+			return nj.Write(emptyCell)
+		}
+		annotatedAny = true
+		return writeNotesAttr(nj, releaseNotes(rel))
+	})
+	if !annotatedAny {
+		return gj.String(), ""
+	}
+	return gj.String(), nj.String()
+}
+
+// writeBestGroupAttr streams one group into j with its commas encoded, so a comma
+// in upstream group text cannot read as the seadex_best separator that
+// seadex_best_notes binds to positionally. It cuts incrementally rather than
+// escaping the whole value first, so a multi-MB group is never copied.
+//
+// Incremental ON PURPOSE, and the alternative was tried and rejected: charging
+// the escaped value atomically (the shape the tracker=url pair uses) means a
+// group that alone exceeds the budget is refused entirely, so the attribute
+// carries nothing but the truncation marker instead of naming the group that
+// overflowed. TestBestGroupDedupeIsBoundedAndCaseInsensitive pins the emitted
+// form at exactly the cap plus the marker, which is that decision: for a
+// SINGLE oversized value there is no partner slot to desynchronize, and a
+// truncated name an operator can read beats a dropped one.
+func writeBestGroupAttr(j *logattr.Joiner, group string) bool {
+	for {
+		before, after, found := strings.Cut(group, ",")
+		if !j.Write(before) {
+			return false
+		}
+		if !found {
+			return true
+		}
+		if !j.WriteSep("&#44;") {
+			return false
+		}
+		group = after
+	}
+}
+
+// writeNotesAttr appends one annotated best's note list to j, matching notesCell's
+// comma-joined spelling, and reports whether the joiner can still accept more.
+func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
+	for i := range notes {
+		if i > 0 && !j.WriteSep(", ") {
+			return false
+		}
+		if !j.Write(notes[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// sanitizeOutput returns a deep-enough copy of the report with every untrusted
+// string passed through sanitizeDisplayText, for the machine-readable outputs.
+// The canonical Report is never mutated. Verdict, Qualifier and release Warnings
+// are app-defined vocabularies, not upstream data, and stay as-is.
+func sanitizeOutput(r *Report) *Report {
+	out := *r
+	out.Rows = sanitizedRows(r.Rows)
+	out.Incomplete = sanitizedIncomplete(r.Incomplete)
+	return &out
+}
+
+// sanitizedRows returns a sanitized clone of the report rows. Nil rows become
+// []Row{} to preserve the empty-array JSON shape ("rows": []), since
+// slices.Clone(nil) is nil and would render null.
+func sanitizedRows(rows []Row) []Row {
+	out := slices.Clone(rows)
+	if out == nil {
+		out = []Row{}
+	}
+	for i := range out {
+		row := &out[i]
+		row.Title = sanitizeDisplayText(row.Title)
+		row.Arr = sanitizeDisplayText(row.Arr)
+		row.ArrURL = sanitizeDisplayText(row.ArrURL)
+		row.SeaDexURL = sanitizeDisplayText(row.SeaDexURL)
+		row.MatchSource = sanitizeDisplayText(row.MatchSource)
+		row.CurrentGroups = sanitizedStrings(row.CurrentGroups)
+		row.Releases = sanitizedReleases(row.Releases)
+	}
+	return out
+}
+
+// sanitizedStrings returns a sanitized copy of a string slice; a nil or
+// empty slice is returned as-is (never cloned), preserving its JSON shape.
+func sanitizedStrings(ss []string) []string {
+	if len(ss) == 0 {
+		return ss
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = sanitizeDisplayText(s)
+	}
+	return out
+}
+
+// sanitizedReleases returns a sanitized clone of a row's releases (Tracker,
+// Group, and URL are upstream data); a nil or empty slice is returned as-is.
+func sanitizedReleases(rels []Release) []Release {
+	if len(rels) == 0 {
+		return rels
+	}
+	out := slices.Clone(rels)
+	for i := range out {
+		out[i].Tracker = sanitizeDisplayText(out[i].Tracker)
+		out[i].Group = sanitizeDisplayText(out[i].Group)
+		out[i].URL = sanitizeDisplayText(out[i].URL)
+	}
+	return out
+}
+
+// sanitizedIncomplete returns a sanitized clone of the incomplete-mapping
+// entries (the releases.moe link); a nil or empty slice is returned as-is.
+func sanitizedIncomplete(inc []IncompleteEntry) []IncompleteEntry {
+	if len(inc) == 0 {
+		return inc
+	}
+	out := slices.Clone(inc)
+	for i := range out {
+		out[i].SeaDexURL = sanitizeDisplayText(out[i].SeaDexURL)
+	}
+	return out
 }
 
 // escapeCell makes a string safe inside a Markdown table cell. It uses HTML
-// numeric/character entities instead of backslash escapes so a pre-existing
-// backslash in the text cannot cancel an inserted escape (\] or \| could
-// otherwise break out of a link label or table cell). It neutralizes the raw
-// HTML metacharacters (& < >) so untrusted text such as <img ...> cannot
-// survive as raw Markdown HTML, encodes the table/link delimiters (| [ ]) and
-// the backslash itself, and flattens CR/LF. strings.NewReplacer performs a
-// single non-overlapping left-to-right pass and never re-scans its replacement
-// output, so encoding & first does not double-encode the entities it inserts.
-// A stripControl pre-pass removes the remaining C0/DEL/C1 control characters
-// and the Unicode bidi override/isolate characters (terminal-escape and visual
-// reordering smuggling).
+// entities instead of backslash escapes so a pre-existing backslash cannot
+// cancel an inserted escape, neutralizes the raw HTML metacharacters (& < >),
+// and encodes the table/link delimiters (| [ ]) and the backslash itself.
+// strings.NewReplacer makes one non-overlapping left-to-right pass and never
+// re-scans its output, so encoding & first does not double-encode. A
+// runesafe.SanitizeSingleLine pre-pass removes the control and bidi runes AND
+// CR/LF, which a single-line sink cannot carry.
 func escapeCell(s string) string {
-	return cellEscaper.Replace(stripControl(s))
+	return cellEscaper.Replace(runesafe.SanitizeSingleLine(s))
 }
 
 // orEmpty returns the empty-cell marker for a blank string.
@@ -431,10 +955,13 @@ func orEmpty(s string) string {
 	return s
 }
 
-// orTracker labels a link by tracker, falling back to "link" for an unnamed one.
-func orTracker(tracker string) string {
-	if strings.TrimSpace(tracker) == "" {
+// orTracker labels a link by tracker name, falling back to "link" when the
+// canonical resolution names nothing at all. The name comes from
+// tracker.CanonicalName, the one home the daemon's alert attributes share, so a
+// blank or oddly-cased SeaDex tracker field labels the same on both surfaces.
+func orTracker(name string) string {
+	if strings.TrimSpace(name) == "" {
 		return "link"
 	}
-	return tracker
+	return name
 }

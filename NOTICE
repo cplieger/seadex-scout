@@ -1,49 +1,32 @@
-github-scout
+seadex-scout
 Copyright (c) 2026 cplieger
 
-This product is licensed under the GNU General Public License v3.0
-(see LICENSE).
+This product is licensed under the GNU General Public License v3.0 or
+later (see LICENSE).
 
 ------------------------------------------------------------------------
 Third-party acknowledgements
 ------------------------------------------------------------------------
 
-The GitHub REST API client design in internal/github (Bearer-token auth
-header set, the X-GitHub-Api-Version pin, and page-count pagination)
-follows patterns common to the following MIT-licensed projects. No source
-code was copied verbatim; the approach was studied and reimplemented.
+This product includes no third-party source code. Two community projects
+informed its design. In both cases the approach was studied and
+reimplemented; no source code was copied verbatim.
 
-  githubexporter/github-exporter
-  https://github.com/githubexporter/github-exporter
-  Copyright (c) 2016 Infinity Works Ltd
-  Licensed under the MIT License.
+  bbtufty/seadexarr
+  https://github.com/bbtufty/seadexarr
+  Licensed under the GNU General Public License v3.0.
+  The prior art this tool was written against. seadex-scout exists to
+  close two gaps in it: a notifier that is not Discord-only, and a filter
+  that keeps encodes while dropping remuxes. See the README.
 
-  xrstf/github_exporter
-  https://github.com/xrstf/github_exporter
-  Copyright (c) 2020 Christoph Mewes
-  Licensed under the MIT License.
+  Ryder-C/seadexerr
+  https://github.com/Ryder-C/seadexerr
+  No license declared by its author.
+  The tracker-id extraction approach in internal/indexer/match.go
+  (extractID: take the token after a known needle, accept it only as a
+  canonical bounded run of ASCII digits) follows the same idea.
 
-The MIT License permits this use. Their full license text is reproduced
-below for attribution.
-
-------------------------------------------------------------------------
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to permit
-persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
+Release data comes from SeaDex (https://releases.moe), the AniList
+GraphQL API, and the Fribb anime-list mappings
+(https://github.com/Fribb/anime-lists). Those are queried at runtime as
+data sources; none of their code is included here.

@@ -3,7 +3,11 @@ package match
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -30,7 +34,7 @@ func (b *partialBatchAniList) Fetch(_ context.Context, id int) (anilist.Media, e
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	b.batchCalls++
 	out := make(map[int]anilist.Media)
 	for _, id := range ids {
@@ -38,7 +42,12 @@ func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (map[int]a
 			out[id] = m
 		}
 	}
-	return out, errors.New("anilist 500")
+	return anilist.BatchResult{
+		Media: out,
+		// The failed later chunk answered nothing trustworthily, so an
+		// unreturned id is left uncached for the per-id Fetch.
+		Verdicts: batchVerdictsAbsentAs(ids, out, anilist.VerdictUnverified),
+	}, errors.New("anilist 500")
 }
 
 // TestMatchMemoizesNotFoundAfterFailedBatch pins the fallback chain behind a
@@ -56,9 +65,9 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 	fake := &partialBatchAniList{batchMedia: map[int]anilist.Media{
 		66: {Titles: []string{"Returned"}, Format: "MOVIE", Year: 2020},
 	}}
-	m := NewMatcher(fake, nil)
+	m := New(fake, nil)
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 66}, {AniListID: 77}}, snap, idx, Memo{})
+	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 66}, {AniListID: 77}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
@@ -79,22 +88,28 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 
 // TestPendingAniListIDsDedupesAndSkipsInvalid pins the batch worklist guards:
 // a duplicate AniList id is requested once, a non-positive id is never
-// requested, and an already-memoized id (positive or negative) is skipped.
+// requested, an already-memoized LIVE id (positive or negative) is skipped,
+// and an EXPIRED memoized id counts as pending again so the batch renews it.
 func TestPendingAniListIDsDedupesAndSkipsInvalid(t *testing.T) {
 	idx := mapping.NewIndex(nil)
-	lib := buildLibIndex(&library.Snapshot{})
-	memo := Memo{Entries: map[int]MemoEntry{88: {NotFound: true}}}
+	lib := NewLibIndex(&library.Snapshot{})
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	memo := Memo{Entries: map[int]MemoEntry{
+		88: {NotFound: true, Expiry: now.Add(time.Hour)},  // live: skipped
+		99: {NotFound: true, Expiry: now.Add(-time.Hour)}, // expired: pending again
+	}}
 	entries := []seadex.Entry{
 		{AniListID: 77},
 		{AniListID: 77}, // duplicate: requested once
 		{AniListID: 0},  // non-positive: never requested
-		{AniListID: 88}, // memoized: skipped
+		{AniListID: 88}, // memoized and live: skipped
+		{AniListID: 99}, // memoized but expired: renewed via the batch
 	}
 
-	got := pendingAniListIDs(entries, idx, lib, &memo)
+	got := pendingAniListIDs(entries, idx, lib, &memo, now)
 
-	if len(got) != 1 || got[0] != 77 {
-		t.Errorf("pendingAniListIDs = %v, want [77]", got)
+	if len(got) != 2 || got[0] != 77 || got[1] != 99 {
+		t.Errorf("pendingAniListIDs = %v, want [77 99]", got)
 	}
 }
 
@@ -120,7 +135,7 @@ func TestMatchSingleFetchRecoversAfterFailedBatch(t *testing.T) {
 		},
 	}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 || fake.fetchCalls != 1 {
 		t.Errorf("calls = batch %d / fetch %d, want 1 / 1 (partial batch falls back to one single Fetch)", fake.batchCalls, fake.fetchCalls)
@@ -149,9 +164,11 @@ func (o *totalOutageAniList) Fetch(context.Context, int) (anilist.Media, error) 
 	return anilist.Media{}, errors.New("anilist 500")
 }
 
-func (o *totalOutageAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
+func (o *totalOutageAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return nil, errors.New("anilist 500")
+	// A TOTAL failure: no chunk completed, so no id carries a verdict at all
+	// and every one of them reads VerdictUnrequested from the zero value.
+	return anilist.BatchResult{}, errors.New("anilist 500")
 }
 
 // TestMatchTotalBatchOutageSkipsPerIDFallback pins the fast-degrade contract:
@@ -169,7 +186,7 @@ func TestMatchTotalBatchOutageSkipsPerIDFallback(t *testing.T) {
 	})
 	fake := &totalOutageAniList{}
 
-	res := NewMatcher(fake, nil).Match(context.Background(),
+	res := New(fake, nil).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
@@ -208,9 +225,13 @@ func (o *midBatchOutageAniList) Fetch(context.Context, int) (anilist.Media, erro
 	return anilist.Media{}, errors.New("anilist 500")
 }
 
-func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
+	return anilist.BatchResult{
+		Media:    media,
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+	}, errors.New("anilist 500")
 }
 
 // TestMatchMidBatchOutageTripsFastFailBreaker pins the consecutive-failure
@@ -233,7 +254,7 @@ func TestMatchMidBatchOutageTripsFastFailBreaker(t *testing.T) {
 		{AniListID: 60}, // breaker tripped: fails fast, no request
 	}
 
-	res := NewMatcher(fake, nil).Match(context.Background(), entries, snap, idx, Memo{})
+	res := New(fake, nil).Match(t.Context(), entries, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
@@ -255,5 +276,222 @@ func TestMatchMidBatchOutageTripsFastFailBreaker(t *testing.T) {
 		if res.Matches[i].InLibrary() {
 			t.Errorf("match %d = %+v, want unmapped (empty library)", i, res.Matches[i])
 		}
+	}
+}
+
+// recoveringAniList models an upstream that recovers mid-outage: the batch
+// prefetch is PARTIAL (first id returned + error), per-id Fetch fails
+// transiently for every id except 40, which succeeds.
+type recoveringAniList struct{ fetchCalls int }
+
+func (a *recoveringAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	a.fetchCalls++
+	if id == 40 {
+		return anilist.Media{Titles: []string{"Recovered"}, Format: "TV"}, nil
+	}
+	return anilist.Media{}, errors.New("anilist 500")
+}
+
+func (*recoveringAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
+	return anilist.BatchResult{
+		Media:    media,
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+	}, errors.New("anilist 500")
+}
+
+// TestMatchSuccessfulLookupResetsFailureBreaker pins recordSuccess's streak
+// reset: a successful per-id lookup after two transient failures must reset
+// the consecutive-failure breaker, so a recovered upstream does not trip it
+// early. With the reset removed, id 40's success leaves the streak at 2, id 50
+// trips the breaker (streak 3), and id 60 fails fast - 4 Fetch calls instead
+// of the 5 a resetting breaker allows.
+func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
+	fake := &recoveringAniList{}
+	entries := []seadex.Entry{{AniListID: 10}, {AniListID: 20}, {AniListID: 30}, {AniListID: 40}, {AniListID: 50}, {AniListID: 60}}
+
+	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+
+	if fake.fetchCalls != 5 {
+		t.Errorf("single Fetch calls = %d, want 5: success after two failures must reset the breaker streak", fake.fetchCalls)
+	}
+	if _, ok := res.Memo.Entries[40]; !ok {
+		t.Error("successful recovery was not memoized")
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true because transient failures occurred")
+	}
+}
+
+// allNotFoundBatchAniList models a batch whose first chunk COMPLETED but found
+// no media before a later chunk failed: FetchMany returns per-id verdicts plus
+// an error (the partial side of the contract), and every per-id Fetch answers a
+// definitive not-found.
+type allNotFoundBatchAniList struct {
+	fetchCalls int
+	batchCalls int
+}
+
+func (o *allNotFoundBatchAniList) Fetch(context.Context, int) (anilist.Media, error) {
+	o.fetchCalls++
+	return anilist.Media{}, anilist.ErrNotFound
+}
+
+func (o *allNotFoundBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	o.batchCalls++
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{
+			Media:    media,
+			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+		},
+		errors.New("anilist 500 on a later chunk")
+}
+
+// TestMatchEmptyCompletedBatchIsNotAnOutage pins the completion contract at
+// the prefetch outage gate: a result carrying per-id verdicts plus an error
+// means at least one chunk completed, NOT a total outage — so the fast-fail
+// must not trip, every pending id is retried with one per-id Fetch, each
+// definitive not-found is memoized negatively, and the cycle stays
+// non-degraded. Only a result with NO verdicts at all (no chunk completed) may
+// trip the outage gate, which TestMatchTotalBatchOutageSkipsPerIDFallback pins.
+func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
+	snap := &library.Snapshot{}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the title fallback
+		{AniListID: 22, Type: "MOVIE"}, // id-less: needs the title fallback
+	})
+	fake := &allNotFoundBatchAniList{}
+
+	res := New(fake, nil).Match(t.Context(),
+		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
+	}
+	if fake.fetchCalls != 2 {
+		t.Errorf("single Fetch calls = %d, want 2 (a completed empty batch must not trip the outage fast-fail)", fake.fetchCalls)
+	}
+	for _, id := range []int{11, 22} {
+		if ent, ok := res.Memo.Entries[id]; !ok || !ent.NotFound {
+			t.Errorf("memo[%d] = %+v (present=%v), want a NotFound negative entry", id, ent, ok)
+		}
+	}
+	if res.Degraded {
+		t.Error("Degraded = true, want false: definitive not-founds after a completed batch are answers, not an outage")
+	}
+}
+
+// notFoundAmongOutageAniList models an outage with one definitive answer
+// mixed in: the batch prefetch is PARTIAL (first id returned + error), and the
+// per-id Fetch answers a definitive not-found for id 40 while every other id
+// fails transiently.
+type notFoundAmongOutageAniList struct {
+	fetchCalls int
+	batchCalls int
+}
+
+func (o *notFoundAmongOutageAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	o.fetchCalls++
+	if id == 40 {
+		return anilist.Media{}, anilist.ErrNotFound
+	}
+	return anilist.Media{}, errors.New("anilist 500")
+}
+
+func (o *notFoundAmongOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	o.batchCalls++
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
+	return anilist.BatchResult{
+		Media:    media,
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+	}, errors.New("anilist 500")
+}
+
+// TestMatchNotFoundResetsFailureBreaker pins the OTHER half of the breaker's
+// reset rule (TestMatchSuccessfulLookupResetsFailureBreaker pins the media
+// half): a definitive ErrNotFound is an answer, proving the upstream responds,
+// so it must reset the consecutive-transient-failure streak too. Sequence: id
+// 10 is batch-returned; 20 and 30 fail transiently (streak 2); 40 answers
+// not-found and RESETS the streak; 50, 60, 70 fail transiently (streak 3,
+// tripping the breaker); 80 fails fast without a request - 6 per-id requests.
+// Without the reset, 40 would leave the streak at 2, id 50 would trip the
+// breaker and 60/70/80 would fail fast: 4 requests.
+func TestMatchNotFoundResetsFailureBreaker(t *testing.T) {
+	fake := &notFoundAmongOutageAniList{}
+	entries := []seadex.Entry{
+		{AniListID: 10},
+		{AniListID: 20},
+		{AniListID: 30},
+		{AniListID: 40},
+		{AniListID: 50},
+		{AniListID: 60},
+		{AniListID: 70},
+		{AniListID: 80},
+	}
+
+	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+
+	if fake.fetchCalls != 6 {
+		t.Errorf("single Fetch calls = %d, want 6: a definitive not-found must reset the consecutive-failure streak", fake.fetchCalls)
+	}
+	if ent, ok := res.Memo.Entries[40]; !ok || !ent.NotFound {
+		t.Errorf("memo[40] = %+v (present=%v), want the definitive not-found memoized", ent, ok)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true: transient failures occurred")
+	}
+}
+
+// TestHandleLookupFailureMemoizesUnusableRecord pins the permanent-vs-transient
+// split at the fallback's classification point. A record whose own content
+// cannot yield a match key (anilist.ErrRecordUnusable) is a DEFINITIVE answer:
+// it must be negative-memoized so it is not re-fetched every cycle, and it must
+// not mark the pass degraded - otherwise the persisted AniList degradation
+// streak climbs to a standing ERROR blaming upstream reachability that is
+// healthy. A genuinely transient error keeps the opposite contract, so both are
+// pinned together.
+func TestHandleLookupFailureMemoizesUnusableRecord(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err          error
+		wantMemoized bool
+		wantDegraded bool
+	}{
+		"unusable record is definitive": {
+			err:          fmt.Errorf("fetch 42: %w: media missing usable title", anilist.ErrRecordUnusable),
+			wantMemoized: true,
+			wantDegraded: false,
+		},
+		"transient failure is retried": {
+			err:          errors.New("anilist: upstream 503"),
+			wantMemoized: false,
+			wantDegraded: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const id = 42
+			r := &matchRun{
+				m: &Matcher{
+					log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+					now:  time.Now,
+					rand: func() float64 { return 0.5 },
+				},
+				memo: &Memo{Entries: map[int]MemoEntry{}},
+				gate: &lookupGate{},
+				now:  time.Now(),
+			}
+
+			r.handleLookupFailure(id, tc.err)
+
+			_, memoized := r.memo.Entries[id]
+			if memoized != tc.wantMemoized {
+				t.Errorf("memoized = %v, want %v", memoized, tc.wantMemoized)
+			}
+			if r.degraded != tc.wantDegraded {
+				t.Errorf("degraded = %v, want %v", r.degraded, tc.wantDegraded)
+			}
+			if _, incomplete := r.incomplete[id]; incomplete == tc.wantMemoized {
+				t.Errorf("incomplete[%d] = %v, want %v (a definitive answer is never retried)", id, incomplete, !tc.wantMemoized)
+			}
+		})
 	}
 }

@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"testing"
@@ -9,7 +8,7 @@ import (
 )
 
 // errTransport fails every request with a plain (non-transient) error, so
-// httpx.RetryWithBackoff returns after the first attempt without sleeping.
+// httpx.Do returns after the first attempt without sleeping.
 type errTransport struct{}
 
 func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
@@ -25,8 +24,8 @@ func TestLoader_refreshCache_transportErrorKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("transport-error refresh returned nil error, want degraded error")
 	}

@@ -1,6 +1,5 @@
-# Kiro skill artifacts (app-review, code-review, judgement, steering-maintenance)
+# Kiro skill artifacts (app-review, refactor, steering-maintenance, judgement)
 **/.app-review/
-**/.code-review/
 **/.judgement/
 **/.steering-maintenance/
 
@@ -15,3 +14,10 @@
 # go.work / go.work.sum are local-dev only (never committed)
 go.work
 go.work.sum
+
+
+# gitleaks scan artifacts (generated locally by security scans, never committed)
+gitleaks-history.sarif
+
+# pgregory.net/rapid failure-repro artifacts (regenerated on demand, never committed)
+**/testdata/rapid/

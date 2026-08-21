@@ -3,16 +3,21 @@ package release
 import (
 	"strings"
 	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // FuzzClassify fuzzes the pure classifier over untrusted SeaDex/arr strings
 // (release names, entry notes, group, tracker, MediaInfo codec) and asserts the
 // bounded-output and cross-function invariants the compare and audit layers
 // rely on: Kind/TrackerType/Codec/Resolution stay inside their enums, Group is
-// never empty (the NOGRP fallback), the classified group always intersects its
-// own raw group under NormalizeGroup, NormalizeGroup is idempotent, a bounded
-// remux token in the release name always classifies remux (per-file evidence
-// wins), and a parsed resolution always ranks above 0 in ResolutionRank.
+// never empty (the NOGRP fallback), the classified group is never PROVEN
+// divergent from its own raw group under GroupsOverlap (a known group matches
+// itself; an unknown-evidence group is indeterminate, never None), NormalizeGroup
+// is idempotent, a bounded remux token in the release name always classifies
+// remux (per-file evidence wins), a parsed resolution always ranks above 0 in
+// ResolutionRank, and no text can ever set DualAudio (the structured input
+// flag, unset here, is its only source).
 func FuzzClassify(f *testing.F) {
 	f.Add("Show 1080p BDRemux [Dual Audio]", "best remux available", "PMR", "Nyaa", "")
 	f.Add("Show x265 crf18", "", "", "AB", "HEVC")
@@ -22,8 +27,8 @@ func FuzzClassify(f *testing.F) {
 	f.Add("Show S01 PREMUX 1080p", "", "PMR", "Nyaa", "")
 	f.Add("Show 1080p x265", "grab the remux", "LostYears", "AB", "")
 	f.Add("Show 480p", "crf 18 encode", "no_group", "RuTracker", "avc")
-	f.Fuzz(func(t *testing.T, name, notes, group, tracker, codec string) {
-		rel := Classify(&Input{Names: []string{name}, Notes: notes, Group: group, Tracker: tracker, VideoCodec: codec})
+	f.Fuzz(func(t *testing.T, name, notes, group, trackerName, codec string) {
+		rel := Classify(&Input{Names: []string{name}, Notes: notes, Group: group, Tracker: trackerName, VideoCodec: codec})
 
 		switch rel.Kind {
 		case KindRemux, KindEncode, KindUnknown:
@@ -31,7 +36,7 @@ func FuzzClassify(f *testing.F) {
 			t.Errorf("Kind = %q outside the enum", rel.Kind)
 		}
 		switch rel.TrackerType {
-		case TrackerPublic, TrackerPrivate, TrackerUnknown:
+		case tracker.Public, tracker.Private, tracker.Unknown:
 		default:
 			t.Errorf("TrackerType = %q outside the enum", rel.TrackerType)
 		}
@@ -52,6 +57,9 @@ func FuzzClassify(f *testing.F) {
 		if rel.Reason == "" {
 			t.Error("Reason is empty; every classification must record why")
 		}
+		if rel.DualAudio {
+			t.Errorf("DualAudio = true from text alone (name %q, notes %q); the structured input flag is the only source", name, notes)
+		}
 
 		ng := NormalizeGroup(rel.Group)
 		if ng == "" {
@@ -60,8 +68,11 @@ func FuzzClassify(f *testing.F) {
 		if NormalizeGroup(ng) != ng {
 			t.Errorf("NormalizeGroup not idempotent: %q -> %q", ng, NormalizeGroup(ng))
 		}
-		if !GroupsIntersect([]string{rel.Group}, []string{group}) {
-			t.Errorf("classified group %q does not intersect its own raw group %q", rel.Group, group)
+		switch overlap := GroupsOverlap([]string{rel.Group}, []string{group}); {
+		case overlap == OverlapNone:
+			t.Errorf("classified group %q proven divergent from its own raw group %q", rel.Group, group)
+		case overlap == OverlapKnown && ng == noGroupNormalized:
+			t.Errorf("unknown-evidence group %q read as a proven match against %q", rel.Group, group)
 		}
 
 		// Contract: per-file name evidence wins for the file, so a
@@ -70,41 +81,6 @@ func FuzzClassify(f *testing.F) {
 		// does not reimplement the production tokenizer).
 		if strings.Contains(" "+strings.ToLower(name)+" ", " remux ") && rel.Kind != KindRemux {
 			t.Errorf("bounded remux marker in name but Kind = %q", rel.Kind)
-		}
-	})
-}
-
-// FuzzIsAnimeBytesHost fuzzes the AB host gate over arbitrary host strings
-// with metamorphic and bounded-output invariants (never a reimplementation of
-// the dot-boundary rule): gluing an explicit ".animebytes.tv" label boundary
-// onto any host always matches; gluing a dotless prefix onto a non-matching
-// host never creates a match (the suffix rule cannot be bypassed without a
-// label boundary); a single trailing dot never changes the answer; and a
-// matching host must at least end in "animebytes.tv" after the root-dot trim.
-func FuzzIsAnimeBytesHost(f *testing.F) {
-	f.Add("animebytes.tv")
-	f.Add("www.animebytes.tv")
-	f.Add("animebytes.tv.")
-	f.Add("maliciousanimebytes.tv")
-	f.Add("animebytes.tv.evil.com")
-	f.Add(".animebytes.tv")
-	f.Add("")
-	f.Fuzz(func(t *testing.T, host string) {
-		got := IsAnimeBytesHost(host)
-
-		if !IsAnimeBytesHost(host + ".animebytes.tv") {
-			t.Errorf("IsAnimeBytesHost(%q) = false, want true: an explicit .animebytes.tv label boundary always matches", host+".animebytes.tv")
-		}
-		if !got && !strings.HasPrefix(host, ".") && IsAnimeBytesHost("evil"+host) {
-			t.Errorf("IsAnimeBytesHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
-		}
-		if !strings.HasSuffix(host, ".") {
-			if dotted := IsAnimeBytesHost(host + "."); dotted != got {
-				t.Errorf("IsAnimeBytesHost(%q) = %v but IsAnimeBytesHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, host+".", dotted)
-			}
-		}
-		if got && !strings.HasSuffix(strings.TrimSuffix(host, "."), "animebytes.tv") {
-			t.Errorf("IsAnimeBytesHost(%q) = true but the host does not even end in animebytes.tv", host)
 		}
 	})
 }

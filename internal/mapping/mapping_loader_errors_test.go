@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,8 +15,8 @@ import (
 // nil logger falls back to slog.Default() so the loader's log calls cannot
 // panic on the fresh-reuse path (which logs at Debug).
 func TestNewLoader_nilLoggerDefaults(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, nil)
-	next, err := l.refreshCache(context.Background(), freshCache())
+	l := NewLoader(nil, "http://unused.invalid", WithRefresh(time.Hour))
+	next, err := l.refreshCache(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("refreshCache with nil logger error: %v", err)
 	}
@@ -29,8 +30,8 @@ func TestNewLoader_nilLoggerDefaults(t *testing.T) {
 // conditional GET, surfacing the no-cache-available
 // error on first boot.
 func TestLoader_refreshCache_badURLErrors(t *testing.T) {
-	l := NewLoader(&http.Client{}, "://not-a-url", "", time.Hour, discardLogger())
-	if _, err := l.refreshCache(context.Background(), &Cache{}); err == nil {
+	l := NewLoader(&http.Client{}, "://not-a-url", WithRefresh(time.Hour), WithLogger(discardLogger()))
+	if _, err := l.refreshCache(t.Context(), &Cache{}); err == nil {
 		t.Fatal("refreshCache with unparseable URL = nil error, want error")
 	}
 }
@@ -48,8 +49,8 @@ func TestLoader_refreshCache_unexpectedStatusKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
+	next, err := l.refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("204 refresh returned nil error, want unexpected-status degraded error")
 	}
@@ -58,26 +59,29 @@ func TestLoader_refreshCache_unexpectedStatusKeepsStale(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_overCapBodyKeepsStale pins the fail-closed download
-// bound: a 200 whose body exceeds maxMapBytes is rejected (ReadLimitedBody's
-// ResponseTooLargeError) and the stale map is kept, rather than a truncated
-// body being parsed as the new map.
-func TestLoader_refreshCache_overCapBodyKeepsStale(t *testing.T) {
+// TestLoader_refreshCache_boundsParseErrorText pins the emit-boundary
+// sanitization on the parse-failure path: a hostile 200 body whose top-level
+// value is a giant control-rune-laden JSON string surfaces a degraded error
+// whose text is bounded and single-line (the anilist sanitizeUpstreamMessage
+// policy), instead of echoing megabytes of attacker-controlled body into the
+// log stream every degraded cycle.
+func TestLoader_refreshCache_boundsParseErrorText(t *testing.T) {
+	hostile := `"` + strings.Repeat("A\u0007\u202e", 50000) + `"`
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(make([]byte, maxMapBytes+1))
+		_, _ = w.Write([]byte(hostile))
 	}))
 	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
+	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
+	_, err := l.refreshCache(t.Context(), &Cache{})
 	if err == nil {
-		t.Fatal("over-cap refresh returned nil error, want degraded error (fail closed)")
+		t.Fatal("refreshCache with string-body upstream = nil error, want parse-failure error")
 	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("over-cap refresh records = %+v, want stale record id 1", next.Records)
+	msg := err.Error()
+	if len(msg) > maxLoggedErrorBytes+100 {
+		t.Errorf("degraded error text = %d bytes, want bounded near maxLoggedErrorBytes (%d)", len(msg), maxLoggedErrorBytes)
+	}
+	if strings.ContainsAny(msg, "\n\r\u0007") || strings.Contains(msg, "\u202e") {
+		t.Errorf("degraded error text carries a control/bidi rune: %q", msg)
 	}
 }
 
@@ -92,7 +96,7 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
 	_, idx, err := l.Load(ctx, freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
@@ -111,8 +115,8 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 // a permission bit): the read error is logged and ignored, and the Fribb
 // record survives unmodified.
 func TestLoader_Load_directoryOverridesIgnored(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", t.TempDir(), time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(t.TempDir()), WithRefresh(time.Hour), WithLogger(discardLogger()))
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with directory overrides error: %v", err)
 	}
@@ -130,8 +134,8 @@ func TestLoader_Load_zeroIDOverrideIgnored(t *testing.T) {
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":0,"type":"movie"}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
-	_, idx, err := l.Load(context.Background(), freshCache())
+	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
+	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}

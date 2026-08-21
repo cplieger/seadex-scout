@@ -2,22 +2,25 @@ package anilist
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
 )
 
 // TestDedupeTitles_idempotentAndLossless pins the title-cleaning contract the
-// fuzz targets also assert (no empty, no duplicate titles) plus two properties
-// the tables cannot reach across arbitrary inputs: no non-empty input title is
-// ever lost, and the function is idempotent (re-deduping its own output is a
-// no-op), so a downstream normalized-title match sees a stable, complete list.
+// fuzz targets also assert (no blank, no duplicate titles) plus two properties
+// the tables cannot reach across arbitrary inputs: no usable (non-blank) input
+// title is ever lost, and the function is idempotent (re-deduping its own
+// output is a no-op), so a downstream normalized-title match sees a stable,
+// complete list.
 func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		titles := rapid.SliceOfN(
-			rapid.OneOf(rapid.SampledFrom([]string{"", "A", "B", "Frieren"}), rapid.String()),
+			rapid.OneOf(rapid.SampledFrom([]string{"", " ", "A", "B", "Frieren"}), rapid.String()),
 			0, 12,
 		).Draw(t, "titles")
 
@@ -25,8 +28,8 @@ func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 
 		seen := make(map[string]struct{}, len(out))
 		for _, title := range out {
-			if title == "" {
-				t.Fatalf("dedupeTitles(%q) returned an empty title", titles)
+			if strings.TrimSpace(title) == "" {
+				t.Fatalf("dedupeTitles(%q) returned a blank title", titles)
 			}
 			if _, dup := seen[title]; dup {
 				t.Fatalf("dedupeTitles(%q) returned duplicate title %q", titles, title)
@@ -34,11 +37,11 @@ func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 			seen[title] = struct{}{}
 		}
 		for _, title := range titles {
-			if title == "" {
+			if strings.TrimSpace(title) == "" {
 				continue
 			}
 			if _, ok := seen[title]; !ok {
-				t.Fatalf("dedupeTitles(%q) lost non-empty input title %q", titles, title)
+				t.Fatalf("dedupeTitles(%q) lost usable input title %q", titles, title)
 			}
 		}
 		if again := dedupeTitles(out...); !slices.Equal(again, out) {
@@ -76,7 +79,10 @@ func TestParseMediaPage_roundTripsGeneratedBatchesProperty(t *testing.T) {
 			Data wireData `json:"data"`
 		}
 
-		ids := rapid.SliceOfNDistinct(rapid.IntRange(1, 1_000_000), 0, 60, rapid.ID).Draw(t, "ids")
+		// Capped at batchSize: the decoder's boundedMediaList rejects a longer
+		// array by contract (the query requests perPage=batchSize), and that
+		// edge is pinned by TestParseMediaPageBoundsMediaCardinality.
+		ids := rapid.SliceOfNDistinct(rapid.IntRange(1, 1_000_000), 0, batchSize, rapid.ID).Draw(t, "ids")
 		media := make([]wireMedia, len(ids))
 		want := make(map[int]Media, len(ids))
 		for i, id := range ids {
@@ -108,6 +114,52 @@ func TestParseMediaPage_roundTripsGeneratedBatchesProperty(t *testing.T) {
 			}
 			if gm.Format != wm.Format || gm.Year != wm.Year || !slices.Equal(gm.Titles, wm.Titles) {
 				t.Fatalf("parsed media for id %d = %+v, want %+v", id, gm, wm)
+			}
+		}
+	})
+}
+
+// TestRetainRequested_dropsOnlyUnsolicitedIDsProperty pins FetchMany's
+// identity-set invariant across arbitrary response/request mixes, not just the
+// one injected id the fixed tables use: every unsolicited id is deleted from
+// the page (so it can never be merged, nor overwrite a value an earlier chunk
+// resolved), every requested record survives with its value untouched, and the
+// error is non-nil with errBatchRecord classification exactly when at least one
+// unsolicited id was present (the classification FetchMany depends on to keep
+// fetching later chunks instead of reading the response as a total outage).
+func TestRetainRequested_dropsOnlyUnsolicitedIDsProperty(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Disjoint ranges: chunk ids are requested, extras never were.
+		chunk := rapid.SliceOfNDistinct(rapid.IntRange(1, 500), 0, 20, rapid.ID).Draw(t, "chunk")
+		extra := rapid.SliceOfNDistinct(rapid.IntRange(501, 1000), 0, 5, rapid.ID).Draw(t, "unsolicited")
+		answered := rapid.IntRange(0, len(chunk)).Draw(t, "answered")
+
+		page := make(map[int]Media, answered+len(extra))
+		for _, id := range chunk[:answered] {
+			page[id] = Media{Titles: []string{fmt.Sprintf("t%d", id)}}
+		}
+		for _, id := range extra {
+			page[id] = Media{Titles: []string{"injected"}}
+		}
+
+		err := retainRequested(page, chunk)
+
+		if (err != nil) != (len(extra) > 0) {
+			t.Fatalf("retainRequested(chunk=%v, unsolicited=%v) err = %v, want an error exactly when an unsolicited id is present", chunk, extra, err)
+		}
+		if err != nil && !errors.Is(err, errBatchRecord) {
+			t.Fatalf("retainRequested err = %v, want errBatchRecord classification", err)
+		}
+		if len(page) != answered {
+			t.Fatalf("page retained %d records, want the %d requested ones", len(page), answered)
+		}
+		for _, id := range chunk[:answered] {
+			m, ok := page[id]
+			if !ok {
+				t.Fatalf("requested id %d was dropped", id)
+			}
+			if want := []string{fmt.Sprintf("t%d", id)}; !slices.Equal(m.Titles, want) {
+				t.Fatalf("requested id %d value = %+v, want titles %v", id, m, want)
 			}
 		}
 	})

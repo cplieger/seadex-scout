@@ -1,6 +1,8 @@
 package mapping
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -16,6 +18,8 @@ func FuzzParseFribb(f *testing.F) {
 	log := discardLogger()
 	f.Add([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":"100","imdb_id":"tt1","themoviedb_id":{"tv":5}}]`))
 	f.Add([]byte(`[{"anilist_id":"2","type":"MOVIE","imdb_id":["tt2","tt3"],"themoviedb_id":{"movie":[7,8]}}]`))
+	f.Add([]byte(`[{"anilist_id":10,"type":"MOVIE","themoviedb_id":603}]`))
+	f.Add([]byte(`[{"anilist_id":11,"type":" movie ","themoviedb_id":"603"}]`))
 	f.Add([]byte(`[{"anilist_id":0}]`))
 	f.Add([]byte(`[[],"x",5,{"anilist_id":9,"themoviedb_id":"unknown"}]`))
 	f.Add([]byte(`null`))
@@ -27,6 +31,9 @@ func FuzzParseFribb(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":5,"type":"tv","season":{"tvdb":2},"episode_offset":{"tvdb":12}}]`))
 	f.Add([]byte(`[{"anilist_id":6,"tvdb_id":"2147483648","imdb_id":["tt1",5,null]}]`))
 	f.Add([]byte(`[{"anilist_id":7,"themoviedb_id":{"movie":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33]}}]`))
+	f.Add([]byte(`[{"anilist_id":8,"imdb_id":["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","aa","bb","cc","dd","ee","ff","gg"]}]`))
+	f.Add([]byte(`[{"anilist_id":1,"anilist_id":false,"type":"MOVIE","type":7,"tvdb_id":42,"tvdb_id":false},{"anilist_id":2,"type":"tv","season":{"tvdb":"3"},"season":1}]`))
+	f.Add([]byte(`[{"anilist_id":3,"type":"tv","season":1,"imdb_id":["tt1",5,null,"  "]}]`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		records, err := parseFribb(data, log)
 		if err != nil {
@@ -40,8 +47,8 @@ func FuzzParseFribb(f *testing.F) {
 				t.Errorf("parseFribb Type = %q, want normalized %q", r.Type, want)
 			}
 			for _, id := range r.TmdbMovies {
-				if id == 0 {
-					t.Errorf("parseFribb TmdbMovies contains zero: %+v", r)
+				if id <= 0 {
+					t.Errorf("parseFribb TmdbMovies contains non-positive id: %+v", r)
 				}
 			}
 			for _, s := range r.IMDbIDs {
@@ -49,6 +56,40 @@ func FuzzParseFribb(f *testing.F) {
 					t.Errorf("parseFribb IMDbIDs entry not trimmed/non-empty: %q", s)
 				}
 			}
+			if len(r.IMDbIDs) > maxFribbIdentifiers || len(r.TmdbMovies) > maxFribbIdentifiers {
+				t.Errorf("parseFribb retained identifier list over cap %d: imdb=%d tmdb=%d", maxFribbIdentifiers, len(r.IMDbIDs), len(r.TmdbMovies))
+			}
+			if r.TvdbID < 0 || r.SeasonTvdb < 0 || r.AniListID < 0 {
+				t.Errorf("parseFribb retained a negative id: %+v", r)
+			}
+		}
+	})
+}
+
+// FuzzParseFribb_numericIDFormsEquivalent pins a cross-representation
+// property on the number-or-string flexInt decoder sitting on the externally
+// supplied Fribb JSON path: every int32 AniList/TVDB id must produce the same
+// records whether upstream sends JSON numbers or numeric strings (including
+// ids the validity invariant rejects, which must drop identically from both
+// forms).
+func FuzzParseFribb_numericIDFormsEquivalent(f *testing.F) {
+	f.Add(int32(0))
+	f.Add(int32(1))
+	f.Add(int32(-1))
+	f.Add(int32(2147483647))
+
+	log := discardLogger()
+	f.Fuzz(func(t *testing.T, id int32) {
+		numberJSON := fmt.Appendf(nil, `[{"anilist_id":%d,"tvdb_id":%d,"type":"tv"}]`, id, id)
+		stringJSON := fmt.Appendf(nil, `[{"anilist_id":%q,"tvdb_id":%q,"type":"tv"}]`, fmt.Sprint(id), fmt.Sprint(id))
+
+		numberRecords, numberErr := parseFribb(numberJSON, log)
+		stringRecords, stringErr := parseFribb(stringJSON, log)
+		if numberErr != nil || stringErr != nil {
+			t.Fatalf("parseFribb equivalent numeric forms: number error=%v, string error=%v", numberErr, stringErr)
+		}
+		if !reflect.DeepEqual(numberRecords, stringRecords) {
+			t.Errorf("parseFribb numeric form = %#v, string form = %#v for id %d", numberRecords, stringRecords, id)
 		}
 	})
 }

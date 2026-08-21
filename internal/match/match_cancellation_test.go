@@ -2,8 +2,10 @@ package match
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -20,8 +22,8 @@ func (cancelledAniList) Fetch(context.Context, int) (anilist.Media, error) {
 	return anilist.Media{}, context.Canceled
 }
 
-func (cancelledAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
-	return nil, context.Canceled
+func (cancelledAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{}, context.Canceled
 }
 
 // TestMatchCancelledLookupsLogDebugNotWarn pins the log-level contract for a
@@ -34,7 +36,7 @@ func TestMatchCancelledLookupsLogDebugNotWarn(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(nil) // no record: the entry needs the AniList lookup
 
-	res := NewMatcher(cancelledAniList{}, logger).Match(context.Background(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
+	res := New(cancelledAniList{}, logger).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
 
 	if !res.Degraded {
 		t.Error("Degraded = false, want true: a cancelled needed lookup must preserve findings")
@@ -46,5 +48,138 @@ func TestMatchCancelledLookupsLogDebugNotWarn(t *testing.T) {
 		if rec.Level >= slog.LevelWarn {
 			t.Errorf("cancellation logged at %s (%q); a shutdown must log at Debug, not Warn", rec.Level, rec.Message)
 		}
+	}
+}
+
+// cancelOnFetchAniList models a shutdown landing mid-cycle: the batch
+// prefetch partial-fails (a COMPLETED result with an empty map plus an error,
+// leaving the ids for the per-id retry), and the single Fetch cancels the run's
+// context while still answering successfully, so the cancellation is first
+// observed by the NEXT entry's loop check.
+type cancelOnFetchAniList struct {
+	cancel     context.CancelFunc
+	fetchCalls int
+}
+
+func (c *cancelOnFetchAniList) Fetch(_ context.Context, _ int) (anilist.Media, error) {
+	c.fetchCalls++
+	c.cancel()
+	return anilist.Media{Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}, nil
+}
+
+func (c *cancelOnFetchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{
+			Media:    media,
+			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+		},
+		errors.New("anilist 500 on a later chunk")
+}
+
+// TestMatchMidRunCancellationRetainsCompletedMatches pins the mid-loop
+// cancellation arm's retention contract (the twin of
+// TestMatchCancelledContextStopsBeforeEntries, which pins the zero-matched
+// pre-cancelled boundary): when the context is cancelled AFTER some entries
+// were matched, the already-completed matches are returned rather than
+// discarded, the remaining entries are skipped with no further AniList
+// traffic, the cycle is flagged Degraded, and a never-attempted id stays OUT
+// of IncompleteIDs (a shutdown is a whole-cycle event per the Result
+// contract).
+func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"}, // id-less: the per-id Fetch cancels the ctx and still answers
+		{AniListID: 22, Type: "MOVIE"}, // never reached: the loop breaks on the cancelled ctx
+	})
+	fake := &cancelOnFetchAniList{cancel: cancel}
+
+	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+		t.Errorf("matches = %+v, want exactly the one title match completed before the cancellation", res.Matches)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when the loop is cut short mid-run")
+	}
+	if fake.fetchCalls != 1 {
+		t.Errorf("single Fetch calls = %d, want 1 (no further AniList traffic after the cancellation)", fake.fetchCalls)
+	}
+	if _, ok := res.IncompleteIDs[22]; ok {
+		t.Errorf("IncompleteIDs = %v, want id 22 absent: a never-attempted id is a whole-cycle shutdown event, not a per-id incomplete lookup", res.IncompleteIDs)
+	}
+}
+
+// TestMatchCancellationDuringFinalEntryFlagsDegraded pins the post-loop
+// cancellation classification: when cancellation lands while the FINAL entry
+// is being matched (after the loop's boundary check already passed), the pass
+// must still be flagged Degraded so the clean-pass-only prune is skipped and
+// expired memo entries stay available to the feed's stale-title tier and the
+// next cycle's batch. The completed final match is retained, and the shutdown
+// stays a whole-cycle event (no per-id IncompleteIDs entry).
+func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"}, // id-less: the per-id Fetch cancels the ctx and still answers
+	})
+	fake := &cancelOnFetchAniList{cancel: cancel}
+	memo := Memo{Entries: map[int]MemoEntry{
+		901: {Titles: []string{"Stale"}, Format: "TV", Year: 2019, Expiry: time.Now().Add(-time.Hour)},
+	}}
+
+	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+		t.Fatalf("matches = %+v, want the final entry's completed title match retained", res.Matches)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when cancellation lands during the final entry")
+	}
+	if _, ok := res.Memo.Entries[901]; !ok {
+		t.Error("expired memo entry 901 was pruned; a cancelled pass must retain expired entries")
+	}
+	if len(res.IncompleteIDs) != 0 {
+		t.Errorf("IncompleteIDs = %v, want empty (a shutdown is a whole-cycle event)", res.IncompleteIDs)
+	}
+}
+
+// TestPrefetchSkippedOnAlreadyCancelledContext pins prefetch's cancellation
+// guard, the batch-side twin of TestMatchCancelledContextStopsBeforeEntries
+// (which uses an ID-resolvable record, so no batch is pending either way):
+// with a PENDING id-less record and an already-cancelled context, the batch
+// prefetch must not be issued at all - a FetchMany on a dead context can only
+// fail with context.Canceled - so no memo entry is stamped from it, the pass
+// is flagged Degraded, and no entry is matched.
+func TestPrefetchSkippedOnAlreadyCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: a pending batch id
+	fake := &batchCountingAniList{media: map[int]anilist.Media{
+		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
+	}}
+
+	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, &library.Snapshot{}, idx, Memo{})
+
+	if fake.batchCalls != 0 {
+		t.Errorf("batch calls = %d, want 0 (a batch issued on an already-cancelled cycle can only fail)", fake.batchCalls)
+	}
+	if fake.fetchCalls != 0 {
+		t.Errorf("single Fetch calls = %d, want 0", fake.fetchCalls)
+	}
+	if len(res.Memo.Entries) != 0 {
+		t.Errorf("memo = %+v, want empty: a cancelled pass must stamp nothing", res.Memo.Entries)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when the pass is cancelled before any entry")
+	}
+	if len(res.Matches) != 0 {
+		t.Errorf("matches = %d, want 0", len(res.Matches))
 	}
 }

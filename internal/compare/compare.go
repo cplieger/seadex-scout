@@ -3,29 +3,23 @@
 // the content filters (remux/dual-audio) AND are obtainable (on a public
 // tracker, or on AnimeBytes when the operator enables it), and compares the
 // surviving recommended release groups against the groups present on the
-// library item. The comparison is season-scoped: a SeaDex entry (one AniList
-// ID = one cour) is compared as the audit report scopes it (via internal/align):
-// a mapped TVDB season against that season's groups, a special against Sonarr's
-// season-0 bucket, a movie against its groups, and an absolute-numbered or
-// title-only run against every real season conservatively -
-// so a later season that needs a better release is not masked by an earlier
-// season that already has it. An item that already has a recommended group is
-// aligned and produces no finding; a recommended release the operator cannot
-// obtain is simply absent, never a finding.
+// library item.
 package compare
 
 import (
-	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // Status is the comparison outcome for a finding.
@@ -42,75 +36,98 @@ const (
 	StatusIncomplete Status = "incomplete"
 	// StatusTheoretical means the entry only names a theoretical best (not muxed).
 	StatusTheoretical Status = "theoretical_best"
+	// StatusUnverifiable means the comparison is indeterminate: the release
+	// group evidence on at least one side is unknown (a group-less on-disk
+	// file or a group-less SeaDex release, both carried as the release.NoGroup
+	// sentinel) and could hide an alignment - so neither a confident aligned
+	// silence nor a better_release warning is honest.
+	StatusUnverifiable Status = "unverifiable"
 )
 
-// Severity is the log level a finding maps to.
-type Severity string
-
-const (
-	// SevWarn is an actionable finding (a better release to go get).
-	SevWarn Severity = "warn"
-	// SevInfo is an informational finding (nothing directly actionable).
-	SevInfo Severity = "info"
-)
-
-// ReleaseLink is one obtainable source for a recommended release: the tracker
-// and a human-followable URL. A recommended group present on both a public
-// tracker and AnimeBytes yields two links, so a finding can surface both.
+// ReleaseLink is one obtainable source for a recommended release: the tracker,
+// a human-followable URL, and the AnimeBytes evidence the RAW upstream record
+// carried. A recommended group present on both a public tracker and AnimeBytes
+// yields two links, so a finding can surface both.
 type ReleaseLink struct {
-	Tracker string `json:"tracker"`
-	URL     string `json:"url"`
+	Tracker string
+	URL     string
+	// AB is the AnimeBytes grade classify.ABEvidence read from the RAW
+	// upstream (tracker, URL) pair this link was published from.
+	AB tracker.ABEvidence
+	// Headline reports whether this link belongs to the HEADLINE candidate's
+	// group - the group Finding.RecommendedGroup names.
+	Headline bool
 }
 
-// Finding is one comparison result for a library item. It carries the fields
-// the report layer emits and the dedupe key that suppresses re-alerts.
+// Finding is one comparison result for a library item. It carries the
+// semantic fields the notification layer emits; finding-set identity is the notify
+// package's own policy, derived from these fields at the notification boundary.
 type Finding struct {
-	Kind              string        `json:"kind,omitempty"`
-	Reason            string        `json:"classification_reason,omitempty"`
-	Arr               string        `json:"arr"`
-	CurrentGroup      string        `json:"current_group,omitempty"`
-	RecommendedGroup  string        `json:"recommended_group,omitempty"`
-	Tracker           string        `json:"tracker,omitempty"`
-	Title             string        `json:"title"`
-	Resolution        string        `json:"resolution,omitempty"`
-	Severity          Severity      `json:"severity"`
-	Codec             string        `json:"codec,omitempty"`
-	ReleaseURL        string        `json:"release_url,omitempty"`
-	ArrURL            string        `json:"arr_url,omitempty"`
-	InfoHash          string        `json:"info_hash,omitempty"`
-	DedupeKey         string        `json:"dedupe_key"`
-	Status            Status        `json:"status"`
-	RecommendedGroups []string      `json:"recommended_groups,omitempty"`
-	Links             []ReleaseLink `json:"links,omitempty"`
-	AniListID         int           `json:"al_id"`
-	Season            int           `json:"season,omitempty"`
-	DualAudio         bool          `json:"dual_audio,omitempty"`
+	Kind             string
+	Reason           string
+	Arr              string
+	CurrentGroup     string
+	RecommendedGroup string
+	Tracker          string
+	Title            string
+	Resolution       string
+	Codec            string
+	ReleaseURL       string
+	ArrURL           string
+	InfoHash         string
+	Status           Status
+	// Scope is the comparison scope the shared decision resolved
+	// (align.Decision.Kind, rendered via its String): "season", "movie",
+	// "special" or "series".
+	Scope             string
+	RecommendedGroups []string
+	Links             []ReleaseLink
+	// CurrentGroups preserves the scoped on-disk group set with its element
+	// boundaries as semantic structured data: CurrentGroup is the flattened
+	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
+	CurrentGroups []string
+	AniListID     int
+	Season        int
+	DualAudio     bool
+	// Approx marks a coarse comparison (align.Decision.Approx): the season-0
+	// specials bucket held more than one group, or the whole-series fallback
+	// spanned more than one real season or group, so CurrentGroup is an
+	// aggregate rather than an exact per-unit attribution. The audit report
+	// renders the same fact as "(approx)".
+	Approx bool
 }
+
+// --- Comparison flow ---
 
 // Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
-	log             *slog.Logger
+	tags            tagfilter.Filter
 	opts            filter.Options
 	excludeSpecials bool
+	animeBytes      bool
 }
 
 // Config configures a Comparer.
 type Config struct {
-	Logger          *slog.Logger
+	// TagFilter is the operator's filters.exclude_tags policy, asked about the
+	// findings surface. Its zero value - the default - excludes nothing, so a
+	// release SeaDex tags Broken produces a finding like any other.
+	TagFilter       tagfilter.Filter
 	Filter          filter.Options
 	ExcludeSpecials bool
+	// AnimeBytes includes AnimeBytes (private tracker) releases in the
+	// obtainability check; public trackers are always considered. Off means
+	// AnimeBytes releases are invisible.
+	AnimeBytes bool
 }
 
-// NewComparer builds a Comparer from cfg.
-func NewComparer(cfg Config) *Comparer {
-	log := cfg.Logger
-	if log == nil {
-		log = slog.Default()
-	}
+// New builds a Comparer from cfg.
+func New(cfg Config) *Comparer {
 	return &Comparer{
-		log:             log,
+		tags:            cfg.TagFilter,
 		opts:            cfg.Filter,
 		excludeSpecials: cfg.ExcludeSpecials,
+		animeBytes:      cfg.AnimeBytes,
 	}
 }
 
@@ -124,7 +141,7 @@ func (c *Comparer) Compare(matches []match.Match) []Finding {
 		if !m.InLibrary() {
 			continue
 		}
-		if filter.ExcludeSpecial(m.Record.IsSpecial(), c.excludeSpecials) {
+		if c.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		if f := c.compareOne(m); f != nil {
@@ -142,103 +159,43 @@ type candidate struct {
 }
 
 // compareOne compares one matched, in-library entry and returns a finding, or
-// nil when there is nothing to report: the mapped scope has no file on disk
-// (the audit's no_file; checked first, before anything about the entry), the
-// item is aligned (already has a recommended group), or no recommended release
-// survives the filters and the entry is neither incomplete nor
-// theoretical-best.
+// nil when there is nothing to report.
 func (c *Comparer) compareOne(m *match.Match) *Finding {
 	entry := &m.Entry
 	recommended := c.recommended(entry)
-
-	// Scope the on-disk groups the same way the audit report does (movie / the
-	// mapped TVDB season / the season-0 specials bucket), via the shared
-	// internal/align, so a daemon finding never disagrees with the report.
-	scoped := align.Scope(m.Item, &m.Record)
-	if scoped.Kind == align.ScopeWholeSeries {
-		// A Sonarr absolute-numbered run / title-only match has no per-season
-		// Fribb mapping, so its single whole-series recommendation is compared
-		// against every real season on disk, conservatively (compareWholeSeries)
-		// - exactly as the audit report does.
-		return c.compareWholeSeries(m, recommended)
-	}
-	if !scoped.HasFile {
-		// File presence first, before the recommendation-emptiness check: the
-		// mapped season/movie/special is not on disk, so there is nothing the
-		// operator has for any recommendation (or incomplete/theoretical nudge)
-		// to apply to. The audit records this scope as no_file; compare has no
-		// no-file status, so report-by-exception means the daemon stays quiet.
+	recGroups := groupSet(recommended)
+	// The daemon only distinguishes best-vs-not, so alt is nil: an on-disk
+	// unit lacking a recommended group reads as unlisted (not aligned).
+	d := align.Decide(m.Item, &m.Record, recGroups, nil)
+	if d.Outcome == align.OutcomeNoFile {
 		return nil
 	}
-	base := c.baseFinding(m, scoped.Groups)
-	if len(recommended) == 0 {
+	base := baseFinding(m, &d)
+	switch d.Outcome {
+	case align.OutcomeNoBest:
 		return emptyResult(entry, &base)
-	}
-
-	recGroups := groupSet(recommended)
-	if release.GroupsIntersect(recGroups, scoped.Groups) {
-		return nil // aligned: a recommended group is already present
-	}
-	// Alignment wins over the mixed-group nudge: a season that already carries a
-	// recommended group is aligned no matter how many groups it spans (exactly
-	// as the audit reports it). Only a NOT-aligned multi-group season needs the
-	// manual review. The scoped group count, not the whole-item group set, so a
-	// season that carries a single group is not misreported as
-	// mixed_group_manual.
-	if len(scoped.Groups) > 1 {
-		fillBest(&base, recommended, recGroups)
-		return finalize(&base, StatusMixedGroup, SevInfo)
-	}
-
-	// Not aligned: a better release the operator can obtain and lacks.
-	return betterResult(entry, &base, recommended, recGroups)
-}
-
-// compareWholeSeries compares a Sonarr whole-series entry (an absolute-numbered
-// run or title-only match, with no per-season Fribb mapping) against every real
-// season on disk (season 0 excluded), conservatively: the item is aligned only
-// when every on-disk season already carries a recommended group, matching the
-// audit report's whole-series verdict via the shared align.SummarizeWholeSeries.
-// It stays silent when no real season is on disk (checked first, before
-// anything about the entry - the audit's no_file), and a not-aligned aggregate
-// spanning more than one group is a mixed_group_manual nudge, exactly as in the
-// season-scoped arm.
-func (c *Comparer) compareWholeSeries(m *match.Match, recommended []candidate) *Finding {
-	entry := &m.Entry
-	recGroups := groupSet(recommended)
-	// nil alt: the daemon only distinguishes best-vs-not, so an on-disk season
-	// lacking a recommended group surfaces as AnyUnlisted.
-	summary := align.SummarizeWholeSeries(m.Item, recGroups, nil)
-	if summary.Seasons == 0 {
-		// File presence first, before the recommendation-emptiness check
-		// (mirroring compareOne): no real season on disk means nothing for any
-		// recommendation (or incomplete/theoretical nudge) to apply to. The
-		// audit records this as no_file; the daemon stays quiet.
+	case align.OutcomeAligned:
 		return nil
-	}
-	base := c.baseFinding(m, summary.Groups)
-	if len(recommended) == 0 {
-		return emptyResult(entry, &base)
-	}
-	if !summary.AnyUnlisted {
-		return nil // aligned: every on-disk season already carries a recommended group
-	}
-	// Alignment wins over the mixed-group nudge, exactly as in compareOne: a
-	// NOT-aligned aggregate spanning more than one group cannot attribute one
-	// current group, so it is a manual-review nudge rather than a false
-	// better_release.
-	if len(summary.Groups) > 1 {
+	case align.OutcomeUnverifiable:
 		fillBest(&base, recommended, recGroups)
-		return finalize(&base, StatusMixedGroup, SevInfo)
+		return finalize(&base, StatusUnverifiable)
+	case align.OutcomeMixed:
+		fillBest(&base, recommended, recGroups)
+		return finalize(&base, StatusMixedGroup)
+	case align.OutcomeDiverged:
+		return betterResult(entry, &base, recommended, recGroups)
+	default:
+		// Every Outcome the shared linearization produces is handled above.
+		fillBest(&base, recommended, recGroups)
+		return finalize(&base, StatusUnverifiable)
 	}
-
-	// At least one on-disk season lacks a recommended group.
-	return betterResult(entry, &base, recommended, recGroups)
 }
 
 // recommended classifies the entry's SeaDex "best" torrents and returns those
-// the operator could act on: passing the content filters (remux policy,
-// dual-audio) AND obtainable (a public tracker, or AnimeBytes when enabled).
+// the operator could act on: not excluded by the operator's tag policy
+// (filters.exclude_tags, which by default excludes nothing), passing the
+// content filters (remux policy, dual-audio) AND obtainable (a public
+// tracker, or AnimeBytes when enabled).
 func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 	var out []candidate
 	for i := range entry.Torrents {
@@ -246,17 +203,22 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		if !t.IsBest {
 			continue
 		}
-		// AB guard before classification; the raw-URL invariant lives in
-		// classify.ABVisible. Obtainable below re-checks the label as defense
-		// in depth.
-		if !classify.ABVisible(t, c.opts.AnimeBytes) {
+		// The operator's configured tag exclusions for THIS surface, asked
+		// per occurrence: only the torrent whose own tags are excluded drops
+		// out, unlike the feed's identity-wide closure in
+		// internal/indexer's splitCurationWarned.
+		if c.tags.Excludes(t.Tags, tagfilter.SurfaceFindings) {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
-		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
+		if !filter.KeepNonTracker(&rel, c.opts) {
 			continue
 		}
-		if !filter.Obtainable(&rel, t.URL, c.opts) {
+		// The ONE AnimeBytes visibility gate on this path: Obtainable applies
+		// filter.ABVisible to the RAW upstream URL (t.URL, never the published
+		// link) in both its public and its private arm, so an AB-hosted or
+		// AB-labelled release is invisible with the toggle off.
+		if !classify.Obtainable(&rel, t, c.animeBytes) {
 			continue
 		}
 		out = append(out, candidate{rel: rel, torrent: *t})
@@ -264,16 +226,16 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 	return out
 }
 
-// betterResult finalizes a not-aligned finding: a better release the operator
+// betterResult finalizes a diverged finding: a better release the operator
 // can obtain and lacks, downgraded to an incomplete info nudge when the entry
 // is incomplete (nothing complete to grab).
 func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, recGroups []string) *Finding {
-	status, sev := StatusBetter, SevWarn
+	status := StatusBetter
 	if entry.Incomplete {
-		status, sev = StatusIncomplete, SevInfo
+		status = StatusIncomplete
 	}
 	fillBest(base, recommended, recGroups)
-	return finalize(base, status, sev)
+	return finalize(base, status)
 }
 
 // emptyResult decides the finding when no recommended release survives the
@@ -284,26 +246,32 @@ func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, r
 func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 	switch classify.Fallback(entry) {
 	case classify.FallbackTheoretical:
-		return finalize(base, StatusTheoretical, SevInfo)
+		return finalize(base, StatusTheoretical)
 	case classify.FallbackIncomplete:
-		return finalize(base, StatusIncomplete, SevInfo)
+		return finalize(base, StatusIncomplete)
 	default:
 		return nil
 	}
 }
 
-// baseFinding seeds a finding with the item identity fields, using the scope
-// groups already resolved by the caller - the mapped season's groups, or the
-// whole-series union for a whole-series comparison - so a season-scoped
-// finding's CurrentGroup and dedupe key never leak whole-series groups.
-func (c *Comparer) baseFinding(m *match.Match, groups []string) Finding {
+// baseFinding seeds a finding with the item identity fields, using the groups
+// and season the shared decision judged/attributed the unit against
+// (align.Decision.Groups: the mapped season's groups, or the whole-series
+// union; align.Decision.Season: the shared season label) - so a season-scoped
+// finding's CurrentGroup (and the dedupe key notify derives from it) never
+// leaks whole-series groups, and the season attribution cannot drift from
+// the audit report's.
+func baseFinding(m *match.Match, d *align.Decision) Finding {
 	return Finding{
-		Title:        m.Item.Title,
-		Arr:          m.Arr,
-		ArrURL:       m.Item.ArrURL,
-		CurrentGroup: strings.Join(groups, ","),
-		AniListID:    m.Entry.AniListID,
-		Season:       max(0, m.Record.SeasonTvdb),
+		Title:         m.Item.Title,
+		Arr:           m.Arr,
+		ArrURL:        m.Item.ArrURL,
+		CurrentGroup:  strings.Join(d.Groups, ","),
+		CurrentGroups: d.Groups,
+		AniListID:     m.Entry.AniListID,
+		Season:        d.Season,
+		Scope:         d.Kind.String(),
+		Approx:        d.Approx,
 	}
 }
 
@@ -315,7 +283,7 @@ func fillBest(f *Finding, pool []candidate, recGroups []string) {
 	rep := representative(pool)
 	fillFromCandidate(f, &rep)
 	f.RecommendedGroups = recGroups
-	f.Links = obtainableLinks(pool)
+	f.Links = obtainableLinks(pool, release.NormalizeGroup(rep.rel.Group))
 }
 
 // fillFromCandidate copies a candidate's release + torrent fields onto a finding.
@@ -327,117 +295,106 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 	f.Kind = string(cand.rel.Kind)
 	f.Reason = cand.rel.Reason
 	f.InfoHash = cand.torrent.InfoHash
-	f.ReleaseURL = cand.torrent.UsableURL()
+	f.ReleaseURL = classify.PublishURL(&cand.torrent)
 	f.DualAudio = cand.rel.DualAudio
 }
 
 // obtainableLinks returns the distinct (tracker, URL) links across the pool,
-// deduped, preserving pool order. This is what lets a finding surface both a
-// Nyaa and an AnimeBytes link for the same recommended release.
-func obtainableLinks(pool []candidate) []ReleaseLink {
-	seen := make(map[string]struct{}, len(pool))
-	var links []ReleaseLink
-	for i := range pool {
-		u := pool[i].torrent.UsableURL()
-		if u == "" {
-			continue
-		}
-		key := pool[i].rel.Tracker + "|" + u
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		links = append(links, ReleaseLink{Tracker: pool[i].rel.Tracker, URL: u})
+// deduped, ordered headlineGroup-first and then by (URL, tracker). This is
+// what lets a finding surface both a Nyaa and an AnimeBytes link for the same
+// recommended release.
+func obtainableLinks(pool []candidate, headlineGroup string) []ReleaseLink {
+	sources := sourcedLinks(pool, headlineGroup)
+	slices.SortFunc(sources, compareSourcedLinks)
+	links := make([]ReleaseLink, 0, len(sources))
+	for i := range sources {
+		link := sources[i].link
+		// Carry the rank to the consumer as data, not just as slice order:
+		// notify.trackerURLs selects per tracker class, so order alone loses
+		// the affinity (see ReleaseLink.Headline).
+		link.Headline = sources[i].rank == 0
+		links = append(links, link)
 	}
 	return links
 }
 
-// finalize sets a finding's status/severity and computes its dedupe key.
-func finalize(f *Finding, status Status, sev Severity) *Finding {
+// sourcedLink is one obtainable link plus its headline rank (0 = a source of
+// the headline candidate's group, 1 = any other source), the key
+// obtainableLinks' total order sorts on.
+type sourcedLink struct {
+	link ReleaseLink
+	rank int
+}
+
+// sourcedLinks collects the pool's distinct URL-carrying links in first-seen
+// order, each ranked headline-first.
+func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
+	// Keyed on the link IDENTITY (tracker + URL) only: ReleaseLink.Headline
+	// is producer affinity, not identity, so it must never take part in the
+	// dedupe - obtainableLinks assigns it after this collection runs. The AB
+	// grade is evidence about the record, not identity either, and is merged
+	// (strongest wins) rather than keyed on.
+	type linkKey struct{ tracker, url string }
+	seen := make(map[linkKey]int, len(pool))
+	sources := make([]sourcedLink, 0, len(pool))
+	for i := range pool {
+		u := classify.PublishURL(&pool[i].torrent)
+		if u == "" {
+			continue
+		}
+		link := ReleaseLink{
+			Tracker: pool[i].rel.Tracker,
+			URL:     u,
+			// Graded from the RAW record, never from u: see ReleaseLink.AB.
+			AB: classify.ABEvidence(&pool[i].torrent),
+		}
+		rank := 1
+		if release.NormalizeGroup(pool[i].rel.Group) == headlineGroup {
+			rank = 0
+		}
+		key := linkKey{tracker: link.Tracker, url: link.URL}
+		if idx, dup := seen[key]; dup {
+			sources[idx].rank = min(sources[idx].rank, rank)
+			// Two records can publish the same (tracker, URL) from different
+			// raw values, so the surviving link keeps the STRONGEST AnimeBytes
+			// evidence any of them carried - the same fail-closed direction
+			// the AB gates take, rather than letting record order decide
+			// whether the link is announced as AnimeBytes.
+			sources[idx].link.AB = max(sources[idx].link.AB, link.AB)
+			continue
+		}
+		seen[key] = len(sources)
+		sources = append(sources, sourcedLink{link: link, rank: rank})
+	}
+	return sources
+}
+
+// compareSourcedLinks orders collected links headline-group-first, then by URL,
+// then by tracker - the deterministic total order obtainableLinks documents.
+func compareSourcedLinks(a, b sourcedLink) int {
+	if a.rank != b.rank {
+		if a.rank < b.rank {
+			return -1
+		}
+		return 1
+	}
+	if c := strings.Compare(a.link.URL, b.link.URL); c != 0 {
+		return c
+	}
+	return strings.Compare(a.link.Tracker, b.link.Tracker)
+}
+
+// finalize sets a finding's status.
+func finalize(f *Finding, status Status) *Finding {
 	f.Status = status
-	f.Severity = sev
-	f.DedupeKey = dedupeKey(f)
 	return f
 }
 
-// dedupeKey keys a finding by AniList ID, status, recommended-group set, current
-// group, and release identity, so a same-group quality swap (new identity) or a
-// changed library state re-surfaces while an unchanged finding is suppressed.
-// It is AnimeBytes-aware two ways: SeaDex redacts AB info hashes, so the
-// identity falls back to the release URL (releaseIdentity), and the AB link set
-// is appended when present (animeBytesLinkKey), so enabling AnimeBytes on an
-// existing public-tracker finding re-surfaces the newly obtainable AB source.
-// The untrusted components (group names, the current group, and the release
-// identity - all parsed from SeaDex data or library file names) have their
-// delimiter characters escaped (escapeDedupePart) before joining, so a value
-// that itself contains the ',' or '|' delimiter cannot collide two distinct
-// findings onto one key (which would suppress the second as already alerted),
-// while a delimiter-free value keeps its legacy representation and existing
-// persisted dedupe state stays valid.
-func dedupeKey(f *Finding) string {
-	groups := slices.Clone(f.RecommendedGroups)
-	slices.Sort(groups)
-	for i := range groups {
-		groups[i] = escapeDedupePart(groups[i])
-	}
-	key := strings.Join([]string{
-		strconv.Itoa(f.AniListID),
-		string(f.Status),
-		strings.Join(groups, ","),
-		escapeDedupePart(f.CurrentGroup),
-		escapeDedupePart(releaseIdentity(f)),
-	}, "|")
-	if abLinks := animeBytesLinkKey(f.Links); abLinks != "" {
-		key += "|ab=" + abLinks
-	}
-	return key
-}
-
-// dedupePartEscaper escapes the characters that participate in the dedupe-key
-// grammar (the '|' field and ',' list delimiters, plus the '\' escape itself,
-// escaped first so the mapping stays injective). Escaping only the reserved
-// characters keeps every delimiter-free component byte-identical to its legacy
-// unescaped form, so persisted dedupe keys from earlier versions remain valid.
-var dedupePartEscaper = strings.NewReplacer(
-	`\`, `\\`,
-	",", `\,`,
-	"|", `\|`,
-)
-
-// escapeDedupePart makes an untrusted dedupe-key component safe to join with
-// the ',' and '|' delimiters (see dedupePartEscaper).
-func escapeDedupePart(s string) string { return dedupePartEscaper.Replace(s) }
-
-// releaseIdentity returns the stable torrent identity used by finding dedupe.
-// SeaDex redacts AnimeBytes info hashes (the literal "<redacted>"), so use the
-// unique torrent page URL there; otherwise every same-group AB replacement
-// would keep the same key and the later replacement would be suppressed.
-func releaseIdentity(f *Finding) string {
-	hash := strings.TrimSpace(f.InfoHash)
-	if hash == "" || strings.EqualFold(hash, "<redacted>") {
-		return strings.TrimSpace(f.ReleaseURL)
-	}
-	return hash
-}
-
-// animeBytesLinkKey returns the sorted AnimeBytes link URLs of a finding as a
-// single comma-joined string, or "" when the finding carries no AB link, so
-// the dedupe key changes when the AB source set changes. Each URL has its
-// delimiters escaped before joining, matching dedupeKey's collision-proofing:
-// a SeaDex-supplied URL containing ',' or '|' cannot collide two link sets.
-func animeBytesLinkKey(links []ReleaseLink) string {
-	var urls []string
-	for i := range links {
-		if release.IsAnimeBytes(links[i].Tracker) {
-			urls = append(urls, escapeDedupePart(strings.TrimSpace(links[i].URL)))
-		}
-	}
-	slices.Sort(urls)
-	return strings.Join(urls, ",")
-}
+// --- Headline candidate selection ---
 
 // representative picks the headline recommended release: highest resolution,
-// then a public tracker, then the first. It assumes len(pool) > 0.
+// then a public tracker, then the stable content key (never upstream order).
+// It assumes len(pool) > 0.
 func representative(pool []candidate) candidate {
 	bestIdx := 0
 	for i := 1; i < len(pool); i++ {
@@ -449,13 +406,37 @@ func representative(pool []candidate) candidate {
 }
 
 // betterCandidate reports whether a should outrank b as the headline
-// recommendation (higher resolution, then public-over-private tracker).
+// recommendation (higher resolution, then public-over-private tracker, then
+// the candidates' stable content keys, computed only when the ranks tie).
 func betterCandidate(a, b *candidate) bool {
 	ra, rb := release.ResolutionRank(a.rel.Resolution), release.ResolutionRank(b.rel.Resolution)
 	if ra != rb {
 		return ra > rb
 	}
-	return a.rel.TrackerType == release.TrackerPublic && b.rel.TrackerType != release.TrackerPublic
+	aPublic := a.rel.TrackerType == tracker.Public
+	bPublic := b.rel.TrackerType == tracker.Public
+	if aPublic != bPublic {
+		return aPublic
+	}
+	return candidateStableKey(a) < candidateStableKey(b)
+}
+
+// candidateStableKey is the deterministic content identity that breaks
+// equal-rank headline ties independently of upstream order: the same
+// candidate set always selects the same representative, whatever order
+// PocketBase returned the torrents relation in.
+func candidateStableKey(c *candidate) string {
+	return keyenc.Join(
+		release.NormalizeGroup(c.rel.Group),
+		strings.ToLower(strings.TrimSpace(c.rel.Tracker)),
+		strings.ToLower(strings.TrimSpace(c.rel.Resolution)),
+		strings.ToLower(strings.TrimSpace(c.rel.Codec)),
+		string(c.rel.Kind),
+		c.rel.Reason,
+		strings.TrimSpace(c.torrent.InfoHash),
+		strings.TrimSpace(classify.PublishURL(&c.torrent)),
+		strconv.FormatBool(c.rel.DualAudio),
+	)
 }
 
 // groupSet returns the sorted distinct normalized groups of the given releases.

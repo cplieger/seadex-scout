@@ -5,28 +5,6 @@ import (
 	"testing"
 )
 
-// TestFlexInt_nonIntegerStringDecodesZero pins the string branch's Atoi
-// fallback: a validly-quoted but non-integer numeric string ("12.5") decodes
-// to 0 (a tolerated placeholder) rather than erroring or truncating to 12.
-func TestFlexInt_nonIntegerStringDecodesZero(t *testing.T) {
-	var f flexInt
-	if err := f.UnmarshalJSON([]byte(`"12.5"`)); err != nil {
-		t.Fatalf("UnmarshalJSON(%q) error: %v", `"12.5"`, err)
-	}
-	if int(f) != 0 {
-		t.Errorf("flexInt(%q) = %d, want 0 (non-integer string tolerated as placeholder)", `"12.5"`, int(f))
-	}
-}
-
-// TestFlexInt_malformedStringErrors pins that the string branch propagates a
-// JSON syntax error (an unterminated string) instead of tolerating it.
-func TestFlexInt_malformedStringErrors(t *testing.T) {
-	var f flexInt
-	if err := f.UnmarshalJSON([]byte(`"unterminated`)); err == nil {
-		t.Error("UnmarshalJSON(unterminated string) = nil error, want syntax error")
-	}
-}
-
 // TestStringList_numberScalarTolerated pins the scalar branch's tolerance: a
 // non-string scalar (a bare number) decodes to an empty list rather than
 // failing the record.
@@ -89,7 +67,7 @@ func TestParseFribb_mixedImdbArrayKeepsRecord(t *testing.T) {
 }
 
 // TestParseFribb_fractionalAndNegativeIDsAbsent pins the record-level
-// consequence of setNumber's validity invariant: a fractional id decodes as
+// consequence of the tolerant decode's validity invariant: a fractional id decodes as
 // absent (not truncated - 9.9 truncated to 9 would point at a different
 // anime) and a negative id decodes as absent (it must not count toward the
 // arr-identifier acceptance floor), while both records survive.
@@ -187,22 +165,22 @@ func TestTmdbID_badInteriorTolerated(t *testing.T) {
 	}
 }
 
-// TestOffsetPair_malformedObjectTolerated pins the object branch's tolerance:
-// syntactically broken object bytes decode to a zero offsetPair (SeasonTvdb 0,
+// TestSeasonObject_malformedObjectTolerated pins the object branch's tolerance:
+// syntactically broken object bytes decode to a zero seasonObject (SeasonTvdb 0,
 // the whole-series/season-0 fallback) with a nil error rather than failing.
-func TestOffsetPair_malformedObjectTolerated(t *testing.T) {
-	var o offsetPair
+func TestSeasonObject_malformedObjectTolerated(t *testing.T) {
+	var o seasonObject
 	if err := o.UnmarshalJSON([]byte(`{"tvdb":`)); err != nil {
 		t.Fatalf("UnmarshalJSON(malformed object) error: %v", err)
 	}
 	if o.tvdbOrZero() != 0 {
-		t.Errorf("offsetPair(malformed object).tvdbOrZero() = %d, want 0", o.tvdbOrZero())
+		t.Errorf("seasonObject(malformed object).tvdbOrZero() = %d, want 0", o.tvdbOrZero())
 	}
 }
 
 // TestFlexString_malformedStringErrors pins that the string branch propagates
 // a JSON syntax error (an unterminated string) instead of tolerating it,
-// matching the sibling flexInt string-branch contract.
+// matching the sibling flexInt malformed-string contract.
 func TestFlexString_malformedStringErrors(t *testing.T) {
 	var s flexString
 	if err := s.UnmarshalJSON([]byte(`"unterminated`)); err == nil {
@@ -223,5 +201,71 @@ func TestStringList_malformedArrayTolerated(t *testing.T) {
 	}
 	if s != nil {
 		t.Errorf("stringList(malformed array) = %v, want nil", []string(s))
+	}
+}
+
+// TestTolerantDecoders_resetOnReuse pins the duplicate-key reset invariant on
+// each app-owned tolerant decoder directly (flexInt is covered in jsonx):
+// encoding/json processes duplicate object keys in order against the SAME
+// field receiver, so a later tolerated-odd value must clear the earlier
+// decode, not silently retain it.
+func TestTolerantDecoders_resetOnReuse(t *testing.T) {
+	var s flexString
+	if err := s.UnmarshalJSON([]byte(`"MOVIE"`)); err != nil || string(s) != "MOVIE" {
+		t.Fatalf("flexString first decode = %q, %v, want MOVIE, nil", string(s), err)
+	}
+	if err := s.UnmarshalJSON([]byte(`7`)); err != nil || string(s) != "" {
+		t.Errorf("flexString reused with odd value = %q, %v, want reset to empty, nil", string(s), err)
+	}
+
+	var l stringList
+	if err := l.UnmarshalJSON([]byte(`["tt1"]`)); err != nil || len(l) != 1 {
+		t.Fatalf("stringList first decode = %v, %v, want [tt1], nil", []string(l), err)
+	}
+	if err := l.UnmarshalJSON([]byte(`false`)); err != nil || l != nil {
+		t.Errorf("stringList reused with odd value = %v, %v, want reset to nil, nil", []string(l), err)
+	}
+
+	var tm tmdbID
+	if err := tm.UnmarshalJSON([]byte(`{"movie":[9]}`)); err != nil || len(tm.Movie) != 1 {
+		t.Fatalf("tmdbID first decode = %+v, %v, want one movie id, nil", tm, err)
+	}
+	if err := tm.UnmarshalJSON([]byte(`3`)); err != nil || len(tm.Movie) != 0 {
+		t.Errorf("tmdbID reused with odd value = %+v, %v, want reset to empty, nil", tm, err)
+	}
+
+	var o seasonObject
+	if err := o.UnmarshalJSON([]byte(`{"tvdb":3}`)); err != nil || o.tvdbOrZero() != 3 {
+		t.Fatalf("seasonObject first decode = %+v, %v, want tvdb 3, nil", o, err)
+	}
+	if err := o.UnmarshalJSON([]byte(`4`)); err != nil || o.tvdbOrZero() != 0 {
+		t.Errorf("seasonObject reused with odd value = %+v, %v, want reset to zero, nil", o, err)
+	}
+}
+
+// TestParseFribb_duplicateKeysLaterOddValueWins pins the documented per-field
+// tolerance semantics under duplicate JSON keys end-to-end: a later odd
+// anilist_id zeroes the key and drops the record, and later odd type/tvdb_id
+// values decode as empty/zero instead of retaining the earlier valid values.
+func TestParseFribb_duplicateKeysLaterOddValueWins(t *testing.T) {
+	data := []byte(`[
+		{"anilist_id":1,"anilist_id":false,"type":"MOVIE","tvdb_id":42},
+		{"anilist_id":2,"type":"MOVIE","type":7,"tvdb_id":42,"tvdb_id":false}
+	]`)
+	records, err := parseFribb(data, discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("parseFribb kept %d records, want 1 (later odd anilist_id drops its record)", len(records))
+	}
+	if records[0].AniListID != 2 {
+		t.Errorf("surviving record AniListID = %d, want 2", records[0].AniListID)
+	}
+	if records[0].Type != "" {
+		t.Errorf("duplicate-key Type = %q, want empty (later odd value wins)", records[0].Type)
+	}
+	if records[0].TvdbID != 0 {
+		t.Errorf("duplicate-key TvdbID = %d, want 0 (later odd value wins)", records[0].TvdbID)
 	}
 }

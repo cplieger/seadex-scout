@@ -1,0 +1,343 @@
+package align_test
+
+import (
+	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/mapping"
+)
+
+// TestDecidePlaceholderItemIsUnverifiedNotNoFile pins the placeholder branch
+// h-f5 added: a library.Item whose file state could not be READ
+// (library.Item.Failed - a series whose episode fetch failed, or a movie Radarr
+// reports a file for while sending no MovieFile payload) has no group evidence at
+// all, so the standing is unverified and Groups stays nil. StandingNoFile would
+// assert the unit has nothing on disk, which is the false claim Comparable exists
+// to stop - and it is what the report rendered before the fix.
+//
+// It is pinned HERE, on Decide, because the audit report is the consumer that
+// relies on Decide handling the placeholder (the daemon's compare pass drops
+// these matches beforehand via scout.splitFailedMatches), and no other align
+// test passes a Failed item to Decide: deleting the branch restored the
+// no_file verdict with the whole suite still green.
+func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
+	movieRec := mapping.Record{Type: "MOVIE"}
+	for name, item := range map[string]library.Item{
+		"failed movie":                   {Arr: library.ArrRadarr, Failed: true},
+		"failed movie Radarr filed":      {Arr: library.ArrRadarr, Failed: true, HasFile: true},
+		"failed series with no groups":   {Arr: library.ArrSonarr, Failed: true},
+		"failed series with read groups": {Arr: library.ArrSonarr, Failed: true, SeasonGroups: map[int][]string{1: {"sam"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := movieRec
+			if item.Arr == library.ArrSonarr {
+				rec = mapping.Record{Type: "TV", SeasonTvdb: 1}
+			}
+			d := align.Decide(&item, &rec, []string{"sam"}, nil)
+			if d.Standing != align.StandingUnverified {
+				t.Errorf("Standing = %v, want %v (a placeholder's file state is MISSING, not empty)", d.Standing, align.StandingUnverified)
+			}
+			if d.Outcome != align.OutcomeUnverifiable {
+				t.Errorf("Outcome = %v, want %v", d.Outcome, align.OutcomeUnverifiable)
+			}
+			if len(d.Groups) != 0 {
+				t.Errorf("Groups = %v, want empty (no groups were read, so none may be reported)", d.Groups)
+			}
+			if d.NoBest {
+				t.Error("NoBest = true, want false (the best set is non-empty)")
+			}
+		})
+	}
+}
+
+// TestDecideSingleUnit pins the file-first group ladder and the outcome
+// linearization for the single-unit scopes (ported from the audit's former
+// verdict table, which the shared core replaced): no file wins over
+// everything including the no-best nudge, a group-less filed unit is
+// unverified (and unverifiable rather than mixed or diverged), a proven best
+// group aligns no matter how many groups the unit spans, and a not-aligned
+// all-known unit is mixed exactly when it spans more than one group.
+func TestDecideSingleUnit(t *testing.T) {
+	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	movieRec := mapping.Record{Type: "MOVIE"}
+	tests := []struct {
+		name         string
+		item         library.Item
+		rec          mapping.Record
+		best         []string
+		alt          []string
+		wantStanding align.Standing
+		wantOutcome  align.Outcome
+		wantNoBest   bool
+	}{
+		{
+			name:         "mapped season not on disk is no-file",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"a"}}},
+			rec:          seasonRec,
+			best:         []string{"sam"},
+			wantStanding: align.StandingNoFile,
+			wantOutcome:  align.OutcomeNoFile,
+		},
+		{
+			name:         "no file wins over the no-best nudge",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"a"}}},
+			rec:          seasonRec,
+			wantStanding: align.StandingNoFile,
+			wantOutcome:  align.OutcomeNoFile,
+			wantNoBest:   true,
+		},
+		{
+			name:         "filed movie with no identifiable group is unverified and unverifiable",
+			item:         library.Item{Arr: library.ArrRadarr, HasFile: true},
+			rec:          movieRec,
+			best:         []string{"sam"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			name:         "current group is best: aligned",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"sam"}}},
+			rec:          seasonRec,
+			best:         []string{"sam"},
+			wantStanding: align.StandingBest,
+			wantOutcome:  align.OutcomeAligned,
+		},
+		{
+			name:         "current group is an alt",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"kh"}}},
+			rec:          seasonRec,
+			best:         []string{"sam"},
+			alt:          []string{"kh"},
+			wantStanding: align.StandingAlt,
+			wantOutcome:  align.OutcomeDiverged,
+		},
+		{
+			name:         "current group is unlisted",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"zzz"}}},
+			rec:          seasonRec,
+			best:         []string{"sam"},
+			alt:          []string{"kh"},
+			wantStanding: align.StandingUnlisted,
+			wantOutcome:  align.OutcomeDiverged,
+		},
+		{
+			name:         "not-aligned multi-group season is mixed",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"a", "b"}}},
+			rec:          seasonRec,
+			best:         []string{"sam"},
+			wantStanding: align.StandingUnlisted,
+			wantOutcome:  align.OutcomeMixed,
+		},
+		{
+			name:         "alt-matching multi-group season is mixed",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"a", "b"}}},
+			rec:          seasonRec,
+			best:         []string{"sam"},
+			alt:          []string{"a"},
+			wantStanding: align.StandingAlt,
+			wantOutcome:  align.OutcomeMixed,
+		},
+		{
+			name:         "aligned multi-group season is aligned, not mixed",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"a", "b"}}},
+			rec:          seasonRec,
+			best:         []string{"a"},
+			wantStanding: align.StandingBest,
+			wantOutcome:  align.OutcomeAligned,
+		},
+		{
+			name:         "empty best set with a filed season is the no-best nudge",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"a"}}},
+			rec:          seasonRec,
+			wantStanding: align.StandingUnlisted,
+			wantOutcome:  align.OutcomeNoBest,
+			wantNoBest:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := align.Decide(&tt.item, &tt.rec, tt.best, tt.alt)
+			if d.Standing != tt.wantStanding {
+				t.Errorf("Standing = %v, want %v", d.Standing, tt.wantStanding)
+			}
+			if d.Outcome != tt.wantOutcome {
+				t.Errorf("Outcome = %v, want %v", d.Outcome, tt.wantOutcome)
+			}
+			if d.NoBest != tt.wantNoBest {
+				t.Errorf("NoBest = %v, want %v", d.NoBest, tt.wantNoBest)
+			}
+		})
+	}
+}
+
+// TestDecideRecordsScopeKindAndGroups pins that the decision carries the
+// resolved scope kind and the groups the unit was judged against (the scoped
+// set for a single unit, so consumers seed display fields and dedupe keys
+// from the decision without re-scoping).
+func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
+	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}}
+	rec := mapping.Record{Type: "TV", SeasonTvdb: 2}
+	d := align.Decide(&item, &rec, []string{"sam"}, nil)
+	if d.Kind != align.ScopeSeason {
+		t.Errorf("Kind = %v, want ScopeSeason", d.Kind)
+	}
+	if len(d.Groups) != 1 || d.Groups[0] != "sam" {
+		t.Errorf("Groups = %v, want [sam]", d.Groups)
+	}
+	if d.Approx {
+		t.Error("a single-group season comparison must not be approximate")
+	}
+}
+
+// TestDecideTriStateEvidence pins the three-valued evidence model over the
+// shared decision: unknown group evidence (the release.NoGroup sentinel, on
+// either side of the comparison) yields StandingUnverified and
+// OutcomeUnverifiable - never a confident alignment (the old
+// sentinel==sentinel defect) and never a divergence - while a known-known
+// best match wins outright even beside unknown members. Unverifiability of
+// the best comparison short-circuits BEFORE the alt rung (when "do you have
+// the best?" is unanswerable, a proven alt must not imply you lack it), and
+// the no-best nudge still outranks the group comparison on a unit whose alt
+// comparison is indeterminate.
+func TestDecideTriStateEvidence(t *testing.T) {
+	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	tests := []struct {
+		name         string
+		item         library.Item
+		best         []string
+		alt          []string
+		wantStanding align.Standing
+		wantOutcome  align.Outcome
+		wantNoBest   bool
+	}{
+		{
+			name:         "unknown library evidence against a known best is unverifiable",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"nogrp"}}},
+			best:         []string{"sam"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			name:         "known library evidence against an unknown-only best is unverifiable",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"sam"}}},
+			best:         []string{"nogrp"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			name:         "sentinel on both sides is unverifiable, never aligned",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"nogrp"}}},
+			best:         []string{"nogrp"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			name:         "unknown member beside a known best match still aligns",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"sam", "nogrp"}}},
+			best:         []string{"sam"},
+			wantStanding: align.StandingBest,
+			wantOutcome:  align.OutcomeAligned,
+		},
+		{
+			name:         "unknown member beside a known miss is unverifiable, not mixed or diverged",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"kh", "nogrp"}}},
+			best:         []string{"sam"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			name:         "unverifiable best comparison short-circuits a proven alt",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"kh", "nogrp"}}},
+			best:         []string{"sam"},
+			alt:          []string{"kh"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			// l-f30: the deliberately conservative sub-case. Best-divergence is
+			// PROVEN here (current "kh" vs best "sam", all evidence known), and
+			// only the alt placement is indeterminate - so the row says
+			// "check this", not "you have an unlisted release". Keeping the
+			// verdict is the reviewed decision; the three docs (Standing,
+			// Outcome, README) name the sub-case explicitly rather than
+			// implying nothing is known.
+			name:         "proven-divergent best with an unknown-only alt is unverified",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"kh"}}},
+			best:         []string{"sam"},
+			alt:          []string{"nogrp"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeUnverifiable,
+		},
+		{
+			name:         "no-best nudge outranks an indeterminate alt comparison",
+			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"nogrp"}}},
+			alt:          []string{"kh"},
+			wantStanding: align.StandingUnverified,
+			wantOutcome:  align.OutcomeNoBest,
+			wantNoBest:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := align.Decide(&tt.item, &seasonRec, tt.best, tt.alt)
+			if d.Standing != tt.wantStanding {
+				t.Errorf("Standing = %v, want %v", d.Standing, tt.wantStanding)
+			}
+			if d.Outcome != tt.wantOutcome {
+				t.Errorf("Outcome = %v, want %v", d.Outcome, tt.wantOutcome)
+			}
+			if d.NoBest != tt.wantNoBest {
+				t.Errorf("NoBest = %v, want %v", d.NoBest, tt.wantNoBest)
+			}
+		})
+	}
+}
+
+// TestDecideSeasonLabel pins the shared non-negative season label the
+// consumers stamp on their output (Decision.Season): a positive Fribb TVDB
+// season passes through, and a zero or negative mapping (Fribb uses -1 for
+// absolute-numbered runs) never reaches the season scope at all, so the
+// label stays 0 instead of leaking a negative number into the daemon
+// findings and audit rows.
+func TestDecideSeasonLabel(t *testing.T) {
+	tests := []struct {
+		name       string
+		recType    string
+		arr        string
+		seasonTvdb int
+		want       int
+	}{
+		{"positive season passes through", "TV", library.ArrSonarr, 2, 2},
+		{"negative absolute-numbered mapping scopes whole-series and carries 0", "TV", library.ArrSonarr, -1, 0},
+		{"movie carries 0", "MOVIE", library.ArrRadarr, 0, 0},
+		{"special carries 0", "OVA", library.ArrSonarr, 0, 0},
+		{"movie ignores irrelevant positive season metadata", "MOVIE", library.ArrRadarr, 2, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := library.Item{Arr: tt.arr, HasFile: true, SeasonGroups: map[int][]string{2: {"sam"}}}
+			rec := mapping.Record{Type: tt.recType, SeasonTvdb: tt.seasonTvdb}
+			if d := align.Decide(&item, &rec, []string{"sam"}, nil); d.Season != tt.want {
+				t.Errorf("Season = %d, want %d", d.Season, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecideSingleUnitApproxPassThrough pins that Decide carries the scope
+// layer's approximation flag for a single-unit comparison: a multi-group
+// season-0 specials bucket stays approximate through the shared decision, so
+// a dropped pass-through in Decide cannot silently render every coarse audit
+// row exact.
+func TestDecideSingleUnitApproxPassThrough(t *testing.T) {
+	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}}
+	rec := mapping.Record{Type: "OVA"}
+	d := align.Decide(&item, &rec, []string{"cait-sidhe"}, nil)
+	if !d.Approx {
+		t.Error("Approx = false, want true (multi-group specials bucket is approximate)")
+	}
+	if d.Kind != align.ScopeSpecial {
+		t.Errorf("Kind = %v, want ScopeSpecial", d.Kind)
+	}
+}

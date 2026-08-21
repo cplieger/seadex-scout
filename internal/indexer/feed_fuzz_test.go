@@ -7,7 +7,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// FuzzFeedTitle_boundedAndTrimmed exercises the title synthesis on arbitrary
+// FuzzDerivedTitle_boundedAndTrimmed exercises the title synthesis on arbitrary
 // SeaDex-supplied file names and release groups (untrusted upstream strings the
 // regex pipeline parses). Invariants: it never panics, the result carries no
 // leading/trailing whitespace (every return path trims), and the result never
@@ -15,7 +15,7 @@ import (
 // group, and every transformation - extension strip, episode collapse,
 // whitespace collapse - only shrinks). A violation would mean the synthesized
 // RSS title leaked padding or grew unboundedly from hostile catalogue data.
-func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
+func FuzzDerivedTitle_boundedAndTrimmed(f *testing.F) {
 	f.Add("Frieren Beyond Journey's End - S01E07 (BD Remux 1080p) [PMR].mkv", "Frieren Beyond Journey's End - S01E08 (BD Remux 1080p) [PMR].mkv", "PMR")
 	f.Add("[Grp] Some Show - 07 (1080p).mkv", "[Grp] Some Show - 08 (1080p).mkv", "")
 	f.Add("NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv", "Show Title - S02E01 (BD 1080p) [Grp].mkv", "Grp")
@@ -24,35 +24,55 @@ func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
 	f.Add("Scum.of.the.Brave.S01E05.1080p.CR.WEB-DL-VARYG.mkv", "", "VARYG")
 	f.Add("[LostYears] Frieren - S01E15v2 (WEB 1080p) [3564C0AD].mkv", "[LostYears] Frieren - S01E16 (WEB 1080p) [06E8039D].mkv", "LostYears")
 	f.Add("Show - 07.mkv", "Show - 08.mkv", "")
+	f.Add("[Grp]_Show_-_01_(1080p).mkv", "[Grp]_Show_-_02_(1080p).mkv", "Grp")
+	f.Add("S01E01/Movie Cut A.mkv", "S01E02/Movie Cut B.mkv", "")
 	f.Fuzz(func(t *testing.T, name1, name2, group string) {
 		tor := &seadex.Torrent{
 			ReleaseGroup: group,
 			Files:        []seadex.File{{Name: name1}, {Name: name2}},
 		}
-		got := feedTitle(tor)
+		got := derivedTitle(tor, EntryInfo{})
 		if got != strings.TrimSpace(got) {
-			t.Errorf("feedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
+			t.Errorf("derivedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
 		}
 		if maxIn := max(len(name1), len(name2), len(group)); len(got) > maxIn {
-			t.Errorf("feedTitle(%q, %q, group %q) = %q (len %d), exceeds longest input (len %d)",
+			t.Errorf("derivedTitle(%q, %q, group %q) = %q (len %d), exceeds longest input (len %d)",
 				name1, name2, group, got, len(got), maxIn)
 		}
 	})
 }
 
-// FuzzFeedTitle_singleVideoPreservesName pins the single-video oracle the
+// FuzzDerivedTitle_singleVideoPreservesName pins the single-video oracle the
 // bounded/trimmed target above cannot: for a torrent holding exactly one
-// recognized video file, the synthesized title is the trimmed base name, so a
-// degenerate implementation that always returns "" cannot pass.
-func FuzzFeedTitle_singleVideoPreservesName(f *testing.F) {
+// recognized video file, the synthesized title is a trimmed COMPONENT of that
+// file's own path - and specifically the trimmed base name whenever the base
+// carries episode evidence - so a degenerate implementation that always returns
+// "" (or one that invents text) cannot pass. The component form (rather than
+// always the base name) is titleBase's headline rule: a base carrying no
+// episode evidence yields to the nearest ancestor directory that has both
+// evidence and text of its own.
+func FuzzDerivedTitle_singleVideoPreservesName(f *testing.F) {
 	f.Add("Show - S01E01 (1080p) [Grp]")
 	f.Add("  Movie Title (2026)  ")
+	f.Add("Season 1/Show - S01E01")
+	f.Add("[Grp] Show S01E01-E12 (1080p)/01")
+	f.Add("S01E01/Movie Cut A")
 	f.Fuzz(func(t *testing.T, base string) {
-		got := feedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}})
-		want := strings.TrimSpace(base)
-		if got != want {
-			t.Errorf("feedTitle(single video %q) = %q, want %q", base, got, want)
+		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, EntryInfo{})
+		components := strings.Split(base, "/")
+		own := components[len(components)-1]
+		if episodeToken.MatchString(own) || absoluteEpisode.MatchString(own) {
+			if want := strings.TrimSpace(own); got != want {
+				t.Errorf("derivedTitle(single video %q) = %q, want %q (a base name carrying episode evidence headlines)", base, got, want)
+			}
+			return
 		}
+		for _, component := range components {
+			if got == strings.TrimSpace(component) {
+				return
+			}
+		}
+		t.Errorf("derivedTitle(single video %q) = %q, want a trimmed component of the file's own path", base, got)
 	})
 }
 
@@ -84,6 +104,89 @@ func FuzzValidInfoHash_normalizedShapeAndIdempotent(f *testing.F) {
 		}
 		if again := validInfoHash(got); again != got {
 			t.Fatalf("validInfoHash not idempotent: validInfoHash(%q) = %q, re-applying gives %q", h, got, again)
+		}
+	})
+}
+
+// FuzzSynthesizeTitle_titledAndTrimmed exercises the assembled-title path on
+// arbitrary show metadata and SeaDex file names (the untrusted strings the
+// episode-marker regexes and the flag classifier parse). Invariants: it never
+// panics, the result carries no leading/trailing whitespace, and with a
+// non-blank show title the result begins with that trimmed title - so a
+// degenerate implementation returning "" (or one that lets hostile file names
+// displace the show title) cannot pass. The derivedTitle fallback (blank title)
+// has its own two targets above.
+func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
+	f.Add("Frieren: Beyond Journey's End", 2023, 1, false, false, true,
+		"Frieren - S01E07 (BD Remux 1080p) [PMR].mkv", "Frieren - S01E08 (BD Remux 1080p) [PMR].mkv", "PMR")
+	f.Add("A Silent Voice", 2016, 0, true, false, false,
+		"A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv", "", "Group")
+	f.Add("Show OVA", 0, 0, false, true, false, "Show OVA - 01.mkv", "Show OVA - 02.mkv", "")
+	f.Add("One Piece", 1999, 0, false, false, false, "[Grp] One Piece - 1085 (1080p).mkv", "", "Grp")
+	f.Add("", 0, 0, false, false, false, "Show - S01E01.mkv", "NCED 01.mkv", "  spaced  ")
+	f.Fuzz(func(t *testing.T, title string, year, season int, isMovie, seasonKnown, dual bool, name1, name2, group string) {
+		tor := &seadex.Torrent{
+			ReleaseGroup: group,
+			DualAudio:    dual,
+			Files:        []seadex.File{{Name: name1}, {Name: name2}},
+		}
+		meta := EntryInfo{Title: title, Year: year, Season: season, SeasonKnown: seasonKnown, IsMovie: isMovie}
+		got := synthesizeTitle(tor, meta)
+		if got != strings.TrimSpace(got) {
+			t.Errorf("synthesizeTitle(title %q) = %q, not trimmed", title, got)
+		}
+		if want := strings.TrimSpace(title); want != "" && !strings.HasPrefix(got, want) {
+			t.Errorf("synthesizeTitle(title %q) = %q, want it to begin with the trimmed show title", title, got)
+		}
+	})
+}
+
+// FuzzCorrectSeasonOnlyTitle_everySeasonClaimIsCorrectable pins the pairing
+// journal.go's titleAudit.served depends on, over arbitrary tracker-supplied
+// titles: when packFromTitle reads a whole-season claim, correctSeasonOnlyTitle
+// must be able to rewrite that claim away, and the rewritten title must no
+// longer read as a season pack. When the two disagree, served() reports the
+// disagreement and then serves the false FullSeason claim unchanged - Sonarr
+// ranks such a title above the season's loose episodes, grabs it, and treats the
+// season as covered, so the real episodes are silently suppressed. The refusal
+// contract is the other half: a correction that cannot be applied must return
+// the title byte-for-byte, never a partial rewrite.
+//
+// The domain is the TRIMMED title, which is what production supplies (the
+// harvest caches strings.TrimSpace of the Prowlarr item title): packFromTitle
+// trims before reading while correctSeasonOnlyTitle matches the raw string, so
+// an untrimmed value is outside the contract the two share.
+//
+// The corrected title is asserted NOT to read as a pack, deliberately without
+// also demanding that it read as a KNOWN single episode: a corrected token can
+// land in text the parser declines to read at all ("0 S001080p" corrects to
+// "0 S00E071080p", which packFromTitle answers unknown), and an unknown title
+// is exactly what packVerdict routes to the file census - it carries no false
+// FullSeason claim, which is the whole defect this target exists to catch.
+func FuzzCorrectSeasonOnlyTitle_everySeasonClaimIsCorrectable(f *testing.F) {
+	f.Add("Show - S01 [1080p][x265]-GRP", "S01E07")
+	f.Add("Show Season 2", "- 07")
+	f.Add("[Grp] Show [S01][1080p]", "S01E01-E13")
+	f.Add("Show - S01 05", "S01E07")
+	f.Add("Show - S01 EXTRAS", "S01E15v2")
+	f.Add("Show - S01E07 [1080p]", "S01E07")
+	f.Add("Show - S01v2 [1080p]", "- 07v2")
+	f.Add("Show Stagione 2", "07")
+	f.Add("", "")
+	f.Fuzz(func(t *testing.T, rawTitle, marker string) {
+		title := strings.TrimSpace(rawTitle)
+		if got, ok := correctSeasonOnlyTitle(title, marker); !ok && got != title {
+			t.Fatalf("correctSeasonOnlyTitle(%q, %q) refused but returned %q, want the title unchanged", title, marker, got)
+		}
+		if pack, _ := packFromTitle(title); !pack {
+			return
+		}
+		corrected, ok := correctSeasonOnlyTitle(title, "S01E07")
+		if !ok {
+			t.Fatalf("packFromTitle(%q) claims a whole season, but correctSeasonOnlyTitle cannot rewrite that claim", title)
+		}
+		if pack, _ := packFromTitle(corrected); pack {
+			t.Fatalf("correctSeasonOnlyTitle(%q) = %q, which still reads as a whole-season claim", title, corrected)
 		}
 	})
 }

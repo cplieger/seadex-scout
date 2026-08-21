@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,16 +11,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi"
-	"github.com/cplieger/health"
-	"github.com/cplieger/seadex-scout/internal/audit"
+	"github.com/cplieger/arrapi/v2"
 	"github.com/cplieger/seadex-scout/internal/config"
+	"github.com/cplieger/seadex-scout/internal/cycle"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
+	yaml "go.yaml.in/yaml/v3"
 )
 
 // TestResolveMode covers the subcommand-vs-config mode resolution: no argument
@@ -54,29 +56,110 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
-// TestIndexerConfigured covers the daemon's HTTP-surface gate: the Torznab feed
-// starts iff at least one Prowlarr Torznab URL is set (the shared
-// config.IndexerConfigured decision the composition root and validation read).
-func TestIndexerConfigured(t *testing.T) {
+// TestValidateInvocation covers the trailing-argument gate that runs before
+// the health fast path: at most one subcommand is accepted (a `poll typo` must
+// never run a real poll or report healthy), and the error names the valid
+// invocations. main maps a non-nil error to exit 2.
+func TestValidateInvocation(t *testing.T) {
 	tests := []struct {
-		name string
-		nyaa string
-		ab   string
-		want bool
+		name    string
+		args    []string
+		wantErr bool
 	}{
-		{"both empty stays socket-less", "", "", false},
-		{"nyaa URL alone enables the feed", "http://prowlarr:9696/22/api", "", true},
-		{"ab URL alone enables the feed", "", "http://prowlarr:9696/2/api", true},
-		{"both URLs enable the feed", "http://prowlarr:9696/22/api", "http://prowlarr:9696/2/api", true},
+		{"no arguments", nil, false},
+		{"one subcommand", []string{"poll"}, false},
+		{"trailing argument", []string{"poll", "typo"}, true},
+		{"trailing argument after health", []string{"health", "typo"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{IndexerNyaaTorznabURL: tt.nyaa, IndexerABTorznabURL: tt.ab}
-			if got := cfg.IndexerConfigured(); got != tt.want {
-				t.Errorf("IndexerConfigured(nyaa=%q, ab=%q) = %v, want %v", tt.nyaa, tt.ab, got, tt.want)
+			err := validateInvocation(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateInvocation(%v) = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), validArgsHint) {
+				t.Errorf("err = %q, want it to carry the valid-invocations hint", err)
 			}
 		})
 	}
+}
+
+// TestRunHealthProbeNotApplicable covers the fast path's dispatch test: any
+// invocation other than exactly `health` reports false so main continues with
+// normal startup. The true branch cannot be exercised here - health.RunProbe
+// terminates the process by contract - which is exactly why the dispatch test
+// is extracted and pinned separately.
+func TestRunHealthProbeNotApplicable(t *testing.T) {
+	for _, args := range [][]string{nil, {"poll"}, {"report"}, {"daemon"}, {"health", "typo"}} {
+		if runHealthProbe(args) {
+			t.Errorf("runHealthProbe(%v) = true, want false (not the health subcommand)", args)
+		}
+	}
+}
+
+// TestLoadRuntimeConfig covers the config-bootstrap sequence main exits 1 on:
+// a first boot writes the starter and returns the typed errStarterWritten
+// sentinel (an expected outcome, not a fault), a starter write failure and a
+// load failure return ordinary errors, and a present valid config loads.
+func TestLoadRuntimeConfig(t *testing.T) {
+	t.Run("first boot writes the starter and returns the sentinel", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		_, err := loadRuntimeConfig(path)
+		if !errors.Is(err, errStarterWritten) {
+			t.Fatalf("loadRuntimeConfig(missing config) = %v, want errStarterWritten", err)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("reading starter: %v", readErr)
+		}
+		if blanked := feedKeyLine.ReplaceAll(got, []byte(`feed_api_key: ""`)); !bytes.Equal(blanked, exampleConfig) {
+			t.Errorf("starter differs from the embedded example beyond the generated feed_api_key (%d vs %d bytes)",
+				len(blanked), len(exampleConfig))
+		}
+	})
+	t.Run("starter write failure is not the sentinel", func(t *testing.T) {
+		// A dangling parent symlink makes os.Stat report the config missing
+		// while the starter's parent creation fails deterministically for
+		// every UID (root-safe, unlike a read-only-dir chmod).
+		dir := t.TempDir()
+		missingTarget := filepath.Join(dir, "missing-target")
+		blockedParent := filepath.Join(dir, "blocked-parent")
+		if err := os.Symlink(missingTarget, blockedParent); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadRuntimeConfig(filepath.Join(blockedParent, "config.yaml"))
+		if err == nil {
+			t.Fatal("loadRuntimeConfig(blocked starter path) = nil, want error")
+		}
+		if errors.Is(err, errStarterWritten) {
+			t.Errorf("err = %v, must not read as a successfully written starter", err)
+		}
+		if !strings.Contains(err.Error(), "write starter config") {
+			t.Errorf("err = %q, want the starter-write failure, not a config-load failure", err)
+		}
+	})
+	t.Run("present valid config loads", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, exampleConfig, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadRuntimeConfig(path); err != nil {
+			t.Fatalf("loadRuntimeConfig(example config) = %v, want nil", err)
+		}
+	})
+	t.Run("malformed config is a load failure", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("{not yaml"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadRuntimeConfig(path)
+		if err == nil {
+			t.Fatal("loadRuntimeConfig(malformed config) = nil, want error")
+		}
+		if errors.Is(err, errStarterWritten) {
+			t.Errorf("err = %v, must not read as a written starter", err)
+		}
+	})
 }
 
 // TestArrClientHelpersReturnNilInterface pins the typed-nil guard: passing a
@@ -96,10 +179,7 @@ func TestArrClientHelpersReturnNilInterface(t *testing.T) {
 // logConfig ("API keys are never logged"): the startup config line must not
 // contain any configured API key or passkey value. Serial (swaps slog.Default).
 func TestLogConfigNeverLogsSecrets(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	// Fixture values stay under 10 characters so the CI secret scanner's
 	// generic-api-key rule (which needs a >=10-char secret-shaped value next
@@ -112,24 +192,25 @@ func TestLogConfigNeverLogsSecrets(t *testing.T) {
 		IndexerABPasskey:      "sekrit-4a",
 		RunMode:               config.RunModeDaemon,
 	}
-	logConfig(cfg)
+	logConfig(cfg, cfg.RunMode)
 
-	out := buf.String()
-	if out == "" {
+	if rec.Count("configuration loaded") == 0 {
 		t.Fatal("logConfig emitted nothing, want a configuration line")
 	}
 	for _, secret := range []string{"sekrit-1s", "sekrit-2r", "sekrit-3p", "sekrit-4a"} {
-		if strings.Contains(out, secret) {
-			t.Errorf("startup config log leaks secret %q: %s", secret, out)
+		// key "" scans every top-level attr of the record.
+		if rec.AttrContains("configuration loaded", "", secret) {
+			t.Errorf("startup config log leaks secret %q: %v", secret, rec.Records())
 		}
 	}
-	if !strings.Contains(out, "sonarr_enabled") {
-		t.Errorf("startup config log missing sonarr_enabled: %s", out)
+	if _, ok := rec.AttrValue("configuration loaded", "sonarr_enabled"); !ok {
+		t.Errorf("startup config log missing sonarr_enabled: %v", rec.Records())
 	}
 }
 
 // TestWriteStarterConfig covers the first-boot path: the starter is written at
-// the given path (parent directories created) with the embedded example bytes.
+// the given path (parent directories created), byte-identical to the embedded
+// example EXCEPT for the generated feed_api_key.
 func TestWriteStarterConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "dir", "config.yaml")
 	if err := writeStarterConfig(path); err != nil {
@@ -139,8 +220,82 @@ func TestWriteStarterConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading starter: %v", err)
 	}
-	if !bytes.Equal(got, exampleConfig) {
-		t.Errorf("starter content differs from embedded example (%d vs %d bytes)", len(got), len(exampleConfig))
+	// The only difference from the embedded bytes is the seeded key, so
+	// re-blanking it must reproduce the example exactly. That pins BOTH halves:
+	// nothing else was rewritten, and the key really was substituted.
+	blanked := feedKeyLine.ReplaceAll(got, []byte(`feed_api_key: ""`))
+	if !bytes.Equal(blanked, exampleConfig) {
+		t.Errorf("starter differs from the embedded example beyond feed_api_key (%d vs %d bytes)",
+			len(blanked), len(exampleConfig))
+	}
+}
+
+// feedKeyLine matches the starter's feed_api_key assignment for the tests that
+// need to read or blank the generated value.
+var feedKeyLine = regexp.MustCompile(`feed_api_key: "[^"]*"`)
+
+// TestWriteStarterConfigSeedsAStrongFeedKey pins the reason the starter seeds a
+// key at all: feed_api_key is the one credential in this config the operator
+// invents rather than copies from another service, so a fresh install must not
+// be able to start life with a weak or empty one. It asserts the properties that
+// matter (present, 32 hex characters, and DIFFERENT on every write) rather than
+// any particular value, and that the result still loads - a key the config
+// validator would reject would make first boot unrecoverable.
+func TestWriteStarterConfigSeedsAStrongFeedKey(t *testing.T) {
+	keyOf := func(t *testing.T, path string) string {
+		t.Helper()
+		if err := writeStarterConfig(path); err != nil {
+			t.Fatalf("writeStarterConfig(%q) = %v, want nil", path, err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading starter: %v", err)
+		}
+		m := feedKeyLine.FindSubmatch(b)
+		if m == nil {
+			t.Fatalf("starter has no feed_api_key line:\n%s", b)
+		}
+		return strings.Trim(strings.TrimPrefix(string(m[0]), "feed_api_key: "), `"`)
+	}
+
+	dir := t.TempDir()
+	first := keyOf(t, filepath.Join(dir, "a.yaml"))
+	second := keyOf(t, filepath.Join(dir, "b.yaml"))
+
+	// The key's own shape (feedKeyBytes rendered as hex, regenerated per call)
+	// is pinned beside config.SeedStarter, which owns the generation; what the
+	// root owns is that the WRITTEN file carries a usable one.
+	if _, err := hex.DecodeString(first); err != nil {
+		t.Errorf("generated key is not hex: %v", err)
+	}
+	if first == second {
+		t.Error("two starters share a feed_api_key; the key must be generated per write")
+	}
+	// The generated key must satisfy the validator, including the placeholder
+	// refusal and the strength warning's 16-character floor.
+	if strings.Contains(first, "${") {
+		t.Errorf("generated key looks like an env reference: %d chars", len(first))
+	}
+	if len(first) < 16 {
+		t.Errorf("generated key is %d chars, below the strength floor the config warns at", len(first))
+	}
+	// The written file must still be valid YAML with the key readable as a
+	// string: the substitution quotes the value itself, so a quoting mistake
+	// would break the very file first boot tells the operator to edit.
+	raw, err := os.ReadFile(filepath.Join(dir, "a.yaml"))
+	if err != nil {
+		t.Fatalf("reading starter: %v", err)
+	}
+	var doc struct {
+		Indexer struct {
+			FeedAPIKey string `yaml:"feed_api_key"`
+		} `yaml:"indexer"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("seeded starter is not valid YAML: %v", err)
+	}
+	if doc.Indexer.FeedAPIKey != first {
+		t.Errorf("feed_api_key parsed as %q, want the generated %q", doc.Indexer.FeedAPIKey, first)
 	}
 }
 
@@ -214,7 +369,7 @@ func TestConfigureLoggerAppliesLevel(t *testing.T) {
 	defer slog.SetDefault(prev)
 
 	configureLogger(slog.LevelWarn, slogx.JSON)
-	ctx := context.Background()
+	ctx := t.Context()
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		t.Error("Debug enabled at level=warn, want disabled")
 	}
@@ -228,21 +383,62 @@ func TestConfigureLoggerAppliesLevel(t *testing.T) {
 	}
 }
 
-// TestFeedWriter pins the nil-when-unconfigured contract: the compare cycle
-// does feed work only when the Torznab feed is configured.
-func TestFeedWriter(t *testing.T) {
-	log := slog.Default()
-	if fw := feedWriter(&config.Config{}, log); fw != nil {
-		t.Errorf("feedWriter(unconfigured) = %v, want nil (cycle must skip feed work)", fw)
+// TestInstallLoggerInitialLevel pins installLogger's documented contract: the
+// pre-config default handler emits at Info (so first-boot and config-parse
+// warnings are visible on the container log stream) and not at Debug, until
+// configureLogger applies the configured level. Serial (swaps slog.Default);
+// the previous default is restored.
+func TestInstallLoggerInitialLevel(t *testing.T) {
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+
+	installLogger()
+	ctx := t.Context()
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		t.Error("Debug enabled before config is read, want the documented Info floor")
 	}
-	cfg := &config.Config{IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api"}
-	if fw := feedWriter(cfg, log); fw == nil {
-		t.Error("feedWriter(configured) = nil, want a FeedWriter")
+	if !slog.Default().Enabled(ctx, slog.LevelInfo) {
+		t.Error("Info disabled before config is read, want enabled (config-parse warnings must emit)")
+	}
+}
+
+// TestFeedWriter pins the nil-when-unconfigured contract through the real
+// composition-root gate: the compare cycle does feed work iff at least one
+// Prowlarr Torznab URL is configured, and the returned cleanup is a callable
+// no-op when it is not. Driving feedWriter (rather than asserting
+// config.IndexerConfigured directly, which the config package owns) is what
+// makes an inverted or dropped guard in the root fail here.
+func TestFeedWriter(t *testing.T) {
+	tests := []struct {
+		name    string
+		nyaaURL string
+		abURL   string
+		wantNil bool
+	}{
+		{name: "both empty skips feed work", wantNil: true},
+		{name: "Nyaa URL enables feed work", nyaaURL: "http://prowlarr:9696/22/api"},
+		{name: "AnimeBytes URL enables feed work", abURL: "http://prowlarr:9696/2/api"},
+		{name: "both URLs enable feed work", nyaaURL: "http://prowlarr:9696/22/api", abURL: "http://prowlarr:9696/2/api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				IndexerNyaaTorznabURL: tt.nyaaURL,
+				IndexerABTorznabURL:   tt.abURL,
+			}
+			fw, cleanup := feedWriter(cfg, slog.Default(), nil)
+			t.Cleanup(cleanup)
+			if gotNil := fw == nil; gotNil != tt.wantNil {
+				t.Errorf("feedWriter(nyaa=%q, ab=%q) nil = %v, want %v", tt.nyaaURL, tt.abURL, gotNil, tt.wantNil)
+			}
+		})
 	}
 }
 
 // TestFilterOptions pins the config-to-filter field mapping so a swapped or
-// dropped field in the wiring cannot silently invert a content filter.
+// dropped field in the wiring cannot silently invert a content filter. The
+// AnimeBytes tracker toggle is not part of filter.Options (it rides
+// compare.Config / audit.Config directly).
 func TestFilterOptions(t *testing.T) {
 	cfg := &config.Config{ExcludeRemux: true, RequireDualAudio: false, AnimeBytes: true}
 	got := filterOptions(cfg)
@@ -252,35 +448,31 @@ func TestFilterOptions(t *testing.T) {
 	if got.RequireDualAudio {
 		t.Error("RequireDualAudio = true, want false")
 	}
-	if !got.AnimeBytes {
-		t.Error("AnimeBytes = false, want true")
-	}
 }
 
-// panicCycler is a cycler whose cycle always panics, exercising the daemon
-// panic shield in runCycle.
-type panicCycler struct{}
-
-func (panicCycler) Cycle(context.Context) bool { panic("boom") }
-
-// boolCycler is a cycler returning a fixed health outcome.
-type boolCycler bool
-
-func (b boolCycler) Cycle(context.Context) bool { return bool(b) }
-
-// TestRunCyclePanicShield pins the daemon crash shield: a panicking cycle is
-// recovered and reported unhealthy instead of crashing the long-lived daemon,
-// and a normal cycle outcome passes through unchanged.
-func TestRunCyclePanicShield(t *testing.T) {
-	ctx := context.Background()
-	if healthy := runCycle(ctx, panicCycler{}); healthy {
-		t.Error("runCycle(panicking cycle) = healthy, want unhealthy")
+// TestUpstreamConfig pins the config-to-indexer upstream field mapping shared
+// by the feed writer and the feed server, so a swapped or dropped field in the
+// wiring cannot route Nyaa searches at the AB endpoint or hand the wrong
+// credential to an upstream.
+func TestUpstreamConfig(t *testing.T) {
+	cfg := &config.Config{
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
+		IndexerProwlarrAPIKey: "pk-3x",
+		IndexerABPasskey:      "ab-4y",
 	}
-	if healthy := runCycle(ctx, boolCycler(true)); !healthy {
-		t.Error("runCycle(healthy cycle) = unhealthy, want healthy")
+	got := upstreamConfig(cfg)
+	if got.NyaaTorznabURL != cfg.IndexerNyaaTorznabURL {
+		t.Errorf("NyaaTorznabURL = %q, want %q", got.NyaaTorznabURL, cfg.IndexerNyaaTorznabURL)
 	}
-	if healthy := runCycle(ctx, boolCycler(false)); healthy {
-		t.Error("runCycle(unhealthy cycle) = healthy, want unhealthy")
+	if got.ABTorznabURL != cfg.IndexerABTorznabURL {
+		t.Errorf("ABTorznabURL = %q, want %q", got.ABTorznabURL, cfg.IndexerABTorznabURL)
+	}
+	if got.ProwlarrAPIKey != cfg.IndexerProwlarrAPIKey {
+		t.Errorf("ProwlarrAPIKey = %q, want %q", got.ProwlarrAPIKey, cfg.IndexerProwlarrAPIKey)
+	}
+	if got.ABPasskey != cfg.IndexerABPasskey {
+		t.Errorf("ABPasskey = %q, want %q", got.ABPasskey, cfg.IndexerABPasskey)
 	}
 }
 
@@ -289,20 +481,50 @@ func TestRunCyclePanicShield(t *testing.T) {
 // ${VAR} secret placed by a config typo) is logged as the fixed marker
 // "invalid", never the raw value. Serial (swaps slog.Default).
 func TestLogConfigMasksInvalidRunMode(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	cfg := &config.Config{RunMode: "leaked-secret-value-9"}
-	logConfig(cfg)
+	logConfig(cfg, cfg.RunMode)
 
-	out := buf.String()
-	if strings.Contains(out, "leaked-secret-value-9") {
-		t.Errorf("startup config log leaks the raw run_mode value: %s", out)
+	if rec.AttrContains("configuration loaded", "", "leaked-secret-value-9") {
+		t.Errorf("startup config log leaks the raw run_mode value: %v", rec.Records())
 	}
-	if !strings.Contains(out, `"run_mode":"invalid"`) {
-		t.Errorf("run_mode not logged as the fixed marker %q: %s", "invalid", out)
+	if !rec.HasAttr("configuration loaded", "run_mode", unknownModeMarker) {
+		t.Errorf("run_mode not logged as the fixed marker %q: %v", unknownModeMarker, rec.Records())
+	}
+}
+
+// TestLogConfigLogsResolvedMode pins the contract the resolved-mode
+// parameter exists for: logConfig renders the mode it is PASSED, not the
+// config key. The documented one-shot `report`/`poll` container leaves
+// `mode: daemon` in config.yaml, so an operator filtering that container's
+// Loki stream on run_mode must read the mode the process actually runs.
+// Serial (swaps slog.Default).
+func TestLogConfigLogsResolvedMode(t *testing.T) {
+	rec := capture.Default(t)
+
+	cfg := &config.Config{RunMode: config.RunModeDaemon}
+	logConfig(cfg, modePoll)
+
+	if !rec.HasAttr("configuration loaded", "run_mode", modePoll) {
+		t.Errorf("run_mode not logged as the resolved mode %q: %v", modePoll, rec.Records())
+	}
+}
+
+// TestLoggableModeMasksUnknownMode pins the redaction contract main applies at
+// its terminal log sites: loggableMode passes the known run modes through and
+// maps anything else (which may be an expanded ${VAR} secret placed by a config
+// typo) to the fixed marker "invalid", so the dispatch-failure lines never echo
+// the raw value.
+func TestLoggableModeMasksUnknownMode(t *testing.T) {
+	for _, mode := range []string{config.RunModeDaemon, config.RunModeReport, modePoll} {
+		if got := loggableMode(mode); got != mode {
+			t.Errorf("loggableMode(%q) = %q, want the known mode passed through", mode, got)
+		}
+	}
+	const secret = "leaked-secret-value-9"
+	if got := loggableMode(secret); got != "invalid" {
+		t.Errorf("loggableMode(%q) = %q, want the fixed marker %q", secret, got, "invalid")
 	}
 }
 
@@ -310,16 +532,16 @@ func TestLogConfigMasksInvalidRunMode(t *testing.T) {
 // poll_interval off (PollExternal), the startup line reports "external", not a
 // zero duration. Serial (swaps slog.Default).
 func TestLogConfigExternalPollInterval(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	cfg := &config.Config{PollExternal: true, RunMode: config.RunModeDaemon}
-	logConfig(cfg)
+	logConfig(cfg, cfg.RunMode)
 
-	if !strings.Contains(buf.String(), `"poll_interval":"external"`) {
-		t.Errorf("poll_interval not rendered as external: %s", buf.String())
+	// The library's attr assertion compares the RENDERED value, so it pins the
+	// attribute itself rather than a substring of the serialized JSON - a
+	// coincidental match elsewhere in the line cannot satisfy it (l-f34).
+	if !rec.HasAttr("configuration loaded", "poll_interval", "external") {
+		t.Errorf("poll_interval not rendered as external: %v", rec.Messages())
 	}
 }
 
@@ -366,12 +588,12 @@ func TestWriteStarterConfigError(t *testing.T) {
 }
 
 // TestBuildScout pins the composition wiring hermetically: with both arrs
-// disabled the full component graph builds without any network I/O (pingArrs
+// disabled each role's component graph builds without any network I/O (pingArrs
 // is a no-op on nil clients) and cleanup is callable, and an invalid arr URL
 // propagates as a build error instead of being swallowed.
 func TestBuildScout(t *testing.T) {
 	t.Run("disabled arrs build hermetically", func(t *testing.T) {
-		b, err := buildScout(context.Background(), &config.Config{})
+		b, err := buildScout(t.Context(), &config.Config{}, nil)
 		if err != nil {
 			t.Fatalf("buildScout(zero config) = %v, want nil", err)
 		}
@@ -380,10 +602,23 @@ func TestBuildScout(t *testing.T) {
 		}
 		b.cleanup()
 	})
+	t.Run("reporter role builds hermetically", func(t *testing.T) {
+		b, err := buildReporter(t.Context(), &config.Config{})
+		if err != nil {
+			t.Fatalf("buildReporter(zero config) = %v, want nil", err)
+		}
+		if b.reporter == nil {
+			t.Fatal("reporter = nil, want a wired reporter")
+		}
+		b.cleanup()
+	})
 	t.Run("invalid sonarr URL propagates", func(t *testing.T) {
 		cfg := &config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"}
-		if _, err := buildScout(context.Background(), cfg); err == nil {
+		if _, err := buildScout(t.Context(), cfg, nil); err == nil {
 			t.Fatal("buildScout(invalid sonarr URL) = nil, want error")
+		}
+		if _, err := buildReporter(t.Context(), cfg); err == nil {
+			t.Fatal("buildReporter(invalid sonarr URL) = nil, want error")
 		}
 	})
 }
@@ -416,7 +651,7 @@ func TestPingArrs(t *testing.T) {
 	}
 	defer r.Close()
 
-	pingArrs(context.Background(), s, r)
+	pingArrs(t.Context(), s, r)
 
 	if !rec.Contains("sonarr reachable") {
 		t.Errorf("missing sonarr reachable info line: %v", rec.Messages())
@@ -426,184 +661,61 @@ func TestPingArrs(t *testing.T) {
 	}
 }
 
-// cancelCycler cancels the poll context during the cycle and returns the
-// configured outcome, simulating a shutdown signal landing mid-cycle (cycle
-// reports unhealthy) or during the end-of-cycle save (cycle still completed
-// healthy).
-type cancelCycler struct {
-	cancel  context.CancelFunc
-	healthy bool
-}
-
-func (c cancelCycler) Cycle(context.Context) bool {
-	c.cancel()
-	return c.healthy
-}
-
-// TestPollCycleUniformInterruption pins poll's uniform interruption contract:
-// a cancellation observed at ANY phase - before the cycle starts, mid-cycle,
-// or after a cycle that still completed healthy (the signal landed during the
-// save) - returns an error wrapping context.Canceled (which main classifies as
-// a routine-shutdown WARN, never ERROR, and maps to exit 1) and never touches
-// the health marker, leaving it at the daemon's last real state.
-func TestPollCycleUniformInterruption(t *testing.T) {
-	tests := []struct {
-		name      string
-		cycler    func(cancel context.CancelFunc) cycler
-		preCancel bool
-	}{
-		{"pre-cycle cancellation", func(context.CancelFunc) cycler { return boolCycler(false) }, true},
-		{"mid-cycle cancellation", func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel} }, false},
-		{"post-cycle cancellation after a healthy cycle", func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel, healthy: true} }, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tt.preCancel {
-				cancel()
-			}
-			// A pre-existing marker stands in for the daemon's last real state;
-			// its content must survive the interrupted poll byte-for-byte.
-			path := filepath.Join(t.TempDir(), ".healthy")
-			if err := os.WriteFile(path, []byte("sentinel-untouched"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			err := pollCycle(ctx, tt.cycler(cancel), health.NewMarker(path))
-
-			if err == nil {
-				t.Fatal("pollCycle = nil, want the interruption error (exit 1)")
-			}
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
-			}
-			got, readErr := os.ReadFile(path)
-			if readErr != nil {
-				t.Fatalf("marker file after interruption: %v", readErr)
-			}
-			if string(got) != "sentinel-untouched" {
-				t.Errorf("marker content = %q, want the pre-existing state untouched", got)
-			}
-		})
-	}
-}
-
-// TestPollCycleUninterrupted pins poll's normal contract: a healthy cycle sets
-// the marker healthy and exits 0; an unhealthy cycle sets it unhealthy and
-// returns the ingest error (exit 1) without reading as an interruption.
-func TestPollCycleUninterrupted(t *testing.T) {
-	t.Run("healthy cycle sets the marker", func(t *testing.T) {
-		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		if err := pollCycle(context.Background(), boolCycler(true), marker); err != nil {
-			t.Fatalf("pollCycle(healthy) = %v, want nil", err)
-		}
-		if !marker.Healthy() {
-			t.Error("marker not healthy after a healthy cycle")
-		}
-	})
-	t.Run("unhealthy cycle sets the marker and errors", func(t *testing.T) {
-		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		err := pollCycle(context.Background(), boolCycler(false), marker)
-		if err == nil {
-			t.Fatal("pollCycle(unhealthy) = nil, want the ingest error")
-		}
-		if errors.Is(err, context.Canceled) {
-			t.Errorf("err = %v, must not read as an interruption", err)
-		}
-		if marker.Healthy() {
-			t.Error("marker healthy after an unhealthy cycle")
-		}
-	})
-}
-
-// TestRunSchedulerShutdownMidCycle pins the daemon twin of pollCycle's
-// interruption contract: a shutdown-interrupted unhealthy cycle must not
-// overwrite the health marker (the guard `if !healthy && ctx.Err() != nil`),
-// while a cycle that still completed healthy during shutdown records its
-// outcome. A regression here would flip the container unhealthy on every
-// redeploy.
-func TestRunSchedulerShutdownMidCycle(t *testing.T) {
-	t.Run("interrupted unhealthy cycle leaves the marker", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		marker.Set(true)
-		runScheduler(ctx, time.Hour, cancelCycler{cancel: cancel}, marker)
-		if !marker.Healthy() {
-			t.Error("marker unhealthy after a shutdown-interrupted cycle")
-		}
-	})
-	t.Run("healthy cycle finished during shutdown still records", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		marker.Set(false)
-		runScheduler(ctx, time.Hour, cancelCycler{cancel: cancel, healthy: true}, marker)
-		if !marker.Healthy() {
-			t.Error("marker not healthy after a healthy cycle")
-		}
-	})
-}
-
-// TestLogIndexerStopClassifiesShutdownAndFault pins the indexer feed's stop
-// log contract: during a shutdown, an expired graceful-shutdown budget
-// (DeadlineExceeded from webhttp.Run, meaning in-flight Torznab requests were
-// cut off) gets its own WARN message distinct from the routine clean-shutdown
-// WARN, and any error outside a shutdown stays the ERROR fault line. Serial
-// (swaps slog.Default).
-func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	tests := []struct {
-		name      string
-		ctx       context.Context
-		err       error
-		wantMsg   string
-		wantLevel slog.Level
-	}{
-		{"budget expired during shutdown", canceled, context.DeadlineExceeded, "indexer shutdown budget expired; in-flight requests aborted", slog.LevelWarn},
-		{"clean stop during shutdown", canceled, context.Canceled, "indexer feed stopped during shutdown", slog.LevelWarn},
-		{"fault outside shutdown", context.Background(), errors.New("bind failed"), "indexer feed stopped", slog.LevelError},
-		{"deadline exceeded outside shutdown stays a fault", context.Background(), context.DeadlineExceeded, "indexer feed stopped", slog.LevelError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-
-			logIndexerStop(tt.ctx, tt.err)
-
-			records := rec.Records()
-			if len(records) != 1 {
-				t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
-			}
-			if records[0].Message != tt.wantMsg {
-				t.Errorf("msg = %q, want %q", records[0].Message, tt.wantMsg)
-			}
-			if records[0].Level != tt.wantLevel {
-				t.Errorf("level = %v, want %v", records[0].Level, tt.wantLevel)
-			}
-		})
-	}
-}
-
 // TestRunReportRefusesWhenLockHeld pins the report concurrency refusal end to
 // end: with another run holding the report lock, runReport returns
-// ErrReportRunning (exit 1) before building any component, so the refusal is
+// ErrReportRunning before building any component, so the refusal is
 // hermetic (no network I/O) and two reports can never race onto the same
 // timestamped filename pair.
 func TestRunReportRefusesWhenLockHeld(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
-	release, err := audit.AcquireReportLock(dir)
+	release, err := cycle.TryReportLock(dir)
 	if err != nil {
 		t.Fatalf("holding the report lock: %v", err)
 	}
 	defer release()
 
 	err = runReport(&config.Config{ReportDir: dir})
-	if !errors.Is(err, audit.ErrReportRunning) {
+	if !errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("runReport with the lock held = %v, want ErrReportRunning", err)
+	}
+}
+
+// TestRunReportRejectsRelativeReportDir pins the report-path guard on
+// report.dir: every report write goes through an absolute-path-only writer, so a
+// relative value cannot produce either half of the pair - the run now fails
+// before it spends the ~25m walk, instead of after it (l-f213). Config still
+// admits the value at load (a daemon never writes a report), so this is the only
+// place the outcome changes: same failure, minutes earlier, with a reason.
+// Hermetic - the refusal precedes the report lock and every component build -
+// and the error names the key without echoing the secret-capable value.
+func TestRunReportRejectsRelativeReportDir(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		wantErr bool
+	}{
+		{"relative", "rel-report-dir", true},
+		{"empty", "", true},
+		{"dot-relative", "./reports", true},
+		{"absolute", filepath.Join(t.TempDir(), "reports"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkReportDir(tc.dir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkReportDir(%q) = %v, wantErr %v", tc.dir, err, tc.wantErr)
+			}
+		})
+	}
+
+	err := runReport(&config.Config{ReportDir: "rel-report-dir"})
+	if err == nil {
+		t.Fatal("runReport with a relative report.dir = nil, want an error")
+	}
+	if strings.Contains(err.Error(), "rel-report-dir") {
+		t.Errorf("report.dir error echoes the configured value: %v", err)
+	}
+	if _, statErr := os.Stat("rel-report-dir"); statErr == nil {
+		t.Error("runReport created the relative report dir before refusing")
 	}
 }
 
@@ -612,22 +724,19 @@ func TestRunReportRefusesWhenLockHeld(t *testing.T) {
 // (DEBUG), not the operator-visible WARN arr-fault line. Serial (swaps
 // slog.Default).
 func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	rec := capture.Default(t)
 
 	logPing("sonarr", fmt.Errorf("ping: %w", context.Canceled))
 
-	var rec map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
-		t.Fatalf("log line does not parse: %v (%s)", err, buf.String())
+	records := rec.Records()
+	if len(records) != 1 {
+		t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
 	}
-	if rec["level"] != "DEBUG" {
-		t.Errorf("level = %v, want DEBUG", rec["level"])
+	if records[0].Level != slog.LevelDebug {
+		t.Errorf("level = %v, want DEBUG", records[0].Level)
 	}
-	if rec["msg"] != "sonarr startup ping cancelled by shutdown" {
-		t.Errorf("msg = %v, want the cancelled-by-shutdown line", rec["msg"])
+	if records[0].Message != "sonarr startup ping cancelled by shutdown" {
+		t.Errorf("msg = %q, want the cancelled-by-shutdown line", records[0].Message)
 	}
 }
 
@@ -637,7 +746,7 @@ func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
 // network I/O).
 func TestDispatchRoutesReportMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
-	release, err := audit.AcquireReportLock(dir)
+	release, err := cycle.TryReportLock(dir)
 	if err != nil {
 		t.Fatalf("holding the report lock: %v", err)
 	}
@@ -649,13 +758,13 @@ func TestDispatchRoutesReportMode(t *testing.T) {
 		ReportDir: dir,
 	}
 	err = dispatch(config.RunModeReport, cfg)
-	if !errors.Is(err, audit.ErrReportRunning) {
+	if !errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("dispatch(report, valid config) = %v, want ErrReportRunning", err)
 	}
 }
 
 // TestRunReportReleasesLockOnBuildFailure pins the deferred lock release: a
-// failed buildScout (invalid sonarr URL, no network I/O) must not leak the
+// failed buildReporter (invalid sonarr URL, no network I/O) must not leak the
 // report lock, or every subsequent report would refuse with ErrReportRunning
 // until restart.
 func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
@@ -666,11 +775,11 @@ func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("runReport(invalid sonarr URL) = nil, want a build error")
 	}
-	if errors.Is(err, audit.ErrReportRunning) {
+	if errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("err = %v, want a build error, not a lock refusal", err)
 	}
 
-	release, err := audit.AcquireReportLock(dir)
+	release, err := cycle.TryReportLock(dir)
 	if err != nil {
 		t.Fatalf("report lock still held after the failed run: %v", err)
 	}
@@ -678,8 +787,10 @@ func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
 }
 
 // TestBuildIndexer pins the Torznab feed server wiring hermetically: a
-// configured feed builds a non-nil server (warm-loading the absent feed
-// snapshot is the documented fresh-install no-op) and cleanup is callable.
+// configured feed builds a non-nil server (New is pure assembly, so nothing is
+// loaded yet) and cleanup is callable; an unconfigured one builds nothing, which
+// is the socket-less posture and what makes the compare cycle's in-process
+// handover nil.
 func TestBuildIndexer(t *testing.T) {
 	cfg := &config.Config{
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
@@ -690,4 +801,237 @@ func TestBuildIndexer(t *testing.T) {
 		t.Fatal("indexer = nil, want a wired Torznab feed server")
 	}
 	bi.cleanup()
+
+	unconfigured := buildIndexer(&config.Config{})
+	if unconfigured.indexer != nil {
+		t.Error("indexer != nil for an unconfigured feed, want none built (the daemon binds no HTTP port)")
+	}
+	unconfigured.cleanup()
+}
+
+// TestStartIndexerUnconfiguredIsNoOp pins the socket-less contract: with no
+// Prowlarr Torznab URL configured, startIndexer builds no indexer and starts
+// no goroutine (no log record from an indexer Run/stop path), and the
+// returned stop func returns immediately instead of waiting on a goroutine.
+// Serial (capture swaps slog.Default).
+func TestStartIndexerUnconfiguredIsNoOp(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stop := startIndexer(ctx, buildIndexer(&config.Config{}))
+	stop()
+
+	if msgs := rec.Messages(); len(msgs) != 0 {
+		t.Errorf("startIndexer(unconfigured) logged %v, want no indexer activity", msgs)
+	}
+}
+
+// TestNewArrClientsRadarrErrorClosesSonarr pins the partial-construction
+// cleanup contract: when Radarr's constructor fails after Sonarr's succeeded,
+// the error names the radarr client and no half-built client pair escapes
+// (both returned clients are nil; the already-built Sonarr client is closed
+// on this path rather than leaked).
+func TestNewArrClientsRadarrErrorClosesSonarr(t *testing.T) {
+	cfg := &config.Config{
+		SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k1",
+		RadarrURL: "not-a-url", RadarrAPIKey: "k2",
+	}
+	s, r, err := newArrClients(cfg)
+	if err == nil {
+		t.Fatal("err = nil, want error for an invalid radarr URL beside a valid sonarr")
+	}
+	if !strings.Contains(err.Error(), "radarr client") {
+		t.Errorf("err = %q, want it to name the radarr client", err)
+	}
+	if s != nil || r != nil {
+		t.Errorf("clients = (%v, %v), want (nil, nil) on a constructor error", s, r)
+	}
+}
+
+// TestWriteStarterConfigOwnerOnlyMode pins the documented owner-only mode of
+// the generated starter config (starterFileMode): the file is where the
+// operator may paste arr API keys and the AB passkey, so it must be created
+// 0600. atomicfile applies the mode via Chmod (umask-independent), so the
+// assertion is deterministic.
+func TestWriteStarterConfigOwnerOnlyMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := writeStarterConfig(path); err != nil {
+		t.Fatalf("writeStarterConfig(%q) = %v, want nil", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat starter: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("starter config mode = %o, want 0600 (owner-only: the file is where API keys get pasted)", got)
+	}
+}
+
+// TestStartIndexerLogsRunErrorAndStops pins the configured half of the
+// startIndexer contract that TestStartIndexerUnconfiguredIsNoOp cannot reach:
+// with a Prowlarr Torznab URL configured, the feed goroutine is launched, a
+// Run failure is logged as the component=indexer ERROR fault line (via
+// logIndexerStop's non-shutdown branch), and the returned stop func waits for
+// the goroutine instead of deadlocking or returning before the record is
+// written. The Run failure used is indexer.Run's own fail-closed refusal on an
+// empty feed_api_key, which returns before any port bind - so the test is
+// hermetic and deterministic (the refusal precedes every context check, so the
+// message is stable even if stop's cancel wins the race with the goroutine).
+// Serial (capture swaps slog.Default).
+func TestStartIndexerLogsRunErrorAndStops(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := t.Context()
+
+	cfg := &config.Config{IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api"}
+	stop := startIndexer(ctx, buildIndexer(cfg))
+	stop() // must wait for the goroutine's terminal log, then return
+
+	if !rec.Contains("indexer feed stopped") {
+		t.Fatalf("missing the indexer feed stopped ERROR line: %v", rec.Messages())
+	}
+	for _, r := range rec.Records() {
+		if r.Message == "indexer feed stopped" && r.Level != slog.LevelError {
+			t.Errorf("level = %v, want ERROR (a Run failure outside shutdown is a fault)", r.Level)
+		}
+	}
+}
+
+// TestRunPollBuildFailure pins runPoll's pre-cycle failure contract: a build
+// failure with no shutdown signal propagates as the ordinary error (exit 1)
+// and must never read as an interruption (an errors.Is(context.Canceled)
+// result would make main demote a genuine misconfiguration to the
+// routine-shutdown WARN, keeping it off the level=ERROR cycle-error alert).
+// Hermetic: the invalid sonarr URL fails newArrClients before any network
+// I/O, cycle-lock creation, or health-marker write.
+func TestRunPollBuildFailure(t *testing.T) {
+	err := runPoll(&config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"})
+	if err == nil {
+		t.Fatal("runPoll(invalid sonarr URL) = nil, want a build error (exit 1)")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, must not read as an interruption (main would demote the fault to WARN)", err)
+	}
+	if !strings.Contains(err.Error(), "sonarr client") {
+		t.Errorf("err = %q, want the sonarr client build failure", err)
+	}
+}
+
+// TestDispatchOutcome pins the two operator-visible contracts main derives from
+// a dispatch error: the slog level the cycle-error Loki alert keys on
+// (level=ERROR) and the exit code a scheduler reads. The self-heal rule decides
+// both - a designed outcome or a routine shutdown is a WARN, and only a refused
+// concurrent report (which owes nothing, because the run holding the lock is
+// producing the report) exits 0.
+func TestDispatchOutcome(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err       error
+		wantLevel slog.Level
+		wantMsg   string
+		wantExit  int
+	}{
+		"refused concurrent report": {
+			err:       fmt.Errorf("acquire report lock: %w", cycle.ErrReportRunning),
+			wantLevel: slog.LevelWarn,
+			wantMsg:   "report skipped; another report is already running",
+			wantExit:  0,
+		},
+		"shutdown": {
+			err:       fmt.Errorf("cycle: %w", context.Canceled),
+			wantLevel: slog.LevelWarn,
+			wantMsg:   "seadex-scout interrupted by shutdown",
+			wantExit:  1,
+		},
+		"operation timeout is a genuine fault": {
+			err:       fmt.Errorf("walk: %w", context.DeadlineExceeded),
+			wantLevel: slog.LevelError,
+			wantMsg:   "seadex-scout failed",
+			wantExit:  1,
+		},
+		"plain fault": {
+			err:       errors.New("sonarr unreachable"),
+			wantLevel: slog.LevelError,
+			wantMsg:   "seadex-scout failed",
+			wantExit:  1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			level, msg, exit := dispatchOutcome(tc.err)
+			if level != tc.wantLevel {
+				t.Errorf("level = %v, want %v", level, tc.wantLevel)
+			}
+			if msg != tc.wantMsg {
+				t.Errorf("msg = %q, want %q", msg, tc.wantMsg)
+			}
+			if exit != tc.wantExit {
+				t.Errorf("exit = %d, want %d", exit, tc.wantExit)
+			}
+		})
+	}
+}
+
+// TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence pins the one half of
+// the wedge lease that is the ROOT's: run() arms it from cfg.PollInterval, so
+// the app's own default cadence has to yield a lease a cold reconcile can finish
+// inside. The lease arithmetic and the floor's measured value are pinned beside
+// the mechanism, in internal/cycle's watchdog tests.
+func TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence(t *testing.T) {
+	// measuredColdReconcile is the observed worst case on a large library (the
+	// typical cold pass is ~25 minutes). At the shipped default the lease has to
+	// survive it, or the watchdog demands the restart that kills the walk before
+	// it can persist the AniList memo - which makes the next boot cold again.
+	const measuredColdReconcile = 2 * time.Hour
+	if got := cycle.WatchdogLease(config.DefaultPollInterval); got <= measuredColdReconcile {
+		t.Errorf("cycle.WatchdogLease(DefaultPollInterval=%v) = %v, want more than the measured %v cold reconcile",
+			config.DefaultPollInterval, got, measuredColdReconcile)
+	}
+}
+
+// TestDetachedWriteError pins the alert-facing exit classification of a
+// shutdown-truncated report write: it must read as a routine shutdown (WARN,
+// excluded from alerts.yaml's SeadexScoutCycleError rule) while a genuine write
+// fault keeps its ERROR classification. It stays in the root even though
+// shutdown.DetachedWriteError is the mechanism, because what it pins is the
+// coupling to dispatchOutcome - the root's own exit-code/level contract. Three
+// non-obvious properties carry it - the multi-%w wrap surviving (fmt drops ALL
+// wrapping on a nil %w operand), the guard's asymmetry, and shutdown.Normalize
+// leaving an already-classified error alone rather than wrapping it twice.
+func TestDetachedWriteError(t *testing.T) {
+	cancelled := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+
+	t.Run("a shutdown-truncated detached write classifies as a routine shutdown", func(t *testing.T) {
+		ctx := cancelled()
+		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
+		got := shutdown.DetachedWriteError(ctx, werr)
+		if !errors.Is(got, context.Canceled) {
+			t.Errorf("errors.Is(err, context.Canceled) = false, want true (the multi-%%w wrap must survive; otherwise the redeploy ERROR alert returns): %v", got)
+		}
+		if !errors.Is(got, context.DeadlineExceeded) {
+			t.Errorf("the original write error was lost: %v", got)
+		}
+		if level, _, _ := dispatchOutcome(got); level != slog.LevelWarn {
+			t.Errorf("dispatchOutcome level = %v, want WARN (a shutdown-truncated report must not trip SeadexScoutCycleError)", level)
+		}
+		// shutdown.Normalize runs deferred over the same ctx and must
+		// leave an already-classified error alone rather than wrapping it twice.
+		if again := shutdown.Normalize(ctx, got); again != got {
+			t.Errorf("Normalize re-wrapped the classified error: %v", again)
+		}
+	})
+	t.Run("a genuine write failure keeps its fault classification", func(t *testing.T) {
+		werr := errors.New("write report pair: no space left on device")
+		if got := shutdown.DetachedWriteError(cancelled(), werr); got != werr {
+			t.Errorf("shutdown.DetachedWriteError(cancelled, non-timeout) = %v, want the error unchanged", got)
+		}
+	})
+	t.Run("a live context never reclassifies", func(t *testing.T) {
+		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
+		if got := shutdown.DetachedWriteError(t.Context(), werr); got != werr {
+			t.Errorf("shutdown.DetachedWriteError(live, timeout) = %v, want the error unchanged", got)
+		}
+	})
 }
