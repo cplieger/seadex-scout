@@ -2027,6 +2027,51 @@ func TestDecodeSnapshotBoundsOneItemsInteriorArray(t *testing.T) {
 	}
 }
 
+// TestDecodeSnapshotAcceptsAnItemExactlyAtThePerItemByteBound pins the OTHER
+// side of that bound, and it is the side that decides how much a corrupt feed
+// costs.
+//
+// feed.json is an untrusted persisted boundary - hand-edited, restored from a
+// partial write, or tampered with - so the decoder meets a document nobody
+// vouches for. An item standing exactly ON the cap is a legal document, and the
+// two possible readings are not close in consequence: accept it and the per-item
+// gate drops that one item while the rest of the journal and the never-pruned
+// publication log survive; refuse it and the WHOLE snapshot re-baselines, which
+// forfeits every currently curated identity into the publication log and serves
+// an empty RSS journal until the next reconcile. One oversized item must not cost
+// the feed its history.
+func TestDecodeSnapshotAcceptsAnItemExactlyAtThePerItemByteBound(t *testing.T) {
+	// One item whose serialized JSON measures exactly maxPersistedItemBytes, and
+	// whose Title is far past the per-FIELD cap, so the only thing that can reject
+	// it is the per-item gate AFTER the decode.
+	const (
+		head = `{"Key":"nyaa:1","FirstSeen":"2026-07-01T00:00:00Z","Title":"`
+		tail = `"}`
+	)
+	atCap := head + strings.Repeat("A", maxPersistedItemBytes-len(head)-len(tail)) + tail
+	if len(atCap) != maxPersistedItemBytes {
+		t.Fatalf("fixture item = %d bytes, want exactly %d (the boundary is the whole subject)", len(atCap), maxPersistedItemBytes)
+	}
+	healthy := `{"Key":"nyaa:2","FirstSeen":"2026-07-01T00:00:00Z","Title":"Healthy Show S01 [G]"}`
+	doc := `{"version":2,"owners":{},"published":{},"ab_feed":[],"nyaa_feed":[` + atCap + `,` + healthy + `]}`
+
+	snap, scrub, reason, err := decodeSnapshot([]byte(doc))
+	if err != nil || reason != "" {
+		t.Fatalf("decodeSnapshot(item of exactly %d bytes) = error %v, reason %q; want the document accepted",
+			maxPersistedItemBytes, err, reason)
+	}
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("nyaa feed = %d items, want 1 (the at-cap item dropped by the per-item gate, the healthy one kept): %v",
+			len(snap.NyaaFeed), feedKeys(snap.NyaaFeed))
+	}
+	if got := snap.NyaaFeed[0].Key; got != "nyaa:2" {
+		t.Errorf("surviving item key = %q, want %q", got, "nyaa:2")
+	}
+	if got := scrub.droppedItems[upstreamNyaa]; got != 1 {
+		t.Errorf("dropped items on nyaa = %d, want 1 (the operator is told the item went, not that the snapshot did)", got)
+	}
+}
+
 // TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey pins the SECOND cardinality
 // dimension of the ownership fact, which the per-owner-key charge cannot see:
 // owners is a map of ARRAYS, so a million releases can hide inside ONE owner's
