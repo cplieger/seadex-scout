@@ -738,3 +738,105 @@ func TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes pins the half of a
+// window's render that its own evidence cannot supply.
+//
+// A window holds the occurrences of the entries a curator happened to touch,
+// never a journal key's whole owner set (~4.4% of curated torrents are attached
+// to several entries), so its render is authorized only as PARTIAL and is
+// completed by carrying the stored votes of the owners it did NOT evaluate. Both
+// carried votes are additive - best-wins on the download-volume-factor marker and
+// a category union - and both are load-bearing at the serve surface: a release
+// SeaDex marks best would otherwise be published to the arrs as an alt for a whole
+// reconcile interval, and a film owned only by an unevaluated entry would never
+// reach Radarr's RSS view.
+//
+// The four cases are the identity relation that decides which stored release
+// counts, plus the rule that a vote this pass REPLACED is never carried on top of
+// its own fresh evidence.
+func TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes(t *testing.T) {
+	// A 40-hex info hash the window's own occurrence carries, so the stored
+	// hash-side identity test has something to match.
+	const sharedHash = "aaaabbbbccccddddeeeeffff0000111122223333"
+	// movieOwner types entry 8 as a film and every other entry as a series, so a
+	// carried category vote is visible as a second category on the item.
+	movieOwner := func(alID int) EntryInfo { return EntryInfo{IsMovie: alID == 8} }
+
+	tests := map[string]struct {
+		desc string
+		// prior is the ownership fact the PREVIOUS snapshot holds.
+		prior map[string][]ownedRelease
+		// windowHash is the info hash the window's own occurrence of nyaa:77
+		// carries ("" for the hashless AnimeBytes-like shape).
+		windowHash string
+		wantMarker string
+		wantCats   []int
+	}{
+		"unevaluated_owner_votes_best_by_key": {
+			desc: "entry 8 is outside the window and its stored contribution names this key, " +
+				"so its best vote and its movie typing complete the render",
+			prior:      ownsBy(8, keyed("nyaa:77", true)),
+			wantMarker: dvfBest,
+			wantCats:   []int{catMovies, catAnime},
+		},
+		"unevaluated_owner_votes_best_by_hash": {
+			desc: "entry 8's stored release names another key but the SAME info hash, " +
+				"which is the snapshot's other identity form",
+			prior:      ownsBy(8, hashed("nyaa:9999", sharedHash, true)),
+			windowHash: sharedHash,
+			wantMarker: dvfBest,
+			wantCats:   []int{catMovies, catAnime},
+		},
+		"hashless_stored_release_under_another_key_owns_nothing": {
+			desc: "a stored release with no hash and a different key matches nothing, " +
+				"even though the item it is compared against also has no hash",
+			prior:      ownsBy(8, keyed("nyaa:9999", true)),
+			wantMarker: dvfAlt,
+			wantCats:   []int{catAnime},
+		},
+		"replaced_owner_stale_best_vote_is_not_carried": {
+			desc: "entry 9 IS this window's own entry, so its stored best vote was " +
+				"replaced wholesale by the fresh evidence that demotes the release",
+			prior:      ownsBy(9, keyed("nyaa:77", true)),
+			wantMarker: dvfAlt,
+			wantCats:   []int{catAnime},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+			fixture := advanceFixture(now.Add(-time.Hour))
+			fixture.Owners = tc.prior
+			writeSnapshotFile(t, path, fixture)
+
+			// The window evaluates entry 9 only, and its occurrence is NOT best:
+			// every best marker below can only have come from a carried vote.
+			entry := nyaaEntry(9, 77, false, "New Show - S01E01 (1080p) [G].mkv")
+			entry.Torrents[0].InfoHash = tc.windowHash
+			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{entry}, movieOwner); err != nil {
+				t.Fatalf("Advance: %v", err)
+			}
+
+			snap := readSnapshotFile(t, path)
+			var got journalItem
+			for i := range snap.NyaaFeed {
+				if snap.NyaaFeed[i].Key == "nyaa:77" {
+					got = snap.NyaaFeed[i]
+				}
+			}
+			if got.Key == "" {
+				t.Fatalf("nyaa:77 was not journaled (%s): feed = %v", tc.desc, feedKeys(snap.NyaaFeed))
+			}
+			if got.DownloadVolumeFactor != tc.wantMarker {
+				t.Errorf("Advance(prior %v) nyaa:77 marker = %q, want %q (%s)",
+					tc.prior, got.DownloadVolumeFactor, tc.wantMarker, tc.desc)
+			}
+			if !slices.Equal(got.Categories, tc.wantCats) {
+				t.Errorf("Advance(prior %v) nyaa:77 categories = %v, want %v ascending (%s)",
+					tc.prior, got.Categories, tc.wantCats, tc.desc)
+			}
+		})
+	}
+}
