@@ -881,7 +881,8 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 			{Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
 	})
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nil, nil); err != nil {
+	log, rec := capture.New()
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -897,6 +898,12 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 	}
 	if !got.FirstSeen.Equal(first) {
 		t.Errorf("FirstSeen = %v, want the original %v", got.FirstSeen, first)
+	}
+	// The one number an operator diagnosing "the feed lists it, the site does
+	// not" reads. The runbook calls this an expected steady state for up to
+	// feedJournalMaxAge, so a silent carry is indistinguishable from a stuck feed.
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_stored_decurated"); !ok || got != "1" {
+		t.Errorf("journal_stored_decurated = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -1353,6 +1360,11 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "0" {
 		t.Errorf("journal_dropped = %q (found=%v), want 0; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	}
+	// The carry-path twin of skipped_unresolvable, and the only signal above Debug
+	// that a systematic upstream data change has frozen every carried render.
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_stored_unrenderable"); !ok || got != "1" {
+		t.Errorf("journal_stored_unrenderable = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
 		t.Errorf("the unresolvable render was counted as an AB passkey skip; log:\n%s", strings.Join(rec.Messages(), "\n"))
