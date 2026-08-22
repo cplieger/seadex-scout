@@ -7,7 +7,7 @@ require (
 	github.com/cplieger/atomicfile/v3 v3.0.0
 	github.com/cplieger/envx/yamlenv/v2 v2.0.0
 	github.com/cplieger/health v1.6.0
-	github.com/cplieger/httpx/v5 v5.0.1
+	github.com/cplieger/httpx/v5 v5.0.2
 	github.com/cplieger/jsoncap/v2 v2.0.0
 	github.com/cplieger/jsonx/v2 v2.0.0
 	github.com/cplieger/keyenc v1.0.6
