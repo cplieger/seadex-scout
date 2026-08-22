@@ -1956,6 +1956,51 @@ func TestChargeSnapshotEntryAggregateBudgetBoundary(t *testing.T) {
 	}
 }
 
+// TestPublicationLogPreflightAndDecodeAgreeOnTheEntryCap pins the AGREEMENT
+// between the two sides of maxSnapshotMapEntries rather than either side alone.
+//
+// persist's doc states the contract: the pre-flight mirrors the reader's size
+// bound before committing, so a snapshot the reload would reject never replaces
+// the last-good file. The inverse is the failure nothing else here would catch -
+// a pre-flight that refused what the decode ACCEPTS fails the pass, keeps the
+// stale feed and tells the operator to delete feed.json to re-baseline, all for
+// a snapshot that would have loaded. Refusing at the cap itself rather than past
+// it is a one-character edit away, and the two sides are written as opposite
+// comparisons (<= admits, > refuses) in two different files, so nothing but a
+// test that runs both at the same numbers holds them together.
+//
+// It drives the predicates at the boundary directly. The end-to-end path needs a
+// 250k-entry log, which was measured at ~605ms and ~1.25M allocations under
+// -race, and it can only demonstrate refusal - never which entry is the last one
+// admitted, which is the whole question.
+func TestPublicationLogPreflightAndDecodeAgreeOnTheEntryCap(t *testing.T) {
+	tests := map[string]struct {
+		entries int
+		want    bool
+	}{
+		"a log one entry below the cap is persistable and decodable": {entries: maxSnapshotMapEntries - 1, want: true},
+		"a log of exactly the cap is persistable and decodable":      {entries: maxSnapshotMapEntries, want: true},
+		"a log one entry past the cap is refused by both":            {entries: maxSnapshotMapEntries + 1, want: false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := publicationLogEntriesWithinDecodeCap(tc.entries); got != tc.want {
+				t.Errorf("publicationLogEntriesWithinDecodeCap(%d) = %v, want %v (cap %d)",
+					tc.entries, got, tc.want, maxSnapshotMapEntries)
+			}
+			// The decode's answer for the same log: charging its LAST entry is
+			// what admits or refuses the map, so the accumulator starts one
+			// short of the count under test.
+			perMap, entries := tc.entries-1, 0
+			decodes := chargeSnapshotEntry("published", &perMap, &entries) == nil
+			if decodes != tc.want {
+				t.Errorf("chargeSnapshotEntry charging entry %d of a %d-entry log accepted = %v, want %v (cap %d)",
+					tc.entries, tc.entries, decodes, tc.want, maxSnapshotMapEntries)
+			}
+		})
+	}
+}
+
 // TestLoadPreviousRefusesANonRegularSnapshot pins the defence the confined read
 // exists for, and it is a HANG this test would otherwise reproduce rather than a
 // wrong answer.
