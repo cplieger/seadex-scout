@@ -326,17 +326,52 @@ func seedNyaaFeed(t *testing.T, ix *Indexer, n int) {
 	ix.cache.snap.NyaaFeed = feed
 }
 
-// TestQueryCapsResults pins the maxItems safety bound: a synthesized feed
-// larger than the cap is truncated - even when the request's explicit limit
-// exceeds it - so a rendered response can never grow unboundedly. (A
-// limit-less request is trimmed to defaultCapsLimit before this cap can bite;
-// see TestQueryFeedDefaultLimit.)
+// TestQueryCapsResults pins the maxItems safety bound at its boundary, in both
+// directions: a synthesized feed larger than the cap is truncated - even when the
+// request's explicit limit exceeds it - so a rendered response can never grow
+// unboundedly, while a feed standing exactly ON the cap is served whole and
+// SILENTLY. (A limit-less request is trimmed to defaultCapsLimit before this cap
+// can bite; see TestQueryFeedDefaultLimit.)
+//
+// The WARN is the operator's only way to tell a short feed from a short
+// catalogue, so it has to fire exactly when something was actually withheld. A
+// line on a feed that lost nothing would report a truncation on every full
+// journal and teach an operator to ignore the one that matters.
 func TestQueryCapsResults(t *testing.T) {
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-	seedNyaaFeed(t, ix, maxItems+5)
-	items, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
-	if len(items) != maxItems {
-		t.Fatalf("got %d items, want the maxItems cap %d", len(items), maxItems)
+	const warnMsg = "feed trimmed to the rendered-item cap"
+	tests := map[string]struct {
+		feed          int
+		wantTrimWarns int
+	}{
+		"a feed exactly at the cap is served whole and silently": {
+			feed: maxItems, wantTrimWarns: 0,
+		},
+		"a feed past the cap is trimmed and the loss reported": {
+			feed: maxItems + 5, wantTrimWarns: 1,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			log, rec := capture.New()
+			ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
+			seedNyaaFeed(t, ix, tc.feed)
+			items, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(tc.feed)}}, "nyaa")
+			if len(items) != maxItems {
+				t.Fatalf("query(feed of %d, limit %d) = %d items, want the maxItems cap %d",
+					tc.feed, tc.feed, len(items), maxItems)
+			}
+			if got := rec.Count(warnMsg); got != tc.wantTrimWarns {
+				t.Errorf("query(feed of %d) emitted the trim WARN %d times, want %d; log:\n%s",
+					tc.feed, got, tc.wantTrimWarns, strings.Join(rec.Messages(), "\n"))
+			}
+			if tc.wantTrimWarns == 0 {
+				return
+			}
+			if got, ok := rec.AttrValue(warnMsg, "available"); !ok || got != strconv.Itoa(tc.feed) {
+				t.Errorf("trim WARN available = %q (found=%v), want %d; log:\n%s",
+					got, ok, tc.feed, strings.Join(rec.Messages(), "\n"))
+			}
+		})
 	}
 }
 
