@@ -32,9 +32,6 @@ const (
 	// maxStateBytes bounds the state file on read AND write (Save refuses to
 	// persist what Load would reject).
 	maxStateBytes = 32 << 20
-	// stateSizeWarnBytes is the pre-cliff warning threshold (80% of maxStateBytes):
-	// crossing the bound refuses every subsequent Save, so writeState warns earlier.
-	stateSizeWarnBytes = maxStateBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// dirMode / fileMode are applied to the created state directory and file.
 	dirMode  = 0o700
 	fileMode = 0o600
@@ -436,7 +433,8 @@ func (s *Store) writeState(ctx context.Context, st *State) error {
 	if encErr := encodeState(pf, st, s.path); encErr != nil {
 		return encErr
 	}
-	if staged := pf.BytesWritten(); staged > stateSizeWarnBytes {
+	// Crossing maxStateBytes refuses every subsequent Save, so warn earlier.
+	if staged := pf.BytesWritten(); degradation.ApproachingLimit(staged, maxStateBytes) {
 		s.log.Warn("state file approaching the size limit; a Save that exceeds it is refused and the persisted cache freezes",
 			"path", s.path, "bytes", staged, "limit", maxStateBytes)
 	}

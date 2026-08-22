@@ -518,7 +518,8 @@ const approachingSizeCapMessage = "mapping: Fribb body approaching the download 
 // persisted rejection streak escalates to ERROR - with no signal at all while
 // refreshes were still succeeding.
 //
-// At exactly mapSizeWarnBytes the WARN fires once (the guard is inclusive) and
+// At exactly the warning threshold the WARN fires once (the shared guard is
+// inclusive) and
 // carries the body size and the cap; one byte below it stays silent. It drives
 // acceptRefresh directly, like the identifier-budget sibling, because the
 // threshold arithmetic is what is under test rather than the transport that
@@ -526,11 +527,16 @@ const approachingSizeCapMessage = "mapping: Fribb body approaching the download 
 // guard reads len(res.Body) before the parse, so the refresh is refused either
 // way and the usable stale cache is kept.
 func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
+	// The threshold is hardcoded rather than recomputed from the shared fraction:
+	// a fixture derived from the expression under test moves with it, and this
+	// test's whole subject is which byte count the warning starts at.
+	// 13421768 is maxMapBytes/10*8 (16 MiB), truncated down.
+	const warnThresholdBytes = 13_421_768
 	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
 
 	logger, rec := capture.New()
 	at := &Loader{log: logger}
-	next, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, mapSizeWarnBytes)})
+	next, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, warnThresholdBytes)})
 	if err == nil {
 		t.Fatal("acceptRefresh(at-threshold body) = nil error, want the stale-map refusal")
 	}
@@ -540,8 +546,8 @@ func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
 	if n := rec.CountLevel(slog.LevelWarn, approachingSizeCapMessage); n != 1 {
 		t.Fatalf("a body at the threshold warned %d times at WARN, want exactly 1 (the guard is inclusive, and a demoted level vanishes from the deployed info-level stream): %v", n, rec.Messages())
 	}
-	if !rec.HasAttr(approachingSizeCapMessage, "bytes", strconv.Itoa(mapSizeWarnBytes)) {
-		t.Errorf("approaching-cap log = %v, want bytes=%d", rec.Messages(), mapSizeWarnBytes)
+	if !rec.HasAttr(approachingSizeCapMessage, "bytes", strconv.Itoa(warnThresholdBytes)) {
+		t.Errorf("approaching-cap log = %v, want bytes=%d", rec.Messages(), warnThresholdBytes)
 	}
 	if !rec.HasAttr(approachingSizeCapMessage, "cap", strconv.Itoa(maxMapBytes)) {
 		t.Errorf("approaching-cap log = %v, want cap=%d", rec.Messages(), maxMapBytes)
@@ -549,7 +555,7 @@ func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
 
 	belowLogger, belowRec := capture.New()
 	below := &Loader{log: belowLogger}
-	if _, err := below.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, mapSizeWarnBytes-1)}); err == nil {
+	if _, err := below.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, warnThresholdBytes-1)}); err == nil {
 		t.Fatal("acceptRefresh(below-threshold body) = nil error, want the stale-map refusal")
 	}
 	if n := belowRec.CountExact(approachingSizeCapMessage); n != 0 {

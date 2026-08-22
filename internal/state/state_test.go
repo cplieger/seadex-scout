@@ -1467,11 +1467,15 @@ func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 
 // TestStoreSaveWarnsApproachingSizeLimit pins the pre-cliff size warning,
 // the operator's only notice before the shared maxStateBytes bound starts
-// refusing every Save and freezes the persisted cache: a staged encoding past
-// stateSizeWarnBytes (80% of the cap) warns exactly once, and an ordinary
-// state stays silent so the warning keeps meaning something.
+// refusing every Save and freezes the persisted cache: a staged encoding that
+// reaches 80% of the cap warns exactly once, and an ordinary state stays silent
+// so the warning keeps meaning something.
 func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	const wantMsg = "state file approaching the size limit; a Save that exceeds it is refused and the persisted cache freezes"
+	// Hardcoded rather than recomputed from the shared fraction, because which
+	// byte count the warning starts at is exactly what this test is for.
+	// 26843544 is maxStateBytes/10*8 (32 MiB), truncated down.
+	const warnThresholdBytes = 26_843_544
 	padded := func(n int) *State {
 		// Version mirrors the SchemaVersion stamp Save applies to the copy it
 		// writes, so the json.Marshal probe below measures the staged shape.
@@ -1486,7 +1490,7 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	t.Run("crossing the threshold warns once", func(t *testing.T) {
 		logger, recorder := capture.New()
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-		if err := store.Save(t.Context(), sized(stateSizeWarnBytes+1024)); err != nil {
+		if err := store.Save(t.Context(), sized(warnThresholdBytes+1024)); err != nil {
 			t.Fatalf("Save returned error: %v", err)
 		}
 		if got := recorder.CountExact(wantMsg); got != 1 {
@@ -1497,7 +1501,7 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	t.Run("an ordinary state stays quiet", func(t *testing.T) {
 		logger, recorder := capture.New()
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-		if err := store.Save(t.Context(), sized(stateSizeWarnBytes/2)); err != nil {
+		if err := store.Save(t.Context(), sized(warnThresholdBytes/2)); err != nil {
 			t.Fatalf("Save returned error: %v", err)
 		}
 		if got := recorder.CountExact(wantMsg); got != 0 {
@@ -1505,18 +1509,21 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 		}
 	})
 
-	t.Run("a state exactly at the threshold stays quiet", func(t *testing.T) {
+	t.Run("a state exactly at the threshold warns", func(t *testing.T) {
 		// encodeState truncates the encoder's newline away and the staged count
 		// re-syncs with it, so the guard reads exactly the marshalled length.
-		// The threshold is the point the warning starts being warranted PAST,
-		// and only this row can say which side of it the equal case falls on.
+		// The threshold is the point the warning STARTS, not the last silent
+		// byte, and only this row can say which side of it the equal case falls
+		// on. It used to assert silence here while the mapping loader's twin
+		// asserted a warning at its own threshold; one shared predicate now
+		// answers for both, inclusively.
 		logger, recorder := capture.New()
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-		if err := store.Save(t.Context(), sized(stateSizeWarnBytes)); err != nil {
+		if err := store.Save(t.Context(), sized(warnThresholdBytes)); err != nil {
 			t.Fatalf("Save returned error: %v", err)
 		}
-		if got := recorder.CountExact(wantMsg); got != 0 {
-			t.Errorf("pre-cliff WARN count = %d for a state exactly at the threshold, want 0 (the warning is for crossing it)", got)
+		if got := recorder.CountExact(wantMsg); got != 1 {
+			t.Errorf("pre-cliff WARN count = %d for a state exactly at the threshold, want 1 (the fraction is where the warning starts)", got)
 		}
 	})
 }
