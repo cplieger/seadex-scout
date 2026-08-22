@@ -1192,6 +1192,58 @@ func TestSeenLedgerWithinLimitsBoundary(t *testing.T) {
 	}
 }
 
+// TestSeenLedgerWithinLimitsAggregateBoundary pins the inclusive endpoint of the
+// AGGREGATE byte cap, which the key-length boundary above cannot reach: a single
+// key can never approach maxPublicationLogBytes, because the per-key cap rejects
+// it first, so only a ledger of many at-limit keys can stand exactly on the
+// aggregate one.
+//
+// The log is append-only and never pruned, so it walks up to this bound one
+// entry at a time and WILL stand exactly on it. Refusing it there re-baselines
+// the journal: every currently curated identity is forfeited into the log and the
+// RSS feed serves empty until the next reconcile, on a ledger that is honest and
+// exactly within its documented size.
+func TestSeenLedgerWithinLimitsAggregateBoundary(t *testing.T) {
+	// Each entry is charged its serialized cost, `"<key>":true,`, so the widest
+	// legal key is also the cheapest way to reach the cap: fewest entries, and no
+	// escaping to reason about.
+	const perEntry = maxPersistedFieldBytes + len(`"":true,`)
+	wide := maxPublicationLogBytes / perEntry
+	seen := make(map[string]bool, wide+1)
+	for i := range wide {
+		id := strconv.Itoa(i)
+		seen["k"+id+strings.Repeat("a", maxPersistedFieldBytes-1-len(id))] = true
+	}
+	// One narrower key tops the ledger up to the cap exactly.
+	seen[strings.Repeat("z", maxPublicationLogBytes-wide*perEntry-len(`"":true,`))] = true
+	if got := serializedLedgerCost(seen); got != maxPublicationLogBytes {
+		t.Fatalf("fixture ledger = %d serialized bytes, want exactly %d (the boundary is the whole subject)", got, maxPublicationLogBytes)
+	}
+
+	if !publicationLogWithinLimits(seen) {
+		t.Errorf("publicationLogWithinLimits(ledger of exactly %d serialized bytes) = false, want true",
+			maxPublicationLogBytes)
+	}
+	seen["one-more-entry"] = true
+	if publicationLogWithinLimits(seen) {
+		t.Errorf("publicationLogWithinLimits(ledger of %d serialized bytes) = true, want false",
+			serializedLedgerCost(seen))
+	}
+}
+
+// serializedLedgerCost measures a fixture publication log the way the persisted
+// document charges it: the JSON-encoded key plus the `:true,` its entry adds. It
+// exists so a boundary fixture can prove it stands where it claims to, and it
+// takes no *testing.T because it cannot fail.
+func serializedLedgerCost(published map[string]bool) int {
+	total := 0
+	for k := range published {
+		encoded, _ := json.Marshal(k)
+		total += len(encoded) + len(`:true,`)
+	}
+	return total
+}
+
 // TestSeenLedgerWithinLimitsChargesJSONEscaping pins that the aggregate cap is
 // charged against the SERIALIZED ledger cost, not the decoded key bytes.
 // encoding/json escapes the HTML-sensitive set, so every '<' costs six bytes
@@ -1856,6 +1908,51 @@ func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "budget exceeded") {
 		t.Errorf("error = %q, want the aggregate map-entry budget error", err)
+	}
+}
+
+// TestChargeSnapshotEntryAggregateBudgetBoundary pins where the aggregate
+// map-entry budget actually falls. The end-to-end test above proves the budget is
+// WIRED INTO the decode, and it can only prove refusal - it reaches the bound by
+// overshooting it with three at-cap maps. Which entry is the last admitted one is
+// a separate question, and getting it wrong by one costs a legal snapshot its
+// whole load: decodeSnapshot returns an error, so loadPrevious re-baselines and
+// the served journal is discarded.
+//
+// Charging the entry is the accumulator both caps run through, so the boundary is
+// stated here directly rather than by building a second multi-megabyte document.
+func TestChargeSnapshotEntryAggregateBudgetBoundary(t *testing.T) {
+	tests := map[string]struct {
+		before  int
+		wantErr bool
+	}{
+		"the last entry inside the budget is charged and admitted": {
+			before: maxSnapshotMapEntriesTotal - 1, wantErr: false,
+		},
+		"the first entry past the budget is refused": {
+			before: maxSnapshotMapEntriesTotal, wantErr: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			perMap, entries := 0, tc.before
+			err := chargeSnapshotEntry("titles", &perMap, &entries)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("chargeSnapshotEntry(entries=%d) = %v, want error %v (budget %d)",
+					tc.before, err, tc.wantErr, maxSnapshotMapEntriesTotal)
+			}
+			if entries != tc.before+1 {
+				t.Errorf("chargeSnapshotEntry(entries=%d) left entries = %d, want %d charged either way",
+					tc.before, entries, tc.before+1)
+			}
+			if !tc.wantErr {
+				return
+			}
+			if !strings.Contains(err.Error(), "budget exceeded") {
+				t.Errorf("chargeSnapshotEntry(entries=%d) error = %q, want the aggregate budget error named",
+					tc.before, err)
+			}
+		})
 	}
 }
 
