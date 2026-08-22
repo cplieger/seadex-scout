@@ -1796,6 +1796,54 @@ func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
 	})
 }
 
+// TestDecodeSnapshotChargesEntryBeforeReadingItsKey pins the ordering
+// jsoncap.(*Decoder).Map states for the walk both map decoders reproduce by
+// hand: the entry charge lands BEFORE the key is read, because the key is
+// itself an unbounded allocation from the wire. A map at exactly the cap
+// followed by one more entry whose key is not even a JSON string must
+// therefore fail with the cap error - the decoder's own complaint about that
+// key would prove it was read after the cap was already reached.
+func TestDecodeSnapshotChargesEntryBeforeReadingItsKey(t *testing.T) {
+	tests := map[string]struct {
+		member string
+		entry  func(i int) string
+	}{
+		"published_via_decodeSnapshotMap": {
+			member: `"published":{`,
+			entry:  func(i int) string { return `"nyaa:` + strconv.Itoa(i) + `":true` },
+		},
+		"owners_via_decodeSnapshotOwners": {
+			member: `"owners":{`,
+			entry:  func(i int) string { return `"g` + strconv.Itoa(i) + `":[]` },
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var doc strings.Builder
+			doc.WriteString(`{"version":2,"nyaa_feed":[],"ab_feed":[],`)
+			doc.WriteString(tc.member)
+			for i := range maxSnapshotMapEntries {
+				if i > 0 {
+					doc.WriteByte(',')
+				}
+				doc.WriteString(tc.entry(i))
+			}
+			// A bare number cannot be an object key, so d.Key refuses it.
+			doc.WriteString(`,0:true}}`)
+			if doc.Len() > maxFeedBytes {
+				t.Fatalf("at-cap document = %d bytes, want it under the %d byte cap", doc.Len(), maxFeedBytes)
+			}
+			_, _, _, err := decodeSnapshot([]byte(doc.String()))
+			if err == nil {
+				t.Fatalf("decodeSnapshot(map of %d entries + 1) = nil error, want the per-map cap to refuse the entry after the cap", maxSnapshotMapEntries)
+			}
+			if !strings.Contains(err.Error(), "too many entries") {
+				t.Errorf("decodeSnapshot(map of %d entries + 1) error = %q, want the entry cap named (the charge must precede the key read)", maxSnapshotMapEntries, err)
+			}
+		})
+	}
+}
+
 // TestCollectWarnedIdentitiesClosesReverseOrderedChain pins the transitive
 // closure on the shape the retired fixpoint form was quadratic on (h-f1): an
 // alternating key/hash chain listed in REVERSE order, where each sweep of a

@@ -127,9 +127,13 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 	var snap snapshot
 	var mapEntries int
 	claimed := make(map[snapshotMember]struct{}, len(allSnapshotMembers))
-	// The aggregate array budget covers both journal feeds; each feed also
-	// carries its own per-array cap, so neither one feed nor the pair can
-	// multiply past the bound.
+	// The aggregate array budget covers both journal feeds AND every owned
+	// release, which decodeSnapshotOwners decodes through d.Array as well; each
+	// array also carries its own per-array cap, so neither one array nor the
+	// set can multiply past the bound. The owners' release dimension is
+	// therefore bounded at 2*maxSnapshotFeedItems by a budget named for the
+	// feeds rather than at maxSnapshotMapEntries, while the owner KEYS charge
+	// nothing against it and chargeSnapshotEntry is their only bound.
 	d := jsoncap.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
 	err := d.Object(func(key string) error {
 		member := snapshotField(key)
@@ -209,7 +213,12 @@ func claimSnapshotField(claimed map[snapshotMember]struct{}, member snapshotMemb
 // shared entry budget. BOTH dimensions are charged - the outer owner keys and
 // every release inside them - because the fact is a map of arrays and either
 // dimension alone can carry hostile cardinality: a million owners with one
-// release each and one owner with a million releases cost the same heap.
+// release each and one owner with a million releases cost the same heap. ONE
+// counter across both dimensions is also why this walks the object with
+// jsoncap's token primitives rather than d.Map, whose per-container cap plus
+// d.Array's would bound each dimension independently and their product not at
+// all. A JSON null KEEPS the caller's map, the opposite of Unmarshal's
+// null-into-map; decodeSnapshotMap carries why that is safe at both sites.
 func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
 	const what = string(memberOwners)
 	open, err := d.Open('{')
@@ -221,12 +230,15 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 	}
 	perMap := 0
 	for d.More() {
+		// The charge lands before the KEY is read, the ordering
+		// jsoncap.(*Decoder).Map states for the same walk: the key is itself an
+		// unbounded allocation from the wire.
+		if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
+			return dst, chargeErr
+		}
 		key, keyErr := d.Key()
 		if keyErr != nil {
 			return dst, keyErr
-		}
-		if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
-			return dst, chargeErr
 		}
 		releases, arrErr := d.Array([]ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
 			if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
@@ -274,11 +286,16 @@ func decodeSnapshotFeed(d *jsoncap.Decoder, dst *[]journalItem, what string) err
 
 // decodeSnapshotMap decodes one persisted map field (a curation index, the seen
 // publication log, or the harvested-title cache) entry by entry under the shared entry
-// budget, and RETURNS the map for the caller to store back. A JSON null leaves
-// the map as it was (Unmarshal's null-into-map); an empty object allocates,
-// because a nil map is the structural sentinel both consumers read. Per-value
-// LENGTH stays loadPrevious's own ingress prune (retainValidTitles): this
-// pass bounds cardinality, which is what json.Unmarshal cannot.
+// budget, and RETURNS the map for the caller to store back. A JSON null KEEPS the
+// caller's map, the OPPOSITE of Unmarshal's null-into-map (measured: json.Unmarshal
+// nils a pre-populated map, and jsoncap.Map matches Unmarshal). That is
+// unobservable here only because claimSnapshotField refuses a repeated top-level
+// member, so the prior is always nil and either policy yields the nil the
+// structural gate then refuses - re-check that precondition before lifting this
+// shape anywhere the prior can be non-nil. An empty object allocates, because a
+// nil map is the structural sentinel both consumers read. Per-value LENGTH stays
+// loadPrevious's own ingress prune (retainValidTitles): this pass bounds
+// cardinality, which is what json.Unmarshal cannot.
 func decodeSnapshotMap[V bool | string](d *jsoncap.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
 	open, err := d.Open('{')
 	if err != nil || !open {
@@ -289,11 +306,13 @@ func decodeSnapshotMap[V bool | string](d *jsoncap.Decoder, dst map[string]V, en
 	}
 	perMap := 0
 	for d.More() {
-		key, err := d.Key()
-		if err != nil {
+		// Charge before the key is read, as decodeSnapshotOwners does and for
+		// the same reason.
+		if err := chargeSnapshotEntry(what, &perMap, entries); err != nil {
 			return dst, err
 		}
-		if err := chargeSnapshotEntry(what, &perMap, entries); err != nil {
+		key, err := d.Key()
+		if err != nil {
 			return dst, err
 		}
 		var value V
