@@ -321,6 +321,18 @@ func chargeSnapshotEntry(what string, perMap, entries *int) error {
 	return nil
 }
 
+// publicationLogEntriesWithinDecodeCap reports whether a publication log of
+// entries entries clears the per-map cardinality bound the DECODE side applies
+// through chargeSnapshotEntry, and is the half of persist's pre-flight that
+// mirrors it. It lives beside chargeSnapshotEntry because the two must move
+// together: the decode accepts a map of exactly maxSnapshotMapEntries and
+// refuses the entry after it, so a writer refusing AT the cap would freeze the
+// feed one entry before its own reader would - and tell the operator to
+// re-baseline a snapshot that would have loaded.
+func publicationLogEntriesWithinDecodeCap(entries int) bool {
+	return entries <= maxSnapshotMapEntries
+}
+
 // decodeSnapshot unmarshals persisted snapshot bytes and applies the gate BOTH
 // consumers share (the server's readSnapshot and the writer's loadPrevious): valid
 // JSON, a PRESENT and SUPPORTED schema version, and the two required facts - the

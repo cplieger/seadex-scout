@@ -327,7 +327,7 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 // only way to cross either cap, and the answer is the same at BOTH scopes: keep
 // the last-good feed.json and fail the pass so the cycle reports degradation.
 func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) error {
-	if publicationLogWithinLimits(snap.Published) && len(snap.Published) <= maxSnapshotMapEntries {
+	if publicationLogWithinLimits(snap.Published) && publicationLogEntriesWithinDecodeCap(len(snap.Published)) {
 		return nil
 	}
 	w.log.Warn("indexer publication log crossed its decode caps; the last-good feed snapshot is kept unchanged - remove feed.json to re-baseline",
