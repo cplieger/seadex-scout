@@ -2784,3 +2784,125 @@ func TestHarvestCredentialErrorDocumentLatchesTheScopeAtError(t *testing.T) {
 		t.Errorf("titles = %v, want empty (no show harvested after the scope latched)", titles)
 	}
 }
+
+// TestHarvestFruitlessBackstopLatchesOnCleanlyRefusedShows pins the no-progress
+// backstop's one genuinely non-obvious input: a show whose query SUCCEEDED.
+//
+// The two per-kind latches count failures, and each resets the other's run, so an
+// upstream that answers 200 with a well-formed body forever trips neither however
+// long it runs. An upstream returning this app's own releases with contradictory
+// identity signals is exactly that shape: every result is refused, nothing is
+// titled, and the whole harvest budget burns with zero progress on every rebuild.
+// So a clean answer that resolved nothing is charged to the no-progress run, and
+// the scope is condemned once even a mixed sequence has produced nothing.
+func TestHarvestFruitlessBackstopLatchesOnCleanlyRefusedShows(t *testing.T) {
+	// One more show than the backstop tolerates, so the latch is observable as a
+	// query the run never spends.
+	const shows = consecutiveFruitlessLatch + 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		// Every show's own release is named by a result whose two page URLs
+		// disagree with each other: a contradiction resolveHarvestKey refuses,
+		// against a key this rebuild is still trying to title.
+		show := strings.TrimPrefix(r.URL.Query().Get("q"), "Show ")
+		body := torznabBody(`<item><title>Tampered</title>` +
+			`<guid>https://nyaa.si/view/9` + show + `</guid>` +
+			`<comments>https://nyaa.si/view/4` + show + `</comments>` +
+			`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`)
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	feed := make([]journalItem, 0, shows)
+	info := map[int]EntryInfo{}
+	for i := range shows {
+		feed = append(feed, journalItem{
+			Title: "Synthesized S01", Key: "nyaa:4" + strconv.Itoa(i), AniListID: 7 + i,
+		})
+		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i)}
+	}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), map[string][]journalItem{upstreamNyaa: feed},
+		titles, func(alID int) EntryInfo { return info[alID] }, "")
+
+	if stats.queries != consecutiveFruitlessLatch {
+		t.Errorf("harvest queries = %d, want %d (the run of cleanly-refused shows condemns the scope, so the last show is never queried)",
+			stats.queries, consecutiveFruitlessLatch)
+	}
+	if len(titles) != 0 {
+		t.Errorf("titles = %v, want none (every result was refused for contradictory identity)", titles)
+	}
+	if !rec.Contains("indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild") {
+		t.Errorf("no-progress latch not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestHarvestShowThatTitledSomethingIsNotChargedForALaterRejection pins the
+// inverse of the backstop: a show that HARVESTED real titles before a later
+// title candidate was rejected made progress, so neither the request-rejection
+// run nor the no-progress run may be charged for it.
+//
+// The ladder widens only while the show is still unsatisfied, so a partially
+// titled show reaching a rejection on its second candidate is the ordinary shape
+// of a multi-release show, not an upstream fault. Charging it would let a run of
+// perfectly productive shows condemn the scope and skip every remaining show's
+// harvest for the rest of the rebuild.
+func TestHarvestShowThatTitledSomethingIsNotChargedForALaterRejection(t *testing.T) {
+	// One more show than the request-rejection latch tolerates, so a wrongly
+	// charged run would condemn the scope before the last show is queried.
+	const shows = consecutiveRejectedLatch + 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		q := r.URL.Query().Get("q")
+		if !strings.HasSuffix(q, "(2023)") {
+			// The WIDENED candidate: the upstream rejects this query shape.
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><error code="201" description="Incorrect parameter"/>`)
+			return
+		}
+		// The first candidate titles ONE of the show's two releases, which
+		// leaves the show pending and the ladder free to widen.
+		show := strings.TrimSuffix(strings.TrimPrefix(q, "Show "), " (2023)")
+		body := torznabBody(torznabItem("Show "+show+" Real Title S01E01",
+			"https://nyaa.si/view/1"+show+"0"))
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	feed := make([]journalItem, 0, 2*shows)
+	info := map[int]EntryInfo{}
+	for i := range shows {
+		show := strconv.Itoa(i)
+		feed = append(feed,
+			journalItem{Title: "Synthesized E01", Key: "nyaa:1" + show + "0", AniListID: 7 + i},
+			journalItem{Title: "Synthesized E02", Key: "nyaa:1" + show + "1", AniListID: 7 + i},
+		)
+		info[7+i] = EntryInfo{Title: "Show " + show + " (2023)"}
+	}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), map[string][]journalItem{upstreamNyaa: feed},
+		titles, func(alID int) EntryInfo { return info[alID] }, "")
+
+	if stats.queries != 2*shows {
+		t.Errorf("harvest queries = %d, want %d (two candidates for every show; a productive show must not condemn its scope)",
+			stats.queries, 2*shows)
+	}
+	if len(titles) != shows {
+		t.Errorf("titles = %v, want %d (one per show, from each show's first candidate)", titles, shows)
+	}
+	if rec.Contains("indexer title harvest: repeated request rejections; skipping this upstream's remaining shows this rebuild") {
+		t.Errorf("shows that harvested real titles were charged to the request-rejection run; log output:\n%s",
+			strings.Join(rec.Messages(), "\n"))
+	}
+	if rec.Contains("indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild") {
+		t.Errorf("shows that harvested real titles were charged to the no-progress run; log output:\n%s",
+			strings.Join(rec.Messages(), "\n"))
+	}
+}
