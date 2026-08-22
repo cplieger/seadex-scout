@@ -36,11 +36,6 @@ const (
 	// maxFeedBytes bounds the persisted feed snapshot, enforced on write and read alike
 	// so a rebuild can never persist a snapshot the server's reload would then reject.
 	maxFeedBytes = 16 << 20
-	// feedSizeWarnBytes is the pre-cliff warning threshold (80% of maxFeedBytes):
-	// crossing the bound refuses every subsequent persist and freezes the served RSS
-	// journal with no self-heal (the offending input never shrinks on its own), so
-	// persist warns while there is still headroom to act.
-	feedSizeWarnBytes = maxFeedBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// maxPersistedFieldBytes caps each persisted feed item's string field (title,
 	// GUID/info/download URL, journal key).
 	maxPersistedFieldBytes = maxUpstreamFieldBytes
@@ -508,7 +503,9 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
 	}
-	if len(data) > feedSizeWarnBytes {
+	// Crossing maxFeedBytes refuses every subsequent persist and freezes the served
+	// RSS journal with no self-heal, so warn while there is still headroom to act.
+	if degradation.ApproachingLimit(int64(len(data)), maxFeedBytes) {
 		w.log.Warn("indexer feed snapshot approaching the size limit; a rebuild that exceeds it is refused and the served feed freezes",
 			"path", w.path, "bytes", len(data), "limit", maxFeedBytes)
 	}

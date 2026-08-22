@@ -42,12 +42,6 @@ const (
 
 	// maxMapBytes bounds the Fribb download before decode (~2.7x the real ~5.9MB body).
 	maxMapBytes = 16 << 20
-	// mapSizeWarnBytes is maxMapBytes' pre-cliff warning threshold (80%, the
-	// app-wide degradation fraction). A body past the cap is a PERSISTENT refresh
-	// refusal that never self-heals, so warn while refreshes still succeed. It
-	// cannot fold into the record-cap warning: body size and record count move
-	// independently.
-	mapSizeWarnBytes = maxMapBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// maxOverrideBytes bounds the local overrides file.
 	maxOverrideBytes = 4 << 20
 	maxAttempts      = 3
@@ -645,7 +639,10 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 // invariants (the record cap, deduplication, the validation floor and the
 // shrink guard), degrading to the stale map when any step rejects the refresh.
 func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
-	if n := len(res.Body); n >= mapSizeWarnBytes {
+	// A body past maxMapBytes is a PERSISTENT refresh refusal that never
+	// self-heals, so warn while refreshes still succeed. It cannot fold into the
+	// record-cap warning: body size and record count move independently.
+	if n := len(res.Body); degradation.ApproachingLimit(int64(n), maxMapBytes) {
 		l.log.Warn("mapping: Fribb body approaching the download size cap; a body past it refuses every refresh and freezes the map stale",
 			"bytes", n, "cap", maxMapBytes)
 	}

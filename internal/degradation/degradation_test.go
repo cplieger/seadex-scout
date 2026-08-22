@@ -83,3 +83,49 @@ func TestCadenceThresholdsAreDistinctAndOrdered(t *testing.T) {
 			ShrunkWalkAcceptThreshold, ReconcileEscalationThreshold)
 	}
 }
+
+// TestApproachingLimitIsTheOneWarningThresholdEveryByteCapShares pins the
+// policy the three persisted-file caps used to each recompute for themselves -
+// the indexer feed snapshot, the Fribb download and state.json - and which they
+// disagreed about at the exact boundary, one warning at the fraction while two
+// stayed silent until one byte past it.
+//
+// Two properties, and the second is the one a reader cannot infer: the
+// comparison is INCLUSIVE, so a payload landing exactly on the fraction warns;
+// and the limit is divided before it is multiplied, so the threshold truncates
+// DOWN. The expected byte counts are therefore hardcoded rather than recomputed
+// from the fraction - a threshold derived from the same expression it is
+// checking against cannot see the operation order change.
+func TestApproachingLimitIsTheOneWarningThresholdEveryByteCapShares(t *testing.T) {
+	t.Parallel()
+	// 16 MiB truncates to 13421768 (16777216/10*8), NOT the 13421772 that
+	// multiplying first would give; 32 MiB truncates to 26843544, not 26843545.
+	const (
+		feedLimit      = 16 << 20
+		feedThreshold  = 13_421_768
+		stateLimit     = 32 << 20
+		stateThreshold = 26_843_544
+	)
+	tests := map[string]struct {
+		size  int64
+		limit int64
+		want  bool
+	}{
+		"an empty payload is nowhere near its limit":       {size: 0, limit: feedLimit, want: false},
+		"one byte below the fraction stays silent":         {size: feedThreshold - 1, limit: feedLimit, want: false},
+		"exactly the fraction warns":                       {size: feedThreshold, limit: feedLimit, want: true},
+		"one byte above the fraction warns":                {size: feedThreshold + 1, limit: feedLimit, want: true},
+		"a payload standing on the limit itself warns":     {size: feedLimit, limit: feedLimit, want: true},
+		"a payload past the limit warns":                   {size: feedLimit + 1, limit: feedLimit, want: true},
+		"one byte below a larger cap's fraction is silent": {size: stateThreshold - 1, limit: stateLimit, want: false},
+		"exactly a larger cap's fraction warns":            {size: stateThreshold, limit: stateLimit, want: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := ApproachingLimit(tc.size, tc.limit); got != tc.want {
+				t.Errorf("ApproachingLimit(%d, %d) = %v, want %v", tc.size, tc.limit, got, tc.want)
+			}
+		})
+	}
+}
