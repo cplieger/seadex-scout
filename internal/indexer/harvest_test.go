@@ -811,9 +811,18 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 // release on its synthesized title for the whole journal window, and unusable
 // rides no stat at all, so this line is its only report. One line per show per
 // rebuild, never per candidate.
+//
+// The ladder is what makes the once-per-show half falsifiable, and it starts
+// CLEAN: the first candidate's response strands nothing, so the second
+// candidate's is the one that must open the line and the third's the one that
+// must not repeat it. A single-candidate show cannot tell that from a line
+// emitted per candidate.
 func TestHarvestReportsStrandedReleases(t *testing.T) {
 	const warnMsg = "indexer title harvest encountered results it could not use for this show's releases"
-	_, srv := newHarvestMock(func(int) string {
+	mock, srv := newHarvestMock(func(call int) string {
+		if call == 0 {
+			return emptyTorznab()
+		}
 		return torznabBody(torznabItem("   ", "https://nyaa.si/view/42"))
 	})
 	defer srv.Close()
@@ -827,8 +836,11 @@ func TestHarvestReportsStrandedReleases(t *testing.T) {
 	}
 	titles := map[string]string{}
 	w.harvest.harvestTitles(t.Context(), feeds, titles, func(int) EntryInfo {
-		return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true}
+		return EntryInfo{Title: "Show (2023) (Remux)", Season: 1, SeasonKnown: true}
 	}, "")
+	if got := mock.calls(); got != 3 {
+		t.Fatalf("harvest queries = %d, want 3 (one per title candidate); a shorter ladder cannot observe the once-per-show latch", got)
+	}
 	if got := rec.Count(warnMsg); got != 1 {
 		t.Errorf("stranded WARN emitted %d times, want exactly one line per show per rebuild; log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
