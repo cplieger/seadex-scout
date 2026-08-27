@@ -815,6 +815,49 @@ func TestStoreLoadIgnoresRetiredScalarShrunkWalks(t *testing.T) {
 	}
 }
 
+// TestStoreLoadIgnoresRetiredLibraryFilteredEmpty is the same compatibility
+// property one level down, for the emptied-arr list that replaced the persisted
+// `library.filtered_empty` boolean. The retired key rides State.Library, so a
+// deployed state.json carries it nested; the new list is a SEPARATE key
+// (`filtered_empty_arrs`) precisely so this file still decodes.
+//
+// Re-typing the boolean in place would have been a data-loss bug rather than a
+// shape change: json.Unmarshal ignores an unknown key but returns an error on a
+// TYPE mismatch, and decode routes an unmarshal error into maybeQuarantine,
+// which renames the live state.json aside and cold-starts. That would have cost
+// the operator the AniList memo (a measured ~25-minute cold reconcile) on the
+// first boot of the new image. Losing the flag is free by comparison: it is
+// re-derived by the very next walk.
+func TestStoreLoadIgnoresRetiredLibraryFilteredEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{"version":1,"library":{"taken_at":"2026-07-01T00:00:00Z","filtered_empty":true,"partial":true,` +
+		`"items":[{"arr":"sonarr","arr_id":7,"title":"Frieren","current":{},"has_file":true}]},` +
+		`"anilist_memo":{"entries":{"154587":{"titles":["Frieren"],"format":"TV","year":2023}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	got, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load of a file carrying the retired library.filtered_empty boolean returned error: %v (an old file must never be quarantined over a retired key)", err)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("quarantine stat = %v, want not exist (a retired key is not corruption)", statErr)
+	}
+	if len(got.Library.FilteredEmptyArrs) != 0 {
+		t.Errorf("FilteredEmptyArrs = %v, want empty (the retired boolean names no arr, so it is dropped)", got.Library.FilteredEmptyArrs)
+	}
+	if !got.Library.Partial {
+		t.Error("Library.Partial = false, want true (the sibling snapshot members are unaffected by the retired key)")
+	}
+	if len(got.Library.Items) != 1 || got.Library.Items[0].Title != "Frieren" {
+		t.Errorf("Library.Items = %+v, want the one persisted item (the snapshot a quarantine would discard)", got.Library.Items)
+	}
+	if len(got.Memo.Entries) != 1 {
+		t.Errorf("memo entries = %d, want 1 (the memo is the member a quarantine would cost ~25 minutes to rebuild)", len(got.Memo.Entries))
+	}
+}
+
 // TestStoreSaveStampsSchemaVersion pins the envelope versioning contract:
 // Save stamps SchemaVersion into every file it writes (round-tripping through
 // Load), the stamp lands on the copy Save writes - never the caller's State -

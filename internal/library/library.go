@@ -69,14 +69,16 @@ func (it *Item) Comparable() bool { return !it.Failed }
 type Snapshot struct {
 	TakenAt time.Time `json:"taken_at"`
 	Items   []Item    `json:"items,omitempty"`
+	// FilteredEmptyArrs names every arr whose arr_tags filtering kept nothing
+	// out of a non-empty arr list, so that arr contributed zero items for a
+	// configuration reason (a dead include set, or labels no item carries)
+	// rather than because the library is empty. Naming the arrs, rather than
+	// reporting one bool, is what lets a consumer tell partial blindness from
+	// every enabled arr emptied at once.
+	FilteredEmptyArrs []string `json:"filtered_empty_arrs,omitempty"`
 	// Partial reports that the walk could not READ part of the library: at
 	// least one series' episode fetch failed.
 	Partial bool `json:"partial,omitempty"`
-	// FilteredEmpty reports that arr_tags filtering kept nothing out of a
-	// non-empty arr list on at least one enabled side, so that side
-	// contributed zero items for a configuration reason (a dead include set,
-	// or labels no item carries) rather than because the library is empty.
-	FilteredEmpty bool `json:"filtered_empty,omitempty"`
 }
 
 // Diff summarizes what changed between two snapshots (by arr + arr id).

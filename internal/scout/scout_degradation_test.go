@@ -13,6 +13,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/degradation"
+	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
@@ -186,13 +187,15 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 // TestCycleTagFilterEmptiedSideClosesDegraded pins the completion-line verdict
 // for a side arr_tags filtering emptied: the walk succeeded, so the cycle stays
 // HEALTHY (a config typo must not restart-loop the container), but it closes
-// "cycle degraded" with reason=tags-emptied-side instead of "cycle complete".
-// Without it the steady state was a daemon watching nothing while every cycle
-// read fully successful: the shrink guard cannot cover this on a first-ever boot
-// (there is no prior count to have shrunk from) and stops covering it once the
-// guard's bounded tolerance accepts the smaller library, so the walker's
-// per-cycle WARN was the only lasting signal. A walk whose filter keeps
-// something still closes clean, so the arm cannot invert.
+// "cycle degraded" with reason=tags-emptied-side AND an emptied_arrs attr naming
+// the arr, since a reason saying "side" without saying which side leaves an
+// operator alerting on it with nothing to fix. Without the arm the steady state
+// was a daemon watching nothing while every cycle read fully successful: the
+// shrink guard cannot cover this on a first-ever boot (there is no prior count to
+// have shrunk from) and stops covering it once the guard's bounded tolerance
+// accepts the smaller library, so the walker's per-cycle WARN was the only lasting
+// signal. A walk whose filter keeps something still closes clean, so the arm
+// cannot invert.
 func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	newScout := func(logger *slog.Logger, sonarr *fakeSonarr, include []string) *Scout {
 		return New(&Deps{
@@ -226,6 +229,12 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	}
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "tags-emptied-side" {
 		t.Errorf("degraded reasons = %v, want [tags-emptied-side]", reasons)
+	}
+	// The reason alone says a side was emptied without saying which, so the arr list
+	// is what an operator alerting on it acts from. Only Sonarr is enabled here, so
+	// Radarr must not appear.
+	if got, ok := recorder.AttrValue("cycle degraded", "emptied_arrs"); !ok || got != library.ArrSonarr {
+		t.Errorf("degraded emptied_arrs = %q (found=%t), want %q", got, ok, library.ArrSonarr)
 	}
 	if n := recorder.CountExact("cycle complete"); n != 0 {
 		t.Errorf("'cycle complete' count = %d, want 0 (a side watching nothing must not read fully successful)", n)

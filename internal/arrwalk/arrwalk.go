@@ -105,27 +105,43 @@ type sideResult struct {
 	filteredEmpty bool
 }
 
+// walkTotals folds every enabled side's contribution into the one snapshot a
+// walk publishes. Both sides fold through add, so no arm can disagree with its
+// sibling about whether a fact accumulates.
+type walkTotals struct {
+	items             []library.Item
+	filteredEmptyArrs []string
+	partial           bool
+}
+
+// add folds one arr side's result in: its items, plus the walk-quality facts
+// only that side observes. filteredEmpty is recorded as the arr's NAME, because
+// a consumer alerting on it has to know which arr to fix.
+func (t *walkTotals) add(arr string, side sideResult) {
+	t.items = append(t.items, side.items...)
+	t.partial = t.partial || side.failedEpisodeFetches > 0
+	if side.filteredEmpty {
+		t.filteredEmptyArrs = append(t.filteredEmptyArrs, arr)
+	}
+}
+
 // Walk ingests both arr sides into a single snapshot.
 func (w *Walker) Walk(ctx context.Context) (library.Snapshot, error) {
-	var items []library.Item
-	partial, filteredEmpty := false, false
+	var totals walkTotals
 
 	if w.sonarr != nil {
 		side, err := w.walkSonarr(ctx)
 		if err != nil {
 			return library.Snapshot{}, &walkSideError{arr: library.ArrSonarr, err: err}
 		}
-		items = append(items, side.items...)
-		partial = side.failedEpisodeFetches > 0
-		filteredEmpty = side.filteredEmpty
+		totals.add(library.ArrSonarr, side)
 	}
 	if w.radarr != nil {
 		side, err := w.walkRadarr(ctx)
 		if err != nil {
 			return library.Snapshot{}, &walkSideError{arr: library.ArrRadarr, err: err}
 		}
-		items = append(items, side.items...)
-		filteredEmpty = filteredEmpty || side.filteredEmpty
+		totals.add(library.ArrRadarr, side)
 	}
 
 	// Final cancellation guard: when both sides are disabled (or the last side
@@ -135,13 +151,13 @@ func (w *Walker) Walk(ctx context.Context) (library.Snapshot, error) {
 		return library.Snapshot{}, err
 	}
 
-	w.log.Info("library walk complete", "items", len(items), "partial", partial,
+	w.log.Info("library walk complete", "items", len(totals.items), "partial", totals.partial,
 		"sonarr", w.sonarr != nil, "radarr", w.radarr != nil)
 	return library.Snapshot{
-		TakenAt:       time.Now().UTC(),
-		Items:         items,
-		Partial:       partial,
-		FilteredEmpty: filteredEmpty,
+		TakenAt:           time.Now().UTC(),
+		Items:             totals.items,
+		FilteredEmptyArrs: totals.filteredEmptyArrs,
+		Partial:           totals.partial,
 	}, nil
 }
 
