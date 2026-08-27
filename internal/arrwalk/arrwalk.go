@@ -390,9 +390,8 @@ func (w *Walker) walkRadarr(ctx context.Context) (sideResult, error) {
 // --- Tag resolution and filtering ---
 
 // resolveTags fetches the arr's tag list once per walk and resolves the
-// include and exclude label sets against it locally (arrapi.TagIDs /
-// UnmatchedLabels), logging any label that matched no tag. With neither set
-// configured no fetch is issued.
+// include and exclude label sets against it locally (arrapi.TagIDs). With
+// neither set configured no fetch is issued.
 func (w *Walker) resolveTags(ctx context.Context,
 	getTags func(context.Context) ([]arrapi.Tag, error),
 ) (includeIDs, excludeIDs map[int]struct{}, err error) {
@@ -403,33 +402,33 @@ func (w *Walker) resolveTags(ctx context.Context,
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolving arr_tags: %w", err)
 	}
-	includeIDs = w.resolveOne(tags, "arr_tags.include", w.includeTags)
-	excludeIDs = w.resolveOne(tags, "arr_tags.exclude", w.excludeTags)
+	includeIDs = w.resolveOne(tags, w.includeTags)
+	excludeIDs = w.resolveOne(tags, w.excludeTags)
 	return includeIDs, excludeIDs, nil
 }
 
-// resolveOne resolves a single label set against an already-fetched tag list,
-// logging a count-only warning for unmatched labels (values withheld: they
-// pass through ${VAR} expansion and could carry a secret - see the
-// credential-safety test).
-func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) map[int]struct{} {
+// resolveOne resolves a single label set against an already-fetched tag list.
+//
+// A configured label that matches no arr tag is NOT reported. It is the
+// operator keeping a tag they use occasionally, and it breaks nothing: an
+// exclude label that resolves to nothing drops nothing, and an include label
+// that resolves to nothing alongside a working sibling just narrows the watch
+// set the operator asked to narrow. The one shape worth a warning is a filter
+// that ends up keeping NO items, and warnFilteredEmpty owns that -- it reads
+// the outcome rather than the config, so it also catches the case no
+// label-resolution check can see: every label resolving correctly and matching
+// the whole library.
+func (w *Walker) resolveOne(tags []arrapi.Tag, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
 		return nil
-	}
-	if unmatched := arrapi.UnmatchedLabels(tags, labels...); len(unmatched) > 0 {
-		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched_count", len(unmatched))
 	}
 	ids := arrapi.TagIDs(tags, labels...)
 	if ids == nil {
 		// Fail closed independently of arrapi's zero-match return shape: the
 		// non-nil EMPTY set is what keepByTags reads as "filter on, nothing
-		// matches".
+		// matches", which is what routes an all-missed include set into
+		// warnFilteredEmpty instead of silently admitting everything.
 		ids = map[int]struct{}{}
-	}
-	if len(ids) == 0 {
-		// Every configured label missed.
-		w.log.Warn("no configured tag resolved to an arr tag; an include set therefore admits nothing, an exclude set drops nothing",
-			"which", which, "configured_count", len(labels))
 	}
 	return ids
 }

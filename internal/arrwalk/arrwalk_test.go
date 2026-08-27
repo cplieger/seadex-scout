@@ -717,7 +717,13 @@ func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 // count-only shape (exact message, exactly the which + unmatched_count
 // attributes), so any future full OR partial tag-value field fails the test
 // without relying on spotting a particular secret substring.
-func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
+// TestWalkNeverLogsAConfiguredTagValue pins the credential-safety property for
+// the whole walk rather than for one message. A configured tag label reaches
+// the app through ${VAR} expansion, so a config typo can place a secret there,
+// and no diagnostic may echo one back into the log stream. Stated over every
+// record and every attribute so a newly added line cannot reintroduce the leak
+// under a different message.
+func TestWalkNeverLogsAConfiguredTagValue(t *testing.T) {
 	const sentinel = "sekrit-expanded-tag-9f8e7d"
 	fs := &fakeSonarr{
 		series: []arrapi.Series{
@@ -729,38 +735,29 @@ func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", sentinel}, Logger: logger})
+	w := NewWalker(&Config{
+		Sonarr:      fs,
+		IncludeTags: []string{"anime", sentinel},
+		ExcludeTags: []string{sentinel + "-excl"},
+		Logger:      logger,
+	})
 
 	if _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
-	warnings := 0
+	if len(rec.Records()) == 0 {
+		t.Fatal("no records captured, so the assertion below would pass vacuously")
+	}
 	for _, r := range rec.Records() {
-		if r.Message != "configured tags matched no arr tag" {
-			continue
-		}
-		warnings++
-		if n := r.NumAttrs(); n != 2 {
-			t.Errorf("unmatched-tag warning carries %d attributes, want exactly 2 (which, unmatched_count)", n)
+		if strings.Contains(r.Message, sentinel) {
+			t.Errorf("record message %q carries a configured tag value", r.Message)
 		}
 		r.Attrs(func(a slog.Attr) bool {
-			switch a.Key {
-			case "which":
-				if got := a.Value.String(); got != "arr_tags.include" {
-					t.Errorf("which = %q, want %q", got, "arr_tags.include")
-				}
-			case "unmatched_count":
-				if got := a.Value.String(); got != "1" {
-					t.Errorf("unmatched_count = %q, want %q", got, "1")
-				}
-			default:
-				t.Errorf("unexpected attribute %s=%q on the count-only unmatched-tag warning", a.Key, a.Value)
+			if v := a.Value.String(); strings.Contains(v, sentinel) {
+				t.Errorf("record %q attr %s=%q carries a configured tag value", r.Message, a.Key, v)
 			}
 			return true
 		})
-	}
-	if warnings != 1 {
-		t.Fatalf("got %d unmatched-tag warnings, want exactly 1", warnings)
 	}
 }
 
@@ -1331,12 +1328,13 @@ func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 }
 
 // TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide pins the dead-filter
-// diagnostic: when no configured include label resolves to an arr tag, the
-// non-nil empty id set makes keepByTags drop every item, so the side
-// contributes zero items while the cycle still reads healthy. The distinct
-// second warning is the only signal that separates a dead filter from one
-// stray label, and it carries the label COUNT rather than the labels
-// themselves (they pass through ${VAR} expansion).
+// outcome: when no configured include label resolves to an arr tag, the non-nil
+// empty id set makes keepByTags drop every item, so the side would otherwise
+// contribute zero items while the cycle still read healthy. The signal is the
+// OUTCOME warning plus the marked snapshot, not a label-resolution check -- an
+// unresolved label is not itself reported, because an exclude label that
+// resolves to nothing drops nothing and an include label with a working sibling
+// just narrows the watch set the operator asked to narrow.
 func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{7}}},
@@ -1357,20 +1355,20 @@ func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
 		t.Errorf("snapshot FilteredEmptyArrs = %v, want it to name %s; a dead include filter must mark the walk so the cycle closes degraded instead of reading complete forever, and it must name the arr the operator has to fix",
 			snap.FilteredEmptyArrs, ArrSonarr)
 	}
-	const msg = "no configured tag resolved to an arr tag; an include set therefore admits nothing, an exclude set drops nothing"
+	const msg = "arr_tags filtering kept no items from a non-empty arr library; this side contributes nothing this cycle"
 	if n := rec.CountExact(msg); n != 1 {
-		t.Fatalf("dead-filter warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
+		t.Fatalf("kept-no-items warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
 	}
-	if !rec.HasAttr(msg, "which", "arr_tags.include") {
-		t.Error("dead-filter warning does not name arr_tags.include in its which attr")
+	if !rec.HasAttr(msg, "arr", ArrSonarr) {
+		t.Errorf("kept-no-items warning does not name %s in its arr attr", ArrSonarr)
 	}
-	if !rec.HasAttr(msg, "configured_count", "2") {
-		t.Error("dead-filter warning does not carry configured_count=2")
+	if rec.CountExact("configured tags matched no arr tag") != 0 {
+		t.Error("an unresolved configured label is reported; it breaks nothing and must stay silent")
 	}
 	for _, r := range rec.Records() {
 		r.Attrs(func(a slog.Attr) bool {
 			if v := a.Value.String(); v == "nope" || v == "also-nope" {
-				t.Errorf("record %q attr %q emits a configured tag VALUE (%q); the diagnostic is count-only", r.Message, a.Key, v)
+				t.Errorf("record %q attr %q emits a configured tag VALUE (%q); no diagnostic may echo a label", r.Message, a.Key, v)
 			}
 			return true
 		})
