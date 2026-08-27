@@ -5,6 +5,12 @@
 # through your Alertmanager like any Prometheus alert. The rules assume the
 # default JSON log handler (log.format: json); for log.format: text, swap the
 # "| json | level=`ERROR`" parser stage for a "|= `level=ERROR`" line filter.
+# They also assume the default log.level: info. Five of the matched messages are
+# INFO records ("tick complete", "cycle complete", "reconcile started",
+# "reconcile complete", "report written"), so at log.level: warn the report rule
+# can never fire and BOTH stall rules fire permanently on a healthy app - only
+# the degraded arms of the loop deadman survive. Drop those three rules before
+# raising the level.
 # Thresholds and the severity labels are starting points; adjust the container
 # selector (or job/service, depending on your log collector) to your deployment
 # and the stall window to your poll_interval.
@@ -112,9 +118,9 @@ groups:
       # fires 15 minutes into every restart while the app works normally. A pass
       # that starts and never completes IS a wedge, and this still catches it.
       # The 3h window is deliberately the tolerance the health marker already
-      # gives a cold pass (main.go's coldReconcileAllowance): two guards for the
-      # same event must not disagree, or the tighter one pages for what the
-      # looser one calls healthy. At the 15m default the marker is what actually
+      # gives a cold pass (internal/cycle's coldReconcileAllowance): two guards
+      # for the same event must not disagree, or the tighter one pages for what
+      # the looser one calls healthy. At the 15m default the marker is what actually
       # restarts a wedged loop, at 3h; this rule firing just after that is the
       # signal the restart did not help. Unlike the other three (one-time
       # events), this is a condition/deadman — keep it on a `send_resolved: true`
@@ -142,7 +148,7 @@ groups:
             restart this rule asks for; the outage alerts on its own through
             SeadexScoutCycleError once the fast path has been blind for 2h.
             Matching the START line keeps it quiet through a slow cold pass,
-            which is the same event main.go's health lease tolerates for 3h.
+            which is the same event the health lease tolerates for 3h.
             The 3h window assumes a poll_interval of 1h or less (the default is
             15m); on a longer interval widen it to at least 3x that interval, or
             the rule fires permanently. This rule is built for built-in (daemon) mode: in

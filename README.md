@@ -386,7 +386,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `SeadexScoutCycleError` | a run logs an error: the Sonarr/Radarr library walk failed, or a degradation guard escalated (a library shrink, a partial walk, or a failed SeaDex fetch after 2 full passes; a rejected mapping refresh or a blind tick after 8 ticks) | warning |
+| `SeadexScoutCycleError` | a run logs an error: the Sonarr/Radarr library walk failed, or a degradation guard escalated | warning |
 | `SeadexScoutScanStalled` | no `tick`/`cycle` completion line and no `reconcile started` in 3h, so the poll loop is wedged | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` in 72h, so the 24h full pass has stopped while ticks keep the stall rule satisfied | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
@@ -396,13 +396,13 @@ Thresholds and the `severity` labels are starting points. Adjust the `container`
 selector (or `job` / `service`, depending on your log collector) to your
 deployment; the stall window assumes a `poll_interval` of 1h or less (the default
 is 15m), so widen it to at least three times a longer interval. In
-resident-idle (`poll_interval: off`) or report mode each cycle runs through a
-`docker exec` child (the `poll` / `report` subcommand), so its logs go to the
-trigger rather than the container's log stream and the log rules cannot fire;
-alert on your external scheduler's own job result instead. The rules assume the
-default JSON log handler; for `log.format: text`, swap the
-`| json | level="ERROR"` parser stage for a `|= "level=ERROR"` line filter. Route
-by whatever labels your Alertmanager uses.
+resident-idle (`poll_interval: off`) each cycle runs as a `docker exec` child,
+so its lines never reach the container's log stream: the count rules go blind and
+both stall rules false-fire. Drop them and alert on your external scheduler's job
+result. A report is observed only as the container's command (`mode: report`).
+The rules assume the default `info` level and JSON log handler; for
+`log.format: text`, swap the `| json | level="ERROR"` parser stage for a
+`|= "level=ERROR"` line filter. Route by whatever labels your Alertmanager uses.
 
 ## Contributing
 
