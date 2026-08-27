@@ -339,9 +339,9 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		// A shutdown arrived during or right after matching. The match set may be
 		// truncated, so comparing it would falsely resolve those entries' findings.
 		// A transient AniList degradation instead flows into the compare below.
-		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, &result)
+		return s.finishInterruptedMatch(ctx, start, startStats, &st, &snap, &mapCache, &result)
 	}
-	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, &result, mapErr, shrunkArrs)
+	return s.finishCompletedCycle(ctx, start, startStats, &st, &snap, &mapCache, entries, &result, mapErr, shrunkArrs)
 }
 
 // warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics for
@@ -500,8 +500,8 @@ func (s *Scout) aniListCycleAttrs(startStats AniListStats) []any {
 // library/mapping/memo but leave the finding table untouched, log the
 // interruption as the shutdown rather than an AniList fault, and emit no
 // completion line. Always healthy: a redeploy is not an ingest fault.
-func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result *match.Result) bool {
-	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
+func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, result *match.Result) bool {
+	st.Library, st.Mapping, st.Memo = *snap, *mapCache, result.Memo
 	s.save(ctx, st)
 	attrs := append(s.aniListCycleAttrs(startStats),
 		"duration", time.Since(start).Round(time.Millisecond).String())
@@ -518,7 +518,7 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 // scoped so degraded items' prior findings are preserved rather than resolved.
 // shrunkArrs are the arrs whose PRIOR items snap already carries; that needs no
 // authority narrowing and only decides the completion line's severity.
-func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result *match.Result, mapErr error, shrunkArrs []string) bool {
+func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result *match.Result, mapErr error, shrunkArrs []string) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.comparer.Compare(cleanMatches)
 	// Findings are reported as STATE: the whole set is re-emitted and a condition
@@ -530,7 +530,7 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	// reconcile exit gated before the compare or was interrupted.
 	s.ready = true
 
-	diff := library.DiffSnapshots(&st.Library, &snap)
+	diff := library.DiffSnapshots(&st.Library, snap)
 	attrs := make([]any, 0, 26)
 	attrs = append(attrs,
 		"seadex_entries", len(entries),
@@ -544,14 +544,14 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
 		"duration", time.Since(start).Round(time.Millisecond).String())
 	s.recordAniListDegradation(st, result)
-	s.recordPartialWalk(st, &snap)
-	s.logCompletedCycle(&snap, result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
+	s.recordPartialWalk(st, snap)
+	s.logCompletedCycle(snap, result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
 	// A SECOND line, carrying nothing but the fact that a full pass finished: once
 	// most iterations are ticks, the deadman cannot tell "the loop is alive" from
 	// "the backstop still runs". Emitted for every reconcile that ran end to end.
 	s.log.Info("reconcile complete", "interval", s.reconcileCadenceAttr())
 
-	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
+	st.Library, st.Mapping, st.Memo = *snap, *mapCache, result.Memo
 	s.save(ctx, st)
 	return true
 }
@@ -627,11 +627,13 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 		// Only a stale-but-usable mapping error reaches this point; unusable and
 		// cancelled loads returned at the pre-compare gate.
 		s.cycleDegraded("mapping-stale", attrs...)
-	case snap.FilteredEmpty:
-		// arr_tags filtering kept nothing out of a non-empty arr list on an enabled
-		// side, so the cycle watched a library the operator did not intend. The walk
+	case len(snap.FilteredEmptyArrs) > 0:
+		// arr_tags filtering kept nothing out of a non-empty arr list on every named
+		// arr, so the cycle watched a library the operator did not intend. The list is
+		// what tells one blinded arr from every enabled arr blinded at once. The walk
 		// succeeded, so this is the LEAST severe reason.
-		s.cycleDegraded("tags-emptied-side", attrs...)
+		s.cycleDegraded("tags-emptied-side",
+			append([]any{"emptied_arrs", strings.Join(snap.FilteredEmptyArrs, ",")}, attrs...)...)
 	default:
 		s.log.Info("cycle complete", attrs...)
 	}

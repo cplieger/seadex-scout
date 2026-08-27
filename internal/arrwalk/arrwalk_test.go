@@ -1353,8 +1353,9 @@ func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
 	if len(snap.Items) != 0 {
 		t.Errorf("items = %+v, want none (an include set resolving to zero ids admits nothing)", snap.Items)
 	}
-	if !snap.FilteredEmpty {
-		t.Error("snapshot FilteredEmpty=false; a dead include filter must mark the walk so the cycle closes degraded instead of reading complete forever")
+	if !slices.Contains(snap.FilteredEmptyArrs, ArrSonarr) {
+		t.Errorf("snapshot FilteredEmptyArrs = %v, want it to name %s; a dead include filter must mark the walk so the cycle closes degraded instead of reading complete forever, and it must name the arr the operator has to fix",
+			snap.FilteredEmptyArrs, ArrSonarr)
 	}
 	const msg = "no configured tag resolved to an arr tag; an include set therefore admits nothing, an exclude set drops nothing"
 	if n := rec.CountExact(msg); n != 1 {
@@ -1497,18 +1498,19 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 // diagnostic: every configured arr_tags label resolves to a real tag id, but no
 // item carries it (renamed or unassigned on the arr side), so the side
 // contributes zero items while the cycle still reads healthy. resolveOne warns
-// only when a LABEL missed and the scout's shrink gate needs a prior snapshot,
-// so this WARN is the only signal that separates a silently-emptied side from a
-// genuinely empty library - hence both negative arms below (a filter that keeps
-// something, and an arr that listed nothing) as well as the positive one. Counts
-// only: the arr and listed attrs never carry label values, which pass through
-// ${VAR} expansion.
+// only when a LABEL missed, so this WARN and the snapshot's FilteredEmptyArrs
+// (which the scout's completion line republishes as reason=tags-emptied-side)
+// are the two signals that separate a silently-emptied side from a genuinely
+// empty library - hence both negative arms below (a filter that keeps something,
+// and an arr that listed nothing) as well as the positive one. Counts only: the
+// arr and listed attrs never carry label values, which pass through ${VAR}
+// expansion.
 func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 	const msg = "arr_tags filtering kept no items from a non-empty arr library; this side contributes nothing this cycle"
-	// The empty-list WARN is the ONLY signal for a silently-emptied side
-	// (warnFilteredEmpty returns early on listed == 0 and the scout shrink gate
-	// is whole-library), so both arms are pinned here rather than leaving the
-	// path executed-but-unchecked.
+	// A side whose arr listed NOTHING is a legitimately empty library, which
+	// warnFilteredEmpty deliberately does not mark, so this separate WARN is what
+	// reports it. Both its arms are pinned here rather than leaving the path
+	// executed-but-unchecked.
 	const emptyMsg = "arr listed no items; this side contributes nothing this cycle - check the arr url and that the instance holds the expected library"
 	anime := []arrapi.Tag{{ID: 7, Label: "anime"}}
 
@@ -1541,8 +1543,9 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 			got, _ := rec.AttrValue(msg, "listed")
 			t.Errorf("listed attr = %q, want 2 (the arr listed two series)", got)
 		}
-		if !snap.FilteredEmpty {
-			t.Error("snapshot FilteredEmpty=false; an emptied side must degrade the cycle, not just WARN once per cycle forever")
+		if !slices.Equal(snap.FilteredEmptyArrs, []string{ArrSonarr}) {
+			t.Errorf("snapshot FilteredEmptyArrs = %v, want [%s]; an emptied side must degrade the cycle naming the arr, not just WARN once per cycle forever",
+				snap.FilteredEmptyArrs, ArrSonarr)
 		}
 	})
 
@@ -1572,8 +1575,9 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 			got, _ := rec.AttrValue(msg, "listed")
 			t.Errorf("listed attr = %q, want 1", got)
 		}
-		if !snap.FilteredEmpty {
-			t.Error("snapshot FilteredEmpty=false; an emptied side must degrade the cycle, not just WARN once per cycle forever")
+		if !slices.Equal(snap.FilteredEmptyArrs, []string{ArrRadarr}) {
+			t.Errorf("snapshot FilteredEmptyArrs = %v, want [%s]; the Radarr arm must name its own arr, and must not report the sibling that was never walked",
+				snap.FilteredEmptyArrs, ArrRadarr)
 		}
 	})
 
@@ -1609,8 +1613,12 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		if n := rec.CountExact(msg); n != 2 {
 			t.Fatalf("dead-filter warnings = %d, want 2 (one per emptied side); messages = %q", n, rec.Messages())
 		}
-		if !snap.FilteredEmpty {
-			t.Error("snapshot FilteredEmpty=false; an emptied side must degrade the cycle, not just WARN once per cycle forever")
+		// Both arrs, in the walk's stable Sonarr-then-Radarr order. This is the case
+		// that separates "one arr is blind" from "the daemon is watching nothing", and
+		// it is what fails if either arm ever stops accumulating its sibling's arr.
+		if want := []string{ArrSonarr, ArrRadarr}; !slices.Equal(snap.FilteredEmptyArrs, want) {
+			t.Errorf("snapshot FilteredEmptyArrs = %v, want %v; both emptied sides must be named, so an operator can tell partial blindness from a daemon watching nothing",
+				snap.FilteredEmptyArrs, want)
 		}
 	})
 
@@ -1646,8 +1654,8 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		if n := rec.CountExact("configured tags matched no arr tag"); n != 0 {
 			t.Errorf("unmatched-label warnings = %d, want none (every label resolved); messages = %q", n, rec.Messages())
 		}
-		if snap.FilteredEmpty {
-			t.Error("snapshot FilteredEmpty=true on a filter that kept an item; the flag must not degrade every filtered cycle")
+		if snap.FilteredEmptyArrs != nil {
+			t.Errorf("snapshot FilteredEmptyArrs = %v, want none; a filter that kept an item must not degrade every filtered cycle", snap.FilteredEmptyArrs)
 		}
 	})
 
@@ -1660,8 +1668,8 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
-		if snap.FilteredEmpty {
-			t.Error("snapshot FilteredEmpty=true for a genuinely empty arr; a legitimately empty Radarr must not degrade every cycle forever")
+		if snap.FilteredEmptyArrs != nil {
+			t.Errorf("snapshot FilteredEmptyArrs = %v, want none; a legitimately empty arr must not degrade every cycle forever", snap.FilteredEmptyArrs)
 		}
 		if n := rec.CountExact(msg); n != 0 {
 			t.Errorf("dead-filter warnings = %d, want none (the arr listed nothing, so filtering emptied nothing); messages = %q", n, rec.Messages())
