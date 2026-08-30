@@ -16,8 +16,8 @@ github.com/cplieger/keyenc v1.0.6 h1:Ac/EoEY8Lgy4ZyTi9I4G4s00RBWGoOlI3RdsjGwHLRo
 github.com/cplieger/keyenc v1.0.6/go.mod h1:9l4QSTuwTtYp2KYeYkvp2PXop12G5MqXeReqCqDlHWY=
 github.com/cplieger/runesafe/v2 v2.0.0 h1:jEkFU2dbDxKLwgHag6l3gbSLpRNfkD8mMsdiCgu56wY=
 github.com/cplieger/runesafe/v2 v2.0.0/go.mod h1:X3avIOn44UaASh8QEhXDIKNWA4HLmSAZYWywNwpOYyE=
-github.com/cplieger/scheduler/v4 v4.0.0 h1:Td1pHPkHCtIR4Cczi0/0yAeJgba0ZmXCnfxU0jSPfAI=
-github.com/cplieger/scheduler/v4 v4.0.0/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
+github.com/cplieger/scheduler/v4 v4.0.1 h1:Jr5SA+EPEAYuYqFEPLXq1AMZ7GLRoIwNREL+BhBpkeQ=
+github.com/cplieger/scheduler/v4 v4.0.1/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
 github.com/cplieger/slogx v1.6.3 h1:1W8DxUwovnfbL1wjthdELHhw2gFH1FXaUcG34KjefIw=
 github.com/cplieger/slogx v1.6.3/go.mod h1:KW/UCGyMK3grILRvcU4Zloawb27C13cLN5HQ7ZLNS5Q=
 github.com/cplieger/urlform v1.3.4 h1:FPpAGYAZq+xqkxv03CaYcvl+5S1fjMTD1YCqV/pGx7A=
