@@ -8,6 +8,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/seadex-scout/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/seadex-scout)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
+<!-- hub-overview BEGIN -->
 A report-only watcher that compares your Sonarr/Radarr anime library against
 [SeaDex](https://releases.moe) (the community-curated index of the best anime
 releases) and tells you, per title, when SeaDex recommends a better release than
@@ -64,6 +65,7 @@ often you poll. See [Scheduling](#scheduling).
 When the [Torznab feed](#indexer-torznab-feed) is configured, the same pass
 rebuilds it from that one SeaDex fetch, so a finding and what the arrs can grab
 from the feed always reflect the same refresh.
+<!-- hub-overview END -->
 
 ## Quick start
 
