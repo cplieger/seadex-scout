@@ -8,10 +8,8 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// The indexer matches a Prowlarr result back to a SeaDex release by a stable
-// per-tracker key: the numeric id in the release's tracker page URL, which both
-// SeaDex and Prowlarr's Torznab item carry, so the ids line up regardless of
-// title or info-hash availability. The info hash is a secondary key when present.
+// Match keys a Prowlarr result to a SeaDex release by the numeric id in the
+// release's tracker page URL (both sides carry it); info hash is secondary.
 
 // trackerScope classifies a tracker name (as SeaDex spells it, "Nyaa" or "AB")
 // into the feed scope it maps to: upstreamNyaa, upstreamAB, or "" for any other
@@ -210,8 +208,8 @@ func isCanonicalTrackerHost(scope, host string) bool {
 // shapes. Host classification rides the shared host->scope home, so a homograph
 // label or an empty-labeled host under a tracker domain yields no key.
 func trackerKeyFromURL(raw string) string {
-	// Classify once: the id is extracted from the VOUCHED reading (f.Trimmed),
-	// not the original spelling (h-f8, see trackerOwnForm).
+	// Classify once: the id is extracted from the vouched reading (f.Trimmed),
+	// not the original spelling (h-f8; see trackerOwnForm).
 	f, ok := httpDisplayForm(raw)
 	if !ok {
 		return ""

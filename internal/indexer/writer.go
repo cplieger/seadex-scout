@@ -901,6 +901,3 @@ func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs map[string]struct{}, ta
 	}
 	return unwarned, changed
 }
-
-// --- Search curation index --- There is no buildCuration any more, and its absence is
-// the point.

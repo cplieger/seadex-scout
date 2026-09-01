@@ -45,10 +45,7 @@ const (
 const SchemaVersion = 1
 
 // State is the persisted cross-cycle cache.
-//
-// It carries NO finding state.
 type State struct {
-	// The four streak counters below are persisted DATA, not policy.
 	Memo    match.Memo    `json:"anilist_memo"`
 	Mapping mapping.Cache `json:"mapping"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard

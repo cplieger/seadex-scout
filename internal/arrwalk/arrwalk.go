@@ -321,20 +321,12 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 		return &item, true
 	}
 	item := w.seriesItem(s, files)
-	// Sonarr's series list declared episode files for this series but its
-	// episode-file list came back empty, so the item necessarily compares as
-	// fileless (seriesItem's HasFile is len(files) > 0) - which reads
-	// downstream as a genuine no-file library state: the daemon falls silent
-	// and resolves the series' prior finding, and the report renders verdict
-	// no_file. Record the degradation instead of letting it look like a
-	// genuinely fileless series. Unlike walkRadarr's no-file-payload sibling
-	// this stays a WARN rather than a Failed placeholder: there, HasFile and
-	// the absent MovieFile arrive in ONE response and contradict each other, so
-	// the file data is certainly missing; here the two facts come from
-	// different responses (the series list once at the top of the walk, the
-	// episode files per series later), so a whole series' files legitimately
-	// deleted mid-walk lands here too and a placeholder would suppress a real
-	// no-file state.
+	// A declared-but-empty episode list makes the item compare as genuinely
+	// fileless (seriesItem's HasFile is len(files) > 0), so record the
+	// degradation rather than let it look like a real no-file series. Stays a
+	// WARN, not a Failed placeholder: unlike walkRadarr's sibling, the two
+	// facts come from separate responses, so a legitimate mid-walk deletion
+	// can also produce this shape and a placeholder would suppress it.
 	if s.Statistics != nil && s.Statistics.EpisodeFileCount > 0 && len(files) == 0 {
 		w.log.Warn("sonarr series declares episode files but its episode-file list came back empty; it compares as fileless",
 			"series", logattr.Cap(s.Title), "id", s.ID, "declared_files", s.Statistics.EpisodeFileCount)
@@ -409,15 +401,10 @@ func (w *Walker) resolveTags(ctx context.Context,
 
 // resolveOne resolves a single label set against an already-fetched tag list.
 //
-// A configured label that matches no arr tag is NOT reported. It is the
-// operator keeping a tag they use occasionally, and it breaks nothing: an
-// exclude label that resolves to nothing drops nothing, and an include label
-// that resolves to nothing alongside a working sibling just narrows the watch
-// set the operator asked to narrow. The one shape worth a warning is a filter
-// that ends up keeping NO items, and warnFilteredEmpty owns that -- it reads
-// the outcome rather than the config, so it also catches the case no
-// label-resolution check can see: every label resolving correctly and matching
-// the whole library.
+// A configured label matching no arr tag is NOT reported (the operator
+// keeping an occasionally-used tag breaks nothing). The one shape worth a
+// warning is a filter that keeps NO items, and warnFilteredEmpty owns that by
+// reading the outcome rather than the config.
 func (w *Walker) resolveOne(tags []arrapi.Tag, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
 		return nil

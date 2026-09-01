@@ -25,16 +25,11 @@ func hostFromRawURL(rawURL string) (string, bool) {
 		// the AnimeBytes host recognizable.
 		return f.Host, !f.HostUnrecoverable
 	case urlform.ClassHiddenHost:
-		// The authority-carrying special schemes recover the browser's
-		// reading ("https:/animebytes.tv/x" and "https:animebytes.tv/x" both
-		// navigate to animebytes.tv - the WHATWG parser reads an authority
-		// through any run of slashes), so recovered evidence participates
-		// exactly like an absolute form's and a quirk-form AB URL is
-		// recognized rather than merely hidden. A hidden-host form with no
-		// recovered host (an opaque non-special scheme like
-		// "animebytes.tv:443/x", a port-only authority, a failed reparse)
-		// has genuinely hidden or destroyed its evidence: hide
-		// conservatively.
+		// Special schemes recover the browser's authority reading
+		// ("https:/animebytes.tv/x", "https:animebytes.tv/x" both navigate to
+		// animebytes.tv), so recovered evidence is recognized like an
+		// absolute form's; a form with no recovered host has genuinely hidden
+		// or destroyed its evidence and hides conservatively.
 		return f.Host, f.Host != "" && !f.HostUnrecoverable
 	default:
 		// urlform.ClassMalformed has no facts at all: hide conservatively.

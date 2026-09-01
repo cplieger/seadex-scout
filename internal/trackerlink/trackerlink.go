@@ -152,8 +152,7 @@ func publishRelative(raw, labelBase string) string {
 // usableRelative converts a tracker-relative path into a followable link by
 // prefixing the tracker's canonical base URL. A relative value whose first
 // colon precedes any slash (a query- or fragment-leading colon such as "?x:y"
-// or "#a:b") is unusable as a relative path; a colon in the first path
-// segment (e.g.
+// or "#a:b") is unusable as a relative path.
 func usableRelative(raw, baseURL string) string {
 	if i := strings.Index(raw, ":"); i >= 0 && !strings.Contains(raw[:i], "/") {
 		return ""

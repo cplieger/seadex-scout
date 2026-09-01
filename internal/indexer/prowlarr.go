@@ -263,28 +263,24 @@ func (u *upstream) redactSecrets(s string) string {
 
 // redactAndBound is the emit-boundary composition for untrusted upstream text that
 // carries this upstream's credentials: redact, sanitize, redact again, then cap.
-// Every position earns its place, and the ORDER is the correctness argument:
+// Order is the correctness argument:
 //
-//   - The PRE-pass catches a credential the sanitizer would garble. It rewrites any
-//     unsafe rune inside the value (a C0 byte, a bidi control) into a space and an
-//     invalid UTF-8 byte into U+FFFD, after which the byte-exact needle no longer
-//     matches and a near-complete fragment of the credential survives.
-//   - The POST-pass catches a credential the sanitizer CONSTRUCTS. It maps every
-//     unsafe rune to U+0020, and four of this upstream's needles carry a U+0020: a
-//     userinfo username or password configured as user%20name (url.Userinfo returns
-//     the percent-DECODED form), and a query credential whose literal '+' decodes to
-//     a space (url.QueryUnescape maps '+' to ' ', which base64 passkeys hit
-//     routinely). So an upstream echoing correct<DEL>horse defeats the pre-pass
-//     needle and the sanitizer then reassembles "correct horse" from it. DEL is the
-//     example rather than a C0 because encoding/xml rejects a C0 outright, so a DEL,
-//     a CR and an LF are the unsafe runes this boundary actually carries.
+//   - The PRE-pass catches a credential the sanitizer would garble: it maps an
+//     unsafe rune to a space and an invalid UTF-8 byte to U+FFFD, after which the
+//     byte-exact needle no longer matches and a near-complete fragment survives.
+//   - The POST-pass catches a credential the sanitizer CONSTRUCTS. Four of this
+//     upstream's needles carry a U+0020 (a userinfo value configured as
+//     user%20name, or a '+' that decodes to a space via url.QueryUnescape - base64
+//     passkeys hit this routinely), so an upstream echoing correct<DEL>horse
+//     defeats the pre-pass needle and the sanitizer then reassembles "correct
+//     horse" from it. DEL stands in for a C0 byte because encoding/xml rejects C0
+//     outright.
 //   - The CAP is last so a credential straddling the bound is already gone rather
 //     than sliced into a surviving prefix.
 //
-// The bound is upstreamTextMaxBytes with the marker counted INSIDE it
-// (SanitizeSingleLineCapped, not the Bounded preset), so upstreamDocError.Error()'s
-// surviving sanitize pass is a byte-for-byte no-op on this output: the text is
-// already within the cap and runesafe.SanitizeSingleLine is idempotent on it.
+// The bound is upstreamTextMaxBytes with the marker counted inside it
+// (SanitizeSingleLineCapped), so upstreamDocError.Error()'s surviving sanitize
+// pass is a byte-for-byte no-op on this output.
 func (u *upstream) redactAndBound(s string) string {
 	s = u.redactSecrets(s)
 	s = runesafe.SanitizeSingleLine(s)
@@ -494,20 +490,15 @@ func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 
 // sameHTTPOrigin reports whether raw is an absolute http or https URL, free of
 // userinfo, whose ORIGIN matches origin's: scheme and hostname compared
-// case-insensitively, and the EFFECTIVE port compared after defaulting an omitted port
-// to the scheme's (80 for http, 443 for https).
+// case-insensitively, port compared after defaulting an omitted one to the
+// scheme's (80/443).
 //
-// Both comparisons fold ASCII-ONLY, deliberately not strings.EqualFold, which is
-// the rule every other host and protocol-token comparison in this app already
-// reads (isCanonicalTrackerHost, displaylink.isHTTPScheme). Full Unicode simple
-// folding has ASCII-PRODUCING mappings, so it launders a homograph host into a
-// canonical one before this gate can refuse it - and the fold is not static:
-// measured across Unicode 15 to 17 (Go 1.26 to 1.27), strings.EqualFold newly
-// reads U+0390 as U+1FD3, U+03B0 as U+1FE3 and U+FB05 as U+FB06, so a host
-// differing from the configured origin by one of those runes was a different
-// origin on 1.26 and would be the same one here. A gate whose answers move with
-// the toolchain's fold table is not a gate; urlform's folds cannot move, because
-// a non-ASCII byte can never fold to an ASCII one.
+// Both comparisons fold ASCII-only, deliberately not strings.EqualFold: full
+// Unicode simple folding has ASCII-producing mappings (measured across
+// Unicode 15 to 17 / Go 1.26 to 1.27: U+0390, U+03B0 and U+FB05 newly fold to
+// ASCII-adjacent runes), so it could launder a homograph host into a
+// canonical one, and a gate whose answers move with the toolchain's fold
+// table is not a gate. urlform's folds are non-ASCII-to-ASCII-proof.
 func sameHTTPOrigin(raw string, origin *url.URL) bool {
 	parsed, ok := httpNoUserinfoURL(raw)
 	if !ok {
@@ -541,18 +532,15 @@ func effectiveHTTPPort(u *url.URL) string {
 }
 
 // httpDisplayForm admits a raw URL as a browser-destined DISPLAY link and
-// returns the whole classified form: an absolute http(s) form, free of userinfo
-// and of the smuggling shapes a browser reads differently from net/url. It is
-// the shared admission prefix of BOTH its consumers: sanitizeDisplayURL
-// (search-path display links) and trackerKeyFromURL (match.go, the curation
-// IDENTITY gate), so relaxing it changes what mints a curation key, not only
-// what renders as a clickable link.
+// returns its classified form: an absolute http(s) form, free of userinfo and
+// of the smuggling shapes a browser reads differently from net/url. It is the
+// shared admission prefix of BOTH its consumers: sanitizeDisplayURL (search-path
+// display links) and trackerKeyFromURL (match.go, the curation IDENTITY gate),
+// so relaxing it changes what mints a curation key too.
 //
 // Both consumers read f.Trimmed rather than the original spelling (h-f8): it is
-// the preprocessed string the vouch step actually judged, so admission, the id
-// extraction and the emitted link can no longer read three different strings.
-// A host-only variant used to sit in front of this one; it went when the last
-// caller that needed nothing else stopped existing.
+// the preprocessed string the vouch step actually judged, so admission, id
+// extraction and the emitted link read the same string.
 func httpDisplayForm(raw string) (f urlform.Form, ok bool) {
 	f = urlform.Classify(raw)
 	if !displaylink.VouchForm(&f) || f.Host == "" {
@@ -561,19 +549,20 @@ func httpDisplayForm(raw string) (f urlform.Form, ok bool) {
 	return f, true
 }
 
-// sanitizeDisplayURL reports whether raw is a display-admissible URL (httpDisplayForm)
-// whose host belongs to the scope's own tracker (scopeOfHost, the single home of the
-// host->scope mapping), and returns the VOUCHED spelling for the caller to emit:
-// urlform's WHATWG-preprocessed reading (Form.Trimmed), the string the gate actually
-// judged. On refusal the caller blanks the field and the item survives (writeItem omits
-// an empty <comments> and item.guid() falls back to InfoHash/DownloadURL).
+// sanitizeDisplayURL reports whether raw is a display-admissible URL
+// (httpDisplayForm) whose host belongs to the scope's own tracker
+// (scopeOfHost), and returns the VOUCHED spelling for the caller to emit
+// (urlform's WHATWG-preprocessed Form.Trimmed - the string the gate actually
+// judged). On refusal the caller blanks the field and the item survives
+// (writeItem omits an empty <comments>; item.guid() falls back to
+// InfoHash/DownloadURL).
 //
-// Returning the vouched reading rather than the original spelling is the h-f8 rule
-// trackerKeyFromURL and snapshotInfoURLAllowed already follow, and this gate was the
-// one display site left on the original: an edge-padded upstream value
-// ("http://nyaa.si  ") is vouched on the BROWSER's reading of it, so passing the padded
-// original through handed the arr UI a <comments> link net/url refuses to parse. It also
-// puts the emitted GUID on the same spelling trackerKeyFromURL keys the curation set by.
+// Returning the vouched reading rather than the original is the h-f8 rule
+// trackerKeyFromURL and snapshotInfoURLAllowed already follow: an edge-padded
+// upstream value ("http://nyaa.si  ") is vouched on the browser's reading of
+// it, so passing the padded original through would hand the arr UI a
+// <comments> link net/url refuses to parse. It also keeps the emitted GUID on
+// the same spelling trackerKeyFromURL keys the curation set by.
 func sanitizeDisplayURL(scope, raw string) (cleaned string, ok bool) {
 	f, ok := httpDisplayForm(raw)
 	if !ok {

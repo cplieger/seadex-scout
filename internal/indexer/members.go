@@ -5,8 +5,8 @@ import (
 	"strconv"
 )
 
-// This file is the persisted feed contract: ONE store, TWO facts, TWO
-// projections, and one FIXED write rule per member.
+// This file is the persisted feed contract: one store, two facts, two
+// projections, and one fixed write rule per member.
 
 // currentFeedVersion is the persisted feed.json schema version. It exists because
 // the file carries members that ACCUMULATE state and cannot be re-derived from the
@@ -117,13 +117,11 @@ type ownedRelease struct {
 func ownerKey(alID int) string { return strconv.Itoa(alID) }
 
 // projectCuration derives the three search maps from the owner-keyed ownership
-// fact. This is the PROJECTION half of "persist the fact, derive the projection":
-// the maps are never persisted, so they cannot drift from the fact or be tampered
-// with independently of it. The isBest fold is an OR across every owner, which is
-// the same catalogue-scoped semantics the old persisted maps carried - only
-// recomputed from the votes rather than accumulated destructively, which is what
-// makes a demotion expressible. All three maps are always allocated, so the
-// co-membership relation byPair records is never absent.
+// fact: persist the fact, derive the projection, so the maps can never drift
+// from it or be tampered with independently. The isBest fold is an OR across
+// every owner, recomputed from the votes rather than accumulated
+// destructively, which is what makes a demotion expressible. All three maps
+// are always allocated, so byPair is never absent.
 func projectCuration(owners map[string][]ownedRelease) curation {
 	set := curation{
 		byHash: make(map[string]bool, len(owners)),
@@ -169,9 +167,9 @@ func upsertOwners(prev, evaluated map[string][]ownedRelease, scope passScope) ma
 	return out
 }
 
-// passWrites is what one pass PRODUCED, member by member. It exists so the persist
-// path walks the members applying each rule instead of mutating a few and
-// implicitly carrying the rest - the shape that let the tick get five members
+// passWrites is what one pass PRODUCED, member by member: the persist path
+// walks each member applying its own rule instead of mutating a few and
+// implicitly carrying the rest, which is how the tick used to get five members
 // wrong by omission.
 type passWrites struct {
 	// evaluated is the ownership contribution of every entry this pass

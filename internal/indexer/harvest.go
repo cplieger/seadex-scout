@@ -484,13 +484,11 @@ type harvestShowProgress struct {
 }
 
 // harvestCandidate runs ONE title candidate's single query, folding its matches
-// into r.titles and its
-// counts into r.stats and st. done reports that this candidate did not run to
-// completion - the pacer's slice ended or the query failed - in which case
-// harvestShow must return
-// the returned outcome instead of
-// advancing the ladder. done false means the candidate's query was consumed,
-// the one state in which the ladder may widen.
+// into r.titles and its counts into r.stats and st. done reports that this
+// candidate did not run to completion - the pacer's slice ended or the query
+// failed - in which case harvestShow must return the returned outcome instead
+// of advancing the ladder. done false means the candidate's query was
+// consumed, the one state in which the ladder may widen.
 func (h *harvester) harvestCandidate(ctx context.Context, u *upstream, g harvestGroup, params url.Values, r *harvestRun, st *harvestShowProgress) (harvestOutcome, bool) {
 	if !r.pacer.next(ctx) {
 		return harvestOK, true

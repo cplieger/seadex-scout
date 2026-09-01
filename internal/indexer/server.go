@@ -27,14 +27,11 @@ const (
 	maxHeaderBytes = 16 << 10
 )
 
-// writeTimeout bounds a stalled response consumer. net/http arms it when the
-// request headers are read, so it must cover EVERYTHING the handler can spend
-// before the body is written: the complete bounded Prowlarr retry budget plus a
-// one-minute render margin. Deriving it from the budget's own constants keeps the
-// deadline valid when the retry policy changes. It is a complete bound, and that
-// is the point of the snapshot never being loaded on the request path: a
-// handler's snapshot access is one lock-free read, so no filesystem wait can
-// outlive it. A var so a test can shorten it.
+// writeTimeout bounds a stalled response consumer. net/http arms it when
+// request headers are read, so it must cover everything the handler can spend
+// before writing the body: the full Prowlarr retry budget plus a one-minute
+// render margin, derived from the budget's own constants so it stays valid if
+// the retry policy changes. A var so a test can shorten it.
 var writeTimeout = upstreamMaxAttempts*upstreamAttemptTimeout +
 	(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
 
@@ -160,12 +157,9 @@ func (ix *Indexer) handler() http.Handler {
 	return mux
 }
 
-// chain assembles the middleware stack Run serves. Order (outermost first): -
-// SecurityHeaders: the OUTERMOST baseline (nosniff, X-Frame-Options: DENY,
-// Referrer-Policy, Content-Security-Policy), set before anything else runs so every
-// response carries it - a recovered panic's 500 AND authFailureLimiter's 429, which
-// short-circuits its own response and would skip the headers entirely from any inner
-// position.
+// chain assembles the middleware stack Run serves. SecurityHeaders is
+// deliberately OUTERMOST so every response carries it, including a recovered
+// panic's 500 and authFailureLimiter's short-circuiting 429.
 func (ix *Indexer) chain() http.Handler {
 	return webhttp.Chain(ix.handler(),
 		// default-src 'none' is the whole policy this endpoint needs: every response is

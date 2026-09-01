@@ -10,11 +10,10 @@ import (
 // downloadURLForScope resolves a grabbable .torrent download URL for one curated
 // release, keyed on the indexer's own feed scope (upstreamNyaa / upstreamAB). A
 // caller holding a seadex.Torrent's tracker name converts it with trackerScope
-// first. It reports ok=false when the release cannot be turned into a download
-// the arr can fetch: an unknown scope, a source URL that is not the tracker's own
-// or is missing the expected id, an AnimeBytes release with no passkey, or a
-// tracker table entry without a usable site base. The AB download URL embeds the
-// passkey, so it is a secret and callers must not log it.
+// first. ok is false when the release cannot become a download the arr can
+// fetch: an unknown scope, a source URL not owned by the tracker or missing its
+// id, an AnimeBytes release with no passkey, or a tracker table entry with no
+// usable site base. The AB URL embeds the passkey, so callers must not log it.
 func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 	base, id, ok := downloadTarget(scope, sourceURL)
 	if !ok {
@@ -26,10 +25,9 @@ func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 	case upstreamNyaa:
 		return base + "/download/" + id + ".torrent", true
 	case upstreamAB:
-		// unusableABPasskey is this package's ONE home for "can this passkey build a
-		// grabbable AnimeBytes link", so no site spells out its own emptiness test:
-		// minting a non-credential would report the release as fully resolved while
-		// every arr grab failed at the tracker.
+		// unusableABPasskey is this package's one home for "can this passkey build a
+		// grabbable AnimeBytes link" - minting a non-credential would report the
+		// release as resolved while every arr grab failed at the tracker.
 		if unusableABPasskey(abPasskey) {
 			return "", false
 		}
