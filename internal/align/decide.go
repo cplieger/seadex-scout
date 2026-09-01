@@ -18,29 +18,13 @@ const (
 	// StandingNoFile means the scoped unit has no file on disk (for a
 	// whole-series comparison: no real season carries files).
 	StandingNoFile Standing = iota
-	// StandingUnverified means files are on disk but the comparison is
-	// unverifiable: the release-group evidence on at least one side is
-	// unknown (a group-less on-disk file or a group-less SeaDex release,
-	// both carried as the release.NoGroup sentinel) and could hide the very
-	// membership being tested, so neither alignment nor divergence is
-	// proven. It also covers the defensive case of a filed unit carrying no
-	// group list at all.
-	//
-	// One sub-case is narrower than that sentence suggests, and is
-	// deliberately still filed here: a unit whose BEST comparison is
-	// provenly divergent (all evidence known, no overlap) but whose ALT
-	// comparison is indeterminate - SeaDex's alt releases all untagged. There
-	// "you do not have a best release" IS proven; only the placement between
-	// have_alt and have_unlisted is unknown. The conservative verdict is kept
-	// because the report's job is to name what a human must check, and the
-	// thing to check is exactly which non-best bucket the unit belongs in;
-	// promoting it to a divergence verdict would assert a bucket the evidence
-	// does not support. Read this standing as "the verdict cannot be
-	// determined", not as "nothing about the comparison is known".
-	//
-	// It also covers an item whose file state could not be READ at all
-	// (library.Item.Comparable is false): a placeholder carries no file data, so
-	// its alignment is undetermined rather than absent.
+	// StandingUnverified means the comparison is unverifiable: the
+	// release-group evidence on at least one side is unknown (release.NoGroup)
+	// and could hide the very membership being tested, so neither alignment
+	// nor divergence is proven. Also covers a proven-divergent best comparison
+	// whose alt placement is indeterminate (read this as "the verdict cannot
+	// be determined", not "nothing is known") and a placeholder whose file
+	// state could not be read at all (library.Item.Comparable false).
 	StandingUnverified
 	// StandingBest means a known best group is proven present on the scoped
 	// unit.

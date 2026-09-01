@@ -181,17 +181,10 @@ var byHost = func() map[string]Tracker {
 // it equals or is a real dot-delimited subdomain of, reporting whether one
 // matched.
 func LookupByHost(host string) (Tracker, bool) {
-	// The ASCII gate runs on the RAW UNTRIMMED host, BEFORE any Unicode
-	// transform: BOTH strings.ToLower and strings.TrimSpace are full-Unicode
-	// operations that can launder non-ASCII runes past the fail-closed
-	// non-ASCII rule - ToLower's few ASCII-producing fold mappings
-	// (U+0130 -> 'i', U+212A KELVIN SIGN -> 'k') would launder a homograph
-	// host ("an\u0130mebytes.tv"), and TrimSpace's unicode.IsSpace trim
-	// (U+00A0 NBSP, U+3000 ideographic space) would launder a
-	// whitespace-decorated host ("nyaa.si\u00a0"). IsASCIIHost is byte-wise,
-	// so a host with incidental ASCII space/tab padding still passes it and
-	// is trimmed after; trimming or folding an ASCII-verified string is a
-	// pure ASCII operation, so legitimate hosts are unaffected.
+	// Gate on the RAW UNTRIMMED host before any Unicode transform: ToLower and
+	// TrimSpace are both full-Unicode and can launder a homograph (U+0130,
+	// U+212A) or NBSP/ideographic-space padding past this byte-wise ASCII
+	// check. Incidental ASCII padding still passes and is trimmed after.
 	if !urlform.IsASCIIHost(host) {
 		return Tracker{}, false
 	}
@@ -199,9 +192,8 @@ func LookupByHost(host string) (Tracker, bool) {
 	if host == "" {
 		return Tracker{}, false
 	}
-	// FoldHostASCII rather than strings.ToLower: the gate above already rejected non-ASCII, so the
-	// two agree today, but the library's fold cannot launder if that ordering ever moves - the
-	// safety stops resting on the call order the comment above has to explain.
+	// FoldHostASCII rather than ToLower: agrees with the gate above today, but
+	// cannot launder if the ordering ever moves.
 	host = urlform.FoldHostASCII(host)
 	// Most specific match wins, so the result cannot depend on Go's
 	// randomized map iteration order once the table holds a host that is

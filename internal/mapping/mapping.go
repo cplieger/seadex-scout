@@ -723,7 +723,6 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 	}, nil
 }
 
-// logAcceptedWithoutBaseline reports an ACCEPTED refresh that carries no
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
 // 200 body: it rejects a refresh below the AniList-key or arr-identifier
 // coverage floors, and one whose routing populations collapse below half of the

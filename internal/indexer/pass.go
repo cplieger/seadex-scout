@@ -261,8 +261,7 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 	} else {
 		pass := &journalPass{
 			w: w, ev: ev, published: prev.published, publish: writes.published,
-			// prior is the ownership fact the PREVIOUS snapshot holds: the only record
-			// of the votes of owners this pass did not evaluate.
+			// prior: see journalPass.prior.
 			prior:   prev.owners,
 			infoFor: infoFor, js: &js, now: now,
 		}

@@ -76,13 +76,11 @@ func (c UpstreamConfig) enabled(scope string) bool {
 	return c.torznabURL(scope) != ""
 }
 
-// enablementOnly returns the ENABLEMENT half of c for a process-lifetime field:
-// the per-tracker off switches plus the AB passkey gate, with ProwlarrAPIKey
-// dropped. Both constructors hold their operator input through this, so neither
+// enablementOnly returns the ENABLEMENT half of c: the per-tracker off switches
+// plus the AB passkey gate, with ProwlarrAPIKey dropped so neither constructor
 // retains the Prowlarr credential (that field is REACHABILITY, consumed only
-// inside the wired upstreams). Stated as an EXCLUSION rather than a list of
-// fields to keep, so a third tracker's URL is carried by both halves
-// automatically instead of being silently omitted from one inclusion list.
+// inside the wired upstreams). Stated as an exclusion, not a keep-list, so a
+// third tracker's URL is carried by both halves automatically.
 func (c UpstreamConfig) enablementOnly() UpstreamConfig {
 	c.ProwlarrAPIKey = ""
 	return c
@@ -111,8 +109,6 @@ func wireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) []
 	if log == nil {
 		log = slog.Default()
 	}
-	// One upstream per configured Torznab URL. An empty URL means that tracker is
-	// off, so it is simply not wired and the feed never queries it.
 	var ups []*upstream
 	for _, scope := range feedScopes {
 		if !cfg.enabled(scope) {
@@ -137,9 +133,8 @@ type Indexer struct {
 	// log is set once in New and read per request without a lock, like enablement
 	// and keyUnusable below: none is ever written after construction.
 	log *slog.Logger
-	// The field order below is govet fieldalignment's: pointer-only fields lead,
-	// then the fields whose trailing words carry no pointer, and finally the
-	// pointer-free values, which have no alignment requirement to pay for.
+	// Field order below is govet fieldalignment's (pointers, then non-pointer
+	// tails, then pointer-free values).
 	noUpstreamWarned map[string]*atomic.Bool
 	// enablement is the per-tracker off switch (a non-empty Torznab URL) plus the AB
 	// passkey gate the request path reads - the same narrowing FeedWriter applies, so

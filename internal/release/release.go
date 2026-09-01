@@ -84,22 +84,12 @@ var (
 	// reRemux matches a remux marker as a delimiter-bounded token ("remux",
 	// "BDRemux", "BD-Remux"), never a bare substring inside a longer word.
 	reRemux = regexp.MustCompile(`(?:^|` + nametoken.NonWordEdge + `)(?:` + nametoken.Literal("bd") + `[\s._-]?)?(?:` + nametoken.Alternation([]string{"premux", "remux"}) + `)(?:` + nametoken.Literal("ed") + `|` + nametoken.Literal("es") + `)?(?:$|` + nametoken.NonWordEdge + `)`)
-	// reEncode matches a generic encode marker ("encode", "encoded", "encodes",
-	// "BDRip", "BDRips" - the BD half accepting the same optional [\s._-]
-	// separator reRemux's BD prefix does, so "BD-Rip"/"BD.Rip"/"BD_Rip"/"BD Rip"
-	// classify like the compact spelling) with reRemux's delimiter-bounded token
-	// style, so a bare substring inside
-	// a longer word ("reencoded", "encoder") is never a marker — the compact
-	// "reencode" spelling stays deliberately UNMATCHED while every
-	// delimiter-separated form ("re-encode", "re encode") matches through the
-	// "encode" token, because admitting a bare in-word substring is what would
-	// make "encoder" a marker. It is the
-	// weakest encoder-marker rung in kindFromEvidence — checked after the remux
-	// token and the codec/CRF/bitrate markers, so it only ever moves a release
-	// from unknown to encode, never off remux. Live SeaDex data motivates it:
-	// many isBest encodes state "encode"/"BDRip" in their name or notes
-	// without any codec, CRF, or bitrate marker and previously classified
-	// unknown.
+	// reEncode matches a generic encode marker ("encode"/"encoded"/"encodes",
+	// "BDRip"/"BDRips") delimiter-bounded like reRemux, so "reencoded"/
+	// "encoder" never match while "re-encode"/"re encode" do. Weakest rung in
+	// kindFromEvidence, checked last: it only ever moves unknown to encode,
+	// never off remux. Motivated by live SeaDex isBest encodes stating
+	// "encode"/"BDRip" with no codec/CRF/bitrate marker.
 	reEncode = regexp.MustCompile(`(?:^|` + nametoken.NonWordEdge + `)(?:` + nametoken.Literal("bd") + `[\s._-]?` + nametoken.Literal("rip") + nametoken.Literal("s") + `?|` + nametoken.Alternation([]string{"encoded", "encodes", "encode"}) + `)(?:$|` + nametoken.NonWordEdge + `)`)
 )
 
