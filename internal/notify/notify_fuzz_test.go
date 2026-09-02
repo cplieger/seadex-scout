@@ -90,7 +90,7 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 }
 
 // FuzzCapAlertTextAttrBoundedAndInertMarkup fuzzes the alert-annotation text
-// encoder. alerts.yaml interpolates alert_title / alert_recommended_group into
+// encoder. alerts/logql.yaml interpolates alert_title / alert_recommended_group into
 // a Discord annotation BODY, so an untrusted SeaDex title must never render as
 // a link or a code span (CWE-116). The escaper emits every dangerous byte as a
 // two-byte backslash escape, so walking escape pairs is an exact oracle rather
@@ -139,7 +139,7 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 }
 
 // FuzzCapURLAttrBoundedAndInertDestination fuzzes the link-destination output
-// encoder over arbitrary untrusted text. alerts.yaml renders arr_url /
+// encoder over arbitrary untrusted text. alerts/logql.yaml renders arr_url /
 // release_url / nyaa_url / public_url / ab_url as `[label](<attr>)`, so any
 // surviving destination-breaking byte closes the destination early and the rest
 // of an untrusted SeaDex URL renders as attacker-authored markdown (CWE-116).

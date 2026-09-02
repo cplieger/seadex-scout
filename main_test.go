@@ -989,7 +989,7 @@ func TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence(t *testing.T) {
 
 // TestDetachedWriteError pins the alert-facing exit classification of a
 // shutdown-truncated report write: it must read as a routine shutdown (WARN,
-// excluded from alerts.yaml's SeadexScoutCycleError rule) while a genuine write
+// excluded from alerts/logql.yaml's SeadexScoutCycleError rule) while a genuine write
 // fault keeps its ERROR classification. It stays in the root even though
 // shutdown.DetachedWriteError is the mechanism, because what it pins is the
 // coupling to dispatchOutcome - the root's own exit-code/level contract. Three

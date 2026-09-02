@@ -730,7 +730,7 @@ func TestLoadStateDeadlineExceededIsNotAFault(t *testing.T) {
 }
 
 // TestSavePreservationRefusalWarnsInsteadOfErroring pins the log-level
-// classification alerts.yaml depends on: a Save the store deliberately
+// classification alerts/logql.yaml depends on: a Save the store deliberately
 // REFUSED in order to preserve unclassifiable on-disk bytes
 // (state.ErrSavePreserved) is a degradation, not a write fault, so it must
 // log "state save skipped; on-disk state preserved" at WARN and never the
@@ -761,7 +761,7 @@ func TestSavePreservationRefusalWarnsInsteadOfErroring(t *testing.T) {
 				t.Errorf("preservation-refusal WARN count = %d, want exactly 1", n)
 			}
 			if n := recorder.CountLevel(slog.LevelError, "state save failed"); n != 0 {
-				t.Errorf("\"state save failed\" ERROR count = %d, want 0 (alerts.yaml documents this refusal as deliberately NOT reaching SeadexScoutCycleError)", n)
+				t.Errorf("\"state save failed\" ERROR count = %d, want 0 (alerts/logql.yaml documents this refusal as deliberately NOT reaching SeadexScoutCycleError)", n)
 			}
 		})
 	}

@@ -38,7 +38,7 @@ func emittedAttrsByTitle(recorder *capture.Recorder, title string) []map[string]
 // only one with no test of its own.
 //
 // Both properties fail SILENTLY and both are visible in the alerting stack.
-// Findings are STATE, so the shipped alerts.yaml reads a lookback window over
+// Findings are STATE, so the shipped alerts/logql.yaml reads a lookback window over
 // the emitted lines: a Reemit that emits no ROW (only its summary line) lets
 // that window expire, which resolves every standing better-release alert and
 // then re-fires the whole set as new on the next full pass. And a Reemit that

@@ -554,7 +554,7 @@ func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd" // C1 CSI, RLO override, C0 ESC
 	const clean = "a b c d"
-	// release_url takes the plain capAttr render: alerts.yaml never renders it as
+	// release_url takes the plain capAttr render: alerts/logql.yaml never renders it as
 	// a Markdown link destination, so the spaces the sanitizer substituted stay
 	// spaces rather than arriving percent-encoded the way an interpolated
 	// link-destination attribute's do (see TestFindingLineSanitizesEveryUntrustedAttr).

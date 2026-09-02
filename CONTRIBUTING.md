@@ -19,7 +19,7 @@ on-demand **season-level report**, and an optional **Torznab feed** Sonarr/Radar
 grab from. The first two are **report-only**: they never download, grab, or touch
 a torrent client, and the app ships no notifier of its own (alerting is the
 observability stack's job; the repo ships reference Loki-ruler rules in
-[`alerts.yaml`](alerts.yaml)). The feed is the one automation path, and even it
+[`alerts/logql.yaml`](alerts/logql.yaml)). The feed is the one automation path, and even it
 does not grab: it hands releases to the arrs so they grab through their own
 engine; seadex-scout never pushes to a download client. Keep that boundary when
 proposing changes: "surface an actionable finding" and "let the arrs act on

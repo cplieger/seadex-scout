@@ -148,7 +148,7 @@ func (s *Scout) tickMappingUnusable(ctx context.Context, mapErr error, st *state
 // includes a tick whose window was empty. No streak advances: the arm that
 // reached here already settled the counters its own evidence covers. It is the
 // ONE site that emits the completed-tick line, whose message and attribute set
-// alerts.yaml's loop deadman pins.
+// alerts/logql.yaml's loop deadman pins.
 func (s *Scout) tickComplete(ctx context.Context, entries, findings int, st *state.State, mapCache *mapping.Cache) bool {
 	s.saveTick(ctx, st, mapCache)
 	s.log.Info("tick complete",
@@ -172,7 +172,7 @@ func (s *Scout) closeDegradedTick(ctx context.Context, reason string, st *state.
 
 // logTickDegraded is the ONE site that emits the degraded-tick line. It is
 // separate from closeDegradedTick because the not-ready arm needs the line
-// without the re-statement, and alerts.yaml's stall rule pins this message.
+// without the re-statement, and alerts/logql.yaml's stall rule pins this message.
 func (s *Scout) logTickDegraded(reason string, attrs ...any) {
 	s.log.Warn("tick degraded", append([]any{"reason", reason}, attrs...)...)
 }

@@ -46,7 +46,7 @@ func TestRunCyclePanicShield(t *testing.T) {
 
 // TestRunCyclePanicIsLoggedAtError pins the panic shield's operator signal, the
 // only report a swallowed panic gets: recovering the panic keeps the daemon
-// alive, so without the ERROR line (the level alerts.yaml's
+// alive, so without the ERROR line (the level alerts/logql.yaml's
 // SeadexScoutCycleError rule keys on, and which its description names as "a
 // panicked run") a cycle panicking on every tick would be invisible beyond the
 // health flip. The panic value and the stack ride along as attributes because
@@ -72,7 +72,7 @@ func TestRunCyclePanicIsLoggedAtError(t *testing.T) {
 
 // TestRunOncePanicIsNotAnIngestFault pins the panic path's own error text: a
 // recovered panic must not be reported as the arr-ingest fault, because that
-// message is what alerts.yaml's SeadexScoutCycleError description sends the
+// message is what alerts/logql.yaml's SeadexScoutCycleError description sends the
 // operator to the arr config to check. The ingest wording stays pinned beside
 // it so the two producers of healthy=false cannot collapse back into one.
 func TestRunOncePanicIsNotAnIngestFault(t *testing.T) {
@@ -1013,7 +1013,7 @@ func TestRunLoopQueueErrorAfterRun(t *testing.T) {
 // TestRunLoopMarkerWriteFailure pins the daemon tick's marker-write failure
 // branch: the tick has no exit code to report the write through and the failure
 // does not self-heal (a full disk, a bad mode on /tmp), so its ERROR line is the
-// only signal the operator gets - the level alerts.yaml's SeadexScoutCycleError
+// only signal the operator gets - the level alerts/logql.yaml's SeadexScoutCycleError
 // rule keys on. Without it a wedged marker restarts the container at
 // WithMaxAge(3*poll_interval) with no logged cause. The marker's directory is
 // present at construction (so the marker does not enter its degraded no-op
@@ -1045,7 +1045,7 @@ func TestRunLoopMarkerWriteFailure(t *testing.T) {
 
 	const msg = "tick could not record cycle health"
 	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
-		t.Errorf("tick marker-failure ERROR count = %d, want 1 (alerts.yaml's level=ERROR rule is this fault's only report): %v", got, rec.Messages())
+		t.Errorf("tick marker-failure ERROR count = %d, want 1 (alerts/logql.yaml's level=ERROR rule is this fault's only report): %v", got, rec.Messages())
 	}
 	if !rec.AttrContains(msg, "error", ".healthy") {
 		t.Errorf("ERROR line lost the failing marker path: %v", rec.Records())
@@ -1263,7 +1263,7 @@ func (c markerBreakingCycler) Cycle(context.Context) bool {
 // its log line: the verdict came from another process's queued demand, so there
 // is no exit code to surface through, and the write does not self-heal (a full
 // disk or a bad mode on /tmp keeps failing until the operator acts). It must
-// therefore log at ERROR - the level alerts.yaml's SeadexScoutCycleError rule
+// therefore log at ERROR - the level alerts/logql.yaml's SeadexScoutCycleError rule
 // keys on, and which that rule's description names by this exact message -
 // while this invocation's own healthy run still exits 0 and the failure is not
 // re-reported as a cycle fault. Serial (capture swaps slog.Default).
@@ -1288,7 +1288,7 @@ func TestRunOnceQueuedRerunMarkerWriteFailure(t *testing.T) {
 	}
 	const msg = "queued rerun could not record poll health"
 	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
-		t.Errorf("queued-rerun marker-failure ERROR count = %d, want 1 (alerts.yaml names this message as an operator-actionable fault): %v", got, rec.Messages())
+		t.Errorf("queued-rerun marker-failure ERROR count = %d, want 1 (alerts/logql.yaml names this message as an operator-actionable fault): %v", got, rec.Messages())
 	}
 	if !rec.AttrContains(msg, "error", "record poll health") {
 		t.Errorf("ERROR line lost the wrapped record-poll-health cause: %v", rec.Records())
@@ -1344,7 +1344,7 @@ func (c ownMarkerBreakingCycler) Cycle(context.Context) bool {
 // fails the marker write and shutdown then lands while Exclusive services a
 // queued rerun, the interruption REPLACES the own result, so this ERROR is the
 // permanent (non-self-healing) marker fault's only report - the level
-// alerts.yaml keys on. Without it the fault would degrade to a routine-shutdown
+// alerts/logql.yaml keys on. Without it the fault would degrade to a routine-shutdown
 // WARN. Serial (capture swaps slog.Default).
 func TestRunOnceOwnMarkerWriteFailureBeforeShutdown(t *testing.T) {
 	rec := capture.Default(t)

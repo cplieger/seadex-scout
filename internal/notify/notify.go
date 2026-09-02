@@ -213,11 +213,11 @@ const maxAttrBytes = logattr.MaxBytes
 // maxAlertTextBytes is the budget for an ALERT-destined TEXT attribute, and it
 // is deliberately far below maxAttrBytes: that budget is sized for the Loki LOG
 // LINE, while these values are interpolated into the Discord annotation
-// alerts.yaml renders.
+// alerts/logql.yaml renders.
 const maxAlertTextBytes = 512
 
 // maxAlertURLBytes is the same budget for an ALERT-destined URL attribute - one
-// the shipped alerts.yaml actually interpolates - and it is MEASURED rather than
+// the shipped alerts/logql.yaml actually interpolates - and it is MEASURED rather than
 // chosen.
 const maxAlertURLBytes = 256
 
@@ -295,7 +295,7 @@ func findingKVs(f *compare.Finding) []any {
 		"title", capAttr(f.Title),
 		// alert_title / alert_recommended_group are the MARKDOWN-safe twins of title /
 		// recommended_group: the raw labels keep their meaning for Loki search and `sum
-		// by` grouping, while alerts.yaml interpolates these into Discord annotations.
+		// by` grouping, while alerts/logql.yaml interpolates these into Discord annotations.
 		"alert_title", capAlertTextAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
@@ -312,12 +312,12 @@ func findingKVs(f *compare.Finding) []any {
 		"codec", f.Codec,
 		"kind", f.Kind,
 		"classification_reason", capAttr(f.Reason),
-		// release_url takes the LOG-LINE budget (capAttr), not the alert one: alerts.yaml
+		// release_url takes the LOG-LINE budget (capAttr), not the alert one: alerts/logql.yaml
 		// neither groups by it nor renders it, and it can exceed 256 bytes because
 		// publishing enforces a canonical host and shape, never a length.
 		"release_url", capAttr(f.ReleaseURL),
 		"release_urls", joinLinksAttr(f.Links),
-		// nyaa_url keeps its name and its meaning: the shipped alerts.yaml
+		// nyaa_url keeps its name and its meaning: the shipped alerts/logql.yaml
 		// renders it as a "[Nyaa]" link, so it may only ever hold a Nyaa URL.
 		"nyaa_url", capURLAttr(publicLink.nyaaURL()),
 		"public_url", capURLAttr(publicLink.otherURL()),

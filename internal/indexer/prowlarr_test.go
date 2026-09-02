@@ -1502,7 +1502,7 @@ func TestUpstreamSecretsRedactionScope(t *testing.T) {
 // of its two shapes: a 401/403 status, or Prowlarr's 200 + Torznab <error>
 // document in the auth band (codes 100-199).
 //
-// The LEVEL is the assertion that matters. alerts.yaml keys SeadexScoutCycleError
+// The LEVEL is the assertion that matters. alerts/logql.yaml keys SeadexScoutCycleError
 // on level=ERROR and on no message, so a re-level to WARN - or deleting the arm,
 // which drops the rejection into the generic "upstream query failed" WARN one
 // line below - leaves the dead feed un-alerted with the suite green.
@@ -1540,7 +1540,7 @@ func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
 				t.Error("fault = nil, want a torznabFault: an empty 200 feed reads as a clean no-match, which records a credential failure as a successful search")
 			}
 			if got := rec.CountLevel(slog.LevelError, credentialsMsg); got != 1 {
-				t.Errorf("credential rejection logged at ERROR %d times, want 1 (alerts.yaml keys on the level, not the message); log output:\n%s",
+				t.Errorf("credential rejection logged at ERROR %d times, want 1 (alerts/logql.yaml keys on the level, not the message); log output:\n%s",
 					got, strings.Join(rec.Messages(), "\n"))
 			}
 			if rec.Contains("upstream query failed") {

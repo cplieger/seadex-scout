@@ -149,7 +149,7 @@ func lastAttrBytes(s string) string {
 
 // TestCapAlertTextAttrEscapesDiscordMarkup pins the alert-sink output
 // encoding: capAttr bounds and sanitizes a value for the JSON slog sink but
-// performs no markup encoding, and alerts.yaml interpolates alert_title /
+// performs no markup encoding, and alerts/logql.yaml interpolates alert_title /
 // alert_recommended_group into a Discord annotation, so an untrusted SeaDex
 // title must not be able to render as a link or a code span (CWE-116). Mention
 // delivery is controlled by the sender's allowed_mentions policy, not by this
@@ -231,10 +231,10 @@ func TestCapAlertTextAttrRecapsAfterEscapeGrowth(t *testing.T) {
 	}
 }
 
-// TestFindingKVsCarriesEscapedAlertLabels pins the alerts.yaml contract: the
+// TestFindingKVsCarriesEscapedAlertLabels pins the alerts/logql.yaml contract: the
 // raw title / recommended_group labels stay for Loki search and grouping, and
 // the annotation-facing alert_* twins carry the escaped values. Without this
-// the two labels alerts.yaml renders could be dropped silently.
+// the two labels alerts/logql.yaml renders could be dropped silently.
 func TestFindingKVsCarriesEscapedAlertLabels(t *testing.T) {
 	f := compare.Finding{
 		Title:            "[phish](https://attacker.example)",
@@ -265,7 +265,7 @@ func TestFindingKVsCarriesEscapedAlertLabels(t *testing.T) {
 
 // TestFindingKVsAlertLabelsCarryNoLineBreaks pins the line-structure half of
 // the alert-sink encoding: capAttr keeps CR/LF for the JSON slog sink, but the
-// annotation body alerts.yaml renders is a single line, so a newline in an
+// annotation body alerts/logql.yaml renders is a single line, so a newline in an
 // untrusted title would re-open the line-start markdown constructs inline
 // escaping cannot reach (a '#' heading, a list bullet, an auto-linked bare
 // URL). The raw labels keep the newline; only the alert_* twins flatten it.

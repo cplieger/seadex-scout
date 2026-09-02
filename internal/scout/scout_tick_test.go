@@ -932,7 +932,7 @@ func TestTickWindowIsWiderThanTheInterval(t *testing.T) {
 // new when the upstream next moved.
 func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
 	boom := errors.New("upstream boom")
-	// deadmanVocabulary is the log-message set alerts.yaml's stall rule matches.
+	// deadmanVocabulary is the log-message set alerts/logql.yaml's stall rule matches.
 	deadmanVocabulary := []string{"tick complete", "tick degraded"}
 	tests := map[string]struct {
 		sea  func() *fakeSeaDex
