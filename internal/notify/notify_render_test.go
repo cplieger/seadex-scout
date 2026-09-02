@@ -268,7 +268,7 @@ func TestPublicLinkAlertLabel(t *testing.T) {
 // TestTrackerURLsHostOverridesMismatchedLabel pins the host-first precedence
 // canonicalTracker applies when the untrusted SeaDex label contradicts the
 // URL: a link labeled "Nyaa" whose host is AnimeTosho must NOT occupy the
-// nyaa slot (alerts.yaml renders that slot under a hardcoded "[Nyaa]" label,
+// nyaa slot (alerts/logql.yaml renders that slot under a hardcoded "[Nyaa]" label,
 // so it would mislabel the destination) and must not displace the genuine
 // Nyaa link that follows it. Every other case in this file supplies matching
 // label/host pairs, so a label-first canonicalTracker (or a label-only Nyaa

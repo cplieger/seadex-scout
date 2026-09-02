@@ -2737,7 +2737,7 @@ func TestPermanentUpstreamCredentialErrorBandEdges(t *testing.T) {
 // the rejection fell through to the generic scope WARN.
 //
 // Two things this shape alone reaches. The LEVEL is the alert contract:
-// alerts.yaml keys SeadexScoutCycleError on level=ERROR and on no message at all,
+// alerts/logql.yaml keys SeadexScoutCycleError on level=ERROR and on no message at all,
 // so a re-level to WARN silences the one signal that says the feed is dying while
 // the container stays healthy and the compare loop keeps logging cycle complete.
 // And the scope must LATCH: a credential rejection fails every show identically,
@@ -2768,7 +2768,7 @@ func TestHarvestCredentialErrorDocumentLatchesTheScopeAtError(t *testing.T) {
 	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if got := rec.CountLevel(slog.LevelError, credentialsMsg); got != 1 {
-		t.Errorf("credential rejection logged at ERROR %d times, want 1 (alerts.yaml keys on the level, not the message); log output:\n%s",
+		t.Errorf("credential rejection logged at ERROR %d times, want 1 (alerts/logql.yaml keys on the level, not the message); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
 	for _, other := range []string{scopeWarnMsg, showLocalMsg} {

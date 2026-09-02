@@ -365,7 +365,7 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
   groups, the release's classification, and one link per obtainable source
   (`nyaa_url`, `public_url` + `public_tracker`, `ab_url` + `ab_tracker`), so an
   alert can render a clickable notification straight from the labels;
-  [`alerts.yaml`](alerts.yaml) names the attributes it groups by. Informational
+  [`alerts/logql.yaml`](alerts/logql.yaml) names the attributes it groups by. Informational
   cases (`incomplete`, `theoretical_best`, `mixed_group_manual`, `unverifiable`)
   log at `info`. Every pass closes with a completion line: `tick complete` or
   `cycle complete` when healthy, `tick degraded` or `cycle degraded` at `warn`
@@ -382,7 +382,7 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
 seadex-scout ships no notifier of its own; its operational state is in its logs.
 Ship the container's logs to Loki (Grafana
 Alloy's Docker log discovery does this with no configuration) and evaluate the
-rules in [`alerts.yaml`](alerts.yaml) with
+rules in [`alerts/logql.yaml`](alerts/logql.yaml) with
 [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts
 deliver through your Alertmanager like any Prometheus metric alert. They cover:
 

@@ -11,7 +11,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
-// The shipped alerts.yaml keys its better-release rule on an exact msg literal,
+// The shipped alerts/logql.yaml keys its better-release rule on an exact msg literal,
 // groups by an exact label set, and interpolates a fixed set of labels into its
 // annotations; these read all three out of the rules file so no attribute name or
 // inventory is retyped in this test.
@@ -22,14 +22,14 @@ var (
 )
 
 // betterReleaseRule returns the shipped better-release rule's body, sliced out
-// of the raw alerts.yaml bytes so every assertion below reads the real consumer.
+// of the raw alerts/logql.yaml bytes so every assertion below reads the real consumer.
 func betterReleaseRule(t *testing.T, raw []byte) string {
 	t.Helper()
 	const anchor = "alert: SeadexScoutBetterReleaseFound"
 	body := string(raw)
 	start := strings.Index(body, anchor)
 	if start < 0 {
-		t.Fatalf("alerts.yaml carries no %q rule; the better-release alert contract was renamed or removed", anchor)
+		t.Fatalf("alerts/logql.yaml carries no %q rule; the better-release alert contract was renamed or removed", anchor)
 	}
 	body = body[start:]
 	if next := strings.Index(body[len(anchor):], "- alert:"); next >= 0 {
@@ -39,7 +39,7 @@ func betterReleaseRule(t *testing.T, raw []byte) string {
 }
 
 // betterReleaseContract extracts the shipped better-release rule's matched
-// message literal and its `sum by` label set from the raw alerts.yaml bytes.
+// message literal and its `sum by` label set from the raw alerts/logql.yaml bytes.
 func betterReleaseContract(t *testing.T, raw []byte) (string, []string) {
 	t.Helper()
 	body := betterReleaseRule(t, raw)
@@ -61,7 +61,7 @@ func betterReleaseContract(t *testing.T, raw []byte) (string, []string) {
 }
 
 // interpolatedAlertLabels returns the distinct labels the better-release rule's
-// annotations actually INTERPOLATE, read out of alerts.yaml. That inventory is
+// annotations actually INTERPOLATE, read out of alerts/logql.yaml. That inventory is
 // the rules file's knowledge, never this test's: a value the annotation does not
 // render occupies none of the embed's budget, and a value it starts rendering
 // must be accounted for the moment it does.
@@ -88,7 +88,7 @@ func interpolatedAlertLabels(t *testing.T, raw []byte) []string {
 
 // alertAttrBudgets is the other half of the arithmetic: the byte budget
 // findingKVs renders each interpolable attribute under. The BUDGETS are the
-// code's knowledge; the INVENTORY is alerts.yaml's (interpolatedAlertLabels), so
+// code's knowledge; the INVENTORY is alerts/logql.yaml's (interpolatedAlertLabels), so
 // neither side can be hand-copied wrong. A fixed-pattern app value carries 0:
 // an id, an arr name, a season number and the seadex_tags vocabulary hold no
 // untrusted upstream text and their worst case is a handful of bytes.
@@ -114,7 +114,7 @@ var alertAttrBudgets = map[string]int{
 }
 
 // TestAlertContractMatchesShippedRules pins the ONE observable contract this
-// package has: observability is slog-only, and the repo ships alerts.yaml whose
+// package has: observability is slog-only, and the repo ships alerts/logql.yaml whose
 // better-release rule matches an exact message literal and groups by a fixed
 // label set. The two halves are deployed independently (this binary vs a rules
 // file loaded into Loki/Mimir) with no import edge between them, so a renamed
@@ -125,9 +125,9 @@ var alertAttrBudgets = map[string]int{
 // contract. It asserts key PRESENCE only, so it pins the contract and not the
 // sample data.
 func TestAlertContractMatchesShippedRules(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts.yaml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
 	if err != nil {
-		t.Fatalf("read alerts.yaml: %v", err)
+		t.Fatalf("read alerts/logql.yaml: %v", err)
 	}
 	wantMsg, wantLabels := betterReleaseContract(t, raw)
 
@@ -147,11 +147,11 @@ func TestAlertContractMatchesShippedRules(t *testing.T) {
 		})
 	}
 	if !found {
-		t.Fatalf("alerts.yaml matches msg=%q but no line with that exact message was emitted", wantMsg)
+		t.Fatalf("alerts/logql.yaml matches msg=%q but no line with that exact message was emitted", wantMsg)
 	}
 	for _, label := range wantLabels {
 		if !keys[label] {
-			t.Errorf("alerts.yaml groups by %q but the finding line emits no such attribute", label)
+			t.Errorf("alerts/logql.yaml groups by %q but the finding line emits no such attribute", label)
 		}
 	}
 }
@@ -160,7 +160,7 @@ func TestAlertContractMatchesShippedRules(t *testing.T) {
 // maxAlertURLBytes, which is the part a reader cannot check by eye and the part
 // a future cap change would silently break.
 //
-// The failure it guards is specific: alerts.yaml interpolates several untrusted
+// The failure it guards is specific: alerts/logql.yaml interpolates several untrusted
 // values into ONE Discord annotation and renders the clickable tracker links
 // LAST, so if the values can collectively exceed the embed's 4096-rune
 // description limit, the half the operator acts on is what gets cut. Capping
@@ -171,7 +171,7 @@ func TestAlertContractMatchesShippedRules(t *testing.T) {
 // The inventory is READ from the shipped rules file rather than re-spelled here
 // (the sibling TestAlertContractMatchesShippedRules reads its contract the same
 // way). A hand-copied one had counted release_url among the interpolated URL
-// attributes, which alerts.yaml neither groups by nor renders - so an attribute
+// attributes, which alerts/logql.yaml neither groups by nor renders - so an attribute
 // nothing in the annotation reads was paying the annotation's budget, and the
 // arithmetic "proved" a sum that did not describe the shipped template.
 func TestAlertAnnotationBudgetFitsTheEmbedLimit(t *testing.T) {
@@ -179,15 +179,15 @@ func TestAlertAnnotationBudgetFitsTheEmbedLimit(t *testing.T) {
 	// Discord's embed description limit, the ceiling Alertmanager's notifier
 	// truncates the rendered annotation at.
 	const discordEmbedDescriptionRunes = 4096
-	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts.yaml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
 	if err != nil {
-		t.Fatalf("read alerts.yaml: %v", err)
+		t.Fatalf("read alerts/logql.yaml: %v", err)
 	}
 	worst := 0
 	for _, label := range interpolatedAlertLabels(t, raw) {
 		budget, classified := alertAttrBudgets[label]
 		if !classified {
-			t.Errorf("alerts.yaml interpolates %q into the annotation but this test does not know its budget; "+
+			t.Errorf("alerts/logql.yaml interpolates %q into the annotation but this test does not know its budget; "+
 				"classify it in alertAttrBudgets (an attribute rendered on the multi-KB log-line budget must be "+
 				"re-capped before it can be interpolated at all)", label)
 			continue

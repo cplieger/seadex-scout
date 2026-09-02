@@ -122,7 +122,7 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 }
 
 // TestWriteFilesReportWrittenLineCarriesAlertAttributes pins the success
-// record's wire shape, which alerts.yaml keys on: SeadexScoutReportWritten
+// record's wire shape, which alerts/logql.yaml keys on: SeadexScoutReportWritten
 // selects msg="report written", groups on sum by (anime), and renders
 // {{ $labels.anime }} in its description. Renaming or dropping the anime
 // attribute (or the message) leaves the rule grouping on an absent label and

@@ -543,7 +543,7 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 		log.Warn("report json written but not crash-durable; skipping the markdown half to keep the pair ordering",
 			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", false)
 		// The run published an artifact and returns success, so it still emits the
-		// success record alerts.yaml's SeadexScoutReportWritten rule keys on. The
+		// success record alerts/logql.yaml's SeadexScoutReportWritten rule keys on. The
 		// empty markdown name is what tells the operator only one half landed.
 		reportWritten(log, "", jsonPath, len(r.Rows), false)
 		return nil
