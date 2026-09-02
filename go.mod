@@ -12,7 +12,7 @@ require (
 	github.com/cplieger/jsonx/v2 v2.0.1
 	github.com/cplieger/keyenc v1.0.7
 	github.com/cplieger/runesafe/v2 v2.0.1
-	github.com/cplieger/scheduler/v4 v4.1.0
+	github.com/cplieger/scheduler/v4 v4.2.0
 	github.com/cplieger/slogx v1.6.4
 	github.com/cplieger/urlform v1.3.5
 	github.com/cplieger/webhttp/v2 v2.0.3
