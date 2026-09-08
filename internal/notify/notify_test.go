@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"log"
 	"log/slog"
 	"slices"
 	"strings"
@@ -529,9 +530,17 @@ func TestFindingLineCarriesDocumentedAttrs(t *testing.T) {
 // logger is process-global, so this test must not run in parallel.
 func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 	logger, recorder := capture.New()
-	prev := slog.Default()
+	// slog.SetDefault also redirects the log package's writer and flags and
+	// skips that redirect for slog's own default handler, so all three are
+	// saved here and slog is restored first. t.Cleanup rather than defer: a
+	// defer does not run on a subtest's failure path.
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(logger)
-	defer slog.SetDefault(prev)
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
 
 	notifier := NewNotifier(nil, nil)
 	notifier.Report([]compare.Finding{testFinding("k", "Frieren")}, nil)
