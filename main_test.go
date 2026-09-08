@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -362,11 +364,61 @@ func TestDispatchRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+// restoreLogger saves slog's default logger together with the log package's
+// writer and flags, restoring all three on cleanup. t.Cleanup rather than
+// defer: a defer does not run on a subtest's failure path.
+//
+// slog.SetDefault also points the log package at the installed handler and
+// zeroes its flags, and skips that redirect for slog's own default handler, so
+// restoring slog alone leaves log writing into a dead buffer. slog goes back
+// first: reinstalling a non-default prev re-runs the redirect.
+func restoreLogger(t *testing.T) {
+	t.Helper()
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+}
+
+// TestRestoreLogger_restoresLogPackage pins all three globals slog.SetDefault
+// mutates. A sentinel writer and a non-zero flag set are installed first so
+// neither assertion can hold by accident: the incomplete restore leaves the
+// log package aimed at the swapped handler with its flags zeroed, which
+// silences every later slog call in the package.
+func TestRestoreLogger_restoresLogPackage(t *testing.T) {
+	prevWriter, prevFlags := log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+	var sentinel bytes.Buffer
+	log.SetOutput(&sentinel)
+	log.SetFlags(log.Lshortfile)
+
+	t.Run("swap", func(t *testing.T) {
+		restoreLogger(t)
+		var captured bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewTextHandler(&captured, nil)))
+		slog.Info("captured")
+		if captured.Len() == 0 {
+			t.Fatal("the swapped handler captured nothing; the swap itself is broken, so the restore assertions below would be vacuous")
+		}
+	})
+
+	if got := log.Writer(); got != io.Writer(&sentinel) {
+		t.Errorf("after restoreLogger cleanup, log.Writer() = %T, want the sentinel *bytes.Buffer", got)
+	}
+	if got := log.Flags(); got != log.Lshortfile {
+		t.Errorf("after restoreLogger cleanup, log.Flags() = %d, want %d", got, log.Lshortfile)
+	}
+}
+
 // TestConfigureLoggerAppliesLevel pins the configured level onto the default
-// logger. Serial (mutates slog.Default); the previous default is restored.
+// logger. Serial (mutates slog.Default); restoreLogger puts it back.
 func TestConfigureLoggerAppliesLevel(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
+	restoreLogger(t)
 
 	configureLogger(slog.LevelWarn, slogx.JSON)
 	ctx := t.Context()
@@ -387,10 +439,9 @@ func TestConfigureLoggerAppliesLevel(t *testing.T) {
 // pre-config default handler emits at Info (so first-boot and config-parse
 // warnings are visible on the container log stream) and not at Debug, until
 // configureLogger applies the configured level. Serial (swaps slog.Default);
-// the previous default is restored.
+// restoreLogger puts it back.
 func TestInstallLoggerInitialLevel(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
+	restoreLogger(t)
 
 	installLogger()
 	ctx := t.Context()
