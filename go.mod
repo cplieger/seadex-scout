@@ -3,7 +3,7 @@ module github.com/cplieger/seadex-scout
 go 1.27.1
 
 require (
-	github.com/cplieger/arrapi/v2 v2.0.5
+	github.com/cplieger/arrapi/v2 v2.0.6
 	github.com/cplieger/atomicfile/v3 v3.0.1
 	github.com/cplieger/envx/yamlenv/v2 v2.0.1
 	github.com/cplieger/health v1.7.1

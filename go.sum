@@ -1,5 +1,5 @@
-github.com/cplieger/arrapi/v2 v2.0.5 h1:ZjeczsQlqZ8YVBiiZ6324NNeTQAvp3NyWrDnKo5+uWY=
-github.com/cplieger/arrapi/v2 v2.0.5/go.mod h1:C3aDtiCZTlQKX27aRsJI9EO9B6kXhN9XwVWnsJ17YSw=
+github.com/cplieger/arrapi/v2 v2.0.6 h1:WlzgmpWdBwsiixZUcBM/68h3SMC9+dMaAdgouAI/FVY=
+github.com/cplieger/arrapi/v2 v2.0.6/go.mod h1:OYgYksuBRcroa59yFV+2PsdIlur9qY9miNZrpP/03ys=
 github.com/cplieger/atomicfile/v3 v3.0.1 h1:F5MZQ8Tvn9K0imJ59rFVofgtnGR5Gtf94Ivk9v3gC7o=
 github.com/cplieger/atomicfile/v3 v3.0.1/go.mod h1:jhxOw5RQn5pYB0eAo5SLRPXKYChRxT/bW/TnTcLZa78=
 github.com/cplieger/envx/yamlenv/v2 v2.0.1 h1:LaSXybVEdse3kY6R6J1lPM2Vz9buOaB3t77w9euCp6Y=
