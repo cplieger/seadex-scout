@@ -20,12 +20,15 @@ const coldReconcileAllowance = 3 * time.Hour
 
 // WatchdogLease is the freshness lease the DAEMON arms against its own interval:
 // 0 (no watchdog) in external mode, else healthLeaseFactor intervals, floored at
-// coldReconcileAllowance.
+// coldReconcileAllowance. The arithmetic - including the non-positive-interval
+// disarm and the saturation a wrapped deadline would otherwise turn into a
+// silent disarm - is health.Lease's.
 func WatchdogLease(interval time.Duration) time.Duration {
-	if interval <= 0 {
-		return 0
-	}
-	return max(healthLeaseFactor*interval, coldReconcileAllowance)
+	return health.Lease{
+		Interval: interval,
+		Cycles:   healthLeaseFactor,
+		Floor:    coldReconcileAllowance,
+	}.Duration()
 }
 
 // watchdogPollDivisor sets how often the watchdog re-checks the marker's age,
