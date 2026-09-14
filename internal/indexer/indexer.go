@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync/atomic"
 
-	"github.com/cplieger/webhttp/v2"
+	"github.com/cplieger/webhttp/v3"
 )
 
 const (
