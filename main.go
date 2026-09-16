@@ -97,7 +97,7 @@ func main() {
 	logConfig(cfg, mode)
 
 	if err := dispatch(mode, &boot); err != nil {
-		level, msg, code := dispatchOutcome(err)
+		level, msg, code := dispatchOutcome(err, boot.starter)
 		slog.Log(context.Background(), level, msg, "mode", loggableMode(mode), "error", err)
 		if code != 0 {
 			os.Exit(code)
@@ -169,26 +169,15 @@ func loadRuntimeConfig(configPath string) (bootConfig, error) {
 	return boot, nil
 }
 
-// invalidConfigError is a rejected config plus whether this boot wrote the file:
-// dispatchOutcome gives a starter the environment did not complete the
-// set-variables-or-edit line and an operator's file the plain failure line.
-type invalidConfigError struct {
-	err     error
-	path    string
-	starter bool
-}
-
-func (e *invalidConfigError) Error() string {
-	return fmt.Sprintf("invalid configuration in %s: %v", e.path, e.err)
-}
-
-func (e *invalidConfigError) Unwrap() error { return e.err }
+// errInvalidConfig marks a config Validate rejected; dispatchOutcome reads it
+// together with whether this boot wrote the file.
+var errInvalidConfig = errors.New("invalid configuration")
 
 // dispatch validates the config, then runs the resolved mode. Each run body lives
 // in a helper so its defers always execute; os.Exit stays in main so it skips none.
 func dispatch(mode string, boot *bootConfig) error {
 	if err := boot.cfg.Validate(); err != nil {
-		return &invalidConfigError{err: err, path: boot.path, starter: boot.starter}
+		return fmt.Errorf("%w in %s: %w", errInvalidConfig, boot.path, err)
 	}
 	if boot.starter {
 		slog.Info("no config found; wrote a starter config and read its connection settings from the environment", "path", boot.path)
@@ -331,8 +320,8 @@ func runPoll(cfg *config.Config) error {
 // a routine skip stays off the cycle-error alert); context.Canceled is shutdown -
 // routine, but the run did not deliver, so it still exits non-zero, while a
 // DeadlineExceeded is a genuine operation timeout and falls through.
-func dispatchOutcome(err error) (level slog.Level, msg string, exit int) {
-	if invalid, ok := errors.AsType[*invalidConfigError](err); ok && invalid.starter {
+func dispatchOutcome(err error, starter bool) (level slog.Level, msg string, exit int) {
+	if starter && errors.Is(err, errInvalidConfig) {
 		return slog.LevelWarn, "no config found; wrote a starter config, but it cannot start yet: set SONARR_URL and SONARR_API_KEY in the container's environment, or edit the file, then restart", 1
 	}
 	switch {

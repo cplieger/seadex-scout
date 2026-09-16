@@ -213,9 +213,9 @@ func holdReportLock(t *testing.T) string {
 
 // TestDispatchRejectsInvalidConfig pins the gate between the loaded config and the
 // run bodies: an invalid config never reaches run, runReport or runPoll, and the
-// typed error it returns carries whether this boot wrote the file, so the operator's
-// file fails at ERROR with the plain line and a starter the environment did not
-// complete fails at WARN naming both remedies. A valid config passes through, with
+// error it returns is classified with whether this boot wrote the file, so the
+// operator's file fails at ERROR with the plain line and a starter the environment
+// did not complete fails at WARN naming both remedies. A valid config passes through, with
 // exactly one Info line for a starter and nothing for an operator's file. Serial
 // (capture swaps slog.Default).
 func TestDispatchRejectsInvalidConfig(t *testing.T) {
@@ -224,17 +224,13 @@ func TestDispatchRejectsInvalidConfig(t *testing.T) {
 		if err == nil {
 			t.Fatal("dispatch(report, zero config) = nil, want the validation error")
 		}
-		invalid, ok := errors.AsType[*invalidConfigError](err)
-		if !ok {
-			t.Fatalf("dispatch(report, zero config) = %T (%v), want *invalidConfigError", err, err)
+		if !errors.Is(err, errInvalidConfig) {
+			t.Fatalf("dispatch(report, zero config) = %v, want errInvalidConfig in its chain", err)
 		}
-		if invalid.starter {
-			t.Error("invalidConfigError.starter = true for an operator's file, want false")
+		if !strings.Contains(err.Error(), "invalid configuration in /config/config.yaml") {
+			t.Errorf("err = %q, want it named as an invalid configuration at its path", err)
 		}
-		if !strings.Contains(err.Error(), "invalid configuration") {
-			t.Errorf("err = %q, want it named as an invalid configuration", err)
-		}
-		level, msg, exit := dispatchOutcome(err)
+		level, msg, exit := dispatchOutcome(err, false)
 		if level != slog.LevelError || msg != "seadex-scout failed" || exit != 1 {
 			t.Errorf("dispatchOutcome = (%v, %q, %d), want (ERROR, seadex-scout failed, 1)", level, msg, exit)
 		}
@@ -253,17 +249,16 @@ func TestDispatchRejectsInvalidConfig(t *testing.T) {
 		if err == nil {
 			t.Fatal("dispatch(report, unedited starter) = nil with no variables set, want the no-arr error")
 		}
-		invalid, ok := errors.AsType[*invalidConfigError](err)
-		if !ok {
-			t.Fatalf("dispatch(report, unedited starter) = %T (%v), want *invalidConfigError", err, err)
+		if !errors.Is(err, errInvalidConfig) {
+			t.Fatalf("dispatch(report, unedited starter) = %v, want errInvalidConfig in its chain", err)
 		}
-		if !invalid.starter {
-			t.Error("invalidConfigError.starter = false for the file this boot wrote, want true")
+		if !boot.starter {
+			t.Error("bootConfig.starter = false for the file this boot wrote, want true")
 		}
 		if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "no arr configured") {
 			t.Errorf("err = %q, want it to name the starter path and the no-arr validation error", err)
 		}
-		level, msg, exit := dispatchOutcome(err)
+		level, msg, exit := dispatchOutcome(err, boot.starter)
 		if level != slog.LevelWarn || exit != 1 {
 			t.Errorf("dispatchOutcome = (%v, %q, %d), want (WARN, the starter line, 1)", level, msg, exit)
 		}
@@ -1099,18 +1094,20 @@ func TestRunPollBuildFailure(t *testing.T) {
 func TestDispatchOutcome(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err       error
+		starter   bool
 		wantLevel slog.Level
 		wantMsg   string
 		wantExit  int
 	}{
 		"starter the environment did not complete": {
-			err:       &invalidConfigError{err: errors.New("no arr configured"), path: "/config/config.yaml", starter: true},
+			err:       fmt.Errorf("%w in /config/config.yaml: no arr configured", errInvalidConfig),
+			starter:   true,
 			wantLevel: slog.LevelWarn,
 			wantMsg:   "no config found; wrote a starter config, but it cannot start yet: " + starterHint + ", then restart",
 			wantExit:  1,
 		},
 		"operator's invalid file": {
-			err:       &invalidConfigError{err: errors.New("no arr configured"), path: "/config/config.yaml"},
+			err:       fmt.Errorf("%w in /config/config.yaml: no arr configured", errInvalidConfig),
 			wantLevel: slog.LevelError,
 			wantMsg:   "seadex-scout failed",
 			wantExit:  1,
@@ -1141,7 +1138,7 @@ func TestDispatchOutcome(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			level, msg, exit := dispatchOutcome(tc.err)
+			level, msg, exit := dispatchOutcome(tc.err, tc.starter)
 			if level != tc.wantLevel {
 				t.Errorf("level = %v, want %v", level, tc.wantLevel)
 			}
@@ -1198,7 +1195,7 @@ func TestDetachedWriteError(t *testing.T) {
 		if !errors.Is(got, context.DeadlineExceeded) {
 			t.Errorf("the original write error was lost: %v", got)
 		}
-		if level, _, _ := dispatchOutcome(got); level != slog.LevelWarn {
+		if level, _, _ := dispatchOutcome(got, false); level != slog.LevelWarn {
 			t.Errorf("dispatchOutcome level = %v, want WARN (a shutdown-truncated report must not trip SeadexScoutCycleError)", level)
 		}
 		// shutdown.Normalize runs deferred over the same ctx and must
