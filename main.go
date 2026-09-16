@@ -81,21 +81,22 @@ func main() {
 	// Resolved after the health fast path: the probe reads only the marker, so it
 	// must not depend on anything the operator can set (see runHealthProbe).
 	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
-	cfg, err := loadRuntimeConfig(configPath)
+	boot, err := loadRuntimeConfig(configPath)
 	if err != nil {
 		// The helper already logged every terminal outcome; main only owns the exit code.
 		os.Exit(1)
 	}
+	cfg := &boot.cfg
 	configureLogger(cfg.LogLevel, cfg.LogFormat)
 
-	mode, err := resolveMode(args, &cfg)
+	mode, err := resolveMode(args, cfg)
 	if err != nil {
 		slog.Error("invalid invocation", "error", err)
 		os.Exit(2)
 	}
-	logConfig(&cfg, mode)
+	logConfig(cfg, mode)
 
-	if err := dispatch(mode, &cfg); err != nil {
+	if err := dispatch(mode, &boot); err != nil {
 		level, msg, code := dispatchOutcome(err)
 		slog.Log(context.Background(), level, msg, "mode", loggableMode(mode), "error", err)
 		if code != 0 {
@@ -129,14 +130,20 @@ func runHealthProbe(args []string) bool {
 	return true
 }
 
-// errStarterWritten distinguishes a successful first-boot starter write (the
-// edit-and-restart WARN) from a genuine write or load failure; main exits 1 on both.
-var errStarterWritten = errors.New("no config found; starter config written")
+// bootConfig is the loaded config plus whether this boot wrote the file itself: a
+// starter the operator has never opened gets a different terminal line from a
+// file they edited.
+type bootConfig struct {
+	path    string
+	cfg     config.Config
+	starter bool
+}
 
 // loadRuntimeConfig runs the startup config sequence: a missing config file writes
-// the first-boot starter, a present one is loaded. It logs every terminal outcome
-// at its original level; a non-nil error means main must exit 1.
-func loadRuntimeConfig(configPath string) (config.Config, error) {
+// the first-boot starter and loads it, a present one is loaded. It logs every
+// terminal outcome; a non-nil error means main must exit 1.
+func loadRuntimeConfig(configPath string) (bootConfig, error) {
+	boot := bootConfig{path: configPath}
 	//nolint:gosec // G703: CONFIG_PATH is an operator-supplied path, not user input
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
 		if werr := writeStarterConfig(configPath); werr != nil {
@@ -146,28 +153,47 @@ func loadRuntimeConfig(configPath string) (config.Config, error) {
 			if errors.Is(werr, fs.ErrPermission) {
 				slog.Error("no config found and could not write a starter: the config directory is not writable by this container's user - chown it on the host to this uid:gid (compose sets it via user: \"${PUID:-1000}:${PGID:-1000}\") and restart",
 					"path", configPath, "uid", os.Getuid(), "gid", os.Getgid(), "error", werr)
-				return config.Config{}, werr
+				return bootConfig{}, werr
 			}
 			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
-			return config.Config{}, werr
+			return bootConfig{}, werr
 		}
-		slog.Warn("no config found; wrote a starter config - set your Sonarr/Radarr url + api_key and restart", "path", configPath)
-		return config.Config{}, errStarterWritten
+		boot.starter = true
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		slog.Error("failed to load config", "path", configPath, "error", err)
-		return config.Config{}, fmt.Errorf("load config: %w", err)
+		slog.Error("failed to load config", "path", configPath, "starter", boot.starter, "error", err)
+		return bootConfig{}, fmt.Errorf("load config: %w", err)
 	}
-	return cfg, nil
+	boot.cfg = cfg
+	return boot, nil
 }
+
+// invalidConfigError is a rejected config plus whether this boot wrote the file:
+// dispatchOutcome gives a starter the environment did not complete the
+// set-variables-or-edit line and an operator's file the plain failure line.
+type invalidConfigError struct {
+	err     error
+	path    string
+	starter bool
+}
+
+func (e *invalidConfigError) Error() string {
+	return fmt.Sprintf("invalid configuration in %s: %v", e.path, e.err)
+}
+
+func (e *invalidConfigError) Unwrap() error { return e.err }
 
 // dispatch validates the config, then runs the resolved mode. Each run body lives
 // in a helper so its defers always execute; os.Exit stays in main so it skips none.
-func dispatch(mode string, cfg *config.Config) error {
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
+func dispatch(mode string, boot *bootConfig) error {
+	if err := boot.cfg.Validate(); err != nil {
+		return &invalidConfigError{err: err, path: boot.path, starter: boot.starter}
 	}
+	if boot.starter {
+		slog.Info("no config found; wrote a starter config and read its connection settings from the environment", "path", boot.path)
+	}
+	cfg := &boot.cfg
 	switch mode {
 	case config.RunModeReport:
 		return runReport(cfg)
@@ -300,11 +326,15 @@ func runPoll(cfg *config.Config) error {
 // dispatchOutcome classifies a dispatch error into the slog level a Loki alert
 // keys on and the exit code a scheduler reads. One rule: a condition that will not
 // clear without the operator is an ERROR, a transient or DESIGNED outcome a WARN.
-// ErrReportRunning is the designed coalescing outcome (exit 0, so a routine skip
-// stays off the cycle-error alert); context.Canceled is shutdown - routine, but the
-// run did not deliver, so it still exits non-zero, while a DeadlineExceeded is a
-// genuine operation timeout and falls through.
+// A starter the environment did not complete is designed (WARN, exit 1, both
+// remedies named); ErrReportRunning is the designed coalescing outcome (exit 0, so
+// a routine skip stays off the cycle-error alert); context.Canceled is shutdown -
+// routine, but the run did not deliver, so it still exits non-zero, while a
+// DeadlineExceeded is a genuine operation timeout and falls through.
 func dispatchOutcome(err error) (level slog.Level, msg string, exit int) {
+	if invalid, ok := errors.AsType[*invalidConfigError](err); ok && invalid.starter {
+		return slog.LevelWarn, "no config found; wrote a starter config, but it cannot start yet: set SONARR_URL and SONARR_API_KEY in the container's environment, or edit the file, then restart", 1
+	}
 	switch {
 	case errors.Is(err, cycle.ErrReportRunning):
 		return slog.LevelWarn, "report skipped; another report is already running", 0

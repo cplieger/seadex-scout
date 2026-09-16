@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -90,8 +91,8 @@ func TestConfigValidate(t *testing.T) {
 
 func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	fc := defaultFileConfig()
-	fc.Sonarr = arrFile{Enabled: true, URL: "  http://sonarr:8989 ", APIKey: " key "}
-	fc.Radarr = arrFile{Enabled: false, URL: "http://radarr", APIKey: "rk"}
+	fc.Sonarr = arrFile{Enabled: new(true), URL: "  http://sonarr:8989 ", APIKey: " key "}
+	fc.Radarr = arrFile{Enabled: new(false), URL: "http://radarr", APIKey: "rk"}
 	fc.ArrTags = tagsFile{Include: []string{" anime ", ""}, Exclude: []string{"skip"}}
 
 	c := fc.toConfig()
@@ -116,6 +117,55 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	}
 	if c.ReportDir != DefaultReportDir {
 		t.Errorf("ReportDir = %q, want default %q", c.ReportDir, DefaultReportDir)
+	}
+}
+
+// TestToConfigEnabledDefault pins the optional `enabled` toggle: absent, the arr
+// follows its url (set = on, empty = off); a written value decides on its own, so
+// `false` switches off an arr whose url is set and `true` with neither url nor key
+// is still the startup error. Radarr is fully configured in every case so the
+// no-arr error cannot stand in for the sonarr verdict.
+func TestToConfigEnabledDefault(t *testing.T) {
+	tests := []struct {
+		name       string
+		sonarr     arrFile
+		wantOn     bool
+		wantWanted bool
+		wantErr    string
+	}{
+		{name: "absent with url and key is on", sonarr: arrFile{URL: "http://sonarr:8989", APIKey: testArrAPIKey}, wantOn: true},
+		{name: "absent with url only keeps the url and fails on the missing key", sonarr: arrFile{URL: "http://sonarr:8989"}, wantErr: "sonarr.url is set but sonarr.api_key is empty"},
+		{name: "absent with empty url is off", sonarr: arrFile{APIKey: testArrAPIKey}},
+		{name: "absent with nothing set is off", sonarr: arrFile{}},
+		{name: "explicit false with url and key is off", sonarr: arrFile{Enabled: new(false), URL: "http://sonarr:8989", APIKey: testArrAPIKey}},
+		{name: "explicit true with url and key is on", sonarr: arrFile{Enabled: new(true), URL: "http://sonarr:8989", APIKey: testArrAPIKey}, wantOn: true, wantWanted: true},
+		{name: "explicit true with nothing set is the enabled-but-empty error", sonarr: arrFile{Enabled: new(true)}, wantWanted: true, wantErr: "sonarr.enabled is true but sonarr.url and sonarr.api_key are both empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := defaultFileConfig()
+			fc.Sonarr = tt.sonarr
+			fc.Radarr = arrFile{URL: "http://radarr:7878", APIKey: testArrAPIKey}
+
+			c := fc.toConfig()
+
+			if got := c.SonarrEnabled(); got != tt.wantOn {
+				t.Errorf("SonarrEnabled() = %v, want %v (url=%q key=%q)", got, tt.wantOn, c.SonarrURL, c.SonarrAPIKey)
+			}
+			if c.sonarrWanted != tt.wantWanted {
+				t.Errorf("sonarrWanted = %v, want %v", c.sonarrWanted, tt.wantWanted)
+			}
+			err := c.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate() = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -329,7 +379,7 @@ func TestLoadTypeErrorOmitsBacktickScalar(t *testing.T) {
 
 func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 	fc := defaultFileConfig()
-	fc.Radarr = arrFile{Enabled: true, URL: " http://radarr:7878 ", APIKey: " rk ", PublicURL: " https://radarr.example.com "}
+	fc.Radarr = arrFile{Enabled: new(true), URL: " http://radarr:7878 ", APIKey: " rk ", PublicURL: " https://radarr.example.com "}
 	fc.Report = reportFile{Dir: "   "}
 
 	c := fc.toConfig()
@@ -345,24 +395,175 @@ func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 	}
 }
 
-func TestLoadWarnsOnUnresolvedAllowlistedEnv(t *testing.T) {
-	rec := capture.Default(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${SONARR_MISSING}\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+// TestLoadReportsUnresolvedAllowlistedEnv pins the two levels an unset allowlisted
+// reference is reported at. On an arr key it is Info, because the key reads as
+// absent and Validate then names the missing key; anywhere else it is Warn,
+// because the literal ${VAR} stays in the config. Both lines name the variable.
+func TestLoadReportsUnresolvedAllowlistedEnv(t *testing.T) {
+	const msg = "config references environment variables that are not set"
+	unsetenv(t, "SONARR_MISSING")
+	unsetenv(t, "SEADEX_SCOUT_MISSING")
+
+	t.Run("arr key reads as absent at info", func(t *testing.T) {
+		rec := capture.Default(t)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${SONARR_MISSING}\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.SonarrAPIKey != "" {
+			t.Errorf("SonarrAPIKey = %q, want empty (an unset reference reads as absent)", cfg.SonarrAPIKey)
+		}
+		if rec.CountLevel(slog.LevelInfo, msg) != 1 || !rec.AttrContains(msg, "vars", "SONARR_MISSING") {
+			t.Errorf("Load log = %v, want one Info line naming SONARR_MISSING", rec.Messages())
+		}
+		if rec.CountLevel(slog.LevelWarn, msg) != 0 {
+			t.Errorf("Load warned for a reference that read as empty: %v", rec.Messages())
+		}
+		verr := cfg.Validate()
+		if verr == nil || !strings.Contains(verr.Error(), "sonarr.url is set but sonarr.api_key is empty") {
+			t.Errorf("Validate() = %v, want the missing-key error", verr)
+		}
+	})
+	t.Run("other field keeps the literal at warn", func(t *testing.T) {
+		rec := capture.Default(t)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := "sonarr:\n  url: http://sonarr:8989\n  api_key: k\narr_tags:\n  include:\n    - \"${SEADEX_SCOUT_MISSING}\"\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.IncludeTags) != 1 || cfg.IncludeTags[0] != "${SEADEX_SCOUT_MISSING}" {
+			t.Errorf("IncludeTags = %v, want the literal kept", cfg.IncludeTags)
+		}
+		if rec.CountLevel(slog.LevelWarn, msg) != 1 || !rec.AttrContains(msg, "vars", "SEADEX_SCOUT_MISSING") {
+			t.Errorf("Load log = %v, want one Warn line naming SEADEX_SCOUT_MISSING", rec.Messages())
+		}
+		if rec.CountLevel(slog.LevelInfo, msg) != 0 {
+			t.Errorf("Load logged the read-as-empty line for a field that kept its literal: %v", rec.Messages())
+		}
+	})
+}
+
+// unsetenv guarantees name is unset for the test and restores it afterwards.
+func unsetenv(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "")
+	if err := os.Unsetenv(name); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+// TestLoadBlanksUnresolvedConnectionRefs pins the one exception to yamlenv's
+// literal-kept contract: the four arr connection values read as absent when they
+// are exactly one reference to an unset allowlisted variable. A resolved
+// reference expands, a reference embedded in a longer value stays literal (and
+// is then refused as a placeholder), and every other field keeps the literal.
+func TestLoadBlanksUnresolvedConnectionRefs(t *testing.T) {
+	const on = "sonarr:\n  enabled: true\n"
+	tests := []struct {
+		name    string
+		env     map[string]string
+		content string
+		check   func(t *testing.T, c *Config)
+	}{
+		{
+			name:    "unset sonarr key reads as absent",
+			content: on + "  url: http://sonarr:8989\n  api_key: ${SONARR_MISSING}\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.SonarrAPIKey != "" {
+					t.Errorf("SonarrAPIKey = %q, want empty", c.SonarrAPIKey)
+				}
+			},
+		},
+		{
+			name:    "unset sonarr url reads as absent",
+			content: on + "  url: ${SONARR_MISSING_URL}\n  api_key: k\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.SonarrURL != "" || c.SonarrAPIKey != "k" {
+					t.Errorf("sonarr = (%q, %q), want an empty url beside the key", c.SonarrURL, c.SonarrAPIKey)
+				}
+			},
+		},
+		{
+			name:    "unset radarr url and key leave radarr off",
+			content: on + "  url: http://sonarr:8989\n  api_key: k\nradarr:\n  url: ${RADARR_URL_MISSING}\n  api_key: ${RADARR_KEY_MISSING}\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.RadarrEnabled() || c.RadarrURL != "" || c.RadarrAPIKey != "" {
+					t.Errorf("radarr = (%q, %q), want off", c.RadarrURL, c.RadarrAPIKey)
+				}
+				if err := c.Validate(); err != nil {
+					t.Errorf("Validate() = %v, want nil (sonarr alone is a runnable config)", err)
+				}
+			},
+		},
+		{
+			name:    "a set reference expands",
+			env:     map[string]string{"SONARR_API_KEY": "sk-123"},
+			content: on + "  url: http://sonarr:8989\n  api_key: ${SONARR_API_KEY}\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.SonarrAPIKey != "sk-123" {
+					t.Errorf("SonarrAPIKey = %q, want the expanded value", c.SonarrAPIKey)
+				}
+			},
+		},
+		{
+			name:    "a reference inside a longer value stays literal",
+			content: on + "  url: http://sonarr:8989\n  api_key: pre${SONARR_MISSING}\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.SonarrAPIKey != "pre${SONARR_MISSING}" {
+					t.Errorf("SonarrAPIKey = %q, want the literal kept", c.SonarrAPIKey)
+				}
+				err := c.Validate()
+				if err == nil || !strings.Contains(err.Error(), "environment-variable reference left unexpanded") {
+					t.Errorf("Validate() = %v, want the placeholder refusal", err)
+				}
+			},
+		},
+		{
+			name:    "a non-connection field keeps the literal",
+			content: on + "  url: http://sonarr:8989\n  api_key: k\n  public_url: ${SONARR_MISSING_PUBLIC}\nindexer:\n  prowlarr_api_key: ${SEADEX_SCOUT_MISSING}\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.SonarrPublicURL != "${SONARR_MISSING_PUBLIC}" {
+					t.Errorf("SonarrPublicURL = %q, want the literal kept", c.SonarrPublicURL)
+				}
+				if c.IndexerProwlarrAPIKey != "${SEADEX_SCOUT_MISSING}" {
+					t.Errorf("IndexerProwlarrAPIKey = %q, want the literal kept", c.IndexerProwlarrAPIKey)
+				}
+			},
+		},
 	}
-	if cfg.SonarrAPIKey != "${SONARR_MISSING}" {
-		t.Errorf("SonarrAPIKey = %q, want unresolved literal", cfg.SonarrAPIKey)
-	}
-	if !rec.Contains("config references environment variables") || !rec.AttrContains("", "vars", "SONARR_MISSING") {
-		t.Errorf("Load unresolved-env warning = %v, want message and variable name", rec.Messages())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, name := range []string{"SONARR_MISSING", "SONARR_MISSING_URL", "SONARR_MISSING_PUBLIC", "RADARR_URL_MISSING", "RADARR_KEY_MISSING", "SEADEX_SCOUT_MISSING"} {
+				unsetenv(t, name)
+			}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tt.check(t, &c)
+		})
 	}
 }
 
@@ -908,7 +1109,20 @@ func TestToConfigWiresToggles(t *testing.T) {
 	}
 }
 
-func TestExampleConfigMatchesLoader(t *testing.T) {
+// starterVars are the four environment variables config.example.yaml references
+// for its connection values, in the order the tests below set or unset them.
+var starterVars = []string{"SONARR_URL", "SONARR_API_KEY", "RADARR_URL", "RADARR_API_KEY"}
+
+// loadExample loads the repo's config.example.yaml, which is also the embedded
+// first-boot starter, with exactly the given starterVars set.
+func loadExample(t *testing.T, env map[string]string) Config {
+	t.Helper()
+	for _, name := range starterVars {
+		unsetenv(t, name)
+	}
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
 	path, err := filepath.Abs(filepath.Join("..", "..", "config.example.yaml"))
 	if err != nil {
 		t.Fatalf("resolve example path: %v", err)
@@ -917,11 +1131,164 @@ func TestExampleConfigMatchesLoader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(config.example.yaml): %v", err)
 	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("Validate() = nil, want the missing sonarr.api_key error the starter ships with")
-	} else if !strings.Contains(err.Error(), "sonarr.api_key") {
-		t.Errorf("Validate() error = %v, want it to name sonarr.api_key", err)
+	return c
+}
+
+// TestExampleConfigStartsFromTheEnvironment pins the starter's contract: its four
+// connection values are references, so the file validates with the variables set,
+// switches Radarr on only when RADARR_URL is set, and fails with the error naming
+// the missing piece (plus the warning naming the variable) when one is unset.
+func TestExampleConfigStartsFromTheEnvironment(t *testing.T) {
+	sonarr := map[string]string{"SONARR_URL": "http://sonarr:8989", "SONARR_API_KEY": testArrAPIKey}
+	radarr := map[string]string{"RADARR_URL": "http://radarr:7878", "RADARR_API_KEY": testArrAPIKey}
+
+	t.Run("sonarr variables set validates with radarr off", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := loadExample(t, sonarr)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil", err)
+		}
+		if !c.SonarrEnabled() || c.SonarrURL != sonarr["SONARR_URL"] || c.SonarrAPIKey != testArrAPIKey {
+			t.Errorf("sonarr = (%q, %q), want the two variables", c.SonarrURL, c.SonarrAPIKey)
+		}
+		if c.RadarrEnabled() {
+			t.Errorf("radarr = (%q, %q), want off with RADARR_URL unset", c.RadarrURL, c.RadarrAPIKey)
+		}
+		if !rec.AttrContains("config references environment variables", "vars", "RADARR_URL") {
+			t.Errorf("Load log = %v, want the line naming the unset radarr variables", rec.Messages())
+		}
+		// Radarr off is the documented two-variable start, so it warns about nothing.
+		if n := rec.CountLevel(slog.LevelWarn, ""); n != 0 {
+			t.Errorf("Load logged %d WARN line(s) for the two-variable start: %v", n, rec.Messages())
+		}
+	})
+	t.Run("all four set switches both arrs on", func(t *testing.T) {
+		rec := capture.Default(t)
+		both := maps.Clone(sonarr)
+		maps.Copy(both, radarr)
+		c := loadExample(t, both)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil", err)
+		}
+		if !c.SonarrEnabled() || !c.RadarrEnabled() {
+			t.Errorf("enabled = (sonarr %v, radarr %v), want both on", c.SonarrEnabled(), c.RadarrEnabled())
+		}
+		if rec.Contains("config references environment variables") {
+			t.Errorf("Load warned about unresolved variables with all four set: %v", rec.Messages())
+		}
+	})
+	t.Run("nothing set fails as no arr configured", func(t *testing.T) {
+		c := loadExample(t, nil)
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "no arr configured") {
+			t.Errorf("Validate() = %v, want the no-arr error", err)
+		}
+	})
+	t.Run("url set with the key unset fails on the missing key and names the variable", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := loadExample(t, map[string]string{"SONARR_URL": "http://sonarr:8989"})
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "sonarr.url is set but sonarr.api_key is empty") {
+			t.Errorf("Validate() = %v, want the missing-key error", err)
+		}
+		if !rec.AttrContains("config references environment variables", "vars", "SONARR_API_KEY") {
+			t.Errorf("Load log = %v, want the line naming SONARR_API_KEY", rec.Messages())
+		}
+	})
+}
+
+// TestExampleConfigHandEditedRunsWithoutVariables pins the file-only path: an
+// operator who replaces the starter's references with values gets a config that
+// loads, validates and reads no environment variable at all.
+func TestExampleConfigHandEditedRunsWithoutVariables(t *testing.T) {
+	for _, name := range starterVars {
+		unsetenv(t, name)
 	}
+	example, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+	edited := strings.NewReplacer(
+		"${SONARR_URL}", "http://sonarr:8989",
+		"${SONARR_API_KEY}", testArrAPIKey,
+		"${RADARR_URL}", "http://radarr:7878",
+		"${RADARR_API_KEY}", testArrAPIKey,
+	).Replace(string(example))
+	for _, name := range starterVars {
+		if strings.Contains(edited, "${"+name+"}") {
+			t.Fatalf("the example still references %s after the edit", name)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := capture.Default(t)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil for the hand-edited starter", err)
+	}
+	if !c.SonarrEnabled() || !c.RadarrEnabled() {
+		t.Errorf("enabled = (sonarr %v, radarr %v), want both on from the literal values", c.SonarrEnabled(), c.RadarrEnabled())
+	}
+	if n := rec.Len(); n != 0 {
+		t.Errorf("Load+Validate logged %d line(s) for a complete literal config, want none: %v", n, rec.Messages())
+	}
+}
+
+// TestExistingLiteralConfigsKeepTheirBehaviour pins a file with literal url and
+// api_key values and a written `enabled` on both arrs: it starts, enables exactly
+// what it says, reads no variable and logs nothing. The smoke fixture under tests/
+// is the committed instance.
+func TestExistingLiteralConfigsKeepTheirBehaviour(t *testing.T) {
+	for _, name := range starterVars {
+		unsetenv(t, name)
+	}
+	t.Run("explicit toggles with literal values", func(t *testing.T) {
+		rec := capture.Default(t)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := "sonarr:\n  enabled: true\n  url: \"http://sonarr:8989\"\n  api_key: \"" + testArrAPIKey + "\"\n" +
+			"radarr:\n  enabled: false\n  url: \"http://radarr:7878\"\n  api_key: \"" + testArrAPIKey + "\"\n"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil", err)
+		}
+		if !c.SonarrEnabled() || c.RadarrEnabled() {
+			t.Errorf("enabled = (sonarr %v, radarr %v), want exactly what the file says", c.SonarrEnabled(), c.RadarrEnabled())
+		}
+		if n := rec.Len(); n != 0 {
+			t.Errorf("Load+Validate logged %d line(s), want none: %v", n, rec.Messages())
+		}
+	})
+	t.Run("the smoke fixture validates", func(t *testing.T) {
+		c, err := Load(filepath.Join("..", "..", "tests", "fixtures", "config.yaml"))
+		if err != nil {
+			t.Fatalf("Load(tests/fixtures/config.yaml): %v", err)
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil", err)
+		}
+		if !c.SonarrEnabled() || c.RadarrEnabled() || !c.IndexerConfigured() {
+			t.Errorf("fixture = (sonarr %v, radarr %v, indexer %v), want sonarr and the feed on",
+				c.SonarrEnabled(), c.RadarrEnabled(), c.IndexerConfigured())
+		}
+	})
+}
+
+// TestExampleConfigMatchesLoader pins the rest of the shipped starter against the
+// loader: every non-connection default it carries is the loader's own.
+func TestExampleConfigMatchesLoader(t *testing.T) {
+	c := loadExample(t, nil)
 	if c.PollInterval != DefaultPollInterval || c.PollExternal {
 		t.Errorf("PollInterval = %v external=%v, want built-in %v", c.PollInterval, c.PollExternal, DefaultPollInterval)
 	}
@@ -1446,25 +1813,44 @@ func TestLoadLeavesNonAllowlistedEnvLiteral(t *testing.T) {
 	}
 }
 
-// TestLoadDefaultsArrURLWhenAbsent pins the defaults-baseline overlay
-// contract ("absent keys keep these values, so a partial config still runs"):
-// an enabled arr whose url key is absent inherits the baseline URL and the
-// resulting config validates, so a minimal enabled+api_key config is runnable.
-func TestLoadDefaultsArrURLWhenAbsent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "sonarr:\n  enabled: true\n  api_key: k\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+// TestLoadAbsentArrURLIsNoURL pins that the arr sections carry no baseline url:
+// a url key the file omits is empty, so a section with a key alone is off, and one
+// switched on explicitly fails naming the url it lacks. A baseline url would
+// switch on every arr a file never mentions.
+func TestLoadAbsentArrURLIsNoURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{"key alone is off", "sonarr:\n  api_key: k\n", "no arr configured"},
+		{"explicit true with a key alone names the missing url", "sonarr:\n  enabled: true\n  api_key: k\n", "sonarr.api_key is set but sonarr.url is empty"},
+		{"a sonarr-only file leaves radarr off", "sonarr:\n  url: http://sonarr:8989\n  api_key: k\n", ""},
 	}
-	c, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.SonarrURL != "http://sonarr:8989" {
-		t.Errorf("SonarrURL = %q, want the defaults-baseline http://sonarr:8989 for an absent url key", c.SonarrURL)
-	}
-	if err := c.Validate(); err != nil {
-		t.Errorf("Validate() = %v, want nil (default url + key is a runnable pair)", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if c.RadarrURL != "" || c.RadarrEnabled() {
+				t.Errorf("RadarrURL = %q, want empty for a file with no radarr section", c.RadarrURL)
+			}
+			verr := c.Validate()
+			if tt.wantErr == "" {
+				if verr != nil {
+					t.Errorf("Validate() = %v, want nil", verr)
+				}
+				return
+			}
+			if verr == nil || !strings.Contains(verr.Error(), tt.wantErr) {
+				t.Errorf("Validate() = %v, want an error containing %q", verr, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -1925,7 +2311,7 @@ func TestToConfigFilterBoundsAreInclusive(t *testing.T) {
 // operator can fix the file without reading the source.
 func TestValidateSurfacesTagFilterError(t *testing.T) {
 	fc := defaultFileConfig()
-	fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "k"}
+	fc.Sonarr = arrFile{Enabled: new(true), URL: "http://sonarr:8989", APIKey: "k"}
 	fc.Filters.ExcludeTags = map[string][]string{"broken": {"alerts"}}
 
 	c := fc.toConfig()
@@ -2083,7 +2469,7 @@ func TestToConfigIgnoreRejections(t *testing.T) {
 // only place that error can surface.
 func TestValidateSurfacesIgnoreError(t *testing.T) {
 	fc := defaultFileConfig()
-	fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "k"}
+	fc.Sonarr = arrFile{Enabled: new(true), URL: "http://sonarr:8989", APIKey: "k"}
 	fc.Filters.Ignore = []int{0}
 
 	c := fc.toConfig()

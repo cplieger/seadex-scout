@@ -99,16 +99,45 @@ func TestRunHealthProbeNotApplicable(t *testing.T) {
 	}
 }
 
-// TestLoadRuntimeConfig covers the config-bootstrap sequence main exits 1 on:
-// a first boot writes the starter and returns the typed errStarterWritten
-// sentinel (an expected outcome, not a fault), a starter write failure and a
-// load failure return ordinary errors, and a present valid config loads.
+// starterVars are the four environment variables the embedded starter references
+// for its connection values.
+var starterVars = []string{"SONARR_URL", "SONARR_API_KEY", "RADARR_URL", "RADARR_API_KEY"}
+
+// setStarterEnv leaves exactly the given starter variables set for the test.
+func setStarterEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	for _, name := range starterVars {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+}
+
+// sonarrEnv completes the starter from the environment; the key is the 32-hex
+// shape the arrs generate so validation logs nothing about it.
+var sonarrEnv = map[string]string{"SONARR_URL": "http://sonarr:8989", "SONARR_API_KEY": strings.Repeat("4b5a6978", 4)}
+
+// TestLoadRuntimeConfig covers the config-bootstrap sequence main exits 1 on: a
+// first boot writes the starter and loads it (marked as the app's own file), a
+// starter write failure and a load failure return errors, and a present config
+// loads as the operator's.
 func TestLoadRuntimeConfig(t *testing.T) {
-	t.Run("first boot writes the starter and returns the sentinel", func(t *testing.T) {
+	t.Run("first boot writes the starter and loads it", func(t *testing.T) {
+		setStarterEnv(t, sonarrEnv)
 		path := filepath.Join(t.TempDir(), "config.yaml")
-		_, err := loadRuntimeConfig(path)
-		if !errors.Is(err, errStarterWritten) {
-			t.Fatalf("loadRuntimeConfig(missing config) = %v, want errStarterWritten", err)
+		boot, err := loadRuntimeConfig(path)
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig(missing config) = %v, want nil", err)
+		}
+		if !boot.starter || boot.path != path {
+			t.Errorf("boot = {starter %v, path %q}, want the starter marked at %q", boot.starter, boot.path, path)
+		}
+		if boot.cfg.SonarrURL != sonarrEnv["SONARR_URL"] || boot.cfg.SonarrAPIKey != sonarrEnv["SONARR_API_KEY"] {
+			t.Errorf("sonarr = (%q, %q), want the values read from the environment", boot.cfg.SonarrURL, boot.cfg.SonarrAPIKey)
 		}
 		got, readErr := os.ReadFile(path)
 		if readErr != nil {
@@ -119,7 +148,7 @@ func TestLoadRuntimeConfig(t *testing.T) {
 				len(blanked), len(exampleConfig))
 		}
 	})
-	t.Run("starter write failure is not the sentinel", func(t *testing.T) {
+	t.Run("starter write failure is an error", func(t *testing.T) {
 		// A dangling parent symlink makes os.Stat report the config missing
 		// while the starter's parent creation fails deterministically for
 		// every UID (root-safe, unlike a read-only-dir chmod).
@@ -129,24 +158,28 @@ func TestLoadRuntimeConfig(t *testing.T) {
 		if err := os.Symlink(missingTarget, blockedParent); err != nil {
 			t.Fatal(err)
 		}
-		_, err := loadRuntimeConfig(filepath.Join(blockedParent, "config.yaml"))
+		boot, err := loadRuntimeConfig(filepath.Join(blockedParent, "config.yaml"))
 		if err == nil {
 			t.Fatal("loadRuntimeConfig(blocked starter path) = nil, want error")
 		}
-		if errors.Is(err, errStarterWritten) {
-			t.Errorf("err = %v, must not read as a successfully written starter", err)
+		if boot.starter {
+			t.Error("boot.starter = true after a failed write, want false")
 		}
 		if !strings.Contains(err.Error(), "write starter config") {
 			t.Errorf("err = %q, want the starter-write failure, not a config-load failure", err)
 		}
 	})
-	t.Run("present valid config loads", func(t *testing.T) {
+	t.Run("present valid config loads as the operator's file", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(path, exampleConfig, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadRuntimeConfig(path); err != nil {
+		boot, err := loadRuntimeConfig(path)
+		if err != nil {
 			t.Fatalf("loadRuntimeConfig(example config) = %v, want nil", err)
+		}
+		if boot.starter {
+			t.Error("boot.starter = true for a present file, want false")
 		}
 	})
 	t.Run("malformed config is a load failure", func(t *testing.T) {
@@ -154,12 +187,120 @@ func TestLoadRuntimeConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{not yaml"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := loadRuntimeConfig(path)
-		if err == nil {
+		if _, err := loadRuntimeConfig(path); err == nil {
 			t.Fatal("loadRuntimeConfig(malformed config) = nil, want error")
 		}
-		if errors.Is(err, errStarterWritten) {
-			t.Errorf("err = %v, must not read as a written starter", err)
+	})
+}
+
+// starterHint is the two-remedy tail of the WARN a first boot ends on when the
+// environment does not complete the starter.
+const starterHint = "set SONARR_URL and SONARR_API_KEY in the container's environment, or edit the file"
+
+// holdReportLock takes the report lock on a fresh directory for the rest of the
+// test, so a dispatch into report mode refuses with ErrReportRunning before any
+// component build or network I/O: the hermetic proof that the gate let it through.
+func holdReportLock(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "reports")
+	release, err := cycle.TryReportLock(dir)
+	if err != nil {
+		t.Fatalf("holding the report lock: %v", err)
+	}
+	t.Cleanup(release)
+	return dir
+}
+
+// TestDispatchRejectsInvalidConfig pins the gate between the loaded config and the
+// run bodies: an invalid config never reaches run, runReport or runPoll, and the
+// typed error it returns carries whether this boot wrote the file, so the operator's
+// file fails at ERROR with the plain line and a starter the environment did not
+// complete fails at WARN naming both remedies. A valid config passes through, with
+// exactly one Info line for a starter and nothing for an operator's file. Serial
+// (capture swaps slog.Default).
+func TestDispatchRejectsInvalidConfig(t *testing.T) {
+	t.Run("an operator's invalid file is refused at ERROR", func(t *testing.T) {
+		err := dispatch(config.RunModeReport, &bootConfig{path: "/config/config.yaml"})
+		if err == nil {
+			t.Fatal("dispatch(report, zero config) = nil, want the validation error")
+		}
+		invalid, ok := errors.AsType[*invalidConfigError](err)
+		if !ok {
+			t.Fatalf("dispatch(report, zero config) = %T (%v), want *invalidConfigError", err, err)
+		}
+		if invalid.starter {
+			t.Error("invalidConfigError.starter = true for an operator's file, want false")
+		}
+		if !strings.Contains(err.Error(), "invalid configuration") {
+			t.Errorf("err = %q, want it named as an invalid configuration", err)
+		}
+		level, msg, exit := dispatchOutcome(err)
+		if level != slog.LevelError || msg != "seadex-scout failed" || exit != 1 {
+			t.Errorf("dispatchOutcome = (%v, %q, %d), want (ERROR, seadex-scout failed, 1)", level, msg, exit)
+		}
+	})
+	t.Run("a starter the environment does not complete is refused at WARN with both remedies", func(t *testing.T) {
+		setStarterEnv(t, nil)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		boot, err := loadRuntimeConfig(path)
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig: %v", err)
+		}
+		// Report mode over a held lock: a gate that lets this through returns
+		// ErrReportRunning at once instead of parking a daemon with no arrs.
+		boot.cfg.ReportDir = holdReportLock(t)
+		err = dispatch(config.RunModeReport, &boot)
+		if err == nil {
+			t.Fatal("dispatch(report, unedited starter) = nil with no variables set, want the no-arr error")
+		}
+		invalid, ok := errors.AsType[*invalidConfigError](err)
+		if !ok {
+			t.Fatalf("dispatch(report, unedited starter) = %T (%v), want *invalidConfigError", err, err)
+		}
+		if !invalid.starter {
+			t.Error("invalidConfigError.starter = false for the file this boot wrote, want true")
+		}
+		if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "no arr configured") {
+			t.Errorf("err = %q, want it to name the starter path and the no-arr validation error", err)
+		}
+		level, msg, exit := dispatchOutcome(err)
+		if level != slog.LevelWarn || exit != 1 {
+			t.Errorf("dispatchOutcome = (%v, %q, %d), want (WARN, the starter line, 1)", level, msg, exit)
+		}
+		if !strings.Contains(msg, "wrote a starter config, but it cannot start yet") || !strings.Contains(msg, starterHint) {
+			t.Errorf("dispatchOutcome msg = %q, want the starter line naming both remedies", msg)
+		}
+	})
+	t.Run("a starter the environment completes starts and says so once", func(t *testing.T) {
+		setStarterEnv(t, sonarrEnv)
+		rec := capture.Default(t)
+		boot, err := loadRuntimeConfig(filepath.Join(t.TempDir(), "config.yaml"))
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig: %v", err)
+		}
+		boot.cfg.ReportDir = holdReportLock(t)
+		if err := dispatch(config.RunModeReport, &boot); !errors.Is(err, cycle.ErrReportRunning) {
+			t.Fatalf("dispatch(report, completed starter) = %v, want ErrReportRunning past the gate", err)
+		}
+		if n := rec.CountLevel(slog.LevelInfo, "no config found; wrote a starter config and read its connection settings from the environment"); n != 1 {
+			t.Errorf("Info starter lines = %d, want exactly 1: %v", n, rec.Messages())
+		}
+		// The two-variable start is the documented path, so nothing about it warns.
+		if n := rec.CountLevel(slog.LevelWarn, "") + rec.CountLevel(slog.LevelError, ""); n != 0 {
+			t.Errorf("first boot logged %d WARN/ERROR line(s): %v", n, rec.Messages())
+		}
+	})
+	t.Run("an operator's valid file starts and logs nothing", func(t *testing.T) {
+		rec := capture.Default(t)
+		boot := bootConfig{path: "/config/config.yaml", cfg: config.Config{
+			RunMode: config.RunModeReport, SonarrURL: "http://sonarr:8989", SonarrAPIKey: sonarrEnv["SONARR_API_KEY"],
+			ReportDir: holdReportLock(t),
+		}}
+		if err := dispatch(config.RunModeReport, &boot); !errors.Is(err, cycle.ErrReportRunning) {
+			t.Fatalf("dispatch(report, valid operator file) = %v, want ErrReportRunning past the gate", err)
+		}
+		if msgs := rec.Messages(); len(msgs) != 0 {
+			t.Errorf("dispatch logged %v for a valid operator file, want nothing", msgs)
 		}
 	})
 }
@@ -350,18 +491,6 @@ func TestNewArrClients(t *testing.T) {
 			t.Errorf("err = %q, want it to name the radarr client", err)
 		}
 	})
-}
-
-// TestDispatchRejectsInvalidConfig pins the validation gate: dispatch must
-// refuse to run any mode on a config that fails Validate, wrapping the error.
-func TestDispatchRejectsInvalidConfig(t *testing.T) {
-	err := dispatch(config.RunModeReport, &config.Config{})
-	if err == nil {
-		t.Fatal("dispatch(report, zero config) = nil, want validation error")
-	}
-	if !strings.Contains(err.Error(), "invalid configuration") {
-		t.Errorf("err = %q, want it wrapped as invalid configuration", err)
-	}
 }
 
 // restoreLogger saves slog's default logger together with the log package's
@@ -796,19 +925,12 @@ func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
 // report lock first, so runReport refuses with ErrReportRunning before any
 // network I/O).
 func TestDispatchRoutesReportMode(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "reports")
-	release, err := cycle.TryReportLock(dir)
-	if err != nil {
-		t.Fatalf("holding the report lock: %v", err)
-	}
-	defer release()
-
-	cfg := &config.Config{
+	boot := bootConfig{path: "/config/config.yaml", cfg: config.Config{
 		RunMode:   config.RunModeReport,
 		SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		ReportDir: dir,
-	}
-	err = dispatch(config.RunModeReport, cfg)
+		ReportDir: holdReportLock(t),
+	}}
+	err := dispatch(config.RunModeReport, &boot)
 	if !errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("dispatch(report, valid config) = %v, want ErrReportRunning", err)
 	}
@@ -981,6 +1103,18 @@ func TestDispatchOutcome(t *testing.T) {
 		wantMsg   string
 		wantExit  int
 	}{
+		"starter the environment did not complete": {
+			err:       &invalidConfigError{err: errors.New("no arr configured"), path: "/config/config.yaml", starter: true},
+			wantLevel: slog.LevelWarn,
+			wantMsg:   "no config found; wrote a starter config, but it cannot start yet: " + starterHint + ", then restart",
+			wantExit:  1,
+		},
+		"operator's invalid file": {
+			err:       &invalidConfigError{err: errors.New("no arr configured"), path: "/config/config.yaml"},
+			wantLevel: slog.LevelError,
+			wantMsg:   "seadex-scout failed",
+			wantExit:  1,
+		},
 		"refused concurrent report": {
 			err:       fmt.Errorf("acquire report lock: %w", cycle.ErrReportRunning),
 			wantLevel: slog.LevelWarn,

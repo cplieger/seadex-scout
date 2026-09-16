@@ -134,12 +134,27 @@ type indexerFile struct {
 	ABPasskey      string `yaml:"ab_passkey"`
 }
 
+// arrFile is one arr section. Enabled is optional: absent, the arr is on exactly
+// when its url is set; an explicit true or false decides regardless of the url.
 type arrFile struct {
+	Enabled   *bool  `yaml:"enabled"`
 	URL       string `yaml:"url"`
 	APIKey    string `yaml:"api_key"`
 	PublicURL string `yaml:"public_url"`
-	Enabled   bool   `yaml:"enabled"`
 }
+
+// on reports whether the section is active: the explicit toggle when written,
+// else url presence.
+func (af *arrFile) on() bool {
+	if af.Enabled != nil {
+		return *af.Enabled
+	}
+	return strings.TrimSpace(af.URL) != ""
+}
+
+// explicitlyOn reports a written `enabled: true`, the one shape Validate rejects
+// when neither url nor api_key is set.
+func (af *arrFile) explicitlyOn() bool { return af.Enabled != nil && *af.Enabled }
 
 type filtersFile struct {
 	// ExcludeTags maps a SeaDex tag to the surfaces it is excluded from ("findings",
@@ -169,11 +184,11 @@ type logFile struct {
 }
 
 // defaultFileConfig is the baseline the YAML document overlays. Absent keys keep
-// these values, so a partial config still runs.
+// these values, so a partial config still runs. The arr sections carry no
+// baseline: an absent url means that arr is off (see arrFile), so a default URL
+// would switch on an arr the file never mentions.
 func defaultFileConfig() fileConfig {
 	return fileConfig{
-		Sonarr: arrFile{URL: "http://sonarr:8989"},
-		Radarr: arrFile{URL: "http://radarr:7878"},
 		Mode:   RunModeDaemon,
 		Report: reportFile{Dir: DefaultReportDir},
 		Log:    logFile{Level: "info", Format: "json"},
@@ -238,8 +253,8 @@ type Config struct {
 	// PollExternal is set when poll_interval is off/disabled/0: no internal
 	// timer, cycles are triggered out-of-band via the `poll` subcommand.
 	PollExternal bool
-	// sonarrWanted / radarrWanted record the file's enabled toggles so
-	// Validate can reject an enabled arr left with neither url nor api_key.
+	// sonarrWanted / radarrWanted record a written `enabled: true` so Validate
+	// can reject an arr the operator switched on with neither url nor api_key.
 	sonarrWanted bool
 	radarrWanted bool
 }
@@ -249,9 +264,11 @@ type Config struct {
 // Load reads, ${VAR}-expands, and parses the YAML config at path into the runtime
 // Config. It returns an error on a missing/oversized file, invalid YAML, a file
 // holding more than one YAML document, or an unknown configuration key; call Validate
-// for semantic checks. The one policy choice made here is WithUnknownKeyEcho: the
-// unknown-key NAME is kept - it IS the diagnostic the operator needs - and the strict
-// probe runs on the pre-expansion bytes, so the name cannot carry an expanded secret.
+// for semantic checks. An arr url or api_key that is exactly one reference to an
+// unset allowlisted variable reads as empty; every other unresolved reference stays
+// literal. The one policy choice made here is WithUnknownKeyEcho: the unknown-key
+// NAME is kept - it IS the diagnostic the operator needs - and the strict probe runs
+// on the pre-expansion bytes, so the name cannot carry an expanded secret.
 func Load(path string) (Config, error) {
 	raw, err := readConfigFile(path)
 	if err != nil {
@@ -260,15 +277,63 @@ func Load(path string) (Config, error) {
 	fc := defaultFileConfig()
 	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
 		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho(true)))
-	if len(refs) > 0 {
-		slog.Warn("config references environment variables that are not set; "+
-			"the literal ${VAR} is kept and will likely fail authentication",
-			"vars", strings.Join(refs, ","))
-	}
 	if err != nil {
+		logUnresolvedRefs(refs, nil)
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	logUnresolvedRefs(refs, fc.blankUnresolvedConnections(refs))
 	return fc.toConfig(), nil
+}
+
+// blankUnresolvedConnections empties each arr url and api_key that is exactly one
+// ${NAME} reference to an unset allowlisted variable, so the starter's references
+// read as absent: an unset RADARR_URL leaves Radarr off, and an unset
+// SONARR_API_KEY fails as a missing key rather than as a literal placeholder.
+// Every other field keeps yamlenv's literal-kept contract. It returns the names it
+// blanked, in first-seen order.
+func (fc *fileConfig) blankUnresolvedConnections(unresolved []string) (blanked []string) {
+	for _, field := range []*string{&fc.Sonarr.URL, &fc.Sonarr.APIKey, &fc.Radarr.URL, &fc.Radarr.APIKey} {
+		name, ok := unresolvedRefName(*field, unresolved)
+		if !ok {
+			continue
+		}
+		*field = ""
+		if !slices.Contains(blanked, name) {
+			blanked = append(blanked, name)
+		}
+	}
+	return blanked
+}
+
+// unresolvedRefName returns NAME when v is exactly ${NAME} for a NAME in unresolved.
+func unresolvedRefName(v string, unresolved []string) (string, bool) {
+	name, ok := strings.CutPrefix(v, "${")
+	if !ok {
+		return "", false
+	}
+	name, ok = strings.CutSuffix(name, "}")
+	return name, ok && slices.Contains(unresolved, name)
+}
+
+// logUnresolvedRefs reports the allowlisted ${VAR} names the environment did not
+// set. The names an arr connection value read as empty are Info: an unset
+// RADARR_URL is how Radarr stays off, and a missing key is the validation error's
+// to name. Every other name is Warn, because its literal ${VAR} is still in the
+// config and will fail wherever it is used.
+func logUnresolvedRefs(unresolved, blanked []string) {
+	if len(blanked) > 0 {
+		slog.Info("config references environment variables that are not set; "+
+			"the sonarr/radarr url and api_key values naming them read as empty",
+			"vars", strings.Join(blanked, ","))
+	}
+	literal := slices.DeleteFunc(slices.Clone(unresolved), func(name string) bool {
+		return slices.Contains(blanked, name)
+	})
+	if len(literal) > 0 {
+		slog.Warn("config references environment variables that are not set; "+
+			"the literal ${VAR} is kept and will likely fail authentication",
+			"vars", strings.Join(literal, ","))
+	}
 }
 
 // readConfigFile reads the config through an os.Root over its own directory, so the
@@ -306,8 +371,8 @@ func readConfigFile(path string) (raw []byte, err error) {
 // --- Flattening to the runtime Config ---
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
-// normalization and the enabled toggles (a disabled arr leaves its URL/key
-// empty, so it is simply skipped downstream).
+// normalization and the arr on/off decision (an arr that is off leaves its
+// URL/key empty, so it is simply skipped downstream).
 func (fc *fileConfig) toConfig() Config {
 	c := Config{
 		RunMode:               strings.ToLower(strings.TrimSpace(fc.Mode)),
@@ -325,11 +390,11 @@ func (fc *fileConfig) toConfig() Config {
 		IndexerABTorznabURL:   strings.TrimSpace(fc.Indexer.ABTorznabURL),
 		IndexerProwlarrAPIKey: strings.TrimSpace(fc.Indexer.ProwlarrAPIKey),
 		IndexerABPasskey:      strings.TrimSpace(fc.Indexer.ABPasskey),
-		sonarrWanted:          fc.Sonarr.Enabled,
-		radarrWanted:          fc.Radarr.Enabled,
+		sonarrWanted:          fc.Sonarr.explicitlyOn(),
+		radarrWanted:          fc.Radarr.explicitlyOn(),
 	}
-	c.SonarrURL, c.SonarrAPIKey, c.SonarrPublicURL = applyArr(fc.Sonarr)
-	c.RadarrURL, c.RadarrAPIKey, c.RadarrPublicURL = applyArr(fc.Radarr)
+	c.SonarrURL, c.SonarrAPIKey, c.SonarrPublicURL = applyArr(&fc.Sonarr)
+	c.RadarrURL, c.RadarrAPIKey, c.RadarrPublicURL = applyArr(&fc.Radarr)
 	if c.ReportDir == "" {
 		c.ReportDir = DefaultReportDir
 	}
@@ -339,10 +404,10 @@ func (fc *fileConfig) toConfig() Config {
 	return c
 }
 
-// applyArr flattens one arr section: an enabled arr's trimmed connection details, or
-// empty strings.
-func applyArr(af arrFile) (arrURL, key, publicURL string) {
-	if af.Enabled {
+// applyArr flattens one arr section: an active arr's trimmed connection details,
+// or empty strings.
+func applyArr(af *arrFile) (arrURL, key, publicURL string) {
+	if af.on() {
 		return strings.TrimSpace(af.URL), strings.TrimSpace(af.APIKey), strings.TrimSpace(af.PublicURL)
 	}
 	return "", "", ""
