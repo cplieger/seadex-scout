@@ -3,22 +3,28 @@
 # ----------------------------------------------------------------------------
 # Connections & schedule
 # ----------------------------------------------------------------------------
-# At least one arr must be enabled with a url + api_key.
+# An arr is on when its url is set, and then needs its api_key too. At least
+# one arr must be on. The four ${VAR} references below are read from the
+# container's environment: set SONARR_URL and SONARR_API_KEY (and the RADARR_*
+# pair for Radarr) there, or replace the references with the values. A
+# reference to a variable that is not set reads as empty, so Radarr stays off
+# until RADARR_URL is set. To force an arr off whatever its url says, add
+# `enabled: false` to its block.
 #
 # api_key shape: the arrs generate a 32-character hex key (Settings -> General ->
 # API Key). Any other shape is accepted with a startup warning naming the field -
 # they honour whatever key you set - but a value containing a '$' is REFUSED,
 # because it means a ${VAR} reference that was never expanded and starting with
-# the literal placeholder would 401 every call.
+# the literal placeholder would 401 every call. The one exception is an api_key
+# that is exactly one unset reference, like the two below: it reads as empty and
+# fails as a missing key.
 sonarr:
-  enabled: true
-  url: "http://sonarr:8989" # where seadex-scout reaches Sonarr (internal is fine)
-  api_key: "" # required when enabled; 32 hex chars, or a ${SONARR_API_KEY}-style env ref (see README)
+  url: "${SONARR_URL}" # where seadex-scout reaches Sonarr, for example http://sonarr:8989 (internal is fine)
+  api_key: "${SONARR_API_KEY}" # 32 hex chars from Sonarr's Settings -> General -> API Key
   public_url: "" # browser base for the report's deep-links; empty = use url
 radarr:
-  enabled: false
-  url: "http://radarr:7878"
-  api_key: ""
+  url: "${RADARR_URL}" # for example http://radarr:7878; unset = Radarr off
+  api_key: "${RADARR_API_KEY}"
   public_url: ""
 
 mode: "daemon" # daemon (scheduled) | report (one-shot, exit)

@@ -81,9 +81,12 @@ services:
     restart: unless-stopped
     # PUID/PGID come from .env; ./config must ALREADY be owned by this uid.
     user: "${PUID:-1000}:${PGID:-1000}"
-    # Key-only refs for config.yaml; an unset variable stays unset.
+    # The first boot writes /config/config.yaml reading these; an unset variable
+    # stays unset, so Radarr is off until RADARR_URL is set.
     environment:
+      - "SONARR_URL=http://sonarr:8989"
       - SONARR_API_KEY
+      - RADARR_URL
       - RADARR_API_KEY
       - SEADEX_SCOUT_FEED_KEY
       - SEADEX_SCOUT_PROWLARR_KEY
@@ -94,11 +97,17 @@ services:
 
 1. Create the config directory owned by that uid:
    `mkdir config && chown "${PUID:-1000}:${PGID:-1000}" config`.
-2. Start the container. The first boot writes a starter `/config/config.yaml`,
-   warns, and exits.
-3. Set `sonarr.url` and `sonarr.api_key` in that file, then restart.
+2. Put `SONARR_API_KEY=<your key>` in `.env` beside the compose file, and change
+   `SONARR_URL` if Sonarr is not reachable at `http://sonarr:8989`.
+3. Start the container. The first boot writes `/config/config.yaml`, reads the
+   Sonarr connection from those two variables, and starts.
 
-Every key is in the [Configuration reference](#configuration-reference).
+With no variable set, the first boot still writes the file and then stops with a
+message naming both remedies; set the variables, or open the file and put the
+`url` and `api_key` values in it, then restart. The file is the single source of
+truth: every other setting lives there, and a variable is read only where the
+file references it. Every key is in the
+[Configuration reference](#configuration-reference).
 
 ## Run modes
 
@@ -309,22 +318,37 @@ through their own quality profile and Custom Formats. All are optional:
 
 ## Configuration reference
 
-All configuration lives in one YAML file, `/config/config.yaml` (override the path
-with `CONFIG_PATH`). The first-boot starter carries a generated `feed_api_key`.
-The full annotated template is
-[`config.example.yaml`](config.example.yaml).
+All configuration lives in one YAML file, `/config/config.yaml`. The first boot
+writes it from the annotated template
+[`config.example.yaml`](config.example.yaml) with a generated `feed_api_key`.
 
 Any string value can reference `SONARR_*`, `RADARR_*`, or `SEADEX_SCOUT_*`
 environment variables with `${VAR}`, so secrets can live in an `.env` or a Docker
-secret instead of the file. API keys are never logged (only whether each is set).
+secret instead of the file. The file is the source of truth: a variable is read
+only where the file references it, which the starter does for the four connection
+values below. A reference to a variable that is not set reads as empty in those
+four; anywhere else it stays as written. API keys are never logged (only whether
+each is set).
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `CONFIG_PATH` | Path of the config file. | `/config/config.yaml` |
+| `SONARR_URL` | Where seadex-scout reaches Sonarr; an internal address is fine. Unset = Sonarr off. | _(unset)_ |
+| `SONARR_API_KEY` | Sonarr's API key (Settings → General → API Key); required when `SONARR_URL` is set. | _(unset)_ |
+| `RADARR_URL` | Where seadex-scout reaches Radarr. Unset = Radarr off. | _(unset)_ |
+| `RADARR_API_KEY` | Radarr's API key; required when `RADARR_URL` is set. | _(unset)_ |
+
+The compose example also passes `SEADEX_SCOUT_FEED_KEY`, `SEADEX_SCOUT_PROWLARR_KEY` and `SEADEX_SCOUT_AB_PASSKEY`; they are read only where `config.yaml` references them, for the `indexer.feed_api_key`, `indexer.prowlarr_api_key` and `indexer.ab_passkey` keys below.
+
+The keys the file itself holds, with the values the starter ships:
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `sonarr.enabled` | `true` | Walk Sonarr. At least one arr must be enabled. |
-| `sonarr.url` | `http://sonarr:8989` | Where seadex-scout reaches Sonarr; an internal address is fine. |
-| `sonarr.api_key` | _none_ | Required when Sonarr is enabled. |
+| `sonarr.url` | `${SONARR_URL}` | Where seadex-scout reaches Sonarr. Sonarr is on when this is set; at least one arr must be on. |
+| `sonarr.api_key` | `${SONARR_API_KEY}` | Required when Sonarr is on. |
+| `sonarr.enabled` | _(unset)_ | Optional. `false` turns Sonarr off whatever `url` says; `true` requires `url` and `api_key`; absent follows `url`. |
 | `sonarr.public_url` | _(unset)_ | Browser base for the report's deep-links; empty reuses `url`. |
-| `radarr.*` | `enabled: false` | Same four keys as `sonarr`, defaulting to `http://radarr:7878`. |
+| `radarr.*` | `${RADARR_URL}`, `${RADARR_API_KEY}` | Same four keys as `sonarr`. |
 | `mode` | `daemon` | `daemon` (scheduled) or `report` (one-shot, then exit). |
 | `poll_interval` | `15m` | Pass cadence for the findings and the feed; minimum `15m`. `off`, `disabled`, or `0` = external. |
 | `animebytes` | `false` | Set true when you have an AnimeBytes account: adds AB releases and links. |
