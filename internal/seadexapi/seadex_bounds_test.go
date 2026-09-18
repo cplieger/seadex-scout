@@ -26,12 +26,10 @@ func repeatJSON(elem string, n int) string {
 // pair - the immutable keyset the walk pages on - with the given trs
 // cardinality, so a repeated hostile chunk body still advances the cursor
 // instead of tripping the no-progress guard. Its id sorts after every id
-// distinctFillerItems hands the same chunk (the walk validates a chunk's whole
-// keyset sequence, so the cursor record must be the chunk's LAST key) and
-// before the next chunk's filler ids. Its alID is unique per seq too,
-// since FetchEntries requires one positive, unique AniList ID per entry across
-// the whole walk (validatePageIdentities); it sits above the ids
-// distinctFillerItems hands the same chunk's filler records.
+// distinctFillerItems hands the same chunk, because the walk validates a chunk's
+// whole keyset sequence and the cursor record must be its LAST key, and before
+// the next chunk's ids. Its alID is unique per seq too, since FetchEntries
+// requires one positive, unique AniList ID per entry across the whole walk.
 func keysetCursorItem(seq, torrents int) string {
 	return fmt.Sprintf(`{"alID":%d,"id":%q,"created":"2026-01-02 03:04:05.000Z","expand":{"trs":[%s]}}`,
 		(seq+1)*perPage, keysetID(seq, perPage), repeatJSON(`{}`, torrents))
@@ -190,9 +188,6 @@ func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 // (maxTotalBytes) with an error and a nil slice, instead of accumulating up to
 // maxPages*maxPageBytes of memory. The bulk rides an unknown JSON field so the
 // test itself stays cheap on retained memory while len(body) is what counts.
-// The budget now caps the wire read itself (fetchPage downloads at most the
-// remaining allowance), so the over-budget page is rejected before decode -
-// same observable contract, earlier enforcement.
 func TestFetchEntriesByteCapErrors(t *testing.T) {
 	// One chunk just under the per-page cap; the cumulative cap trips after
 	// ceil(maxTotalBytes/chunkSize) chunks, well before maxPages. Each chunk is
@@ -342,12 +337,10 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 // against the deployment container: the caps are independently admissible, so
 // their maxima can occur in the same fetch, and an admitted catalogue may
 // simultaneously retain maxTotalBytes of decoded string content, the raw page
-// fetchPage still holds (maxPageBytes), and maxTotalElements of element
-// structs. That conservative working set must stay under a 192 MiB ceiling so
-// the guards fire (clean degradation) with at least 64 MiB of the 256 MiB
-// container left for slice spare capacity, decoder buffers, the loaded
-// state/mapping/library snapshots, and the Go runtime — instead of the kernel
-// OOM-killing the process.
+// fetchPage still holds (maxPageBytes), and maxTotalElements of element structs.
+// That conservative working set must stay under a 192 MiB ceiling so the guards
+// fire with at least 64 MiB of the 256 MiB container left for spare capacity,
+// decoder buffers, the loaded snapshots and the runtime, instead of an OOM kill.
 func TestSeadexWorkingSetBudget(t *testing.T) {
 	const ceiling = 192 << 20 // 256 MiB container minus 64 MiB headroom
 	workingSet := maxTotalBytes + maxPageBytes + maxTotalElements*int(unsafe.Sizeof(seadex.Torrent{}))
@@ -362,11 +355,10 @@ func TestSeadexWorkingSetBudget(t *testing.T) {
 // the page-DECODE failure, the twin of the keyset-cursor bound
 // TestAdvanceCursorBoundsRejectedValueInDiagnostic pins. Stdlib json renders a
 // rejected NUMBER literal verbatim ("cannot unmarshal number <literal> into Go
-// value of type int"), so a page whose totalItems is a megabyte of digits
-// yields a megabyte-long error - bounded only by maxPageBytes otherwise. It
-// crosses the log boundary on BOTH fetch paths and only the daemon's is reduced
-// downstream, so the cap has to hold here or one hostile page balloons a Loki
-// record.
+// value of type int"), so a page whose totalItems is a megabyte of digits yields
+// a megabyte-long error, bounded only by maxPageBytes otherwise. It crosses the
+// log boundary on BOTH fetch paths and only the daemon's is reduced downstream,
+// so the cap has to hold here or one hostile page balloons a Loki record.
 func TestFetchEntriesBoundsDecodeFailureDiagnostic(t *testing.T) {
 	huge := strings.Repeat("9", 64<<10)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

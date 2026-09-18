@@ -35,18 +35,14 @@ func verdictName(v Verdict) string {
 	return fmt.Sprintf("Verdict(%d)", uint8(v))
 }
 
-// TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological
-// server-supplied Retry-After cannot stall the client: the 429 becomes a
-// *httpx.RateLimitError whose hint is clamped, and the shared throttle is
-// penalized so subsequent lookups wait the clamped window too.
-//
-// The ceiling is maxThrottlePenalty, the POLITENESS one (l-f7). Note what this
-// test would silently stop proving if the app went back to httpx.ParseRetryAfter:
-// that helper caps at httpx.RetryAfterCap (60s) inside the library, so a hostile
-// header would never reach the app's own ceiling and this assertion would pass
-// for the wrong reason - the two 429 shapes (Retry-After here, X-RateLimit-Reset
-// in TestDo429WithHostileResetHeaderIsCapped) would disagree by 5x on the same
-// stated window. Both now clamp at the same number, which is the point.
+// TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological server-supplied
+// Retry-After cannot stall the client: the 429 becomes a *httpx.RateLimitError whose hint
+// is clamped, and the shared throttle is penalized so subsequent lookups wait the clamped
+// window too. The ceiling is maxThrottlePenalty, the POLITENESS one. The assertion goes
+// vacuous under httpx.ParseRetryAfter, which caps at 60s inside the library: a hostile
+// header would never reach the app's own ceiling, and the two 429 shapes (Retry-After
+// here, X-RateLimit-Reset in TestDo429WithHostileResetHeaderIsCapped) would disagree by
+// 5x on the same stated window.
 func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	rec := capture.Default(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -427,15 +423,14 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	}
 }
 
-// TestParseMediaPageRejectionCountCharges pins the magnitude annotation itself,
-// which is the operator's only way to tell ONE poisoned record from a wholesale
-// schema drift. Two properties carry it. A duplicate charges the records the
-// conflict excluded - the offender plus the record it invalidated - and nothing
-// else, so the count stays a count of records and cannot exceed the batch. And a
-// SINGLE offender carries no annotation at all: the first offender's own message
-// already names it, so a "(1 of N)" suffix would make every ordinary poisoned
-// record read as a systemic failure. The existing duplicate table cannot see
-// either property: its conflicts all land with the accepted set already empty.
+// TestParseMediaPageRejectionCountCharges pins the magnitude annotation itself, the
+// operator's only way to tell ONE poisoned record from a wholesale schema drift. Two
+// properties carry it: a duplicate charges the records the conflict excluded - the
+// offender plus the record it invalidated - and nothing else, so the count stays a count
+// of records and cannot exceed the batch; and a SINGLE offender carries no annotation,
+// since its own message already names it and a "(1 of N)" suffix would make every
+// ordinary poisoned record read as systemic. The existing duplicate table sees neither:
+// its conflicts all land with the accepted set already empty.
 func TestParseMediaPageRejectionCountCharges(t *testing.T) {
 	t.Run("a duplicate charges only what the conflict excluded", func(t *testing.T) {
 		raw := []byte(`{"data":{"Page":{"media":[` +
@@ -719,19 +714,14 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 	}
 }
 
-// TestDo429WithHostileResetHeaderIsCapped pins the app-level ceilings on the
-// reset-window fallback: a 429 that omits Retry-After but carries a pathological
-// far-future X-RateLimit-Reset must not stall anything unboundedly.
-//
-// The two ceilings are DIFFERENT numbers and this pins both (l-f7): the hint the
-// retry loop waits on is bounded by maxRetryAfter (per-attempt responsiveness),
-// while the shared throttle penalty is bounded by the longer
-// maxThrottlePenalty (politeness - how long the client honours a stated window
-// for every LATER lookup). Collapsing them is what made a real window longer than
-// a minute get honoured for 60s and then discarded.
-//
-// A 24h header is also absurd rather than merely long, so it must leave a trace:
-// clamping it silently would hide an upstream defect.
+// TestDo429WithHostileResetHeaderIsCapped pins the app-level ceilings on the reset-window
+// fallback: a 429 that omits Retry-After but carries a pathological far-future
+// X-RateLimit-Reset must not stall anything unboundedly. The two ceilings are DIFFERENT
+// numbers and this pins both - the hint the retry loop waits on is bounded by
+// maxRetryAfter (per-attempt responsiveness), the shared throttle penalty by the longer
+// maxThrottlePenalty (politeness, how long a stated window is honoured for every LATER
+// lookup); collapsing them honours a window longer than a minute for 60s and discards the
+// rest. A 24h header is absurd rather than merely long, so clamping it must leave a trace.
 func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	rec := capture.Default(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -970,16 +960,13 @@ func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
 	}
 }
 
-// TestFetchManyKeepsFirstRecordErrorAcrossChunks pins the documented
-// "first record error is surfaced" side of the batch contract: when two
-// chunks each contain a poisoned record, the error returned beside the merged
-// result is the FIRST chunk's record error, not overwritten by the second
-// chunk's, while both chunks' valid records still merge. It also pins the
-// ACCUMULATION of VerdictUnverified across both poisoned chunks: the matcher
-// reads the verdict to tell an untrustworthy absence from a definitive miss, so
-// a regression to last-chunk-only marking would negative-memoize the first
-// chunk's ids for the memo TTL on the strength of a response that was not
-// trustworthy.
+// TestFetchManyKeepsFirstRecordErrorAcrossChunks pins the documented "first record error
+// is surfaced" side of the batch contract: when two chunks each contain a poisoned
+// record, the error beside the merged result is the FIRST chunk's, while both chunks'
+// valid records still merge. It also pins the ACCUMULATION of VerdictUnverified across
+// both poisoned chunks: the matcher reads the verdict to tell an untrustworthy absence
+// from a definitive miss, so last-chunk-only marking would negative-memoize the first
+// chunk's ids for the memo TTL on the strength of an untrustworthy response.
 func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
@@ -1341,16 +1328,14 @@ func TestDoObservesRateHeadersOnErrorStatus(t *testing.T) {
 	}
 }
 
-// TestFetchManyScopesUnrequestedIDsToTheAbandonedTail pins the PRODUCER half of
-// the VerdictUnrequested contract. VerdictUnverified says "do not memoize this
-// absence"; VerdictUnrequested says the strictly narrower "no request ever
-// covered this id, so re-batch it 50 at a time" - and match.prefetch switches on
-// exactly that verdict to avoid regressing an abandoned tail into one
-// rate-limited per-id Fetch each. The consumer's own test builds its verdict map
-// by hand, so nothing in the tree fails if FetchMany stops distinguishing the
-// two. Three chunks are needed to tell them apart: chunk 1 completes with a
-// record-local defect (unverified but ANSWERED, so never re-batched), chunk 2
-// aborts, and chunk 3 is never requested.
+// TestFetchManyScopesUnrequestedIDsToTheAbandonedTail pins the PRODUCER half of the
+// VerdictUnrequested contract. VerdictUnverified says "do not memoize this absence";
+// VerdictUnrequested says the strictly narrower "no request ever covered this id, so
+// re-batch it 50 at a time", and match.prefetch switches on exactly that verdict to keep
+// an abandoned tail out of one rate-limited per-id Fetch each. The consumer's own test
+// builds its verdict map by hand, so nothing in the tree fails if FetchMany stops
+// distinguishing the two. Three chunks are needed: chunk 1 completes with a record-local
+// defect (unverified but ANSWERED), chunk 2 aborts, chunk 3 is never requested.
 func TestFetchManyScopesUnrequestedIDsToTheAbandonedTail(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0

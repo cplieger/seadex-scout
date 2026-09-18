@@ -60,18 +60,13 @@ func (f *flakySonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.
 	return f.fakeSonarr.EpisodeFiles(ctx, seriesID)
 }
 
-// fakeSeaDex is an in-package SeaDexSource: it returns fixed entries or an
-// error so orchestration tests drive cycle outcomes directly, without the
-// PocketBase adapter or an httptest server (the seadex package's own suite
-// covers adapter behavior).
-//
-// It serves BOTH halves of the seam. A full fetch answers entries/err; a
-// windowed fetch answers windowEntries/windowErr, so one fake can drive a
-// reconcile and a tick in the same test without either half's scripting
-// leaking into the other. Every call is recorded: opts carries the Options of
-// each FetchEntries in order (which is how a test asserts a reconcile asked
-// for FetchFull and a tick for FetchWindow with a live Since), and countSince
-// carries each CountWindow's since.
+// fakeSeaDex is an in-package SeaDexSource: it returns fixed entries or an error so
+// orchestration tests drive cycle outcomes directly, without the PocketBase adapter
+// or an httptest server. It serves BOTH halves of the seam - a full fetch answers
+// entries/err, a windowed fetch windowEntries/windowErr - so one fake drives a
+// reconcile and a tick in the same test without either half's scripting leaking into
+// the other. Every call is recorded: opts carries each FetchEntries' Options in
+// order, and countSince each CountWindow's since.
 type fakeSeaDex struct {
 	err     error
 	entries []seadex.Entry

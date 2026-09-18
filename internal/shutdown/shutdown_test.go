@@ -8,15 +8,12 @@ import (
 	"testing"
 )
 
-// TestInterruptedClassifiesNonCanceledCause pins poll's interruption
-// classification against a cancellation cause that does NOT itself wrap
-// context.Canceled. A WithCancelCause cause is whatever the cancelling site
-// passed, so only ctx.Err() is guaranteed to be context.Canceled (Go 1.26's
-// signal.NotifyContext cause happens to satisfy errors.Is via signalError.Is,
-// but a cause in general - and net/http, which surfaces context.Cause
-// verbatim - does not). Interrupted must therefore wrap the stable ctx.Err()
-// for main's routine-shutdown WARN classification while the cause stays
-// errors.Is-able for diagnostics.
+// TestInterruptedClassifiesNonCanceledCause pins poll's interruption classification
+// against a cancellation cause that does NOT itself wrap context.Canceled. A
+// WithCancelCause cause is whatever the cancelling site passed, so only ctx.Err() is
+// guaranteed to be context.Canceled (signal.NotifyContext's happens to satisfy
+// errors.Is, net/http's does not). So Interrupted wraps the stable ctx.Err() for
+// main's WARN classification while the cause stays errors.Is-able.
 func TestInterruptedClassifiesNonCanceledCause(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	cause := errors.New("terminated signal received")

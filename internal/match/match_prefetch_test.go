@@ -232,10 +232,9 @@ func (a *abortingBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 // TestPrefetchReBatchesUnrequestedIDs pins the abort-recovery half of prefetch:
 // the ids an aborted batch abandoned WITHOUT requesting are re-batched, not
 // dropped to one rate-limited per-id Fetch each. Against a briefly-flaky
-// upstream those per-id fetches succeed, so transientFailureCap never trips to
-// stop them - an abort in an early chunk used to turn a handful of batched
-// requests into one request per remaining id, the request storm batching exists
-// to remove.
+// upstream those per-id fetches succeed, so transientFailureCap never trips to stop them:
+// an abort in an early chunk would otherwise turn a handful of batched requests into one
+// request per remaining id, the storm batching exists to remove.
 func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: answered by the first pass

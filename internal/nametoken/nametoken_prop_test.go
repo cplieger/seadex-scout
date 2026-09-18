@@ -79,12 +79,10 @@ func TestLiteralIsExactlyToLowerEqualityProperty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Literal(%+q) does not compile: %v", token, err)
 		}
-		// Lower both sides ONCE, before comparing. Keeping the fold out of the
-		// comparison expression is deliberate: strings.EqualFold(raw, token)
+		// Lower both sides ONCE, before comparing. strings.EqualFold(raw, token)
 		// reads equivalent and is what a linter suggests, but EqualFold is the
-		// full-Unicode simple fold this whole package exists to keep out of
-		// name parsing (it reads ſ as an s), so an EqualFold oracle would
-		// assert the very behaviour Literal refuses.
+		// full-Unicode simple fold this package exists to keep out of name parsing
+		// (it folds U+017F onto s), so that oracle asserts what Literal refuses.
 		lowRaw, lowToken := strings.ToLower(raw), strings.ToLower(token)
 		if got := re.MatchString(raw); got != (lowRaw == lowToken) {
 			t.Fatalf("Literal(%+q) matching %+q = %v, want %v (strings.ToLower: %+q vs %+q)",

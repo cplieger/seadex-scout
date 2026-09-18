@@ -6,20 +6,12 @@ import (
 	"testing"
 )
 
-// TestMakeDirEnforcesTheModeOfTheDirectoryItCreated pins that the created
-// report directory's mode is what the filesystem STORED, not what MakeDir
-// asked for. The distinction is the whole reason the chmod became an
-// atomicfile.EnforceMode: a mode argument is a request, and mkdir(2), chmod(2)
-// and open(2) all report success having stored something else.
-//
-// The widening here is REAL rather than mocked: Linux propagates S_ISGID from a
-// setgid parent to a new subdirectory, so os.Mkdir(dir, 0o700) genuinely stores
-// a mode nobody asked for, and a report directory carrying setgid hands its
-// contents - the operator's whole library enumeration plus private-tracker page
-// links - to whoever is in the parent's group. The witness below SKIPS the test
-// as invalid rather than letting it pass vacuously if the kernel stops doing
-// that, because on a filesystem that honours every mode request there is
-// nothing here for enforcement to correct.
+// TestMakeDirEnforcesTheModeOfTheDirectoryItCreated pins that the created report
+// directory's mode is what the filesystem STORED, not what MakeDir asked for.
+// The widening is REAL rather than mocked: Linux propagates S_ISGID from a setgid
+// parent, so os.Mkdir(dir, 0o700) genuinely stores a mode nobody asked for. The
+// witness below SKIPS as invalid if the kernel stops doing that, rather than
+// passing vacuously.
 func TestMakeDirEnforcesTheModeOfTheDirectoryItCreated(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -55,12 +47,10 @@ func TestMakeDirEnforcesTheModeOfTheDirectoryItCreated(t *testing.T) {
 	}
 }
 
-// TestMakeDirLeavesAWiderPreExistingDirectoryAlone pins the deliberate
-// asymmetry this app needs and atomicfile.EnsurePrivateDir would break:
-// /config/reports may be an operator-created directory or a bind-mounted
-// volume, possibly group-readable on purpose so another container can ship the
-// reports, and MakeDir must accept it AS IS. Enforcement applies only to a
-// directory this call created.
+// TestMakeDirLeavesAWiderPreExistingDirectoryAlone pins the deliberate asymmetry
+// atomicfile.EnsurePrivateDir would break: /config/reports may be operator-created
+// or bind-mounted, group-readable on purpose so another container can ship the
+// reports, so MakeDir accepts it AS IS and enforces only what it created.
 func TestMakeDirLeavesAWiderPreExistingDirectoryAlone(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "reports")
@@ -134,16 +124,13 @@ func TestMakeDirCleansATrailingSeparator(t *testing.T) {
 	}
 }
 
-// TestEnforceDirModeRefusesASymlinkInsteadOfChmodingItsTarget pins the half of
-// the change the mode assertions cannot see. os.Chmod resolves the pathname, so
-// a symlink planted where the report directory should be made the old code
-// chmod whatever it pointed at - 0700 on another principal's directory, applied
-// by the report run. The handle is opened O_NOFOLLOW|O_DIRECTORY, so the kernel
-// refuses the name outright and the victim keeps its mode.
-//
-// MakeDir itself reaches this only for a directory its own os.Mkdir just
-// created, so the refusal guards a swap racing that step rather than a shape the
-// call path can reach on its own; the helper is where it is testable.
+// TestEnforceDirModeRefusesASymlinkInsteadOfChmodingItsTarget pins the half the
+// mode assertions cannot see. os.Chmod resolves the pathname, so a symlink
+// planted where the report directory belongs would take 0700 on another
+// principal's directory; the handle is opened O_NOFOLLOW|O_DIRECTORY, so the
+// kernel refuses the name and the victim keeps its mode. MakeDir reaches this
+// only for a directory its own os.Mkdir just created, so the refusal guards a
+// swap racing that step and the helper is where it is testable.
 func TestEnforceDirModeRefusesASymlinkInsteadOfChmodingItsTarget(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()

@@ -8,22 +8,12 @@ import (
 
 // FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks exercises the
 // persisted-InfoURL publish gate - the load-boundary twin of the search path's
-// sanitizeDisplayURL, which already carries a fuzz target - with arbitrary
-// tampered feed.json values. Three invariants: an UNRESOLVED canonical host must
-// vouch nothing (a hostless "https:///1" must not slip through the empty-host
-// comparison, which is what the host == "" guard exists to stop); any URL the
-// gate accepts must resolve to the canonical SeaDex host over http(s) with no
-// userinfo under an INDEPENDENT parser (net/url), so a vouched link can never be
-// one a consumer sends elsewhere; and it must stay accepted after that
-// consumer's own parse/re-render round trip, so a vouched link cannot change
-// identity between the gate and the arr UI that renders it as <comments>.
-// The independent parse reads the VOUCHED spelling the gate returns, which is
-// exactly what sanitizeSnapshotInfoURLs stores (h-f8). There is no
-// unparseable-value skip any more: a form only classifies absolute after
-// net/url parsed it, and a backslash-bearing value is refused outright, so the
-// string the gate vouched IS the string its parser of record resolved - a
-// net/url failure on it would be a real defect, not the browser-vs-net/url
-// divergence the old skip covered.
+// sanitizeDisplayURL - with arbitrary tampered feed.json values. Three invariants: an
+// UNRESOLVED canonical host vouches nothing (a hostless "https:///1" must not slip
+// through the empty-host comparison); any accepted URL resolves to the canonical SeaDex
+// host over http(s) with no userinfo under an INDEPENDENT parser (net/url); and it stays
+// accepted after that consumer's parse/re-render round trip. The independent parse reads
+// the VOUCHED spelling the gate returns, which is what sanitizeSnapshotInfoURLs stores.
 func FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks(f *testing.F) {
 	f.Add("https://releases.moe/154587")
 	f.Add("http://releases.moe/154587")

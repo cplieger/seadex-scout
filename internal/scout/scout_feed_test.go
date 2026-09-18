@@ -512,15 +512,12 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 	}
 }
 
-// TestCycleWalkFailureWithFeedPreservesPriorSnapshot pins the
-// walk-failed arm's persistence SCOPE: with a feed configured Cycle falls
-// through to handleLibraryGate, which saves ONLY the refreshed mapping cache.
-// Persisting the failed walk's empty snapshot instead would make st.Library
-// empty, so the NEXT cycle's compare would mass-resolve every finding against
-// an empty prior library - findings vanish with no error anywhere. The sibling
-// arms already pin this (the shrink guard's persisted-prior-4-items assertion,
-// TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot); the walk-failed arm
-// did not.
+// TestCycleWalkFailureWithFeedPreservesPriorSnapshot pins the walk-failed arm's
+// persistence SCOPE: with a feed configured Cycle falls through to
+// handleLibraryGate, which saves ONLY the refreshed mapping cache. Persisting the
+// failed walk's empty snapshot would leave st.Library empty, so the NEXT cycle's
+// compare mass-resolves every finding against an empty prior library - findings
+// vanish with no error anywhere.
 func TestCycleWalkFailureWithFeedPreservesPriorSnapshot(t *testing.T) {
 	store := &fakeStore{st: state.State{
 		Mapping: frierenMappingCache(),

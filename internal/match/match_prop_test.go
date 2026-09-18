@@ -12,16 +12,14 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestMemoExpiryLifecycleProperty pins the memo lifecycle invariants under
-// randomized pre-state (absent / live / expired / legacy entries), randomized
-// jitter draws, and a randomized AniList answer set, across one clean Match
-// pass: no returned entry is immortal (zero expiry) or already expired, a
-// pending id (absent or expired) is re-stamped inside [now+memoMinTTL,
-// now+memoMaxTTL) with the batch answer deciding positive vs negative, a live
-// entry survives untouched with zero AniList traffic for it, and an entry with
-// no expiry at all behaves exactly like an expired one (there is no migration,
-// so the two must not diverge). The model is the drawn state labels,
-// so the assertions restate the documented contract, not the implementation.
+// TestMemoExpiryLifecycleProperty pins the memo lifecycle invariants under randomized
+// pre-state (absent / live / expired / legacy entries), randomized jitter draws and a
+// randomized AniList answer set, across one clean Match pass: no returned entry is immortal
+// (zero expiry) or already expired, a pending id is re-stamped inside [now+memoMinTTL,
+// now+memoMaxTTL) with the batch answer deciding positive vs negative, a live entry
+// survives untouched with zero AniList traffic, and an entry with no expiry behaves exactly
+// like an expired one (no migration exists, so the two must not diverge). The model is the
+// drawn state labels, so the assertions restate the contract, not the implementation.
 func TestMemoExpiryLifecycleProperty(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		now := memoTestClock

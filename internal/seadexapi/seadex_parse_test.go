@@ -9,13 +9,12 @@ import (
 
 // TestChunkComplete pins the keyset walk's completeness decision table,
 // including the arms the HTTP-level tests never reach in-package: a FULL chunk
-// always continues (the filter asked for everything after the cursor, so a
-// full chunk cannot be the last), a SHORT chunk completes even with a count
-// mismatch (pagination over a live collection can shift counts, which stays
-// finishFetch's WARN), an EMPTY first chunk completes so finishFetch's
-// empty-catalogue guard converts it into an error, and an EMPTY later chunk
-// completes only while the reported totalItems is already satisfied - one with
-// entries still outstanding is a truncated-view error.
+// always continues (the filter asked for everything after the cursor, so a full
+// chunk cannot be the last), a SHORT chunk completes even with a count mismatch
+// (pagination over a live collection can shift counts, which stays finishFetch's
+// WARN), an EMPTY first chunk completes so finishFetch's empty-catalogue guard
+// converts it into an error, and an EMPTY later chunk completes only while the
+// reported totalItems is satisfied - one with entries outstanding is an error.
 func TestChunkComplete(t *testing.T) {
 	tests := []struct {
 		name          string

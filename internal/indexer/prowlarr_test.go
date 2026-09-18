@@ -201,16 +201,14 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	}
 }
 
-// TestFetchAndParseClassifiesTorznabErrorDoc pins the failure classification
-// at the parse boundary: a syntactically valid Torznab <error> document is an
-// upstream-scoped answer, so it NEVER carries the show-local malformedBody
-// marker (after the search fails, the harvest latches the failed scope), and
-// its retryability splits on the numeric code - a deterministic auth/account
-// (100-199) or request/parameter (200-299) error is terminal because retrying
-// cannot recover bad credentials or a bad request, while a generic/
-// server-side (900) or unparseable code stays transient within the bounded
-// budget. A truncated/garbled RSS body remains show-local (marker set) and
-// transient.
+// TestFetchAndParseClassifiesTorznabErrorDoc pins the failure classification at the
+// parse boundary: a syntactically valid Torznab <error> document is an upstream-scoped
+// answer, so it NEVER carries the show-local malformedBody marker (after the search
+// fails, the harvest latches the failed scope), and its retryability splits on the
+// numeric code - a deterministic auth/account (100-199) or request/parameter (200-299)
+// error is terminal because retrying cannot recover bad credentials or a bad request,
+// while a generic/server-side (900) or unparseable code stays transient within the
+// bounded budget. A truncated/garbled RSS body remains show-local and transient.
 func TestFetchAndParseClassifiesTorznabErrorDoc(t *testing.T) {
 	tests := map[string]struct {
 		body          string
@@ -346,21 +344,14 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 	})
 }
 
-// TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc pins the credential
-// redaction on the parse boundary: a syntactically valid Torznab <error>
-// document's code/description are attacker-influenced text, and the request
-// that produced them carried the Prowlarr API key - a compromised upstream
-// can reflect that key back in the error description. Both the terminal
-// (request/parameter) and retryable (generic) document paths must scrub the
-// key before the error reaches httpx.Do's retry logger or any caller WARN,
-// so the credential never expands into the log stream (CWE-532).
-//
-// "The key" is every credential the request TRANSMITS, not just the header
-// one: config accepts (with a WARN) a credential embedded in the configured
-// feed URL, and net/http turns userinfo into an Authorization: Basic header
-// while a query value rides the request URL. In that configuration the header
-// key is typically EMPTY, so a header-key-only redaction was inert on exactly
-// the shape config permits - hence the two feed-URL cases below.
+// TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc pins the credential redaction on
+// the parse boundary: a syntactically valid Torznab <error> document's
+// code/description are attacker-influenced text, and the request that produced them
+// carried the Prowlarr API key, so both the terminal and the retryable document paths
+// must scrub the key before the error reaches httpx.Do's retry logger or a caller WARN
+// (CWE-532). "The key" is every credential the request TRANSMITS: config accepts (with
+// a WARN) one embedded in the feed URL, and there the header key is typically EMPTY,
+// so a header-key-only redaction was inert - hence the two feed-URL cases below.
 func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 	const apiKey = "test-prowlarr-key"
 	const (
@@ -449,7 +440,7 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 }
 
 // TestUpstreamSearchRedactsReflectedBasicAuthorization pins the WIRE
-// representation of a feed-URL userinfo credential (h-f7): net/http never
+// representation of a feed-URL userinfo credential: net/http never
 // transmits the plaintext username/password - it sends
 // "Authorization: Basic base64(user:pass)" - so an upstream reflecting that
 // header, or the bare token, back inside its <error> document would escape an
@@ -493,22 +484,14 @@ func TestUpstreamSearchRedactsReflectedBasicAuthorization(t *testing.T) {
 	}
 }
 
-// TestUpstreamSearchRedactsAndBoundsGenericDecodeError pins the emit-boundary
-// policy on the GENERIC 2xx decode-failure path (the sibling of the <error>-
-// document path above): encoding/xml returns the raw strconv error quoting
-// the FULL unparsed <size> value, so a hostile 2xx body can pack
-// attacker-controlled text - including a reflection of the Prowlarr API key
-// the request carried - into the search error that httpx.Do's retry logger
-// and fetchRaw's WARN expand into the log stream. The returned error must be
-// redacted FIRST and then bounded (sanitizeUpstreamText's 200-byte cap plus
-// the truncation marker, well under the 259-byte ceiling), must never contain
-// the key, and must keep the malformedBody marker the harvest classifies on.
-//
-// The second case covers the feed-URL credential shape config accepts with a
-// WARN (userinfo plus an ?apikey= value, header key empty): it is transmitted
-// on every request just as the header key is, so it must be scrubbed here too
-// - a header-key-only redaction is a documented no-op on an empty secret and
-// was therefore inert in exactly that configuration.
+// TestUpstreamSearchRedactsAndBoundsGenericDecodeError pins the emit-boundary policy
+// on the GENERIC 2xx decode-failure path (sibling of the <error>-document path above):
+// encoding/xml returns the raw strconv error quoting the FULL unparsed <size> value,
+// so a hostile 2xx body can pack a reflection of the Prowlarr API key into the search
+// error that httpx.Do's retry logger and fetchRaw's WARN expand into the log stream.
+// The error must be redacted FIRST and then bounded (a 200-byte cap plus the marker,
+// under the 259-byte ceiling) and must keep the malformedBody marker. The second case
+// covers the feed-URL credential shape, where a header-key-only redaction is inert.
 func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 	const apiKey = "test-prowlarr-key"
 	const (
@@ -565,30 +548,14 @@ func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 	}
 }
 
-// TestUpstreamSearchRedactsAcrossTheSanitizer pins the ORDER of the emit-boundary
-// composition, which the two redaction sites in this file share (redactAndBound):
-// redaction runs on both sides of the sanitizer, not only before it.
-//
-// The defect it guards is that runesafe's sanitizer is a normalizing transform, and
-// the normal form it produces is a SPACE: every unsafe rune it rewrites becomes
-// U+0020. Four of this upstream's needles carry a U+0020 - a userinfo username or
-// password configured as user%20name (url.Userinfo hands back the percent-DECODED
-// form) and a query credential whose literal '+' decodes to a space (url.QueryUnescape
-// maps '+' to ' ', which base64 passkeys hit routinely). So an upstream that splits
-// the credential with an unsafe rune defeats the byte-exact needle, and a redaction
-// that ran only BEFORE the sanitizer leaves the sanitizer to REASSEMBLE the
-// credential into the error text and the log stream (CWE-532). Every row below fails
-// when the composition is reduced to redact-then-sanitize.
-//
-// Delivery is the <error>-document path, verified reachable end to end: an attribute
-// value carries a raw DEL or LF, and &#13; carries a real CR, all the way into
-// upstreamDocError's fields. Two shapes deliberately are NOT used because the real
-// boundary cannot deliver them, so a row built on either would pass under both
-// orders and prove nothing - encoding/xml rejects a C0 outright ("illegal character
-// code U+0001", raw or as a character reference, in text and in attributes), and the
-// generic <size> decode path reaches the error text through strconv.Quote, which
-// escapes a control rune into a printable \x7f sequence the sanitizer never sees.
-// The existing fixtures miss all of this because their credentials are space-free.
+// TestUpstreamSearchRedactsAcrossTheSanitizer pins the ORDER of redactAndBound's
+// composition: redaction runs on both sides of the sanitizer, not only before it.
+// runesafe normalizes every unsafe rune to U+0020, and four of this upstream's needles
+// carry a U+0020 (userinfo decoded from user%20name; a query credential whose '+'
+// decodes to a space, which base64 passkeys hit routinely), so an upstream that splits
+// the credential with an unsafe rune defeats the byte-exact needle and lets the
+// sanitizer REASSEMBLE it into the error text and the log stream (CWE-532). Every row
+// below fails when the composition is reduced to redact-then-sanitize.
 func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
 	tests := map[string]struct {
 		// username and password are the RAW userinfo credential (encoded into the feed
@@ -603,7 +570,11 @@ func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
 		description string
 		secret      string
 	}{
-		// A DEL is the cheapest unsafe rune the XML boundary carries verbatim.
+		// A DEL is the cheapest unsafe rune the XML boundary carries verbatim. A C0 and
+		// a strconv.Quote-escaped shape are deliberately absent: encoding/xml rejects a
+		// C0 outright, and the generic <size> path escapes a control rune into a
+		// printable sequence the sanitizer never sees, so a row built on either would
+		// pass under both orders and prove nothing.
 		"userinfo password reassembled from DEL": {
 			username:    "alice",
 			password:    "correct horse battery",
@@ -718,17 +689,14 @@ func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	}
 }
 
-// TestUpstreamSearchRetriesRetryableStatuses pins the retry taxonomy the app
-// owns now that httpx.GetBytes performs the single fetch under
-// WithMaxAttempts(1). GetBytes deliberately does NOT mark its exhaustion error
-// Transient - after a one-attempt budget the retry decision belongs to the
-// caller - so without attemptError re-classifying the *StatusError, every
-// self-healing upstream status would fail the search on its first attempt:
-// the documented three-attempt budget silently collapses to one, an
-// interactive search fails immediately, and the title harvest latches the
-// tracker scope for a whole rebuild. A 408/429/5xx must therefore be retried
-// and recover on a healthy next attempt; any other non-2xx must still fail
-// fast, spending exactly one attempt.
+// TestUpstreamSearchRetriesRetryableStatuses pins the retry taxonomy the app owns
+// while httpx.GetBytes performs the single fetch under WithMaxAttempts(1). GetBytes
+// deliberately does NOT mark its exhaustion error Transient - after a one-attempt
+// budget the retry decision belongs to the caller - so without attemptError
+// re-classifying the *StatusError, every self-healing upstream status fails the search
+// on its first attempt: the three-attempt budget collapses to one, an interactive
+// search fails immediately, and the harvest latches the tracker scope for a whole
+// rebuild. Any other non-2xx must still fail fast, spending exactly one attempt.
 func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
 	newUpstream := func(t *testing.T, first int) (*upstream, func() int) {
 		t.Helper()
@@ -816,14 +784,13 @@ func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
 }
 
 // TestUpstreamSearchRedactsUserinfoAcrossRetryLogging is the retry-path half of
-// TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery: a retryable status is
-// logged once per attempt by BOTH httpx.GetBytes (which sees the raw request
-// URL) and the enclosing httpx.Do, so an endpoint carrying a username-only
-// userinfo token and an apikey query value gets three chances per search to
-// leak them into the log stream (CWE-532). The app passes the unscrubbed URL to
-// GetBytes deliberately - only the actual request needs the credentials - which
-// makes httpx's redaction the sole guard, and this test the acceptance test for
-// it across the whole retry tree.
+// TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery: a retryable status is logged
+// once per attempt by BOTH httpx.GetBytes (which sees the raw request URL) and the
+// enclosing httpx.Do, so an endpoint carrying a username-only userinfo token and an
+// apikey query value gets three chances per search to leak them (CWE-532). The app
+// passes the unscrubbed URL to GetBytes deliberately - only the actual request needs
+// the credentials - which makes httpx's redaction the sole guard across the whole
+// retry tree.
 func TestUpstreamSearchRedactsUserinfoAcrossRetryLogging(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -922,15 +889,13 @@ func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
 }
 
 // TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery pins the status-error
-// sanitization of the Prowlarr proxy: a configured Torznab endpoint may carry
-// a username-only userinfo token (which validateHTTPURL accepts) and an
-// apikey query value, and both must be absent from the error the search
-// returns and from every line the retry logger emits (CWE-532). The scrub is
-// httpx's since v4 - redactURL drops the whole userinfo component and REDACTs
-// every query value, so *StatusError renders safely on its own and the app
-// carries no pre-scrubbed URL clone. This is the cross-library acceptance test
-// for that guarantee: it fails if httpx ever regresses to url.Redacted()
-// semantics, which mask only the password and preserve the username verbatim.
+// sanitization of the Prowlarr proxy: a configured Torznab endpoint may carry a
+// username-only userinfo token (which validateHTTPURL accepts) and an apikey query
+// value, and both must be absent from the error the search returns and from every line
+// the retry logger emits (CWE-532). The scrub is httpx's - redactURL drops the whole
+// userinfo component and REDACTs every query value, so *StatusError renders safely on
+// its own. This is the cross-library acceptance test: it fails if httpx regresses to
+// url.Redacted() semantics, which mask only the password and keep the username.
 func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -963,8 +928,8 @@ func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 
 // TestSameHTTPOrigin pins the accept side of the SSRF origin gate directly,
 // including the https leg no other test reaches: every existing consumer test
-// runs against an http httptest server, so a mutant that rejects the https
-// scheme survives the whole suite while breaking every TLS-terminated
+// runs against an http httptest server, so an implementation that rejects the
+// https scheme survives the whole suite while breaking every TLS-terminated
 // Prowlarr deployment.
 func TestSameHTTPOrigin(t *testing.T) {
 	mustParse := func(s string) *url.URL {
@@ -1116,14 +1081,13 @@ func TestUpstreamSearchReportsRawPageCount(t *testing.T) {
 	}
 }
 
-// TestFilterDownloadURLsWarnsOnBlankedDisplayURLs pins the operational
-// contract of the display-URL gate's warning, the sibling of the origin
-// filter's "items dropped" WARN: an item whose passthrough InfoURL/GUID are not
-// the tracker's own canonical http(s) page URLs survives with those fields
-// blanked, and the blanking is reported exactly once per search carrying the
-// true per-FIELD count (two bad fields on one item count 2) and the kept-item
-// count, while a clean response never warns. It is the only observable
-// distinguishing a healthy passthrough from a tampered upstream whose
+// TestFilterDownloadURLsWarnsOnBlankedDisplayURLs pins the operational contract of the
+// display-URL gate's warning, the sibling of the origin filter's "items dropped" WARN:
+// an item whose passthrough InfoURL/GUID are not the tracker's own canonical http(s)
+// page URLs survives with those fields blanked, and the blanking is reported exactly
+// once per search carrying the true per-FIELD count (two bad fields on one item count
+// 2) and the kept-item count, while a clean response never warns. It is the only
+// observable distinguishing a healthy passthrough from a tampered upstream whose
 // clickable links are being stripped.
 func TestFilterDownloadURLsWarnsOnBlankedDisplayURLs(t *testing.T) {
 	log, rec := capture.New()
@@ -1241,15 +1205,13 @@ func TestSearchBoundsAttemptWithoutClientTimeout(t *testing.T) {
 	}
 }
 
-// TestSearchRetriesAttemptTimeoutAwaitingHeaders pins that a per-attempt
-// timeout (the package's own attempt deadline, or a client-level
-// http.Client.Timeout backstop - this test drives the latter, which is the
-// cheaper timer to shorten)
-// participates in the bounded retry budget instead of ending the search after
-// one attempt. The timer's error matches context.DeadlineExceeded, which
-// httpx.IsTransient treats as terminal, so an unnormalized attempt timeout
-// would fail an interactive search immediately and latch the harvest's tracker
-// scope for the whole rebuild.
+// TestSearchRetriesAttemptTimeoutAwaitingHeaders pins that a per-attempt timeout (the
+// package's own attempt deadline, or a client-level http.Client.Timeout backstop -
+// this test drives the latter, the cheaper timer to shorten) participates in the
+// bounded retry budget instead of ending the search after one attempt. The timer's
+// error matches context.DeadlineExceeded, which httpx.IsTransient treats as terminal,
+// so an unnormalized attempt timeout would fail an interactive search immediately and
+// latch the harvest's tracker scope for the whole rebuild.
 func TestSearchRetriesAttemptTimeoutAwaitingHeaders(t *testing.T) {
 	srv, calls := timeoutOnFirstCall(t, false)
 	defer srv.Close()
@@ -1422,17 +1384,14 @@ func TestTerminalTorznabCode(t *testing.T) {
 	}
 }
 
-// TestUpstreamSecretsRedactionScope pins WHICH values upstreamSecrets collects
-// as transmitted credentials, the set every log line and error message on the
-// upstream failure path is scrubbed against (CWE-532). Four rules decide it and
-// none of them is reachable from the existing redaction tests, which all use a
-// credential-NAMED query parameter: a value on a parameter whose NAME says
-// nothing is a secret from minEmbeddedSecretLen bytes up (an operator-embedded
-// token), a credential-named parameter is a secret at any length even when its
-// NAME is percent-encoded, both the raw and the percent-decoded form of a value
-// are registered because a hostile upstream can reflect either, and a raw-query
-// pair with no '=' at all has no name to judge, so the whole token is graded as
-// an unlabelled VALUE against the same length floor.
+// TestUpstreamSecretsRedactionScope pins WHICH values upstreamSecrets collects as
+// transmitted credentials, the set every log line and error on the upstream failure
+// path is scrubbed against (CWE-532). Four rules decide it and none is reachable from
+// the other redaction tests, which all use a credential-NAMED query parameter: a value
+// on a parameter whose NAME says nothing is a secret from minEmbeddedSecretLen bytes
+// up, a credential-named parameter is a secret at any length even percent-encoded,
+// both the raw and decoded forms are registered because a hostile upstream can reflect
+// either, and a raw-query pair with no '=' is graded whole against the length floor.
 func TestUpstreamSecretsRedactionScope(t *testing.T) {
 	const (
 		unlabelledAtFloor = "abcdefghijklmnop"    // exactly minEmbeddedSecretLen bytes
@@ -1492,20 +1451,14 @@ func TestUpstreamSecretsRedactionScope(t *testing.T) {
 	}
 }
 
-// TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy pins the SEARCH path's
-// half of the credential classification, which is the half whose consequence
-// escalates: every rejected search answers the arr a Torznab <error>, and an arr
-// counts those toward disabling the indexer - RSS included - so a wrong
-// indexer.prowlarr_api_key takes the whole feed down while the container stays
-// healthy. fetchRaw's permanentUpstreamCredentialError arm is what turns that
-// into the one ERROR line naming the remedy, and nothing exercised it in either
-// of its two shapes: a 401/403 status, or Prowlarr's 200 + Torznab <error>
-// document in the auth band (codes 100-199).
-//
-// The LEVEL is the assertion that matters. alerts/logql.yaml keys SeadexScoutCycleError
-// on level=ERROR and on no message, so a re-level to WARN - or deleting the arm,
-// which drops the rejection into the generic "upstream query failed" WARN one
-// line below - leaves the dead feed un-alerted with the suite green.
+// TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy pins the SEARCH path's half
+// of the credential classification, the half whose consequence escalates: every
+// rejected search answers the arr a Torznab <error>, and an arr counts those toward
+// disabling the indexer - RSS included - so a wrong indexer.prowlarr_api_key takes the
+// whole feed down while the container stays healthy. fetchRaw's
+// permanentUpstreamCredentialError arm turns that into one ERROR line naming the
+// remedy, in both its shapes (a 401/403 status, or 200 + an auth-band <error>). The
+// LEVEL is the assertion: alerts/logql.yaml keys SeadexScoutCycleError on level=ERROR.
 func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
 	const credentialsMsg = "upstream rejected the credentials"
 	tests := map[string]http.HandlerFunc{

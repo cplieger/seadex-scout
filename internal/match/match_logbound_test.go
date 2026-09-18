@@ -10,17 +10,14 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestFindByTitleBoundsAmbiguousTitleLog is the cross-package acceptance test
-// for the matcher's adoption of the bounded joiner: logattr's own suite proves
-// Joiner is bounded, but nothing pinned that findByTitle actually routes its
-// UNTRUSTED ambiguous-title attribute through it. Replacing j.String() with an
-// eagerly joined or raw title would leave the rest of the suite green while
-// re-opening the CWE-400 log-amplification path (one hostile multi-megabyte
-// AniList title emitted verbatim into a Loki-shipped attribute).
-//
-// The assertion deliberately accepts either a string or a []string attribute so
-// it does not pre-decide the deferred log-schema question; only the VOLUME bound
-// and the truncation marker are pinned.
+// TestFindByTitleBoundsAmbiguousTitleLog is the cross-package acceptance test for the
+// matcher's adoption of the bounded joiner: logattr's own suite proves Joiner is bounded,
+// but nothing else pins that findByTitle routes its UNTRUSTED ambiguous-title attribute
+// through it. An eagerly joined or raw title leaves the rest of the suite green while
+// re-opening the CWE-400 log-amplification path (one hostile multi-megabyte AniList title
+// emitted verbatim into a Loki-shipped attribute). The assertion accepts either a string
+// or a []string attribute so it does not pre-decide the log-schema question; only the
+// VOLUME bound and the truncation marker are pinned.
 func TestFindByTitleBoundsAmbiguousTitleLog(t *testing.T) {
 	title := strings.Repeat("A", logattr.MaxBytes+1)
 	li := NewLibIndex(&library.Snapshot{Items: []library.Item{

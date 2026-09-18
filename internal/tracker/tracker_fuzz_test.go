@@ -7,18 +7,12 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// FuzzLookupByRelativeURL fuzzes the structural relative-URL tracker
-// resolver over arbitrary untrusted URL strings (SeaDex-published torrent
-// URLs) with bounded-output and cross-function invariants, never a
-// reimplementation of the shape rule: a match is always exactly the canonical
-// AnimeBytes table entry (the resolver can never mint a tracker the table
-// does not carry); a match implies urlform classified the input as a host-less
-// path form - rooted relative, or the slashless spelling whose href reading is
-// that same rooted path - so an absolute, protocol-relative, or hidden-host
-// input can never resolve (tracker identity from those forms must come from the
-// host gate); and prefixing a scheme+host onto any matching input never
-// creates a match (the relative-shape rule cannot be bypassed by embedding
-// the path in an absolute URL).
+// FuzzLookupByRelativeURL fuzzes the structural relative-URL tracker resolver over
+// arbitrary untrusted URL strings (SeaDex-published torrent URLs), never a
+// reimplementation of the shape rule: a match is always exactly the canonical AnimeBytes
+// table entry, a match implies urlform classified the input as a host-less path form (so
+// tracker identity from an absolute, protocol-relative or hidden-host input must come
+// from the host gate), and prefixing a scheme+host onto a matching input never matches.
 func FuzzLookupByRelativeURL(f *testing.F) {
 	f.Add("/torrents.php?id=12345&torrentid=1167293")
 	f.Add("/torrents.php?torrentid=1")
@@ -72,18 +66,11 @@ func fuzzLabel(s string) string {
 	return b.String()
 }
 
-// hostGateInvariants asserts the shared metamorphic and bounded-output
-// invariants for a tracker host gate over one fuzz input (never a
-// reimplementation of the dot-boundary rule): the canonical domain itself
-// (with or without the DNS-root dot) always matches; gluing a valid label
-// onto an explicit ".<domain>" boundary always matches; gluing an EMPTY
-// label ("..<domain>") never matches, whatever precedes it (no resolvable
-// DNS name has an empty label); gluing a dotless prefix onto a non-matching
-// host never creates a match (the suffix rule cannot be bypassed without a
-// label boundary); a single trailing dot never changes the answer; and a
-// matching host must at least end in the domain after the gate's own
-// case/whitespace fold and root-dot trim (the gate resolves through
-// LookupByHost, which folds case and trims whitespace).
+// hostGateInvariants asserts the shared metamorphic and bounded-output invariants for a
+// tracker host gate over one fuzz input, never a reimplementation of the dot-boundary
+// rule; each check's failure message states the rule it holds. The gate resolves through
+// LookupByHost, which folds case and trims whitespace, so the normalized comparisons
+// here fold the same way.
 func hostGateInvariants(t *testing.T, gate func(string) bool, domain, host string) {
 	t.Helper()
 	got := gate(host)
@@ -112,17 +99,8 @@ func hostGateInvariants(t *testing.T, gate func(string) bool, domain, host strin
 	}
 }
 
-// FuzzIsAnimeBytesHost fuzzes the AB host gate over arbitrary host strings
-// with metamorphic and bounded-output invariants (never a reimplementation of
-// the dot-boundary rule): gluing a valid label onto an explicit
-// ".animebytes.tv" boundary always matches; gluing an EMPTY label
-// ("..animebytes.tv") never matches, whatever precedes it (no resolvable DNS
-// name has an empty label); gluing a dotless prefix onto a non-matching host
-// never creates a match (the suffix rule cannot be bypassed without a label
-// boundary); a single trailing dot never changes the answer; and a matching
-// host must at least end in "animebytes.tv" after the gate's own
-// case/whitespace fold and root-dot trim (the gate resolves through
-// LookupByHost, which folds case and trims whitespace).
+// FuzzIsAnimeBytesHost fuzzes the AB host gate over arbitrary host strings.
+// hostGateInvariants owns the invariants asserted.
 func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Add("animebytes.tv")
 	f.Add("www.animebytes.tv")
@@ -138,17 +116,11 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Fuzz(func(t *testing.T, host string) { hostGateInvariants(t, IsAnimeBytesHost, "animebytes.tv", host) })
 }
 
-// FuzzNyaaHostResolution fuzzes the canonical-table resolution of an untrusted
-// URL host to the Nyaa tracker - the question the indexer's scopeOfHost asks
-// (LookupByHost, then the resolved tracker's name) and the reason the table
-// tolerates hostile input. It carries the same metamorphic and bounded-output
-// invariants as the exported AnimeBytes host predicate (which survives as an
-// export only because filter's AB evidence gate consumes it): the canonical
-// host itself (with or without the DNS-root dot) always matches; a valid label
-// on an explicit ".nyaa.si" boundary always matches while an empty label never
-// does; a dotless prefix never bypasses the suffix rule; a DNS-root trailing
-// dot never changes the answer; and a matching host at least ends in "nyaa.si"
-// after the resolver's own case/whitespace fold and root-dot trim.
+// FuzzNyaaHostResolution fuzzes the canonical-table resolution of an untrusted URL host
+// to the Nyaa tracker - the question the indexer's scopeOfHost asks (LookupByHost, then
+// the resolved tracker's name), and the reason the table tolerates hostile input. The
+// AnimeBytes predicate beside it survives as an export only because filter's AB evidence
+// gate consumes it. hostGateInvariants owns the invariants asserted.
 func FuzzNyaaHostResolution(f *testing.F) {
 	f.Add("nyaa.si")
 	f.Add("www.nyaa.si")

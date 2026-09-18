@@ -209,7 +209,7 @@ func isCanonicalTrackerHost(scope, host string) bool {
 // label or an empty-labeled host under a tracker domain yields no key.
 func trackerKeyFromURL(raw string) string {
 	// Classify once: the id is extracted from the vouched reading (f.Trimmed),
-	// not the original spelling (h-f8; see trackerOwnForm).
+	// not the original spelling (see trackerOwnForm).
 	f, ok := httpDisplayForm(raw)
 	if !ok {
 		return ""

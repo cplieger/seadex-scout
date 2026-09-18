@@ -11,19 +11,11 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestPopulationProperty pins the EPISODE-CENSUS floor over the full
-// untrusted length space, which the seven fixed length shapes of
-// TestPopulationMedianAnchoredFloor cannot cover. The floor is
-// median-anchored precisely because a max-anchored one deleted every regular
-// episode of a pack carrying one over-long file, collapsing a season pack into
-// a single-episode release, so the invariants are stated against the pool's two
-// CENTRAL lengths (not one chosen middle, since the even-pool tie-break is a
-// free choice): the census is an in-order subsequence of the eligible pool,
-// every pool file at or above the upper-middle length survives, nothing below
-// half the lower-middle length does, a pool with no positive median is kept
-// whole, and the census never excludes a file the primary-payload rule keeps (a
-// median can never exceed a maximum, so its floor can never sit above
-// primaryFiles').
+// TestPopulationProperty pins the EPISODE-CENSUS floor over the full untrusted
+// length space, which the seven fixed length shapes of
+// TestPopulationMedianAnchoredFloor cannot cover. A max-anchored floor deletes
+// every regular episode of a pack carrying one over-long file, collapsing a
+// season pack into a single-episode release, so the floor is median-anchored.
 func TestPopulationProperty(t *testing.T) {
 	baseGen := rapid.SampledFrom([]string{"", "a.mkv", "b.mkv", "NCED [BDRemux].mkv", "movie.iso", "sub.ass"})
 	lenGen := rapid.Int64Range(math.MinInt64, math.MaxInt64)
@@ -73,13 +65,10 @@ func TestPopulationProperty(t *testing.T) {
 			j++
 		}
 		if len(pool) > 0 {
-			// The invariants are stated against the two CENTRAL lengths rather
-			// than one chosen middle, because the even-pool tie-break is not
-			// part of the contract: the census floor only has to sit at half of
-			// some value between them. Reading the upper middle as "the median"
-			// would re-assert the max-anchored floor on a two-file pool (there
-			// the upper middle IS the maximum), which is exactly what the
-			// median anchor exists to avoid.
+			// Stated against the two CENTRAL lengths, not one chosen middle: the
+			// even-pool tie-break is not part of the contract. Reading the upper
+			// middle as "the median" re-asserts the max-anchored floor on a
+			// two-file pool, where the upper middle IS the maximum.
 			upperMid := lengths[len(lengths)/2]
 			lowerMid := lengths[(len(lengths)-1)/2]
 			if upperMid > 0 {
@@ -89,11 +78,9 @@ func TestPopulationProperty(t *testing.T) {
 					if pool[i].Length >= upperMid && !slices.Contains(got, pool[i].Name) {
 						t.Fatalf("Population(%+v) = %v, dropped the episode %q at or above the median length %d", files, got, pool[i].Name, upperMid)
 					}
-					// The sub-floor claim only bites where a floor exists: a
-					// zero lower middle means the rule filtered nothing (its
-					// own median collapses to zero on such a pool), so a
-					// negative wire length surviving is the documented
-					// no-positive-median fallback, not a counted sample.
+					// The sub-floor claim only bites where a floor exists: on a
+					// zero lower middle the rule filtered nothing, so a negative
+					// wire length surviving is the no-positive-median fallback.
 					if floor > 0 && pool[i].Length < floor && slices.Contains(got, pool[i].Name) {
 						t.Fatalf("Population(%+v) = %v, counted the sub-half-median sample %q (len %d, floor %d)", files, got, pool[i].Name, pool[i].Length, floor)
 					}
@@ -120,27 +107,12 @@ func censusNames(files []seadex.File) []string {
 	return out
 }
 
-// TestNamesProperty pins the layered eligibility rule's invariants
-// over the full untrusted input space (SeaDex file names carry arbitrary
-// extensions and creditless markers; lengths are upstream int64s where
-// negative, zero, and math.MaxInt64 are all constructible). The eligible
-// POOL is modeled with the rule's own exported type gate — content files
-// (ContentMediaFile) when any exist, every named file otherwise (the
-// unlisted-container / sidecar-only fallback) — and the size layer's
-// invariants are then checked structurally against that pool:
-//
-//	(1) the output is an in-order subsequence of the pool's names — so with
-//	    any content survivor, no sidecar or creditless extra ever appears,
-//	    whatever its size (the type gate);
-//	(2) whenever any pool file has positive length, every maximum-length
-//	    pool file survives (the primary payload can never be filtered out);
-//	(3) a pool file strictly smaller than half the maximum is always
-//	    dropped (the invariant the MaxInt64 ceil-half overflow would
-//	    violate by letting every small extra survive);
-//	(4) with no positive length in the pool, the whole pool is kept (the
-//	    fixture-preserving contract).
-//
-// Names are made unique per index so presence/absence checks are sound.
+// TestNamesProperty pins the layered eligibility rule over the full untrusted
+// input space: SeaDex names carry arbitrary extensions and creditless markers,
+// and lengths are upstream int64s where negative, zero and math.MaxInt64 are all
+// constructible. The eligible POOL is modeled with the rule's own exported type
+// gate, so the four numbered invariants below check the size layer structurally
+// against it. Names are unique per index, or presence checks prove nothing.
 func TestNamesProperty(t *testing.T) {
 	baseGen := rapid.SampledFrom([]string{"", "a.mkv", "b.mkv", "NCED [BDRemux].mkv", "movie.iso", "sub.ass"})
 	lenGen := rapid.Int64Range(math.MinInt64, math.MaxInt64)
@@ -211,19 +183,14 @@ func TestNamesProperty(t *testing.T) {
 	})
 }
 
-// TestTypeGateASCIICaseInsensitiveProperty pins the file-eligibility type
-// gate's case contract over generated marker-bearing names: swapping the ASCII
-// case of every letter must change neither IsMediaFile, IsCreditlessExtra,
-// IsSampleExtra, nor ContentMediaFile. Both markers render their letters
-// through the shared strings.ToLower-faithful case classes (nametoken.Literal -
-// a global (?i) is unusable, since Go regexp's SimpleFold diverges from
-// strings.ToLower on U+0130 and U+017F), and the unit tables only exercise a
-// few spellings of each token, so a marker rebuilt with a case-SENSITIVE
-// fragment - a hand-typed [N] where the shared class renders [nN] - would leave
-// a lowercase "nced" extra voting as content evidence. Only ASCII letters are
-// swapped: a non-ASCII fold can legitimately change the extraMarkerEdge
-// boundary (U+212A lowercases onto ASCII 'k' but is not ASCII-alphanumeric), so
-// it is outside the invariant.
+// TestTypeGateASCIICaseInsensitiveProperty pins the type gate's case contract:
+// swapping the ASCII case of every letter changes none of the four predicates.
+// A global (?i) is unusable, since Go regexp's SimpleFold diverges from
+// strings.ToLower on U+0130 and U+017F, so the markers render through
+// nametoken.Literal's case classes and a hand-typed [N] where the class renders
+// [nN] would leave a lowercase "nced" extra voting as content evidence. Only
+// ASCII letters swap: a non-ASCII fold can legitimately move the extraMarkerEdge
+// boundary (U+212A lowercases onto ASCII 'k' but is not ASCII-alphanumeric).
 func TestTypeGateASCIICaseInsensitiveProperty(t *testing.T) {
 	tokenGen := rapid.SampledFrom([]string{
 		"ncop", "NCOP", "NcOp", "nced", "NCED", "creditless", "CREDITLESS",

@@ -39,15 +39,12 @@ func staleMappingState() state.State {
 	}
 }
 
-// TestMappingExhaustionWarnsOnceWithAppContext pins the OTHER half of the Fribb
-// door's terminal-level demotion (l-f101): the generic httpx verdict is gone
-// from WARN, and the contextual caller record that replaces it is still there.
-// Both log sites are covered because the demotion is on the shared request
-// option and therefore affects the daemon and the one-shot report alike: the
-// cycle publishes "mapping degraded" (escalating on a persisted rejection
-// streak, which a stale-but-usable refresh does not trip) and report mode
-// publishes "report: mapping degraded". Asserting the absence at WARN
-// specifically, not the absence of the record - it survives at Debug, which
+// TestMappingExhaustionWarnsOnceWithAppContext pins the other half of the Fribb
+// door's terminal-level demotion: the generic httpx verdict is gone from WARN, and
+// the contextual caller record that replaces it is still there. Both log sites are
+// covered because the demotion is on the shared request option and so affects the
+// daemon and the one-shot report alike. The assertion is the absence at WARN
+// specifically, not the absence of the record: it survives at Debug, which
 // internal/mapping's own test pins.
 func TestMappingExhaustionWarnsOnceWithAppContext(t *testing.T) {
 	cases := map[string]struct {

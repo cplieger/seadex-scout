@@ -76,15 +76,13 @@ func (c *cancelOnFetchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 		errors.New("anilist 500 on a later chunk")
 }
 
-// TestMatchMidRunCancellationRetainsCompletedMatches pins the mid-loop
-// cancellation arm's retention contract (the twin of
-// TestMatchCancelledContextStopsBeforeEntries, which pins the zero-matched
-// pre-cancelled boundary): when the context is cancelled AFTER some entries
-// were matched, the already-completed matches are returned rather than
-// discarded, the remaining entries are skipped with no further AniList
-// traffic, the cycle is flagged Degraded, and a never-attempted id stays OUT
-// of IncompleteIDs (a shutdown is a whole-cycle event per the Result
-// contract).
+// TestMatchMidRunCancellationRetainsCompletedMatches pins the mid-loop cancellation arm's
+// retention contract (the twin of TestMatchCancelledContextStopsBeforeEntries, which pins
+// the zero-matched pre-cancelled boundary): when the context is cancelled AFTER some
+// entries matched, the completed matches are returned rather than discarded, the remaining
+// entries are skipped with no further AniList traffic, the cycle is flagged Degraded, and a
+// never-attempted id stays OUT of IncompleteIDs (a shutdown is a whole-cycle event per the
+// Result contract).
 func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

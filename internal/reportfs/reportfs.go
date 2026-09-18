@@ -1,11 +1,8 @@
 // Package reportfs owns the on-disk privacy rule for the report artifacts: the
 // directory and the pairs written into it are owner-only, with the created
-// directory's mode ENFORCED - set on an open handle and then read back from that
-// same handle - so it is what the filesystem stored rather than what the process
-// asked for. Both directions are live: umask and default-ACL filtering only ever
-// REMOVE bits (a report dir narrowed past traversability), while an inheritable
-// ACE ADDS them (a report dir readable by a group that should not see it, least
-// privilege / CWE-732). A PRE-EXISTING directory is deliberately left alone.
+// directory's mode ENFORCED on an open handle and read back from it. Both
+// directions are live: umask and default-ACL filtering only REMOVE bits, an
+// inheritable ACE ADDS them (CWE-732). A PRE-EXISTING directory is left alone.
 package reportfs
 
 import (

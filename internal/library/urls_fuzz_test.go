@@ -5,16 +5,14 @@ import (
 	"testing"
 )
 
-// FuzzSafeLogURL fuzzes the logging trust-boundary sanitizer with the security
-// invariant that matters: secrets placed in the userinfo, query, and fragment
-// of a constructed arr URL never appear in the sanitized output, whatever the
-// fuzzer does to the host and path around them. net/url reshuffling cannot
-// move the markers out of the stripped components (an extra "@" in the host
-// only extends the userinfo; a "?" or "#" in the path only starts the query or
-// fragment earlier), and a parse failure yields "" which leaks nothing. String
-// reparse or idempotence oracles are deliberately NOT used - net/url's
-// Parse/String round-trip is lossy on degenerate inputs ("//@// " renders as
-// "//%20" which does not reparse), which is harmless for a log string.
+// FuzzSafeLogURL fuzzes the logging trust-boundary sanitizer on the security
+// invariant: secrets placed in the userinfo, query and fragment of a constructed
+// arr URL never appear in the sanitized output, whatever the fuzzer does around
+// them. net/url reshuffling cannot move the markers out of the stripped components
+// (an extra "@" in the host only extends the userinfo, a "?" in the path only
+// starts the query earlier) and a parse failure yields "". A reparse or idempotence
+// oracle is deliberately NOT used: net/url's round-trip is lossy on degenerate
+// input ("//@// " renders "//%20"), which is harmless for a log string.
 func FuzzSafeLogURL(f *testing.F) {
 	f.Add("sonarr.example", "series/frieren")
 	f.Add("[::1", "path")
@@ -46,11 +44,9 @@ func FuzzSafeLogURL(f *testing.F) {
 		// credentialed authority inside Path, where the userinfo strip cannot
 		// reach it; the host-required guard must drop it, not pass it through.
 		checkNoLeak("https:/user:SCRTpass@" + suffix)
-		// The port-only-authority arm: "https://:443/user:pass@host/..."
-		// parses with a NON-empty Host (":443") but an empty Hostname and the
-		// credentialed text inside Path, where the userinfo strip cannot
-		// reach it; the hostname-required guard must drop it, not pass it
-		// through.
+		// The port-only-authority arm: "https://:443/user:pass@host/..." parses
+		// with a NON-empty Host but an empty Hostname and the credentialed text
+		// inside Path, so the hostname-required guard must drop it.
 		checkNoLeak("https://:443/user:SCRTpass@" + suffix)
 	})
 }

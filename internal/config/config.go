@@ -962,10 +962,9 @@ func (c *Config) warnTorznabURLCredentials() {
 // FORMAT: the shared wellFormedCredential rule via checkAPIKeyShape, then a warn-only
 // note when the value is not the 32-hex shape the arrs generate.
 //
-// The accepted cost is larger here than for this app's own feed key: an operator who
-// DELIBERATELY set a custom arr key containing a dollar sign is refused, even though
-// the arrs would accept it. The trade is taken because the alternative failure mode -
-// every arr call 401ing - names the arr rather than the config typo that caused it.
+// Accepted cost, larger here than for this app's own feed key: a DELIBERATELY custom arr
+// key containing a dollar sign is refused, even though the arrs would accept it. The
+// alternative failure mode - every arr call 401ing - names the arr rather than the typo.
 func validateArrPair(name, rawURL, key string) error {
 	switch {
 	case rawURL == "" && key == "":

@@ -74,15 +74,12 @@ func TestTextGuards(t *testing.T) {
 	}
 }
 
-// TestTextKeepsShortSeparatorlessDirIntact pins the minRedactablePath floor,
-// which is the one thing standing between a relative configured path and
-// corrupted diagnostics. A relative report.dir loads with only a WARN
-// (config.warnRelativeReportDir), so a value like "reports" reaches this
-// masker, and substring-replacing it would rewrite the letters of unrelated
-// words - including the alert-keyed "report written" message a Loki rule
-// matches on. The masking half stays pinned by the rows above; these rows pin
-// the refusal to mask, on both sides of the length floor and for a short value
-// that IS path-shaped.
+// TestTextKeepsShortSeparatorlessDirIntact pins the minRedactablePath floor, the
+// one thing between a relative configured path and corrupted diagnostics. A
+// relative report.dir loads with only a WARN, so a value like "reports" reaches
+// this masker, and substring-replacing it would rewrite the letters of unrelated
+// words including the alert-keyed "report written" message a Loki rule matches on.
+// These rows pin the refusal to mask, on both sides of the length floor.
 func TestTextKeepsShortSeparatorlessDirIntact(t *testing.T) {
 	tests := []struct {
 		name string

@@ -34,15 +34,12 @@ const wantWindowFilter = `updated>"2026-01-02 03:04:05.000Z"`
 func windowOptions() Options { return Options{Mode: FetchWindow, Since: windowSince} }
 
 // TestFetchWindowRequestContract pins the windowed walk's wire request across
-// both chunks: the changed-since conjunct rides EVERY page, on the second page
-// it is ANDed after the keyset cursor's own clause rather than replacing it,
-// and the sort stays the immutable (created, id) pair.
-//
-// That last part is the whole design and the reason to assert the literal query
-// string: sorting on `updated` instead would let a record edited mid-walk move
-// between chunks and be skipped, which is exactly the class the keyset
-// migration closed. A window that paged on its own selection column would
-// silently reopen it.
+// both chunks: the changed-since conjunct rides EVERY page, on the second page it
+// is ANDed after the keyset cursor's own clause rather than replacing it, and the
+// sort stays the immutable (created, id) pair. That last part is why the literal
+// query string is asserted: sorting on `updated` instead would let a record
+// edited mid-walk move between chunks and be skipped, so a window paging on its
+// own selection column would silently reopen that class.
 func TestFetchWindowRequestContract(t *testing.T) {
 	var filters []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -498,16 +495,14 @@ func TestMaxWindowEntriesIsOnePage(t *testing.T) {
 	}
 }
 
-// TestCountWindowUpstreamFailureErrors pins the probe's FAILURE propagation,
-// the arm the negative-total guard cannot cover. internal/scout's tick branches
-// on this error (a failed probe degrades the tick and advances the fast path's
-// own unreachability streak, which is the only thing that escalates an
-// unreachable upstream between reconciles), so a swallowed transport failure
-// answers (0, nil) and reads as a QUIET window instead: every tick reports
-// completion, and nothing escalates while SeaDex is unreachable.
-// Both shapes the probe must refuse are here - a non-retryable status, and a
-// body over maxProbeBytes, since the probe asks for one id and the honest
-// answer is ~88 bytes, so an oversized body is not the shape it asked for.
+// TestCountWindowUpstreamFailureErrors pins the probe's FAILURE propagation, the
+// arm the negative-total guard cannot cover. internal/scout's tick branches on
+// this error (a failed probe degrades the tick and advances the fast path's own
+// unreachability streak, the only thing that escalates an unreachable upstream
+// between reconciles), so a swallowed transport failure answers (0, nil) and
+// reads as a QUIET window instead. Both refusals are here: a non-retryable
+// status, and a body over maxProbeBytes, since the probe asks for one id and the
+// honest answer is ~88 bytes.
 func TestCountWindowUpstreamFailureErrors(t *testing.T) {
 	tests := map[string]struct {
 		handler http.HandlerFunc
@@ -546,16 +541,14 @@ func TestCountWindowUpstreamFailureErrors(t *testing.T) {
 	}
 }
 
-// TestFetchWindowWarnsOnAOneChunkShortfall pins the diagnostic l-f142 added, and
-// the scenario is the measured one: a probe reports 300 changed records, the
-// window fetches its single page, THREE arrive, and before this the tick logged
-// `tick complete seadex_entries=3` with nothing to distinguish it from a
-// complete pass. The freshness half of the product went missing silently.
-//
-// Note what makes the signal sound: in a ONE-chunk walk the delivered items and
-// the totalItems that counts them arrive in the SAME response, so a well-behaved
-// page cannot legitimately disagree. Across multiple chunks it can, which is why
-// the guard is gated on the chunk count (see TestFetchWindowDoesNotWarnAcrossChunks).
+// TestFetchWindowWarnsOnAOneChunkShortfall pins the shortfall diagnostic on the
+// measured scenario: a probe reports 300 changed records, the window fetches its
+// single page, THREE arrive, and without the WARN the tick logs
+// `tick complete seadex_entries=3` with nothing to distinguish it from a complete
+// pass, so the freshness half of the product goes missing silently. What makes
+// the signal sound: in a ONE-chunk walk the delivered items and the totalItems
+// that counts them arrive in the SAME response, so a well-behaved page cannot
+// legitimately disagree. Across chunks it can, hence the chunk-count gate.
 func TestFetchWindowWarnsOnAOneChunkShortfall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":300,"totalPages":1,"items":[`+
@@ -638,19 +631,13 @@ func TestFetchWindowEmptyWindowDoesNotWarn(t *testing.T) {
 }
 
 // TestFetchWindowDoesNotWarnAcrossChunks pins the SOUNDNESS boundary of the
-// shortfall guard, and it is the reason that guard is gated on the chunk count
-// rather than applied to every window.
-//
-// Across MULTIPLE chunks a shortfall is legitimately explainable: a record
-// edited between chunk requests newly matches `updated > since` while the
-// immutable keyset cursor has already paged past its `created`, so the reported
-// total can honestly exceed what the walk delivers. Warning there would fire on
-// benign upstream activity. Within ONE chunk the delivered items and the
-// totalItems that counts them arrive in the same response, which is what makes
-// the disagreement evidence rather than a race.
-//
-// Here a full chunk plus a short one delivers perPage+1 against a reported
-// perPage+9, a real shortfall - and it must stay silent.
+// shortfall guard, and it is why that guard is gated on the chunk count. Across
+// MULTIPLE chunks a shortfall is legitimately explainable: a record edited between
+// chunk requests newly matches `updated > since` while the immutable keyset cursor
+// has already paged past its `created`, so the reported total can honestly exceed
+// what the walk delivers, and warning there would fire on benign upstream
+// activity. Here a full chunk plus a short one delivers perPage+1 against a
+// reported perPage+9, a real shortfall, and it must stay silent.
 func TestFetchWindowDoesNotWarnAcrossChunks(t *testing.T) {
 	var reqs int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

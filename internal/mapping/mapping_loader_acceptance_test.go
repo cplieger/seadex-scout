@@ -513,14 +513,13 @@ func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 }
 
 // TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale pins acceptRefresh's
-// whole-map below-half shrink guard on a shape the per-population floors
-// cannot intercept: the guarded populations (typed, season, special, both
-// routing sides) are fully retained while the TOTAL record count drops below
-// half (100 -> 40, via loss of bare id-only records). The guard must reject
-// with the FIXED "refresh shrank below half of previous" reason (a
-// Loki-queryable class discriminator), carry the live counts as structured
-// stale_returned/stale_previous facts, advance the persisted rejection
-// streak, and keep the stale map unchanged.
+// whole-map below-half shrink guard on a shape the per-population floors cannot
+// intercept: the guarded populations (typed, season, special, both routing sides)
+// are fully retained while the TOTAL record count drops below half (100 -> 40, via
+// loss of bare id-only records). The guard must reject with the FIXED "refresh
+// shrank below half of previous" reason (a Loki-queryable class discriminator),
+// carry the live counts as structured stale_returned/stale_previous facts, advance
+// the persisted rejection streak, and keep the stale map unchanged.
 func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 	var b strings.Builder
 	b.WriteByte('[')
@@ -580,15 +579,14 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_exactHalfShrinkAccepted pins the exact-half
-// acceptance boundary shared by acceptRefresh's whole-map shrink guard and
+// TestLoader_refreshCache_exactHalfShrinkAccepted pins the exact-half acceptance
+// boundary shared by acceptRefresh's whole-map shrink guard and
 // populationCollapsed: both use a strict below-half comparison
-// (degradation.Shrunk's count*factor < prevCount), so a refresh retaining
-// EXACTLY half of the previous records (4 of 8, every guarded population
-// halved together) must be accepted and reset the rejection streak. The
-// existing shrink tests only pin below-half rejection and above-half
-// acceptance (1001 of 2000), leaving the <= boundary mutant alive in both
-// guards.
+// (degradation.Shrunk's count*factor < prevCount), so a refresh retaining EXACTLY
+// half of the previous records (4 of 8, every guarded population halved together)
+// must be accepted and reset the rejection streak. The existing shrink tests pin
+// only below-half rejection and above-half acceptance, leaving the <= boundary
+// mutant alive in both guards.
 func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
 	var b strings.Builder
 	b.WriteByte('[')

@@ -713,8 +713,8 @@ func TestLogConfigExternalPollInterval(t *testing.T) {
 	logConfig(cfg, cfg.RunMode)
 
 	// The library's attr assertion compares the RENDERED value, so it pins the
-	// attribute itself rather than a substring of the serialized JSON - a
-	// coincidental match elsewhere in the line cannot satisfy it (l-f34).
+	// attribute itself rather than a substring of the serialized JSON: a
+	// coincidental match elsewhere in the line cannot satisfy it.
 	if !rec.HasAttr("configuration loaded", "poll_interval", "external") {
 		t.Errorf("poll_interval not rendered as external: %v", rec.Messages())
 	}
@@ -855,14 +855,13 @@ func TestRunReportRefusesWhenLockHeld(t *testing.T) {
 	}
 }
 
-// TestRunReportRejectsRelativeReportDir pins the report-path guard on
-// report.dir: every report write goes through an absolute-path-only writer, so a
-// relative value cannot produce either half of the pair - the run now fails
-// before it spends the ~25m walk, instead of after it (l-f213). Config still
-// admits the value at load (a daemon never writes a report), so this is the only
-// place the outcome changes: same failure, minutes earlier, with a reason.
-// Hermetic - the refusal precedes the report lock and every component build -
-// and the error names the key without echoing the secret-capable value.
+// TestRunReportRejectsRelativeReportDir pins the report-path guard on report.dir:
+// every report write goes through an absolute-path-only writer, so a relative value
+// cannot produce either half of the pair and the run fails before it spends the
+// ~25m walk. Config still admits the value at load (a daemon never writes a
+// report), so this is the only place the outcome changes. Hermetic: the refusal
+// precedes the report lock and every component build, and the error names the key
+// without echoing the secret-capable value.
 func TestRunReportRejectsRelativeReportDir(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1036,17 +1035,13 @@ func TestWriteStarterConfigOwnerOnlyMode(t *testing.T) {
 	}
 }
 
-// TestStartIndexerLogsRunErrorAndStops pins the configured half of the
-// startIndexer contract that TestStartIndexerUnconfiguredIsNoOp cannot reach:
-// with a Prowlarr Torznab URL configured, the feed goroutine is launched, a
-// Run failure is logged as the component=indexer ERROR fault line (via
-// logIndexerStop's non-shutdown branch), and the returned stop func waits for
-// the goroutine instead of deadlocking or returning before the record is
-// written. The Run failure used is indexer.Run's own fail-closed refusal on an
-// empty feed_api_key, which returns before any port bind - so the test is
-// hermetic and deterministic (the refusal precedes every context check, so the
-// message is stable even if stop's cancel wins the race with the goroutine).
-// Serial (capture swaps slog.Default).
+// TestStartIndexerLogsRunErrorAndStops pins the configured half of startIndexer:
+// the feed goroutine is launched, a Run failure is logged as the component=indexer
+// ERROR fault line, and the returned stop func waits for the goroutine rather than
+// deadlocking or returning before the record is written. The failure used is
+// indexer.Run's fail-closed refusal on an empty feed_api_key, which returns before
+// any port bind and before every context check, so the message is stable even if
+// stop's cancel wins the race. Serial: capture swaps slog.Default.
 func TestStartIndexerLogsRunErrorAndStops(t *testing.T) {
 	rec := capture.Default(t)
 	ctx := t.Context()
@@ -1170,14 +1165,12 @@ func TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence(t *testing.T) {
 }
 
 // TestDetachedWriteError pins the alert-facing exit classification of a
-// shutdown-truncated report write: it must read as a routine shutdown (WARN,
-// excluded from alerts/logql.yaml's SeadexScoutCycleError rule) while a genuine write
-// fault keeps its ERROR classification. It stays in the root even though
-// shutdown.DetachedWriteError is the mechanism, because what it pins is the
-// coupling to dispatchOutcome - the root's own exit-code/level contract. Three
-// non-obvious properties carry it - the multi-%w wrap surviving (fmt drops ALL
-// wrapping on a nil %w operand), the guard's asymmetry, and shutdown.Normalize
-// leaving an already-classified error alone rather than wrapping it twice.
+// shutdown-truncated report write: a routine shutdown reads WARN (excluded from
+// alerts/logql.yaml's SeadexScoutCycleError rule) while a genuine write fault keeps
+// ERROR. It stays in the root because what it pins is the coupling to
+// dispatchOutcome, the root's own exit-code/level contract. Three non-obvious
+// properties carry it: the multi-%w wrap surviving (fmt drops ALL wrapping on a nil
+// %w operand), the guard's asymmetry, and Normalize not wrapping twice.
 func TestDetachedWriteError(t *testing.T) {
 	cancelled := func() context.Context {
 		ctx, cancel := context.WithCancel(context.Background())

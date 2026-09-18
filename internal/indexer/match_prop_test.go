@@ -6,18 +6,14 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestExtractID_roundTripsNumericIDsProperty is the every-PR randomized
-// complement to the fixed fuzz corpus: numeric IDs up to the documented
-// maxTrackerIDDigits width followed by every supported delimiter must extract
-// intact from Nyaa view URLs and the AnimeBytes /torrent/{id} permalink path
-// (wider runs fail closed - pinned by
-// TestTrackerIDExtractionRejectsOverlongDigitRuns - and so do non-canonical
-// zero-padded forms, hence the canonical generator; see
-// TestTrackerIDExtractionRejectsNonCanonicalDecimalForms). The torrentid= query form
-// is component-aware (the id must be the whole parameter value), so only
-// genuine URL-level terminators (a following param or a fragment) may trail
-// it - a "?" or "/" inside a query value is literal content and must NOT
-// yield an id.
+// TestExtractID_roundTripsNumericIDsProperty is the every-PR randomized complement to
+// the fixed fuzz corpus: numeric IDs up to the documented maxTrackerIDDigits width
+// followed by every supported delimiter must extract intact from Nyaa view URLs and the
+// AnimeBytes /torrent/{id} permalink path. Wider runs and non-canonical zero-padded forms
+// fail closed (TestTrackerIDExtractionRejectsOverlongDigitRuns and
+// TestTrackerIDExtractionRejectsNonCanonicalDecimalForms pin those, hence the canonical
+// generator). The torrentid= query form is component-aware, so only genuine URL-level
+// terminators may trail it - a "?" or "/" inside a query value must NOT yield an id.
 func TestExtractID_roundTripsNumericIDsProperty(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		id := rapid.StringMatching(`0|[1-9][0-9]{0,19}`).Draw(t, "id")

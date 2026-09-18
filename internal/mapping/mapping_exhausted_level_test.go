@@ -11,17 +11,13 @@ import (
 )
 
 // TestConditionalGetExhaustedTerminalRecordIsDemoted pins the Fribb door's
-// terminal log level (l-f101). httpx's retry loop publishes its own generic
-// "http retries exhausted" verdict, and the caller republishes the SAME event
-// with strictly more context - scout.loadMapping's "mapping degraded" carries
-// usable_records, the stale-cache reason and the persisted rejection streak (and
-// escalates to ERROR on a sustained streak), and report mode publishes the same
-// attribute set as "report: mapping degraded". Leaving both at Warn put two
-// warnings in Loki for one Fribb outage, the less informative one first, so
-// httpx's verdict is demoted to Debug. It is demoted rather than dropped
-// (WithLogger stays) because the per-attempt retry diagnostics are the half
-// worth keeping - the same rule internal/seadex and internal/indexer's Prowlarr
-// door already apply.
+// terminal log level. httpx's retry loop publishes its own generic "http retries
+// exhausted" verdict, and the caller republishes the SAME event with strictly more
+// context - scout.loadMapping's "mapping degraded" carries usable_records, the
+// stale-cache reason and the persisted rejection streak - so httpx's verdict sits
+// at Debug rather than putting two warnings in Loki for one Fribb outage. Demoted
+// rather than dropped (WithLogger stays) because the per-attempt retry diagnostics
+// are the half worth keeping.
 func TestConditionalGetExhaustedTerminalRecordIsDemoted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

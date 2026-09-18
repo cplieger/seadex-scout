@@ -5,15 +5,14 @@ import (
 	"testing"
 )
 
-// FuzzCurationWarnings fuzzes the curation-warning gate over arbitrary
-// untrusted SeaDex tag strings with bounded-output and cross-function
-// invariants, never a reimplementation of the exact-match rule: the result is
-// always one of the four canonical values (nil, [broken], [incomplete],
-// [broken incomplete]) so raw upstream tag bytes can never leak into reports
-// or log attributes; curationWarned always agrees with the annotation
-// (nil-ness consistency); input tag order never changes the result;
-// duplicating the tag list never changes the result (dedupe); and appending a
-// canonical warning spelling always trips the gate.
+// FuzzCurationWarnings fuzzes the curation-warning gate over arbitrary untrusted SeaDex
+// tag strings with bounded-output and cross-function invariants, never a
+// reimplementation of the exact-match rule: the result is always one of the four
+// canonical values (nil, [broken], [incomplete], [broken incomplete]) so raw upstream
+// tag bytes can never leak into reports or log attributes; curationWarned always agrees
+// with the annotation (nil-ness consistency); input tag order never changes the result;
+// duplicating the tag list never changes the result (dedupe); and appending a canonical
+// warning spelling always trips the gate.
 func FuzzCurationWarnings(f *testing.F) {
 	f.Add("broken", "incomplete", "best")
 	f.Add("Broken", " BROKEN ", "dual")

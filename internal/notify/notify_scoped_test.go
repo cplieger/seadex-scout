@@ -16,18 +16,13 @@ func ids(alIDs ...int) map[int]struct{} {
 }
 
 // TestReportScopedDeletesOnlyWithinItsAuthority is the reason ReportScoped
-// exists.
-//
-// Report can delete a row by omission because a full pass looked at
-// everything, so an absent row is a RESOLVED condition. A partial pass cannot
-// make that inference: an entry it never examined is absent for exactly the
-// same reason a resolved one is. Reading the two alike would stop reporting
-// conditions that are still true (the alert clears while the problem stands)
-// and then re-report them as new on the next full pass.
-//
-// comparedIDs is therefore deletion AUTHORITY, not a filter: a row whose owner
-// is in the set and absent from the batch goes; a row whose owner is outside
-// the set is carried untouched, and counted as carried.
+// exists. Report can delete a row by omission because a full pass looked at
+// everything, so an absent row is RESOLVED. A partial pass cannot make that
+// inference: an entry it never examined is absent for the same reason a resolved
+// one is, so reading the two alike stops reporting conditions that are still
+// true and then re-reports them as new on the next full pass. comparedIDs is
+// therefore deletion AUTHORITY, not a filter: a row whose owner is in the set
+// and absent from the batch goes, a row whose owner is outside is carried.
 func TestReportScopedDeletesOnlyWithinItsAuthority(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	inScope := findingWithID("in", "InScope", 1)
@@ -105,16 +100,13 @@ func TestReportScopedCarriesEveryOwnerOutsideAuthority(t *testing.T) {
 	}
 }
 
-// TestReportScopedPreservesIncompleteWithinAuthority pins the PRECEDENCE
-// between the two preservation rules, which is the one place they can disagree.
-//
-// A row can be both in the window's authority AND owned by an entry whose
-// evidence this pass found incomplete. Authority alone would delete it;
-// incompleteness must win, exactly as it does in a full pass, because
-// incomplete evidence means the pass cannot say the condition resolved. The
-// counters keep the two apart - preserved for the incompleteness rule, carried
-// for the authority rule - so an operator reading the summary can tell WHY a
-// row survived.
+// TestReportScopedPreservesIncompleteWithinAuthority pins the PRECEDENCE between
+// the two preservation rules, the one place they can disagree. A row can be both
+// in the window's authority AND owned by an entry whose evidence this pass found
+// incomplete: authority alone would delete it, and incompleteness must win,
+// because incomplete evidence means the pass cannot say the condition resolved.
+// The counters keep the two apart - preserved for incompleteness, carried for
+// authority - so an operator reading the summary can tell WHY a row survived.
 func TestReportScopedPreservesIncompleteWithinAuthority(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	incomplete := findingWithID("inc", "Incomplete", 1)
@@ -151,16 +143,14 @@ func TestReportScopedPreservesIncompleteWithinAuthority(t *testing.T) {
 	}
 }
 
-// TestReportStillDeletesByOmission pins that adding the scoped path did not
-// weaken the full one. Report passes nil authority, which the shared body reads
-// as FULL deletion authority - so a row absent from a full pass still goes, and
-// nothing is counted as carried.
+// TestReportStillDeletesByOmission pins the nil authority reading: Report passes
+// nil, which the shared body reads as FULL deletion authority, so a row absent
+// from a full pass still goes and nothing counts as carried.
 //
-// The distinction matters because nil and empty are opposites here: nil means
-// "delete anything absent", empty means "delete nothing". A refactor that
-// normalized nil to empty for tidiness would silently make every full pass stop
-// resolving findings, and no count assertion on the full path alone would catch
-// it.
+// nil and empty are opposites here: nil means "delete anything absent", empty
+// means "delete nothing". Normalizing nil to empty for tidiness would silently
+// make every full pass stop resolving findings, and no count assertion on the
+// full path alone would catch it.
 func TestReportStillDeletesByOmission(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	kept := findingWithID("kept", "Kept", 1)

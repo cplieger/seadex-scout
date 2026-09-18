@@ -11,15 +11,13 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// TestCompareAuditConsistency runs the SAME (item, entry) through both align
-// consumers - the daemon's compare pass and the audit report - and pins that
-// they tell one story across the six states the shared vocabulary covers:
-// no-file, aligned, unverifiable (unknown group evidence on either side),
-// mixed-group (>1 group, not aligned), theoretical-only, and incomplete. The
-// daemon is report-by-exception (silence is its no-file and aligned outcome);
-// the audit enumerates, carrying the daemon's vocabulary as the row Qualifier
-// (an unverifiable comparison needs no qualifier - its verdict, unverified,
-// IS the daemon's story).
+// TestCompareAuditConsistency runs the SAME (item, entry) through both align consumers -
+// the daemon's compare pass and the audit report - and pins that they tell one story across
+// the six states the shared vocabulary covers: no-file, aligned, unverifiable, mixed-group,
+// theoretical-only and incomplete. The daemon is report-by-exception, so silence is its
+// no-file and aligned outcome, while the audit enumerates and carries the daemon's
+// vocabulary as the row Qualifier (an unverifiable comparison needs no qualifier: its
+// verdict, unverified, IS the daemon's story).
 func TestCompareAuditConsistency(t *testing.T) {
 	nyaaBest := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},

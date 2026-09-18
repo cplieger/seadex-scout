@@ -9,18 +9,14 @@ import (
 	"github.com/cplieger/jsoncap/v2"
 )
 
-// FuzzDecodePage is a differential fuzz target for the schema-aware bounded
-// page decoder: for any body, decodePage must match the json.Unmarshal
-// oracle it documents parity with. If json.Unmarshal accepts a body,
-// decodePage must either accept it with a deeply-equal pbList or reject it
-// for exactly one reason - a jsoncap cardinality cap or element
-// budget, the one deliberate divergence from stdlib. If json.Unmarshal
-// rejects a body, decodePage must reject it too (never accept what stdlib
-// refuses). This guards the whole parity surface at once: case-insensitive
-// key matching, null-into-container no-ops, duplicate-key overwrite order,
-// trailing-data strictness, scalar type errors, and nil-vs-empty slice
-// identity (jsoncap matches stdlib exactly: null → nil, `[]` → empty
-// non-nil, absent → untouched), so the comparison is a plain DeepEqual.
+// FuzzDecodePage is a differential fuzz target for the schema-aware bounded page
+// decoder: for any body, decodePage must match the json.Unmarshal oracle it
+// documents parity with. An accepted body must decode to a deeply-equal pbList
+// or be rejected for exactly one reason, a jsoncap cardinality cap or element
+// budget, the one deliberate divergence from stdlib; a body stdlib rejects must
+// be rejected too. That covers the whole parity surface at once: case-insensitive
+// keys, null-into-container no-ops, duplicate-key order, trailing data, scalar
+// type errors, and nil-vs-empty slice identity, so a plain DeepEqual suffices.
 func FuzzDecodePage(f *testing.F) {
 	seeds := []string{
 		`{"totalItems":1,"totalPages":1,"items":[{"alID":7,"notes":"n","theoreticalBest":"tb","updated":"2026-01-02 03:04:05.000Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"files":[{"name":"a.mkv","length":1}],"tags":["best"]}]}}]}`,
@@ -103,18 +99,13 @@ func FuzzDecodePage(f *testing.F) {
 }
 
 // FuzzDecodePageHonorsElementBudget is the budget-enforcement half of the
-// decoder's contract, which the parity target cannot see: FuzzDecodePage
-// always decodes at the full per-page bound, while the FETCH-wide element
-// budget works by handing decodePage a REDUCED limit (remainingFetchBudgets),
-// and that reduced limit is what keeps a run of compact-but-huge chunks from
-// amplifying into decoded structs that OOM-kill the 256 MiB container. For any
-// body and any positive limit, an accepted page must charge no more elements
-// than the limit it was handed, must charge at least what it retained (an
-// undercharge silently raises the real fetch-wide ceiling), and must decode to
-// exactly the value the full budget produces (the budget bounds work, never
-// content). A zero limit is out of contract: jsoncap reads a
-// non-positive budget as unbounded and fetchPage only ever passes a positive
-// remaining allowance.
+// decoder's contract, which the parity target cannot see: FuzzDecodePage always
+// decodes at the full per-page bound, while the FETCH-wide element budget hands
+// decodePage a REDUCED limit, and that reduced limit is what keeps a run of
+// compact-but-huge chunks from amplifying into structs that OOM-kill the 256 MiB
+// container. An accepted page must charge no more elements than its limit, at
+// least what it retained (an undercharge raises the real ceiling), and decode to
+// exactly what the full budget produces. A zero limit is out of contract.
 func FuzzDecodePageHonorsElementBudget(f *testing.F) {
 	bodies := []string{
 		`{"items":[{"alID":1,"expand":{"trs":[{"tags":["a","b"]}]}}]}`,

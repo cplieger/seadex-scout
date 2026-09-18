@@ -63,15 +63,13 @@ func TestClassifyDualAudioStructuredOnly(t *testing.T) {
 	}
 }
 
-// TestGroupsOverlap pins the three-valued group-set comparison's contract:
-// a known group shared between the sides (case/whitespace-insensitively) is
-// proven overlap; all-known disjoint sets are proven divergence; an unknown
-// member (the NoGroup sentinel or any of its spelling variants, including the
-// empty string) makes an otherwise matchless comparison indeterminate rather
-// than proving anything - sentinel∩sentinel is Unknown, never Known; a
-// known-known match wins outright even with unknown members alongside; and an
-// empty side is always None (nothing can overlap with an empty set, and an
-// unknown member cannot hide a match against one).
+// TestGroupsOverlap pins the three-valued group-set comparison's contract: a known group
+// shared between the sides (case/whitespace-insensitively) is proven overlap; all-known
+// disjoint sets are proven divergence; an unknown member (the NoGroup sentinel or any
+// spelling variant, the empty string included) makes an otherwise matchless comparison
+// indeterminate, so sentinel-against-sentinel is Unknown and never Known; a known-known
+// match wins outright even with unknown members alongside; and an empty side is always
+// None, which no unknown member can hide a match against.
 func TestGroupsOverlap(t *testing.T) {
 	tests := []struct {
 		name string
@@ -100,17 +98,13 @@ func TestGroupsOverlap(t *testing.T) {
 	}
 }
 
-// TestClassifyKind covers the per-file-evidence-first remux -> encode ->
-// unknown classification in classifyKind: within one text source a
-// delimiter-bounded remux token (remux/BDRemux/BD-Remux/PREMUX) wins, then an
-// encoder marker (codec token, CRF, bitrate, or a generic encode token —
-// encode/encoded/BDRip, the weakest rung); the release names win for the
-// file and the entry-wide notes only fill the gap when the names carry no
-// marker, so a notes remux cannot override a per-file encode marker. The
-// generic encode tokens are delimiter-bounded like the remux tokens, so a
-// bare substring inside a longer word (reencode/reencoded/encoder) is never
-// a marker. These are the branches the daemon and report both key alignment
-// on.
+// TestClassifyKind covers the per-file-evidence-first remux -> encode -> unknown ladder in
+// classifyKind: within one text source a delimiter-bounded remux token wins, then an
+// encoder marker (codec token, CRF, bitrate, or a generic encode token, the weakest rung).
+// The release names win for the file and the entry-wide notes only fill the gap when the
+// names carry no marker, so a notes remux cannot override a per-file encode marker. The
+// generic encode tokens are delimiter-bounded like the remux tokens, so a bare substring
+// inside a longer word (reencode/encoder) is never a marker.
 func TestClassifyKind(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -152,11 +146,11 @@ func TestClassifyKind(t *testing.T) {
 		{name: "remux token wins over a generic encode token", in: Input{Names: []string{"Show BD-Remux encode 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "reencode is not an encode marker", in: Input{Names: []string{"Show reencode 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 		{name: "reencoded is not an encode marker", in: Input{Names: []string{"Show reencoded 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
-		// Plural forms count: the notes field is prose, where the plural is the
-		// natural spelling, and a release whose only kind evidence was a plural
-		// statement used to classify unknown - understating the `kind` attribute
+		// Plural forms count: the notes field is prose, where the plural is the natural
+		// spelling, so a release whose only kind evidence is a plural statement would
+		// otherwise classify unknown - understating the `kind` attribute
 		// and the report row, and letting filters.exclude_remux pass a stated
-		// remux through (l-f62).
+		// remux through.
 		{name: "plural remuxes in notes is a remux marker", in: Input{Names: []string{"Show 1080p"}, Notes: "both remuxes are from the JPBD"}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "plural premuxes is a remux marker", in: Input{Names: []string{"Show S01 PREMUXES"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "plural bd remuxes is a remux marker", in: Input{Names: []string{"Show BD-Remuxes 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
@@ -439,11 +433,10 @@ func TestClassifyMultiNameEvidence(t *testing.T) {
 
 // TestClassifyEarlierNameEvidenceRetained pins the evidence accumulator's
 // retention contract: markers observed in an EARLIER Names element survive
-// marker-less later elements (each observe call ORs into the accumulated
-// flags, never overwrites them). TestClassifyMultiNameEvidence covers only
-// the later-element pickup direction, so a regression that re-evaluates each
-// flag per element (last element wins) passes every existing test; this
-// covers the retention direction.
+// marker-less later elements (each observe call ORs into the accumulated flags, never
+// overwrites them). TestClassifyMultiNameEvidence covers only the later-element pickup
+// direction, so a per-element re-evaluation (last element wins) passes it; this covers
+// the retention direction.
 func TestClassifyEarlierNameEvidenceRetained(t *testing.T) {
 	got := Classify(&Input{Names: []string{"Show S01E01 1080p BDRemux x265", "Show S01E02", "Show S01E03"}})
 	if got.Resolution != "1080p" {
@@ -469,16 +462,13 @@ func TestClassifyFirstResolutionWinsAcrossNames(t *testing.T) {
 	}
 }
 
-// TestResolutionVocabularySingleHome pins the single-home claim
-// resolutionHeights documents: every height in the vocabulary must be BOTH
-// detectable by Classify (reResolution's alternation derives from the slice)
-// and rankable by ResolutionRank (its Atoi path derives from the same slice),
-// the detected value must be the canonical spelling, and the slice must stay
-// in the documented highest-first order the doc comment promises. The
-// hand-enumerated rows in TestClassifyResolution and TestResolutionRank cover
-// today's five heights only, so a sixth added in a shape one consumer cannot
-// parse (a "4K"-style entry: detected as text, yet ranking 0) would silently
-// zero the resolution floor with every existing test green.
+// TestResolutionVocabularySingleHome pins the single-home claim resolutionHeights
+// documents: every height must be BOTH detectable by Classify and rankable by
+// ResolutionRank (both derive from the slice), the detected value must be the canonical
+// spelling, and the slice must stay in highest-first order. The hand-enumerated rows in
+// TestClassifyResolution and TestResolutionRank cover today's five heights only, so a
+// sixth added in a shape one consumer cannot parse (a "4K"-style entry: detected as text,
+// yet ranking 0) would silently zero the resolution floor with every row still green.
 func TestResolutionVocabularySingleHome(t *testing.T) {
 	if len(resolutionHeights) == 0 {
 		t.Fatal("resolutionHeights is empty; the resolution vocabulary must carry every recognized height")
@@ -503,15 +493,13 @@ func TestResolutionVocabularySingleHome(t *testing.T) {
 	}
 }
 
-// TestClassifyReadsTheSharedNameVocabulary is the release-side half of the
-// convergence pinned across both name parsers (the indexer's season/episode
-// tokenizer carries the other half): the marker edges and case classes come
-// from internal/nametoken, so dot and hyphen END a token, underscore ends one
-// too, and the two homographs read as strings.ToLower reads them - U+0130 and
-// U+212A CONTINUE a word while U+017F does not fold onto s. These rows are the
-// table form of the Unicode rows in TestClassifyKind: they state the shared
-// rule directly at the boundary, where a regression would otherwise only show
-// up as a misclassified kind.
+// TestClassifyReadsTheSharedNameVocabulary is the release-side half of the convergence
+// pinned across both name parsers (the indexer's season/episode tokenizer carries the
+// other half): the marker edges and case classes come from internal/nametoken, so dot,
+// hyphen and underscore END a token, and the two homographs read as strings.ToLower reads
+// them - U+0130 and U+212A CONTINUE a word while U+017F does not fold onto s. These rows
+// state the shared rule at the boundary, where a regression would otherwise surface only
+// as a misclassified kind.
 func TestClassifyReadsTheSharedNameVocabulary(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

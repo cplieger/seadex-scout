@@ -189,13 +189,9 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 // HEALTHY (a config typo must not restart-loop the container), but it closes
 // "cycle degraded" with reason=tags-emptied-side AND an emptied_arrs attr naming
 // the arr, since a reason saying "side" without saying which side leaves an
-// operator alerting on it with nothing to fix. Without the arm the steady state
-// was a daemon watching nothing while every cycle read fully successful: the
-// shrink guard cannot cover this on a first-ever boot (there is no prior count to
-// have shrunk from) and stops covering it once the guard's bounded tolerance
-// accepts the smaller library, so the walker's per-cycle WARN was the only lasting
-// signal. A walk whose filter keeps something still closes clean, so the arm
-// cannot invert.
+// operator alerting on it with nothing to fix. The shrink guard cannot cover this on
+// a first-ever boot (no prior count to have shrunk from) and stops covering it once
+// its bounded tolerance accepts the smaller library.
 func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	newScout := func(logger *slog.Logger, sonarr *fakeSonarr, include []string) *Scout {
 		return New(&Deps{
@@ -250,15 +246,13 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	}
 }
 
-// TestWarnCatalogueLinkQuality pins the catalogue-wide tracker-link
-// diagnostics the orchestrator owns (moved here from the seadex client with the
-// diagnostic itself, l-f156): a torrent whose URL the publisher refuses -
-// omitted/empty, a foreign host under a trusted tracker label, or a tracker
-// this build does not know - is counted into ONE aggregate WARN so a tracker
-// host migration or schema drift that strips every release link is alertable
-// from Loki, while the unknown-tracker subset gets its own line naming the
-// remedy only a seadex-scout release can apply. A usable canonical-host URL
-// must count in neither.
+// TestWarnCatalogueLinkQuality pins the catalogue-wide tracker-link diagnostics the
+// orchestrator owns: a torrent whose URL the publisher refuses - omitted/empty, a
+// foreign host under a trusted tracker label, or a tracker this build does not know -
+// is counted into ONE aggregate WARN, so a tracker host migration or schema drift
+// that strips every release link is alertable from Loki, while the unknown-tracker
+// subset gets its own line naming the remedy only a seadex-scout release can apply.
+// A usable canonical-host URL must count in neither.
 func TestWarnCatalogueLinkQuality(t *testing.T) {
 	entries := []seadex.Entry{
 		{AniListID: 1, Torrents: []seadex.Torrent{
@@ -312,10 +306,9 @@ func TestWarnCatalogueLinkQuality(t *testing.T) {
 }
 
 // TestWarnCatalogueLinkQualitySilentWhenEveryLinkPublishes pins the OFF state
-// of both alert-stable lines: a catalogue whose every torrent publishes - and
-// the empty catalogue a failed fetch returns, which the client used to gate on
-// success - must emit neither, so the Loki alerts keyed on them cannot fire on
-// a clean cycle or on an upstream outage.
+// of both alert-stable lines: a catalogue whose every torrent publishes, and the
+// empty catalogue a failed fetch returns, must emit neither, so the Loki alerts
+// keyed on them cannot fire on a clean cycle or on an upstream outage.
 func TestWarnCatalogueLinkQualitySilentWhenEveryLinkPublishes(t *testing.T) {
 	for name, entries := range map[string][]seadex.Entry{
 		"clean": {{AniListID: 1, Torrents: []seadex.Torrent{

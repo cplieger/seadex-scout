@@ -772,17 +772,13 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 }
 
 // TestReportBoundsRetainedUntrustedStrings pins the RESIDENCY bound on the
-// in-memory set. The old dedupe record persisted a 7-field projection whose
-// untrusted strings were capped because it was written to state.json; deleting
-// the persistence did not delete the reason. These rows stay resident for as
-// long as the condition holds, so an oversized SeaDex title, group name or link
-// URL would otherwise sit in a 256 MiB container bounded only by the fetch's own
-// budget - invisible, because the emit path caps per attribute on the way out
-// and never shrinks what it read from.
-//
-// The six closed-vocabulary fields (Arr, Kind, Resolution, Codec, Scope, Status) are
-// deliberately absent: internal/compare writes each from package constants, so no
-// oversized value can reach them and boundRetained does not cap them.
+// in-memory set. These rows stay resident for as long as the condition holds, so
+// an oversized SeaDex title, group name or link URL would otherwise sit in a
+// 256 MiB container bounded only by the fetch's own budget - invisible, because
+// the emit path caps per attribute on the way out and never shrinks what it read
+// from. The six closed-vocabulary fields (Arr, Kind, Resolution, Codec, Scope,
+// Status) are deliberately absent: internal/compare writes each from package
+// constants, so no oversized value can reach them and boundRetained skips them.
 func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 	t.Parallel()
 	huge := strings.Repeat("x", 4*maxAttrBytes)
@@ -837,17 +833,12 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 
 // TestReportBoundsRetainedRowToItsDocumentedCeiling pins the RESIDENCY bound
 // maxRetainedElemBytes' comment states as a number: a retained row's three
-// untrusted slices are bounded at maxRetainedListItems elements, each element at
+// untrusted slices are bounded at maxRetainedListItems elements, each at
 // maxRetainedElemBytes, so the worst-case row is 64 x 256 x 4 = 64 KiB rather
-// than the 2 MiB the count cap alone left it at. Both halves are load-bearing
-// and neither is observable from the emit path, which caps per attribute on the
-// way out and never shrinks what it retained - so dropping capRetainedList's
-// truncation (one SeaDex entry admits 512 torrents, internal/seadex's
-// maxTorrentsPerEntry) or widening capRetainedElem's element budget restores a
-// multi-MB resident row in a 256 MiB container (CWE-400) while the rest of the
-// suite stays green. The sibling TestReportBoundsRetainedUntrustedStrings bounds
-// each element by the Loki LOG-LINE budget, 32x looser, so it cannot see either
-// regression.
+// than the 2 MiB the count cap alone left. Neither half is observable from the
+// emit path, so dropping capRetainedList's truncation (one SeaDex entry admits
+// 512 torrents) or widening capRetainedElem restores a multi-MB resident row in a
+// 256 MiB container (CWE-400) while the sibling test, 32x looser, stays green.
 func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 	t.Parallel()
 	const upstreamMax = 512 // internal/seadex's maxTorrentsPerEntry

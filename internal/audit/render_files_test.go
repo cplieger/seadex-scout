@@ -54,15 +54,14 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 	}
 }
 
-// TestWriteFilesReportPairIsOwnerOnly pins the report pair's least-privilege
-// file mode: a report enumerates the operator's whole library and carries
-// private-tracker page links, and atomicfile's DEFAULT mode is 0o644, so a
-// dropped WithMode(reportfs.FileMode) would publish every report to any local
-// account able to traverse the bind-mounted /config tree with nothing failing.
-// Only the FILE mode is asserted: a default ACL on the parent (containers,
-// group-writable bind mounts) can widen a freshly created directory beyond
-// reportfs.DirMode, so a directory-mode assertion would fail on an
-// honest tree.
+// TestWriteFilesReportPairIsOwnerOnly pins the report pair's least-privilege file
+// mode: a report enumerates the operator's whole library and carries private-tracker
+// page links, and atomicfile's DEFAULT mode is 0o644, so a dropped
+// WithMode(reportfs.FileMode) would publish every report to any local account able to
+// traverse the bind-mounted /config tree with nothing failing. Only the FILE mode is
+// asserted: a default ACL on the parent (containers, group-writable bind mounts) can
+// widen a freshly created directory beyond reportfs.DirMode, so a directory-mode
+// assertion would fail on an honest tree.
 func TestWriteFilesReportPairIsOwnerOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC)}
@@ -414,15 +413,13 @@ func (c *pathExistsCancelCtx) Err() error {
 	return nil
 }
 
-// TestWriteFilesCanceledAfterJSONStillWritesMarkdown pins the point-of-no-return
-// rule: once the JSON half's rename has committed, a cancellation observed from
-// there on must NOT abandon the Markdown half. Abandoning it lost the
-// human-readable product of a ~25-minute generation permanently - reportPairStem
-// requires BOTH halves free, so the next run writes a fresh complete pair and
-// the orphaned .json keeps its stem forever - to save milliseconds of I/O on
-// bytes already rendered. The Markdown write therefore runs on a short detached
-// budget (markdownWriteGrace), and WriteFiles succeeds with a complete pair
-// (l-f190).
+// TestWriteFilesCanceledAfterJSONStillWritesMarkdown pins the point-of-no-return rule:
+// once the JSON half's rename has committed, a cancellation observed from there on must
+// NOT abandon the Markdown half. Abandoning it loses the human-readable product of a
+// ~25-minute generation permanently - reportPairStem requires BOTH halves free, so the
+// next run writes a fresh complete pair and the orphaned .json keeps its stem forever -
+// to save milliseconds of I/O on bytes already rendered. The Markdown write therefore
+// runs on a short detached budget (markdownWriteGrace).
 func TestWriteFilesCanceledAfterJSONStillWritesMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
@@ -461,18 +458,13 @@ func (c *countingCancelCtx) Err() error {
 }
 
 // TestWriteFilesCanceledBeforeJSONRenderWritesNothing pins the report-render
-// cancellation checkpoint (the one WriteFiles stage no existing test
-// reaches): a cancellation observed after the stem probe but before the JSON
-// half is rendered stops the pipeline with the report-render stage error and
-// writes nothing - the report dir is never created.
-//
-// The flip point is an Err() call index, so it has to be recounted whenever a
-// stage gains or loses a context check. Err call #1 is the report-write
-// checkpoint, #2 the stale-temp sweep (atomicfile's CleanupStaleTemps takes a
-// context as of /v3 and checks it once, even for a directory that does not
-// exist yet), #3 the single stem-probe round (empty dir), so flipping at call 4
-// lands exactly on the report-render checkpoint. Flipping at 3 lands one stage
-// early on the stem probe, and at 5 one stage late inside the JSON write.
+// cancellation checkpoint: a cancellation observed after the stem probe but before the
+// JSON half is rendered stops the pipeline with the report-render stage error and writes
+// nothing, so the report dir is never created. The flip point is an Err() call index, so
+// recount it whenever a stage gains or loses a context check: #1 is the report-write
+// checkpoint, #2 the stale-temp sweep (CleanupStaleTemps checks its context once, even
+// for a directory that does not exist yet), #3 the single stem-probe round, so flipping
+// at 4 lands on report-render, 3 one stage early and 5 one stage late.
 func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	ctx := &countingCancelCtx{Context: t.Context(), after: 4}
@@ -491,19 +483,14 @@ func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 	}
 }
 
-// TestWriteFilesNonDurableJSONSkipsMarkdown pins the JSON half's durability
-// ORDERING effect without treating it as a failure. atomicfile reports a rename
-// whose parent-directory fsync failed as Result{Durable:false} with a NIL error:
-// the bytes reached their final path, so nothing is broken and a re-run cannot
-// fix an fsync - WriteFiles must therefore return nil rather than fail the run.
-// What it must still do is skip the Markdown half, because a recovered .md
-// without its machine-readable pair is exactly the state the JSON-first
-// ordering exists to prevent. It must ALSO still announce itself: the run
-// published a machine-readable report and returns success, so suppressing the
-// alert-keyed "report written" record blinded SeadexScoutReportWritten on it
-// (l-f188). The empty markdown name is what says only one half landed. The
-// write seam is a package var because a parent-directory fsync failure cannot
-// be induced on a test filesystem; it runs serially (shared package state).
+// TestWriteFilesNonDurableJSONSkipsMarkdown pins the JSON half's durability ORDERING
+// effect without treating it as a failure. atomicfile reports a rename whose parent-dir
+// fsync failed as Result{Durable:false} with a NIL error: the bytes reached their final
+// path and a re-run cannot fix an fsync, so WriteFiles returns nil. It must still skip
+// the Markdown half (a recovered .md without its machine-readable pair is the state the
+// JSON-first ordering exists to prevent) and still emit the alert-keyed "report written"
+// record, or SeadexScoutReportWritten is blinded; the empty markdown name says only one
+// half landed. Serial: it swaps the atomicWriteFile package var.
 func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	var buf strings.Builder

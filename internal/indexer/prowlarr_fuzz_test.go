@@ -51,22 +51,14 @@ func FuzzSameHTTPOrigin_acceptedURLTargetsProwlarrOrigin(f *testing.F) {
 	})
 }
 
-// FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks exercises the
-// display-URL gate on the two passthrough fields (InfoURL/GUID) with
-// arbitrary tracker-controlled strings. Invariants: anything the gate keeps
-// must - under the consumer's own interpretation (url.Parse) - be an absolute
-// http(s) URL, free of userinfo, whose hostname the served scope's tracker
-// predicate accepts; the kept spelling is a FIXED POINT of the gate; and an
-// unknown scope keeps nothing.
-//
-// The fixed-point leg replaced an "unchanged or empty" leg, which asserted that
-// this gate emits its INPUT. That was the h-f8 defect rather than the contract:
-// admission reads urlform's WHATWG-preprocessed form, so an edge-padded value
-// ("http://nYAA.si  ") was vouched on the browser's reading and then emitted
-// padded, and url.Parse - the arr UI's reading - refuses it. Idempotence is the
-// durable statement of the same property: whatever the gate emits, it judges
-// identically the next time it sees it, so no later transform can smuggle a
-// spelling past the gate that produced it.
+// FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks exercises the display-URL
+// gate on the two passthrough fields (InfoURL/GUID) with arbitrary tracker-controlled
+// strings. Invariants: anything the gate keeps must - under the consumer's own
+// interpretation (url.Parse) - be an absolute http(s) URL, free of userinfo, whose
+// hostname the served scope's tracker predicate accepts; the kept spelling is a FIXED
+// POINT of the gate; and an unknown scope keeps nothing. Idempotence rather than
+// "unchanged or empty" is the durable statement: whatever the gate emits it judges
+// identically next time, so no later transform can smuggle a spelling past it.
 func FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks(f *testing.F) {
 	f.Add("nyaa", "https://nyaa.si/view/1234567")
 	f.Add("ab", "https://animebytes.tv/torrent/1167293/group")

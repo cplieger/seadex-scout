@@ -9,20 +9,10 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestRequestExhaustedTerminalRecordIsDemoted pins the AniList door's terminal
-// log level (h-f21) on BOTH paths through the shared request: Fetch (per-id) and
-// FetchMany (batch). httpx's retry loop publishes its own generic "retries
-// exhausted" verdict, and the matcher republishes the SAME event with strictly
-// more context - "anilist batch prefetch failed; skipping per-id fallback for
-// pending ids" for a total batch outage, "anilist fallback failed" (with al_id)
-// for a per-id miss, and scout's sustained-outage ERROR carrying
-// consecutive_anilist_degraded. Leaving both at Warn put two warnings in Loki
-// for one AniList outage, the less informative one first, so httpx's verdict is
-// demoted to Debug. The option sits on request, which is shared, so the demotion
-// is deliberately wider than the single call path the finding named - correct,
-// because both paths already publish their own contextual record. It is demoted
-// rather than dropped (WithLogger stays) because the per-attempt retry
-// diagnostics are the half worth keeping.
+// TestRequestExhaustedTerminalRecordIsDemoted pins the AniList door's terminal log level
+// on BOTH paths through the shared request: Fetch (per-id) and FetchMany (batch). The
+// WithExhaustedLevel call in request owns why. The demotion is deliberately wider than a
+// single call path because both paths republish the same event with more context.
 func TestRequestExhaustedTerminalRecordIsDemoted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

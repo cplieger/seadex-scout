@@ -10,24 +10,14 @@ import (
 	"github.com/cplieger/seadex-scout/internal/align"
 )
 
-// TestReportJSONWireShapeKeys pins the report JSON's KEY SET, which no
-// round-trip test can see: TestWriteFilesWritesTimestampedPair unmarshals back
-// into Report, so a renamed struct tag round-trips perfectly while every
-// external consumer of report-<stamp>.json breaks. It also pins the
-// omitempty half of the contract the code documents ("a fully obtainable row's
-// JSON shape is unchanged") by asserting a minimal row carries only its
-// always-present keys.
-//
-// "scope" is one of those always-present keys, deliberately: it is the comparison
-// the row's verdict was reached under, so a consumer that cannot read it has to
-// re-derive align's dispatch to know what the verdict means (l-f18). It carries
-// align.ScopeKind's own String() vocabulary rather than the iota, so the wire, the
-// Markdown and the log all name a scope the same way.
-//
-// The "full" fixture is deliberately MAXIMAL rather than realistic - it sets every
-// omitempty field so the key set is complete, which is why it carries mutually
-// exclusive facts (groups AND groups_unknown, best AND unobtainable). Semantics are
-// pinned by the render and audit tests, not here.
+// TestReportJSONWireShapeKeys pins the report JSON's KEY SET, which no round-trip
+// test can see: TestWriteFilesWritesTimestampedPair unmarshals back into Report, so
+// a renamed struct tag round-trips perfectly while every external consumer of
+// report-<stamp>.json breaks. A minimal row pins the omitempty half. "scope" is
+// always present deliberately: it is the comparison the row's verdict was reached
+// under, so a consumer that cannot read it has to re-derive align's dispatch, and it
+// carries align.ScopeKind's own String() vocabulary rather than the iota. The "full"
+// fixture is MAXIMAL rather than realistic, so it carries mutually exclusive facts.
 func TestReportJSONWireShapeKeys(t *testing.T) {
 	t.Run("maximal fixture", func(t *testing.T) {
 		full := &Report{

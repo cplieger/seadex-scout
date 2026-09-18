@@ -9,15 +9,12 @@ import (
 )
 
 // TestAttrJoinerRecapsAfterSanitizeGrowth pins logattr.Joiner.Write's
-// post-sanitize re-cap: runesafe.Sanitize grows each invalid UTF-8 byte into
-// the three-byte U+FFFD, so the pre-sanitize cap alone lets an all-invalid
-// hostile SeaDex value emit ~3x the per-attribute budget - the very
-// log-pipeline line-limit overrun (and memory amplification) the budget
-// exists to prevent. The emitted attribute must stay within the budget plus
-// the "..." marker AND stay valid UTF-8 (the re-cap backs off to a rune
-// boundary, so no partial rune re-mints raw 0x80-0x9F bytes a terminal reads
-// as C1 introducers). Every other bounding test uses valid ASCII, which
-// never grows.
+// post-sanitize re-cap: runesafe.Sanitize grows each invalid UTF-8 byte into the
+// three-byte U+FFFD, so the pre-sanitize cap alone lets an all-invalid hostile
+// SeaDex value emit ~3x the per-attribute budget. The emitted attribute must
+// stay within the budget plus the "..." marker AND stay valid UTF-8: the re-cap
+// backs off to a rune boundary, so no partial rune re-mints raw 0x80-0x9F bytes
+// a terminal reads as C1 introducers.
 func TestAttrJoinerRecapsAfterSanitizeGrowth(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	f := testFinding("grow", "Frieren")
@@ -40,21 +37,14 @@ func TestAttrJoinerRecapsAfterSanitizeGrowth(t *testing.T) {
 	}
 }
 
-// TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator pins the honesty of
-// the "..." marker on the exact-fit boundary: when the pieces consume the whole
-// per-attribute budget, every later source is silently dropped at the
-// separator, and the attribute must still be marked truncated. Without the drop
-// marker the joined attribute renders as a complete list, so an operator reading
-// recommended_groups or release_urls in Loki cannot tell sources were discarded.
-// This is the only path that reaches the joiner's budget-exhausted branch (a
-// single-value attribute writes one piece and the aggregate tests always
-// truncate mid-piece).
+// TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator pins the honesty of the
+// "..." marker on the exact-fit boundary: when the pieces consume the whole
+// per-attribute budget, every later source is dropped at the separator, and
+// without the marker the attribute renders in Loki as a complete list. It is the
+// only path reaching the joiner's budget-exhausted branch.
 //
-// The fill is COMPUTED from maxRetainedElemBytes and maxAttrBytes rather than
-// written as one pathological 8 KiB element, because retention now bounds each
-// element at maxRetainedElemBytes - so no single element can fill the joiner's
-// budget on its own, and reaching the separator boundary takes many of them.
-// Computing it keeps this test correct if either constant moves.
+// The fill is COMPUTED because retention bounds each element, so reaching the
+// separator boundary takes many of them at sizes that move with the constants.
 func TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 
@@ -181,12 +171,10 @@ func TestCapAlertTextAttrEscapesDiscordMarkup(t *testing.T) {
 	}
 }
 
-// TestCapAlertTextAttrEmitsNoHTMLEntities pins the single-sink decision
-// (l-f84): the escaper targets Discord only, so the Slack-mrkdwn entity half
-// is gone and an honest '&', '<' or '>' must reach the annotation as itself.
-// A reintroduced entity encoding would make every such title read
-// "Tiger &amp; Bunny" in the Discord receiver the homelab Alertmanager is
-// provisioned with.
+// TestCapAlertTextAttrEmitsNoHTMLEntities pins the single-sink decision: the
+// escaper targets Discord only, so an honest '&', '<' or '>' must reach the
+// annotation as itself. An entity encoding would make every such title read
+// "Tiger &amp; Bunny" in the Discord receiver Alertmanager is provisioned with.
 func TestCapAlertTextAttrEmitsNoHTMLEntities(t *testing.T) {
 	corpus := []string{
 		"Tiger & Bunny",
@@ -327,17 +315,12 @@ func TestCapAlertTextAttrNeverEndsInADanglingEscape(t *testing.T) {
 
 // TestJoinLinksAttrNeverEmitsAHalfLink pins the release_urls invariant a reader
 // depends on: every element of the space-separated list IS a `tracker=url` pair.
-// The failure it guards is a live one, not a style point. joinLinksAttr charges a
-// link as three writes against one shared budget, and Write returns false once
-// the budget is spent WITHOUT unwinding what it already appended - so a budget
-// that ends between the tracker and its "=url" leaves the tracker name standing
-// alone as a list element. An operator (or a Loki query splitting on "=") then
-// reads a tracker name where a URL belongs, and the "..." marker cannot tell them
-// apart: it means "sources were dropped" in both the honest and the broken case.
-//
-// The fill is COMPUTED so the budget lands exactly on that boundary - the second
-// link's tracker fits and its "=url" does not - because that offset is the only
-// input that reaches the defect, and it moves whenever maxAttrBytes does.
+// joinLinksAttr charges a link as three writes against one shared budget, and
+// Write returns false once the budget is spent WITHOUT unwinding what it already
+// appended, so a budget ending between the tracker and its "=url" leaves the
+// tracker name standing alone as a list element - and the "..." marker reads the
+// same in the honest and the broken case. The fill is COMPUTED because that
+// boundary offset is the only input that reaches the defect.
 func TestJoinLinksAttrNeverEmitsAHalfLink(t *testing.T) {
 	const tracker = "Nyaa"
 	const urlPrefix = "https://nyaa.si/view/"

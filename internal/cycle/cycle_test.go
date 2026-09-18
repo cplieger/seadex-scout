@@ -251,15 +251,12 @@ func TestRunOnceBusyLockPreCancelled(t *testing.T) {
 	}
 }
 
-// TestRunOnceGatedRun pins the OutcomeGated leg of poll's uniform
-// interruption contract: shutdown lands in the race window between
-// RunOnce's pre-Run check and the Exclusive's gate evaluation (simulated
-// deterministically by a gate that cancels the shared context exactly when
-// it is consulted, mirroring NewExclusive's ctx.Err()==nil gate). The
-// run is refused (the cycle never executes), RunOnce reports the
-// interruption (wrapping context.Canceled so main classifies it WARN and
-// exits non-zero), and the health marker is left at the daemon's last real
-// state.
+// TestRunOnceGatedRun pins the OutcomeGated leg of poll's uniform interruption contract:
+// shutdown lands in the race window between RunOnce's pre-Run check and the Exclusive's
+// gate evaluation, simulated deterministically by a gate that cancels the shared context
+// exactly when it is consulted (mirroring NewExclusive's ctx.Err()==nil gate). The run is
+// refused, RunOnce reports the interruption (wrapping context.Canceled so main classifies
+// it WARN and exits non-zero), and the health marker keeps the daemon's last real state.
 func TestRunOnceGatedRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -384,22 +381,14 @@ func (c queuedRerunMarkerCycler) Cycle(context.Context) bool {
 	return true
 }
 
-// TestHealthPublishedInsideCycleLock pins WHERE poll commits a cycle's
-// health verdict, which proves the marker write remains ordered with other
-// cycle state. The marker is cross-process shared state like state.json and
-// feed.json, and `cycle.lock` is what orders every writer of those — but
-// Exclusive releases the lock before Run returns, so a verdict committed after
-// Run is unordered: a newer cycle from
-// a daemon tick or another poll process can publish in between and then be
-// overwritten by this older, superseded verdict.
-//
-// The observable proof is timing against a queued rerun. Run 1 completes and
-// queues demand from another process; the rerun then starts under a fresh
-// acquisition of the same lock. A verdict committed INSIDE the locked body is
-// therefore already on disk when the rerun begins; one deferred until Run
-// returns is not, and the rerun still sees the seeded sentinel. The daemon tick
-// always wrote in-lock (RunLoop's closure), so this also pins parity
-// between the two entry points that share the marker.
+// TestHealthPublishedInsideCycleLock pins WHERE poll commits a cycle's health verdict, so
+// the marker write stays ordered against other cycle state. The marker is cross-process
+// shared state like state.json and feed.json and `cycle.lock` orders every writer of those,
+// but Exclusive releases the lock before Run returns: a verdict committed after Run is
+// unordered, so a newer cycle from a daemon tick or another poll process can publish in
+// between and then be overwritten by this older one. The observable proof is timing against
+// a queued rerun - a verdict committed INSIDE the locked body is already on disk when the
+// rerun begins, while a deferred one leaves the rerun seeing the seeded sentinel.
 func TestHealthPublishedInsideCycleLock(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
@@ -424,20 +413,14 @@ func TestHealthPublishedInsideCycleLock(t *testing.T) {
 	assertMarkerPublished(t, path, true)
 }
 
-// TestRunOnceRanQueuedThenCancelled pins the ran-plus-queued-rerun leg of
-// poll's uniform interruption contract: this process's own run completes
-// healthy, Exclusive then services another process's queued rerun, and
-// shutdown lands during that rerun. Run returns OutcomeRanQueued with a nil
-// own result, but the cancellation observed by then must win — RunOnce
-// returns the interruption error (wrapping context.Canceled, so main
-// classifies it WARN and exits non-zero) instead of the own run's success —
-// while the queued requester itself still returned nil.
-//
-// The interruption governs this INVOCATION's result only. The own run
-// completed, so it published its healthy verdict inside the locked body, where
-// the cycle lock orders the write against every other writer of the shared
-// marker; a later shutdown does not withdraw a completed cycle's health. The
-// interrupted RERUN publishes nothing.
+// TestRunOnceRanQueuedThenCancelled pins the ran-plus-queued-rerun leg of poll's uniform
+// interruption contract: this process's own run completes healthy, Exclusive then services
+// another process's queued rerun, and shutdown lands during that rerun. Run returns
+// OutcomeRanQueued with a nil own result, but the cancellation observed by then wins -
+// RunOnce returns the interruption error (wrapping context.Canceled, so main classifies it
+// WARN and exits non-zero) rather than the own run's success, while the queued requester
+// still returned nil. The interruption governs this INVOCATION's result only: the completed
+// own run already published its healthy verdict, and the interrupted RERUN publishes nothing.
 func TestRunOnceRanQueuedThenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -876,14 +859,12 @@ func TestNewExclusiveMkdirError(t *testing.T) {
 	}
 }
 
-// TestRecordRunHealthWithholdsAfterLateCancellation pins the recording
-// boundary's OWN cancellation check, for the one window no end-to-end path can
-// reach: runOnce returned a healthy nil result with the context still alive, and
-// the shutdown lands before the verdict is committed. Nothing may be published -
-// a result the shutdown reached first is not this process's to publish - so the
-// marker keeps its previous value and the invocation reports the uniform
-// interruption. Called directly because every RunOnce-level path arrives here
-// with a cycleErr that already carries the cancellation, which takes the other
+// TestRecordRunHealthWithholdsAfterLateCancellation pins the recording boundary's OWN
+// cancellation check, for the one window no end-to-end path can reach: runOnce returned a
+// healthy nil result with the context still alive, and the shutdown lands before the verdict
+// is committed. Nothing may be published, so the marker keeps its previous value and the
+// invocation reports the uniform interruption. Called directly because every RunOnce-level
+// path arrives here with a cycleErr already carrying the cancellation, which takes the other
 // arm of the same branch.
 func TestRecordRunHealthWithholdsAfterLateCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1019,16 +1000,13 @@ func TestRunLoopQueueErrorAfterRun(t *testing.T) {
 	}
 }
 
-// TestRunLoopMarkerWriteFailure pins the daemon tick's marker-write failure
-// branch: the tick has no exit code to report the write through and the failure
-// does not self-heal (a full disk, a bad mode on /tmp), so its ERROR line is the
-// only signal the operator gets - the level alerts/logql.yaml's SeadexScoutCycleError
-// rule keys on. Without it a wedged marker restarts the container at
-// WithMaxAge(3*poll_interval) with no logged cause. The marker's directory is
-// present at construction (so the marker does not enter its degraded no-op
-// mode) and is then replaced by a regular file, so SetChecked fails for every
-// UID (root-safe, unlike a read-only-dir chmod). Serial (capture swaps
-// slog.Default).
+// TestRunLoopMarkerWriteFailure pins the daemon tick's marker-write failure branch: the
+// tick has no exit code to report the write through and the failure does not self-heal (a
+// full disk, a bad mode on /tmp), so its ERROR line is the only signal the operator gets,
+// and the level is what alerts/logql.yaml's SeadexScoutCycleError rule keys on. The marker's
+// directory is present at construction (so the marker does not enter its degraded no-op
+// mode) and is then replaced by a regular file, so SetChecked fails for every UID
+// (root-safe, unlike a read-only-dir chmod). Serial: capture swaps slog.Default.
 func TestRunLoopMarkerWriteFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	rec := captureAndCancelOn(t, cancel, "tick could not record cycle health")
@@ -1267,15 +1245,13 @@ func (c markerBreakingCycler) Cycle(context.Context) bool {
 	return true
 }
 
-// TestRunOnceQueuedRerunMarkerWriteFailure pins the queued-rerun leg of
-// recordRunHealth's marker-write failure, the one fault whose ONLY report is
-// its log line: the verdict came from another process's queued demand, so there
-// is no exit code to surface through, and the write does not self-heal (a full
-// disk or a bad mode on /tmp keeps failing until the operator acts). It must
-// therefore log at ERROR - the level alerts/logql.yaml's SeadexScoutCycleError rule
-// keys on, and which that rule's description names by this exact message -
-// while this invocation's own healthy run still exits 0 and the failure is not
-// re-reported as a cycle fault. Serial (capture swaps slog.Default).
+// TestRunOnceQueuedRerunMarkerWriteFailure pins the queued-rerun leg of recordRunHealth's
+// marker-write failure, the one fault whose ONLY report is its log line: the verdict came
+// from another process's queued demand, so there is no exit code to surface through, and the
+// write does not self-heal (a full disk or a bad mode on /tmp keeps failing until the
+// operator acts). So it must log at ERROR, the level alerts/logql.yaml's
+// SeadexScoutCycleError rule keys on and names by this exact message, while this
+// invocation's own healthy run still exits 0. Serial: capture swaps slog.Default.
 func TestRunOnceQueuedRerunMarkerWriteFailure(t *testing.T) {
 	rec := capture.Default(t)
 	ctx := t.Context()

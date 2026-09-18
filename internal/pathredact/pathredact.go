@@ -33,11 +33,8 @@ func Text(dir, s string) string {
 	if dir == "" {
 		return s
 	}
-	// A dir with nothing maskable in it is skipped entirely: a degenerate
-	// value ("." or "/") would rewrite every dot or slash, and a short
-	// separator-less value would rewrite the letters of unrelated words -
-	// including an alert-keyed message a log rule matches on - while being far
-	// too short to be one of this app's secrets.
+	// A dir with nothing maskable in it is skipped entirely; minRedactablePath
+	// owns why.
 	c := filepath.Clean(dir)
 	if !redactablePath(c) {
 		return s

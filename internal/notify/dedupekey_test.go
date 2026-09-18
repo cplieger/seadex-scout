@@ -216,14 +216,13 @@ func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
 }
 
 // TestDedupeKeyBoundsAssembledKey pins the AGGREGATE bound. keyenc bounds a
-// component SET against its raw size, so several separator-heavy components
-// that each pass on their own would assemble into a ~64 KiB key once escaping
-// doubles them. Routing the OUTER assembly through keyenc too is what bounds
-// the assembled key rather than only its parts: the outer set trips the same
-// threshold and reduces to a fixed-size identity. These keys index the
-// in-memory finding set that is re-emitted on every pass, so N hostile
-// findings would otherwise hold N x 64 KiB resident and be walked once per
-// emission. Distinct findings must still key distinctly across the reduction.
+// component SET against its raw size, so several separator-heavy components that
+// each pass on their own would assemble into a ~64 KiB key once escaping doubles
+// them. Routing the OUTER assembly through keyenc too is what bounds the
+// assembled key rather than only its parts. These keys index the in-memory
+// finding set re-emitted on every pass, so N hostile findings would otherwise
+// hold N x 64 KiB resident and be walked once per emission. Distinct findings
+// must still key distinctly across the reduction.
 func TestDedupeKeyBoundsAssembledKey(t *testing.T) {
 	// Just under the raw bound and all separators, so escaping doubles each
 	// component: every one encodes on its own while the assembled set blows

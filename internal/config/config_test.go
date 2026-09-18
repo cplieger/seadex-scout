@@ -300,7 +300,7 @@ func TestValidateRejectsMalformedURLs(t *testing.T) {
 // TestValidateHTTPURLErrorOmitsCredentials pins the field-name-only posture of
 // validateHTTPURL errors: neither validation branch may echo the supplied URL,
 // which can carry a userinfo password, a username-only token, or a query-string
-// apikey destined for the startup log (l-f4).
+// apikey destined for the startup log.
 func TestValidateHTTPURLErrorOmitsCredentials(t *testing.T) {
 	sentinels := []string{"pw-sentinel", "user-token-sentinel", "query-token-sentinel"}
 	tests := map[string]string{
@@ -620,7 +620,7 @@ func TestParseLogLevelWarnsOnUnrecognizedValue(t *testing.T) {
 		t.Errorf("parseLogLevel warning = %v, want message", rec.Messages())
 	}
 	// Field-name-only: the rejected value may be an expanded ${VAR} secret and
-	// must never ride the warning (h-f13).
+	// must never ride the warning.
 	if rec.AttrContains("", "", "verbose") {
 		t.Errorf("parseLogLevel warning echoes the rejected value: %v", rec.Messages())
 	}
@@ -681,7 +681,7 @@ func TestParseLogFormatWarnsOnUnrecognizedValue(t *testing.T) {
 				t.Errorf("parseLogFormat warning = %v, want message", rec.Messages())
 			}
 			// Field-name-only: the rejected value may be an expanded ${VAR}
-			// secret and must never ride the warning (h-f13).
+			// secret and must never ride the warning.
 			if tt.wantWarn && rec.AttrContains("", "", "txt") {
 				t.Errorf("parseLogFormat warning echoes the rejected value: %v", rec.Messages())
 			}
@@ -696,7 +696,7 @@ func TestParseLogFormatWarnsOnUnrecognizedValue(t *testing.T) {
 // every diagnostic a misplaced ${VAR} credential can reach: a secret expanded
 // into log.level, log.format, mode, or poll_interval must never appear in the
 // warning/error corpus, while each field still falls back per its contract
-// (h-f13, CWE-532).
+// (CWE-532).
 func TestConfigDiagnosticsOmitExpandedSecrets(t *testing.T) {
 	const secret = "credential-sentinel-7f3a"
 	t.Setenv("SONARR_API_KEY", secret)
@@ -774,7 +774,7 @@ func TestConfigDiagnosticsOmitExpandedSecrets(t *testing.T) {
 
 // TestValidateWarnsOnMalformedPublicURL pins the documented non-fatal contract
 // for malformed sonarr/radarr public_url values: Validate warns that report
-// deep-links will be broken but still accepts the config (l-f6).
+// deep-links will be broken but still accepts the config.
 func TestValidateWarnsOnMalformedPublicURL(t *testing.T) {
 	tests := map[string]Config{
 		"sonarr public url": {
@@ -951,23 +951,14 @@ func TestValidateIndexerParkedABPasskeyInfo(t *testing.T) {
 	})
 }
 
-// TestValidateIndexerRejectsMalformedFeedKey pins the config boundary's ONE
-// gate on indexer.feed_api_key (validateFeedAPIKey). This key IS the feed's
-// authentication, and the /ab RSS body embeds the operator's AnimeBytes passkey
-// in every download link, so a key that is not a key is refused at startup
-// rather than warned about: internal/indexer refuses to bind behind an
-// unexpanded reference (unusableFeedKey), and the app must not validate clean
-// and then never serve the feed.
-//
-// The gate is POSITIVE - one run of printable characters, no whitespace, no
-// '$' - so it refuses every unexpanded-reference spelling at once, including
-// the unterminated "${NAME" paste no reference regex models. That makes config's
-// acceptance set a SUBSET of what the runtime will serve behind, which is the
-// safe direction for two gates on one credential. The cost, pinned here
-// deliberately: a hand-typed key containing '$' is refused too, and the message
-// says to generate one instead.
-//
-// Field-name-only on every arm: the key value never rides the error or the log.
+// TestValidateIndexerRejectsMalformedFeedKey pins the config boundary's ONE gate on
+// indexer.feed_api_key (validateFeedAPIKey). This key IS the feed's authentication and the
+// /ab RSS body embeds the operator's AnimeBytes passkey in every download link, so a key
+// that is not a key is refused at startup: internal/indexer refuses to bind behind an
+// unexpanded reference, and the app must not validate clean and then never serve the feed.
+// The gate is POSITIVE - one run of printable characters, no whitespace, no '$' - so config's
+// acceptance set is a SUBSET of what the runtime serves behind, at the pinned cost that a
+// hand-typed key containing '$' is refused too. Field-name-only: the value never rides out.
 func TestValidateIndexerRejectsMalformedFeedKey(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
@@ -1313,7 +1304,7 @@ func TestExampleConfigMatchesLoader(t *testing.T) {
 // TestLoadEnvValueWithYAMLSyntax pins the ${VAR} contract for values carrying
 // YAML syntax: expansion happens on parsed string nodes, so a quote or newline
 // in an environment value stays scalar content instead of breaking the
-// document structure (h-f4).
+// document structure.
 func TestLoadEnvValueWithYAMLSyntax(t *testing.T) {
 	t.Setenv("SONARR_API_KEY", "key\"withquote\nand-newline")
 	dir := t.TempDir()
@@ -1331,8 +1322,8 @@ func TestLoadEnvValueWithYAMLSyntax(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsUnknownKeys pins the strict unknown-key contract of Load
-// (h-f12): a misspelled or misplaced key fails the load with the offending key
+// TestLoadRejectsUnknownKeys pins the strict unknown-key contract of Load:
+// a misspelled or misplaced key fails the load with the offending key
 // named and its line kept, instead of being silently ignored (the reproduced
 // case: a config with top-level anime_bytes plus filters.animebytes loaded and
 // validated while Config.AnimeBytes stayed false).
@@ -1407,15 +1398,13 @@ func TestLoadRejectsMistypedKeys(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsMultiDocumentConfig pins the single-document contract of
-// Load (l-f66): yaml.Unmarshal and the strict unknown-key pre-decode both
-// consume only the first YAML document, so a stray "---" separator used to
-// silently drop every section below it. Load must reject a multi-document
-// file loudly — including the empty trailing document a stray end-of-file
-// separator produces — while trailing whitespace/comments and a leading
-// document-start marker (both still single-document files) keep loading.
-// The check itself is yamlenv.CheckSingleDocument; this is the consumer
-// contract pin, asserting its static sentinel surfaces through Load's wrap.
+// TestLoadRejectsMultiDocumentConfig pins the single-document contract of Load:
+// yaml.Unmarshal and the strict unknown-key pre-decode both consume only the first YAML
+// document, so a stray "---" separator would silently drop every section below it. Load
+// rejects a multi-document file loudly, the empty trailing document a stray end-of-file
+// separator produces included, while trailing whitespace/comments and a leading
+// document-start marker keep loading. The check is yamlenv.CheckSingleDocument; this pins
+// that its static sentinel surfaces through Load's wrap.
 func TestLoadRejectsMultiDocumentConfig(t *testing.T) {
 	const arr = "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: k\n"
 	const wantMsg = "more than one YAML document; remove the '---' separator"
@@ -1513,7 +1502,7 @@ func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
 }
 
 // TestLoadParseErrorOmitsSecretAlias pins the fail-closed posture of Load's
-// FIRST yaml.Unmarshal error (h-f18): a literal secret pasted unquoted where a
+// FIRST yaml.Unmarshal error: a literal secret pasted unquoted where a
 // string was expected can be read as a YAML alias, and yaml.v3's parse error
 // ("unknown anchor 'X' referenced") embeds it verbatim. main logs Load's error
 // at startup, so neither the returned error nor the captured log corpus may
@@ -1576,7 +1565,7 @@ func TestLoadDuplicateKeyErrorKeepsLineNumbers(t *testing.T) {
 // that ${VAR} expansion touches only string VALUES: a mapping key carrying an
 // allowlisted reference stays byte-for-byte literal, so an environment value
 // can never rewrite the document structure the operator wrote. With strict
-// unknown-key checking (h-f12) the literal key is now rejected by name - had
+// unknown-key checking the literal key is rejected by name - had
 // it been expanded it would have materialized the real animebytes key and
 // loaded silently with the toggle flipped.
 func TestLoadLeavesMappingKeysLiteral(t *testing.T) {
@@ -1748,13 +1737,11 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 	})
 }
 
-// TestLoadEmptyOrCommentOnlyConfig pins Load's contract for a config file
-// that exists but carries no YAML document (an empty file, or comments only):
-// the load succeeds on the pure defaults baseline (RunMode daemon, default
-// poll interval, default report dir) and the failure surfaces at Validate
-// with the no-arr error, so a `touch`ed-but-never-filled config fails loudly
-// with an actionable message instead of a parse error or a silent half-boot.
-// This is the one Load path where the yaml document node is the zero Node
+// TestLoadEmptyOrCommentOnlyConfig pins Load's contract for a config file that exists but
+// carries no YAML document (empty, or comments only): the load succeeds on the pure defaults
+// baseline and the failure surfaces at Validate with the no-arr error, so a touched but
+// never-filled config fails loudly with an actionable message instead of a parse error or a
+// silent half-boot. It is the one Load path where the yaml document node is the zero Node
 // (Decoder.Decode returns io.EOF), exercising yamlenv.CheckSingleDocument's
 // first-decode-error branch.
 func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
@@ -2541,24 +2528,14 @@ func TestLoadIgnoreFromFile(t *testing.T) {
 	})
 }
 
-// TestValidateRejectsUnusableABPasskey pins the config boundary's ONE format
-// gate on indexer.ab_passkey (validateABPasskey). A configured passkey that is
-// not the shape AnimeBytes issues cannot build a grabbable download link, so it
-// is a HARD startup error rather than a warning: the alternative is a daemon
-// that validates clean, starts, and then hands every arr a link that fails at
-// the tracker. Empty stays the documented off state.
-//
-// The gate is POSITIVE - length plus no whitespace - which is why no case here
-// is about a placeholder SPELLING. Every unexpanded reference is refused by the
-// same rule that refuses a truncated paste, including the unterminated "${NAME"
-// form no reference regex matches. Reference recognition survives only as a
-// hint inside the message, so it never decides pass/fail.
-//
-// The lengths are upstream authority, not an invention: Jackett's AnimeBytes
-// indexer rejects a passkey with "expected length: 32, 48, or 56" and
-// Prowlarr's AnimeBytesSettingsValidator asserts the same three. Neither
-// constrains the CHARSET, so a well-shaped non-hex value must pass - the app
-// validates shape, never correctness.
+// TestValidateRejectsUnusableABPasskey pins the config boundary's ONE format gate on
+// indexer.ab_passkey (validateABPasskey). A passkey that is not the shape AnimeBytes issues
+// cannot build a grabbable download link, so it is a HARD startup error rather than a
+// warning; empty stays the documented off state. The gate is POSITIVE - length plus no
+// whitespace - so no case here is about a placeholder SPELLING: every unexpanded reference
+// is refused by the rule that refuses a truncated paste, and reference recognition survives
+// only as a hint in the message. The lengths are upstream authority (Jackett and Prowlarr
+// both assert 32, 48 or 56), and neither constrains the CHARSET, so non-hex must pass.
 func TestValidateRejectsUnusableABPasskey(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",

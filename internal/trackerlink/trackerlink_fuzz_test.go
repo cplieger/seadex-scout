@@ -9,19 +9,11 @@ import (
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
-// FuzzPublish fuzzes the unsafe-scheme and host-binding gate over the
-// untrusted upstream (SeaDex-supplied) torrent URL and tracker name.
-// Invariants: a protocol-relative URL (//host/...) is always rejected (empty
-// result); a non-empty result never carries a non-http(s) scheme (javascript:,
-// data:, file: must never become clickable links in findings/reports/feeds);
-// a non-empty result's host is always bound to a canonical tracker host from
-// the internal/tracker table (so a regression that drops the
-// tracker.LookupByHost gate cannot let https://evil.example/x or a
-// suffix-confusion host through); an absolute http(s) input that survives the
-// tracker host-binding gate is returned unchanged apart from trimming and the
-// cleartext-to-https scheme upgrade (l-f89); and
-// the function is idempotent (re-running on its own output is a fixed point,
-// so a link already made usable is never re-mangled).
+// FuzzPublish fuzzes the unsafe-scheme and host-binding gate over the untrusted upstream
+// (SeaDex-supplied) torrent URL and tracker name. Every invariant is stated at the
+// assertion that holds it: no protocol-relative form, no non-http(s) scheme, no userinfo
+// authority, a host bound to the internal/tracker table, absolute passthrough apart from
+// trimming and the cleartext upgrade, and idempotence.
 func FuzzPublish(f *testing.F) {
 	f.Add("https://nyaa.si/view/1", "Nyaa")
 	f.Add("http://nyaa.si/view/1", "Nyaa")
@@ -56,14 +48,11 @@ func FuzzPublish(f *testing.F) {
 	f.Add("torrents.php?id=1&torrentid=2", "Nyaa")
 	f.Fuzz(func(t *testing.T, rawURL, trackerName string) {
 		out := Publish(trackerName, rawURL)
-		// The publisher's passthrough is "unchanged APART FROM EDGE TRIMMING",
-		// and the trim is urlform's, not strings.TrimSpace's: it strips a C0
-		// control or space (the WHATWG URL preprocessing step) AND Unicode
-		// whitespace, so it removes "\x00".."\x20" plus NBSP and NEL while
-		// keeping DEL. Modelling it as TrimSpace made this property falsifiable
-		// on any value with an edge C0 control ("http://nyaa.si/0\x0f" published
-		// correctly as "https://nyaa.si/0" and the property demanded the control
-		// byte back), which is a defect in the oracle, not in the publisher.
+		// The publisher's passthrough is "unchanged APART FROM EDGE TRIMMING", and the trim
+		// is urlform's, not strings.TrimSpace's: it strips a C0 control or space (the WHATWG
+		// URL preprocessing step) AND Unicode whitespace, so it removes "\x00".."\x20" plus
+		// NBSP and NEL while keeping DEL. Modelling it as TrimSpace falsifies the property on
+		// any value with an edge C0 control, which is an oracle defect, not a publisher one.
 		trimmed := strings.TrimFunc(rawURL, func(r rune) bool {
 			return r <= 0x20 || unicode.IsSpace(r)
 		})
@@ -101,11 +90,10 @@ func FuzzPublish(f *testing.F) {
 				t.Errorf("Publish(%q, tracker %q) = %q carries a non-http(s) scheme", rawURL, trackerName, out)
 			}
 		}
-		// Passthrough: an absolute http(s) input comes back unchanged (trimmed),
-		// EXCEPT that a cleartext scheme is upgraded to https (l-f89): the host
-		// is proven canonical before the scheme is read, and every canonical
-		// tracker is https, so the link is upgraded rather than dropped. Only
-		// the scheme changes - the rest survives byte-for-byte, mixed case
+		// Passthrough: an absolute http(s) input comes back unchanged (trimmed), EXCEPT that
+		// a cleartext scheme is upgraded to https: the host is proven canonical before the
+		// scheme is read and every canonical tracker is https, so the link is upgraded rather
+		// than dropped. Only the scheme changes; the rest survives byte-for-byte, mixed case
 		// included.
 		tl := strings.ToLower(trimmed)
 		switch {

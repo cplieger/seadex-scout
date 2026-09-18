@@ -109,8 +109,8 @@ func FuzzParseMediaPage(f *testing.F) {
 // state.json) a title that exceeds the documented byte cap -- the
 // resource-exhaustion defense toMedia exists to enforce -- and its format must
 // be a member of the shared mediatype vocabulary or the unknown sentinel, which
-// is what bounds that field by construction now that a defective format costs
-// only the arr hint (l-f140).
+// is what bounds that field by construction, since a defective format costs only the
+// arr hint.
 func assertMediaBounded(t *testing.T, m Media, raw []byte) {
 	t.Helper()
 	for _, title := range m.Titles {

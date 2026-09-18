@@ -9,19 +9,12 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestPublishSafeOutputProperty is the every-PR property companion to
-// FuzzPublish (whose coverage-guided exploration only runs in the
-// weekly fuzz job): for ANY input URL and tracker, a non-empty Publish
-// result parses as an absolute http(s) URL with a non-empty host and no
-// userinfo (the link-safety gate: no javascript:/data:/file:, no
-// protocol-relative form, no bare path, no credential-bearing authority),
-// a non-empty result's host is bound to a canonical tracker host from the
-// internal/tracker table, and the result is a fixed point (feeding a usable
-// link back in returns it unchanged, so an already-usable link is never
-// re-mangled). The host component is DRAWN from canonical and
-// near-canonical tracker hosts: a random rest never spells a tracker host,
-// so without it every absolute draw dies on the host-binding gate and the
-// assertions never run on the absolute arm at all.
+// TestPublishSafeOutputProperty is the every-PR property companion to FuzzPublish, whose
+// coverage-guided exploration only runs in the weekly fuzz job; it holds the same
+// link-safety, host-binding and fixed-point invariants over drawn inputs. The host
+// component is DRAWN from canonical and near-canonical tracker hosts: a random rest never
+// spells a tracker host, so without it every absolute draw dies on the host-binding gate
+// and the assertions never run on the absolute arm at all.
 func TestPublishSafeOutputProperty(t *testing.T) {
 	trackers := []string{"Nyaa", "AB", "AnimeTosho", "RuTracker", "unknown", ""}
 	prefixes := []string{"", "//", "/", "  ", "javascript:", "data:", "file://", "https://", "http://", "HTTPS://", ":"}

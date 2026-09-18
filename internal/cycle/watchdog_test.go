@@ -11,18 +11,14 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestWatchdogLease pins the daemon's freshness lease: external mode arms no
-// watchdog, an interval well above the floor keeps the documented
-// three-interval lease (a 3h interval still restarts a wedged loop at 9h), and
-// a shorter interval is floored at coldReconcileAllowance - the marker is
-// refreshed only when a pass COMPLETES, so a tighter deadline would call a
-// slow-but-healthy cold reconcile wedged and restart it before it can persist
-// its memo.
-//
-// The lease is stated in terms of this package's own constants, so the test
-// carries no app-package dependency; the coupling to the CONFIG's default
-// cadence is a wiring fact and is pinned in the composition root's test, beside
-// the call that arms this lease from cfg.PollInterval.
+// TestWatchdogLease pins the daemon's freshness lease: external mode arms no watchdog, an
+// interval well above the floor keeps the documented three-interval lease (a 3h interval
+// still restarts a wedged loop at 9h), and a shorter interval is floored at
+// coldReconcileAllowance - the marker is refreshed only when a pass COMPLETES, so a tighter
+// deadline calls a slow-but-healthy cold reconcile wedged and restarts it before it can
+// persist its memo. The lease is stated in this package's own constants, so the test carries
+// no app-package dependency; the coupling to the CONFIG's default cadence is pinned in the
+// composition root's test, beside the call that arms this lease from cfg.PollInterval.
 func TestWatchdogLease(t *testing.T) {
 	for name, tc := range map[string]struct {
 		interval time.Duration

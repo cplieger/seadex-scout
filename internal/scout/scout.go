@@ -86,8 +86,8 @@ var _ MappingSource = (*mapping.Loader)(nil)
 // field is one the cycle reaches: it compares, notifies, and rebuilds the feed.
 // The read-only one-shot report has its own role struct (ReportDeps) because the
 // two entry points need DISJOINT sets, so the composition root builds only the
-// components the flow it is starting can call - and a mis-wired flow does not
-// compile, where it used to be a nil-pointer panic.
+// components the flow it is starting can call, and a mis-wired flow does not
+// compile.
 type Deps struct {
 	Logger   *slog.Logger
 	Store    StateStore
@@ -782,10 +782,10 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
 // walk is unhealthy and persists only the refreshed mapping cache. It is the ONLY
-// arm that stops the cycle here: a walk that shrank suspiciously no longer skips
-// the comparison (mergeShrunkSides carries that side's prior items instead), and
-// a partial snapshot is not gated either - the compare proceeds on the clean
-// items with the Failed items' rows carried forward.
+// arm that stops the cycle here: a walk that shrank suspiciously still compares
+// (mergeShrunkSides carries that side's prior items instead), and a partial
+// snapshot is not gated either - the compare proceeds on the clean items with the
+// Failed items' rows carried forward.
 func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, mapCache *mapping.Cache, errs cycleOutcomes) (handled, healthy bool) {
 	if errs.walk != nil {
 		// Persist only the refreshed mapping cache: discarding it re-downloads an

@@ -7,17 +7,13 @@ import (
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
-// FuzzClassify fuzzes the pure classifier over untrusted SeaDex/arr strings
-// (release names, entry notes, group, tracker, MediaInfo codec) and asserts the
-// bounded-output and cross-function invariants the compare and audit layers
-// rely on: Kind/TrackerType/Codec/Resolution stay inside their enums, Group is
-// never empty (the NOGRP fallback), the classified group is never PROVEN
-// divergent from its own raw group under GroupsOverlap (a known group matches
-// itself; an unknown-evidence group is indeterminate, never None), NormalizeGroup
-// is idempotent, a bounded remux token in the release name always classifies
-// remux (per-file evidence wins), a parsed resolution always ranks above 0 in
-// ResolutionRank, and no text can ever set DualAudio (the structured input
-// flag, unset here, is its only source).
+// FuzzClassify fuzzes the pure classifier over untrusted SeaDex/arr strings (release
+// names, entry notes, group, tracker, MediaInfo codec) and asserts the bounded-output and
+// cross-function invariants compare and audit rely on, each stated at its own assertion.
+// Two worth naming: the classified group is never PROVEN divergent from its own raw group
+// under GroupsOverlap (a known group matches itself, an unknown-evidence group is
+// indeterminate, never None), and no text can set DualAudio, whose only source is the
+// structured input flag left unset here.
 func FuzzClassify(f *testing.F) {
 	f.Add("Show 1080p BDRemux [Dual Audio]", "best remux available", "PMR", "Nyaa", "")
 	f.Add("Show x265 crf18", "", "", "AB", "HEVC")

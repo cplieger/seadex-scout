@@ -210,9 +210,9 @@ func TestTrackerURLsMalformedURLFailsClosedToABSlot(t *testing.T) {
 // under: canonicalTracker prefers the canonical tracker table over the
 // untrusted SeaDex label, falls back to the URL's own host when the label
 // names no known tracker, and labels an unknown host with itself so a
-// non-Nyaa public link is never published nameless (the l-f5 defect). The
-// existing tests only ever supply canonical-tracker hosts, so the host
-// fallback and the self-labelling last resort are unexercised.
+// non-Nyaa public link is never published nameless. The other tests supply only
+// canonical-tracker hosts, so the host fallback and the self-labelling last
+// resort are unexercised there.
 func TestPublicLinkAlertLabel(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -266,14 +266,13 @@ func TestPublicLinkAlertLabel(t *testing.T) {
 }
 
 // TestTrackerURLsHostOverridesMismatchedLabel pins the host-first precedence
-// canonicalTracker applies when the untrusted SeaDex label contradicts the
-// URL: a link labeled "Nyaa" whose host is AnimeTosho must NOT occupy the
-// nyaa slot (alerts/logql.yaml renders that slot under a hardcoded "[Nyaa]" label,
-// so it would mislabel the destination) and must not displace the genuine
-// Nyaa link that follows it. Every other case in this file supplies matching
-// label/host pairs, so a label-first canonicalTracker (or a label-only Nyaa
-// decision in classifyTrackerLink) still satisfies them; these assertions
-// fail under either regression.
+// canonicalTracker applies when the untrusted SeaDex label contradicts the URL: a
+// link labeled "Nyaa" whose host is AnimeTosho must NOT occupy the nyaa slot
+// (alerts/logql.yaml renders that slot under a hardcoded "[Nyaa]" label, so it
+// would mislabel the destination) and must not displace the genuine Nyaa link
+// that follows it. Every other case in this file supplies matching label/host
+// pairs, so a label-first canonicalTracker still satisfies them; these
+// assertions fail under either regression.
 func TestTrackerURLsHostOverridesMismatchedLabel(t *testing.T) {
 	links := gradedLinks(
 		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
@@ -370,7 +369,7 @@ func TestTrackerURLsPrefersNyaaWithinTheHeadlineTier(t *testing.T) {
 	}
 }
 
-// TestABSlotTrackerNamesTheRealTracker pins l-f121: the AB slot is filled by a
+// TestABSlotTrackerNamesTheRealTracker pins that the AB slot is filled by a
 // fail-closed grade that reads the untrusted SeaDex tracker LABEL first, so it
 // can legitimately hold a link whose host belongs to a public tracker. The
 // alert must not announce that link as AnimeBytes, so the slot publishes the

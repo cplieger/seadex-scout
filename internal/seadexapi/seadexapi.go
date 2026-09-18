@@ -5,10 +5,6 @@
 // is polite to the Cloudflare-fronted community service (a descriptive
 // User-Agent and a configurable inter-page delay), and bounds every response
 // before decoding. It is read-only and never authenticates.
-//
-// The wire shape, the paging pipeline and the decode budgets change with the
-// releases.moe API; the MODEL they produce (internal/seadex) changes with this app's
-// comparison rules.
 package seadexapi
 
 import (
@@ -34,8 +30,7 @@ import (
 )
 
 const (
-	// DefaultPageDelay is the politeness delay between SeaDex pages. It is releases.moe
-	// contract knowledge, so it lives beside the client that paces itself with it.
+	// DefaultPageDelay is the politeness delay between SeaDex pages.
 	DefaultPageDelay = 2 * time.Second
 
 	// entriesPath is the PocketBase collection endpoint for SeaDex entries.
@@ -46,9 +41,8 @@ const (
 	// maxPages caps pagination so a misbehaving API cannot loop forever
 	// (~6 pages expected at perPage=500).
 	maxPages = 200
-	// maxEntries is the ceiling a whole fetch's accumulated entries must stay under. It is
-	// not enforced at runtime because it cannot be crossed: the per-page items cap and
-	// the maxPages bound cap a walk at maxPages*perPage, and the guard below keeps it so.
+	// maxEntries is the ceiling a whole fetch's accumulated entries must stay under. No
+	// runtime guard: the compile-time guard below proves maxPages*perPage cannot reach it.
 	maxEntries = 200_000
 	// maxPageBytes bounds one page (500 entries with expanded torrents) before
 	// decode, guarding against an oversized or malicious payload.
@@ -73,8 +67,8 @@ const (
 	// ~24-byte ASCII timestamp, so anything longer must not be echoed into a request.
 	maxCursorValueBytes = 64
 	// maxLoggedCursorBytes bounds a REJECTED cursor value before it is quoted into an
-	// error internal/scout logs as a slog attribute, so a hostile page cannot balloon a
-	// Loki record. Sized just over maxCursorValueBytes so an honest value stays readable.
+	// error logged as a slog attribute, so a hostile page cannot balloon a log record.
+	// Sized just over maxCursorValueBytes so an honest value stays readable.
 	maxLoggedCursorBytes = 128
 	// maxLoggedDecodeBytes bounds a page-DECODE failure's rendered text: stdlib json
 	// renders a rejected number literal verbatim, so the message is otherwise bounded
@@ -92,8 +86,8 @@ const (
 // Cardinality caps on one decoded page, enforced by decodePage DURING the token-level
 // decode. json.Unmarshal materializes the whole decoded value before any caller-side
 // count check can run, so compact serialized elements could otherwise amplify a bounded
-// body far beyond maxPageBytes. The values are generous headroom over the honest
-// catalogue, not tuning knobs; a page crossing one aborts the fetch.
+// body far beyond maxPageBytes. Every value is headroom over the honest catalogue, not a
+// tuning knob; a page crossing one aborts the fetch.
 const (
 	// maxTorrentsPerEntry bounds one entry's expanded trs relation (honest
 	// data: tens at most, one torrent per episode on unpacked seasons).
@@ -150,19 +144,14 @@ var errCumulativeElements = fmt.Errorf("seadex: decoded elements exceeded the re
 	"and maxPageElements too if one page alone carries more than %d elements); "+
 	"refusing to compare against a truncated view", maxTotalElements, maxPageElements)
 
-// fetchPage's classification of the aggregate element budget rides jsoncap's
-// ErrElementBudget sentinel: the full per-page bound is a per-page violation, while a
-// budget-reduced limit is the fetch-wide cumulative cap.
-
 // Client fetches entries from a SeaDex PocketBase instance.
 type Client struct {
 	http      *http.Client
 	log       *slog.Logger
 	baseURL   string
 	pageDelay time.Duration
-	// mu guards lastAccepted, the in-process catalogue-size baseline
-	// warnCatalogueShrink compares against. FetchEntries is serialized per process
-	// today, so the mutex buys a future concurrent caller safety.
+	// mu guards lastAccepted, the in-process baseline warnCatalogueShrink compares
+	// against. FetchEntries is serialized today, so it only buys a concurrent caller.
 	mu           sync.Mutex
 	lastAccepted int
 }
@@ -208,8 +197,6 @@ func NewClient(httpClient *http.Client, baseURL string, opts ...Option) *Client 
 	}
 }
 
-// ---- PocketBase wire model and paging pipeline ----
-
 // pbList is the PocketBase list-response envelope for the entries collection.
 type pbList struct {
 	Items      []pbEntry `json:"items"`
@@ -235,7 +222,6 @@ type pbExpand struct {
 	Trs []seadex.Torrent `json:"trs"`
 }
 
-// toEntry converts a decoded PocketBase record into a public Entry.
 func (r *pbEntry) toEntry() seadex.Entry {
 	return seadex.Entry{
 		Torrents:        r.Expand.Trs,
@@ -253,17 +239,14 @@ func (r *pbEntry) toEntry() seadex.Entry {
 // last-writer assignment would hand both completeness guards a shrinking denominator
 // and let a truncated walk satisfy them.
 type fetchTotals struct {
-	// seenAniListIDs is the identity set of every entry accepted so far, so
-	// the walk can prove count completeness is also KEY completeness (see
-	// validatePageIdentities).
+	// seenAniListIDs is the identity set validatePageIdentities accumulates.
 	seenAniListIDs map[int]struct{}
 	bytes          int
 	elements       int
 	reportedTotal  int
 	reportedPages  int
-	// chunks counts the walk's delivered chunks. A ONE-chunk walk is the only shape
-	// whose delivered count and the totalItems that counts them arrive in the SAME
-	// response, which is what makes the window shortfall a sound signal.
+	// chunks counts delivered chunks. A ONE-chunk walk is the only shape whose delivered
+	// count and the totalItems counting them arrive in the SAME response.
 	chunks int
 }
 
@@ -308,7 +291,6 @@ func joinFilters(cur cursor, opts Options) string {
 // filterSafe already refuses the shapes with no business in an id or timestamp.
 var filterQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
-// quoteFilterValue renders v as a double-quoted PocketBase filter literal.
 func quoteFilterValue(v string) string {
 	return `"` + filterQuoteEscaper.Replace(v) + `"`
 }
@@ -328,9 +310,8 @@ func filterSafe(v string) bool {
 	return true
 }
 
-// logCursor bounds and cleans one untrusted cursor value before it is quoted into an
-// error internal/scout logs as a slog attribute; the single application of
-// maxLoggedCursorBytes.
+// logCursor bounds and cleans one untrusted cursor value for a log attribute; the single
+// application of maxLoggedCursorBytes.
 func logCursor(v string) string {
 	return runesafe.SanitizeSingleLineBounded(v, maxLoggedCursorBytes)
 }
@@ -363,13 +344,11 @@ func cursorAdvances(next, prev cursor) bool {
 
 // advanceCursor validates a non-empty chunk's whole keyset sequence and returns the
 // position after it. EVERY record is checked, in order, from the previous position,
-// because that ordering premise is what the walk's completeness argument rests on: a
-// chunk shorter than perPage is read as exhaustion only because the filter asked for
-// everything after the cursor. So it runs for a SHORT terminal chunk too.
-//
-// It fails the fetch when any record's pair is unusable - missing, unsafe, or not
-// strictly after its predecessor (equality would re-request forever, a regression would
-// re-read a consumed prefix while later records went unread).
+// because a chunk shorter than perPage is read as exhaustion only on the premise that
+// the filter returned everything after the cursor - so it runs for a SHORT terminal
+// chunk too. It fails the fetch when a record's pair is unusable: missing, unsafe, or
+// not strictly after its predecessor (equality would re-request forever, a regression
+// would re-read a consumed prefix while later records went unread).
 func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 	pos := prev
 	for i := range items {
@@ -454,8 +433,7 @@ func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) 
 	}
 	var list pbList
 	if err := json.Unmarshal(body, &list); err != nil {
-		// Bounded like the page decoder's arm: stdlib json can render a rejected number
-		// literal verbatim, so the message is otherwise bounded only by the body cap.
+		// Bounded for the reason maxLoggedDecodeBytes states.
 		return 0, fmt.Errorf("seadex: decode window count: %s",
 			runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes))
 	}
@@ -472,9 +450,8 @@ func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) 
 // of the catalogue. It sleeps pageDelay between chunks, and a chunk failure aborts:
 // partial results are discarded so a caller never compares against a truncated view.
 //
-// A catalogue completing with ZERO entries is an error, as is one that retained less
-// than HALF the reported totalItems; a smaller disagreement is logged and still
-// returned, provided the walk ended on a SHORT chunk rather than an empty one.
+// Zero entries is an error, as is retaining less than HALF the reported totalItems; a
+// smaller disagreement is logged and returned when the walk ended on a SHORT chunk.
 func (c *Client) FetchEntries(ctx context.Context, opts Options) ([]seadex.Entry, error) {
 	if opts.Mode == FetchWindow && opts.Since.IsZero() {
 		return nil, errors.New("seadex: FetchWindow needs a non-zero Since")
@@ -527,18 +504,14 @@ func walkBudgetError(parent, walk context.Context, err error, page, fetched int)
 // entries is an error (SeaDex is never legitimately empty for this app's use), so is a
 // catalogue no response ever reported a totalItems for, so is a collected count below
 // HALF the reported total; a smaller disagreement logs the alert-stable count-mismatch
-// WARN and still returns the entries. The catalogue's TRACKER-LINK quality is
-// deliberately NOT diagnosed here: that judgment needs the publish policy, a layer above
-// this wire client, so internal/scout owns it. warnCatalogueShrink stands apart because
-// no upstream number vouches for it.
+// WARN and still returns the entries.
 func (c *Client) finishFetch(all []seadex.Entry, tot fetchTotals, mode FetchMode) ([]seadex.Entry, error) {
 	if err := validateFinishedFetch(len(all), tot, mode); err != nil {
 		return nil, err
 	}
 	if mode == FetchFull {
-		// Both of these compare the result against a CATALOGUE-scale expectation, and a
-		// window is a legitimately varying subset of that - so running either would emit
-		// a shrink diagnostic every tick and poison the next full walk's comparison.
+		// Both compare against a CATALOGUE-scale expectation, and a window is a legitimately
+		// varying subset: running either would poison the next full walk's comparison.
 		c.logFinishedFetchWarnings(len(all), tot)
 		c.warnCatalogueShrink(len(all))
 	} else {
@@ -550,17 +523,13 @@ func (c *Client) finishFetch(all []seadex.Entry, tot fetchTotals, mode FetchMode
 }
 
 // warnWindowShortfall reports a ONE-CHUNK window that delivered fewer entries than the
-// same response claimed to be selecting - the freshness half of the product going
-// silently missing, since the tick would otherwise log a count indistinguishable from a
-// complete pass. It is its OWN message rather than a reuse of the catalogue-count
-// mismatch, which is a CATALOGUE-scale comparison a window must not run. Gated on ONE
-// chunk, the sound case: delivered items and the totalItems counting them arrive in the
-// same response. A WARN rather than a refusal, because a short window cannot falsely
-// resolve anything and refusing would discard real freshness.
+// same response claimed to be selecting, since the tick would otherwise log a count
+// indistinguishable from a complete pass. Gated on ONE chunk, the sound case: delivered
+// items and the totalItems counting them arrive in the same response. A WARN rather than
+// a refusal, because a short window cannot falsely resolve anything.
 func (c *Client) warnWindowShortfall(count int, tot fetchTotals) {
-	// A non-positive reported total needs no arm of its own: count is a slice length, so
+	// A non-positive reported total needs no arm: count is a slice length, so
 	// count >= tot.reportedTotal already returns for it, the empty window included.
-	// reportedTotal is never negative here (fetchAndAppend raises it from zero with max).
 	if tot.chunks != 1 || count >= tot.reportedTotal {
 		return
 	}
@@ -572,7 +541,7 @@ func (c *Client) warnWindowShortfall(count int, tot fetchTotals) {
 // reportedTotalFitsPages is the one catalogue-metadata guard BOTH fetch modes keep:
 // totalItems cannot exceed what the reported pages can hold, whatever the filter,
 // because it catches the upstream contradicting ITSELF. refusal names what this fetch
-// is declining to do, so both modes keep their own wording over one predicate.
+// is declining to do, so each mode supplies its own wording.
 func reportedTotalFitsPages(tot fetchTotals, refusal string) error {
 	if tot.reportedTotal <= tot.reportedPages*perPage {
 		return nil
@@ -587,8 +556,7 @@ func reportedTotalFitsPages(tot fetchTotals, refusal string) error {
 func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
 	if mode == FetchWindow {
 		// A window legitimately holds nothing and its reported total counts MATCHING
-		// records, so neither the empty-catalogue nor the below-half arm describes
-		// anything real here. The metadata-consistency arm still applies.
+		// records, so only the metadata-consistency arm describes anything real here.
 		if err := reportedTotalFitsPages(tot, "refusing a window it cannot vouch for"); err != nil {
 			return err
 		}
@@ -607,8 +575,8 @@ func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
 	}
 	if degradation.Shrunk(count, tot.reportedTotal) {
 		// The keyset cursor makes a SKIPPED record structurally impossible, so a shortfall
-		// can only be a mid-fetch delete or a walk the upstream ended early. Losing more
-		// than HALF is not credible, and erroring PRESERVES existing findings.
+		// is a mid-fetch delete or an early-ended walk. Losing half is not credible, and
+		// erroring PRESERVES existing findings.
 		return fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
 			"refusing to compare against a truncated view", count, tot.reportedTotal)
 	}
@@ -619,9 +587,8 @@ func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
 // catalogue that PASSED validateFinishedFetch: the alert-stable count mismatch
 // and the budget-mostly-spent capacity warning.
 func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
-	// No reportedTotal > 0 conjunct: this runs only after validateFinishedFetch, which
-	// already fails a FULL fetch whose reported total is not positive, so the mismatch
-	// WARN can never fire with want=0.
+	// No reportedTotal > 0 conjunct: validateFinishedFetch already failed a FULL fetch
+	// whose reported total is not positive, so the mismatch WARN cannot fire with want=0.
 	if count != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", count, "want", tot.reportedTotal)
 	}
@@ -636,11 +603,10 @@ func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
 // warnCatalogueShrink warns when an ACCEPTED catalogue is a suspicious truncation of
 // the previous one THIS PROCESS accepted, then adopts it as the new baseline.
 //
-// Every other completeness check here is SELF-ATTESTED: they compare the collected count
-// against the totalItems the SAME responses reported, so an upstream that serves 200
-// entries and reports 200 satisfies all of them. It adopts the new count whether or not
-// it warned, so a legitimate shrink warns once and settles; persisting the baseline and
-// REFUSING on a streak would newly degrade cycles that succeed today.
+// Every other completeness check here is SELF-ATTESTED against the totalItems the SAME
+// responses reported, so an upstream serving 200 entries and reporting 200 satisfies all
+// of them. The new count is adopted whether or not it warned, so a legitimate shrink
+// warns once and settles.
 func (c *Client) warnCatalogueShrink(count int) {
 	c.mu.Lock()
 	prev := c.lastAccepted
@@ -674,9 +640,8 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []seadex.Entr
 	if verr := validatePageIdentities(list.Items, page, tot); verr != nil {
 		return all, false, verr
 	}
-	// The chunk's keyset sequence is validated BEFORE it is accepted, not only when
-	// another request will be issued: the short-chunk exhaustion decision below rests on
-	// the response really being the sorted suffix after the cursor.
+	// Validated BEFORE the chunk is accepted, not only when another request will be
+	// issued: see advanceCursor for what the short-chunk exhaustion decision rests on.
 	var next cursor
 	if len(list.Items) > 0 {
 		var cerr error
@@ -691,9 +656,6 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []seadex.Entr
 		return all, false, err
 	}
 	if !done {
-		// The walk continues, so the next chunk is requested strictly after
-		// this one's last record; an unusable cursor already failed the fetch
-		// above rather than looping or skipping (advanceCursor).
 		*cur = next
 	}
 	return all, done, nil
@@ -716,9 +678,8 @@ func remainingFetchBudgets(tot fetchTotals) (pageBytes int64, pageElements int, 
 
 // pageFetchError classifies one chunk's failure, whether raised BEFORE the request (an
 // exhausted cumulative budget) or by it: a budget exhaustion keeps its sentinel and
-// gains the page context, anything else becomes the ordinary per-page fetch error. It
-// is the ONE home of that context, so the two paths cannot render the sentinel
-// messages differently.
+// gains the page context, anything else becomes the ordinary per-page fetch error. The
+// ONE home of that context, so the two paths cannot render a sentinel differently.
 func pageFetchError(err error, page, fetched int) error {
 	if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
 		return fmt.Errorf("%w (page %d, %d entries fetched)", err, page, fetched)
@@ -750,9 +711,6 @@ func validatePageIdentities(items []pbEntry, page int, tot *fetchTotals) error {
 	return nil
 }
 
-// appendPageEntries converts one page's decoded records into public entries. The
-// tracker-link counters moved to internal/scout with the diagnostic itself, which is
-// what lets this client stay a pure releases.moe wire+contract leaf.
 func appendPageEntries(all []seadex.Entry, items []pbEntry) []seadex.Entry {
 	for i := range items {
 		all = append(all, items[i].toEntry())
@@ -766,17 +724,13 @@ func appendPageEntries(all []seadex.Entry, items []pbEntry) []seadex.Entry {
 // the chunk itself, not of the response's page metadata.
 //
 // One arm stays an error: an EMPTY chunk after a full one while the collected entries
-// are still below the reported totalItems, or with no reported total at all. The API
-// itself says entries remain, so completing would hand downstream a truncated view;
-// failing degrades the cycle, which preserves existing findings.
+// are below the reported totalItems, or with no reported total at all. The API itself
+// says entries remain, so completing would hand downstream a truncated view.
 func chunkComplete(page, itemCount, fetched, reportedTotal int) (done bool, err error) {
 	if itemCount >= perPage {
 		return false, nil
 	}
 	if itemCount == 0 && page > 1 {
-		// An empty follow-up chunk is only a legitimate terminal state when the API's own
-		// reported total vouches for it. With none there is nothing to check the walk
-		// against, so completing would hand downstream a possibly-truncated catalogue.
 		if reportedTotal <= 0 {
 			return false, fmt.Errorf("seadex: page %d empty with %d entries fetched and no reported total to "+
 				"vouch for completeness; refusing to compare against a truncated view", page, fetched)
@@ -793,9 +747,9 @@ func chunkComplete(page, itemCount, fetched, reportedTotal int) (done bool, err 
 // returning the raw body size and the decoded array-element count so the caller can
 // bound both across chunks. Every request asks for page 1 of the sorted remainder: the
 // cursor's filter is what advances the walk, so no numbered offset can go stale under a
-// concurrent delete. wireLimit and elemLimit are THIS chunk's caps, already reduced by
-// the caller to the remaining cumulative budgets - so tripping a reduced limit is the
-// cumulative cap while tripping the full bound stays a per-page violation.
+// concurrent delete. wireLimit and elemLimit are THIS chunk's caps, already reduced to
+// the remaining cumulative budgets - so tripping a reduced limit is the cumulative cap
+// while tripping the full bound stays a per-page violation.
 func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, elemLimit int, opts Options) (list pbList, bodyBytes, elems int, err error) {
 	q := url.Values{
 		"expand":  {"trs"},
@@ -806,9 +760,6 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		// cursor filter below pages on.
 		"sort": {"created,id"},
 	}
-	// The window is one extra conjunct on the filter the keyset cursor already builds, so
-	// a windowed walk and a full walk are the same request, paging, budgets and decode -
-	// only the completeness policy differs.
 	q.Set("filter", joinFilters(cur, opts))
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 
@@ -818,9 +769,8 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		httpx.WithMaxBodyBytes(wireLimit),
 		httpx.WithHeaders(setHeaders),
 		httpx.WithLogger(c.log),
-		// Demote httpx's terminal "http retries exhausted" line to Debug: a page whose
-		// retries ran out aborts the WHOLE walk, and the caller republishes that failure
-		// with the streak, so leaving both at Warn reports one outage twice.
+		// Demoted to Debug: a page whose retries ran out aborts the WHOLE walk and the
+		// caller republishes that failure with the streak, so Warn here reports it twice.
 		httpx.WithExhaustedLevel(slog.LevelDebug),
 	)
 	if err != nil {
@@ -835,20 +785,16 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		if errors.Is(err, jsoncap.ErrElementBudget) && elemLimit < maxPageElements {
 			return pbList{}, 0, 0, errCumulativeElements
 		}
-		// The decoder's error can embed RAW upstream bytes: stdlib *json.UnmarshalTypeError
-		// renders a rejected NUMBER literal verbatim, so a page whose totalItems is a
-		// megabyte of digits yields a megabyte-long error. Bounded HERE for both paths.
+		// Bounded HERE for both decode paths, for the reason maxLoggedDecodeBytes states.
 		return pbList{}, 0, 0, fmt.Errorf("decode page: %s",
 			runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes))
 	}
 	return list, len(body), elems, nil
 }
 
-// ---- Bounded token-level page decoder ----
-//
-// decodePage and the decode* functions below form a schema-aware bounded decoder for one
-// pbList page, built on jsoncap: the token walk enforces every cardinality cap
-// BEFORE appending each element, where json.Unmarshal materializes the whole value first.
+// decodePage and the decode* functions below are a schema-aware bounded decoder for one
+// pbList page, built on jsoncap: the token walk enforces every cardinality cap BEFORE
+// appending each element, where json.Unmarshal materializes the whole value first.
 
 // decodePage decodes one page body under the bounded-decoder caps, rejecting trailing
 // data after the top-level value (matching json.Unmarshal strictness). elemLimit is
@@ -896,8 +842,6 @@ func decodeEntry(d *jsoncap.Decoder, e *pbEntry) error {
 	return d.Object(func(k string) error { return decodeEntryField(d, e, k) })
 }
 
-// decodeEntryField decodes one entries-record field (or skips an unknown
-// key).
 func decodeEntryField(d *jsoncap.Decoder, e *pbEntry, key string) error {
 	switch {
 	case strings.EqualFold(key, "notes"):
@@ -913,9 +857,8 @@ func decodeEntryField(d *jsoncap.Decoder, e *pbEntry, key string) error {
 	case strings.EqualFold(key, "incomplete"):
 		return d.Decode(&e.Incomplete)
 	case strings.EqualFold(key, "expand"):
-		// Decode into the existing value so neither a duplicate
-		// "expand":null nor a duplicate/partial "expand":{} can wipe an
-		// already-decoded trs (Object's null no-op + field-wise merge).
+		// Decode into the existing value so neither a duplicate "expand":null nor a
+		// duplicate/partial "expand":{} can wipe an already-decoded trs.
 		return decodeExpand(d, &e.Expand)
 	default:
 		return d.Skip()
@@ -937,15 +880,14 @@ func decodeExpand(d *jsoncap.Decoder, ex *pbExpand) error {
 	})
 }
 
-// decodeTorrent decodes one torrent record field-wise into t (see
-// decodeEntry for the duplicate-key semantics the Object walk provides).
+// decodeTorrent decodes one torrent record field-wise into t; duplicate-key semantics as
+// decodeEntry.
 func decodeTorrent(d *jsoncap.Decoder, t *seadex.Torrent) error {
 	return d.Object(func(k string) error { return decodeTorrentField(d, t, k) })
 }
 
-// decodeTorrentField decodes one torrent-record field (or skips an unknown key). The
-// files and tags arrays are capped per torrent; a File is flat, so per-element decoding
-// cannot amplify beyond the already-capped raw bytes.
+// decodeTorrentField decodes one torrent-record field. A File is flat, so per-element
+// decoding cannot amplify beyond the already-capped raw bytes.
 func decodeTorrentField(d *jsoncap.Decoder, t *seadex.Torrent, key string) error {
 	switch {
 	case strings.EqualFold(key, "releaseGroup"):
@@ -975,8 +917,6 @@ func decodeTorrentField(d *jsoncap.Decoder, t *seadex.Torrent, key string) error
 	}
 }
 
-// setHeaders sets the descriptive User-Agent and JSON Accept header on each
-// SeaDex request.
 func setHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", appinfo.UserAgent)
 	req.Header.Set("Accept", "application/json")
