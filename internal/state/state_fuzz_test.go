@@ -13,20 +13,14 @@ import (
 	"unicode/utf8"
 )
 
-// newerSchemaState reports whether data is what Load classifies as valid
-// newer-schema state: a JSON object envelope whose persisted "version" member
-// decodes to an int beyond SchemaVersion. It reads the wire shape directly
-// (a streaming token decode of the raw bytes) instead of decoding into State, so
-// the oracle stays independent of production: a regression to State.Version's
-// JSON tag or decoding shape changes Load's classification without silently
-// changing this helper with it, and the newer-schema seeds fail instead of
-// staying green. Every case-insensitive occurrence of the key must decode to
-// an int and the effective (last) value must exceed SchemaVersion, mirroring
-// Load's newer-schema contract: a payload with any invalid duplicate
-// occurrence - a JSON null, which encoding/json otherwise accepts into a
-// plain int as a silent no-op but production rejects via its *int decode, or
-// a negative value, which violates the documented non-negative discriminator
-// domain - is corruption, never newer-schema state.
+// newerSchemaState reports whether data is what Load classifies as valid newer-schema
+// state: a JSON object envelope whose persisted "version" member decodes to an int beyond
+// SchemaVersion. It reads the wire shape directly (a streaming token decode) rather than
+// decoding into State, so the oracle stays independent of production - a change to
+// State.Version's JSON tag or decoding shape moves Load's classification without silently
+// moving this helper with it. Every case-insensitive occurrence of the key must decode to
+// an int and the effective (last) value must exceed SchemaVersion; an invalid occurrence -
+// a JSON null, which encoding/json accepts as a no-op, or a negative value - is corruption.
 func newerSchemaState(data []byte) bool {
 	// Load's bounded read rejects an over-cap file before the version
 	// discriminator can be inspected, so it is quarantined as foreign/corrupt
@@ -81,18 +75,14 @@ func newerSchemaState(data []byte) bool {
 	return found && version > SchemaVersion
 }
 
-// FuzzStoreLoadQuarantine drives Load with arbitrary state-file bytes and pins
-// the corruption-recovery invariants: Load never panics; a rejected payload is
-// quarantined at path+".corrupt" with its original bytes and the live path is
-// renamed away - EXCEPT a valid-UTF-8 decoded object whose Version is newer
-// than SchemaVersion, which is valid newer-schema state (an image rollback), stays
-// preserved at the live path with no .corrupt copy, and blocks Save so this
-// binary cannot overwrite it; an accepted payload is never quarantined and
-// stays usable - Save re-persists it (stamping SchemaVersion) and Load reads
-// it back, unless HTML-escape expansion pushes the re-encoding over the
-// shared cap, in which case Save's documented over-cap refusal keeps the
-// file intact. Each call uses a fresh t.TempDir(), so fuzz input never
-// shapes a filesystem path.
+// FuzzStoreLoadQuarantine drives Load with arbitrary state-file bytes and pins the
+// corruption-recovery invariants: Load never panics; a rejected payload is quarantined at
+// path+".corrupt" with its original bytes and the live path is renamed away - EXCEPT a
+// valid-UTF-8 decoded object whose Version is newer than SchemaVersion, which is valid
+// newer-schema state (an image rollback), stays at the live path with no .corrupt copy and
+// blocks Save so this binary cannot overwrite it; an accepted payload is never quarantined
+// and stays usable, unless HTML-escape expansion pushes the re-encoding over the shared
+// cap, where Save's over-cap refusal keeps the file intact. Each call gets a fresh TempDir.
 func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`null`))

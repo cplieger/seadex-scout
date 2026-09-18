@@ -10,15 +10,11 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// This file owns the finding-set IDENTITY policy: what makes two findings the same
-// standing condition is a notification concern, so the key is derived here.
-
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
 // group, release identity, and the full obtainable-source link set, so a
-// same-group quality swap (new identity), a changed library state, or ANY
-// change to the recommended sources becomes a DIFFERENT row - the old one
-// resolves and the new one is announced - while an unchanged finding keeps
-// its row and is re-emitted unchanged.
+// same-group quality swap (new identity), a changed library state, or ANY change
+// to the recommended sources becomes a DIFFERENT row - the old one resolves and
+// the new one is announced - while an unchanged finding keeps its row.
 func dedupeKey(f *compare.Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
@@ -35,12 +31,10 @@ func dedupeKey(f *compare.Finding) string {
 	return keyenc.Join(parts...)
 }
 
-// currentGroupKey encodes the finding's current-group component for the dedupe
-// key.
 func currentGroupKey(f *compare.Finding) string {
 	if f.CurrentGroups != nil {
-		// Sorted for the same reason dedupeKey sorts the recommended set: the on-disk
-		// group set is a SET, so its key must not depend on producer order.
+		// Sorted like dedupeKey's recommended set: a SET's key must not depend on
+		// producer order.
 		groups := slices.Clone(f.CurrentGroups)
 		slices.Sort(groups)
 		return keyenc.Join(groups...)

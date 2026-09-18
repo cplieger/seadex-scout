@@ -97,16 +97,14 @@ func TestLoader_Load_emptyOverridesEmitNoAppliedLog(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_overridesFileRefusalLogsError pins l-f69: a file-level
-// overrides refusal is an ERROR, not a WARN. The file is opt-in, so its
-// EXISTENCE means the operator intends those pinned mappings to apply, and both
-// refusal modes persist until they act - the overlay stays inert on every cycle
-// while comparisons silently run on the upstream mapping alone, which a WARN
-// never surfaces through the shipped Loki rules. A MISSING file stays silent
-// (the ordinary no-overrides case) and no arm may touch
-// Cache.RejectedRefreshes: that streak counts UPSTREAM refresh refusals, and
-// folding an operator-config failure into it would make one counter mean two
-// unrelated things.
+// TestLoader_Load_overridesFileRefusalLogsError pins that a file-level overrides
+// refusal is an ERROR, not a WARN. The file is opt-in, so its EXISTENCE means the
+// operator intends those pinned mappings to apply, and both refusal modes persist
+// until they act - the overlay stays inert on every cycle while comparisons
+// silently run on the upstream mapping alone, which a WARN never surfaces through
+// the shipped Loki rules. A MISSING file stays silent, and no arm may touch
+// Cache.RejectedRefreshes: that streak counts UPSTREAM refresh refusals, so
+// folding an operator-config failure into it makes one counter mean two things.
 func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// setup returns the overrides path to configure.

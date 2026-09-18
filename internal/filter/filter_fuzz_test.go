@@ -70,10 +70,8 @@ func FuzzABVisible(f *testing.F) {
 			t.Errorf("ABVisible(%q, padded, false) = %v, want %v (url %q)", trackerName, padded, off, rawURL)
 		}
 		// Cross-function consistency: ABVisible must be exactly the grade
-		// comparison, with no second reading of the evidence. The old
-		// definite-is-a-subset-of-gated property is structural now (one value
-		// cannot be two grades), so what is worth fuzzing is that the policy
-		// function and the grader never disagree.
+		// comparison, with no second reading of the evidence, so what is worth
+		// fuzzing is that the policy function and the grader never disagree.
 		if want := tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone; off != want {
 			t.Errorf("ABVisible(%q, %q, false) = %v but tracker.ClassifyAB = %d; the gate must be exactly the ABNone comparison", trackerName, rawURL, off, tracker.ClassifyAB(trackerName, rawURL))
 		}
@@ -99,15 +97,12 @@ func FuzzABVisible(f *testing.F) {
 }
 
 // FuzzABToggleNeverPublishesAnimeBytes pins the COMPOSED toggle invariant this
-// package owns only half of: with the operator's animebytes toggle off, no
-// release the daemon's obtainability gate admits - and no row the audit report
-// keeps (its gate is tracker.ClassifyAB != tracker.ABDefinite) - may carry a
-// published animebytes.tv link. The hide half is this package's toggle policy
-// (ABVisible) over internal/tracker's grade (tracker.ClassifyAB) and the publish
-// half is trackerlink.Publish; the two agree today only because every publish
-// path that can emit an AnimeBytes base (an AB label, an AB URL host, the AB
-// torrent-page relative shape) also grades tracker.ABDefinite. Nothing asserted
-// that, so a change to either ladder could open a leak silently.
+// package owns only half of: with the animebytes toggle off, no release the
+// obtainability gate admits and no row the audit report keeps may carry a published
+// animebytes.tv link. The hide half is ABVisible over tracker.ClassifyAB and the
+// publish half is trackerlink.Publish; the two agree only because every publish
+// path that can emit an AnimeBytes base also grades tracker.ABDefinite, so a change
+// to either ladder could open a leak silently.
 func FuzzABToggleNeverPublishesAnimeBytes(f *testing.F) {
 	for _, seed := range [][2]string{
 		{"Nyaa", "https://nyaa.si/view/1"},

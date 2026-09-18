@@ -31,24 +31,13 @@ func emittedAttrsByTitle(recorder *capture.Recorder, title string) []map[string]
 }
 
 // TestReemitRestatesEveryRowAndLeavesTheSetUnchanged pins the two properties
-// Reemit's contract rests on, neither of which any other test in this repo
-// drives. It is the third member of the state trio - Report replaces the set
-// with full deletion authority, ReportScoped replaces it within a bounded
-// authority, and Reemit re-states it having compared NOTHING - and it was the
-// only one with no test of its own.
-//
-// Both properties fail SILENTLY and both are visible in the alerting stack.
-// Findings are STATE, so the shipped alerts/logql.yaml reads a lookback window over
-// the emitted lines: a Reemit that emits no ROW (only its summary line) lets
-// that window expire, which resolves every standing better-release alert and
-// then re-fires the whole set as new on the next full pass. And a Reemit that
-// mutates the set - it compares nothing, so it has no authority to delete
-// anything - drops standing rows the next tick would otherwise carry forward,
-// so a condition that is still true stops being reported until a reconcile
-// re-derives it up to 24h later.
-//
-// The summary counters are deliberately NOT the subject here: internal/scout's
-// tick tests already pin carried on a re-statement.
+// Reemit's contract rests on, both of which fail SILENTLY. Findings are STATE,
+// so the shipped alerts/logql.yaml reads a lookback window over the emitted
+// lines: a Reemit that emits no ROW lets that window expire, resolving every
+// standing better-release alert and re-firing the whole set as new on the next
+// full pass. And a Reemit that mutates the set drops standing rows, so a
+// condition still true goes unreported until a reconcile up to 24h later
+// re-derives it.
 func TestReemitRestatesEveryRowAndLeavesTheSetUnchanged(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	a := findingWithID("a", "Aria", 1)

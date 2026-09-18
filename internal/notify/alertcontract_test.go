@@ -86,18 +86,14 @@ func interpolatedAlertLabels(t *testing.T, raw []byte) []string {
 	return labels
 }
 
-// alertAttrBudgets is the other half of the arithmetic: the byte budget
-// findingKVs renders each interpolable attribute under. The BUDGETS are the
-// code's knowledge; the INVENTORY is alerts/logql.yaml's (interpolatedAlertLabels), so
-// neither side can be hand-copied wrong. A fixed-pattern app value carries 0:
-// an id, an arr name, a season number and the seadex_tags vocabulary hold no
-// untrusted upstream text and their worst case is a handful of bytes.
+// alertAttrBudgets is the byte budget findingKVs renders each interpolable
+// attribute under. The BUDGETS are the code's knowledge; the INVENTORY is
+// alerts/logql.yaml's, so neither side can be hand-copied wrong. A
+// fixed-pattern app value carries 0.
 //
-// A label the annotation renders but this map does not classify FAILS the test
-// rather than being counted as free - which is the guard that matters, because
-// the two attributes deliberately left out (release_url, release_urls) carry the
-// multi-KB log-line budget: if a future annotation starts rendering one, its cap
-// has to be revisited before the arithmetic can hold.
+// A label the annotation renders but this map does not classify FAILS the
+// test: release_url and release_urls are absent and carry the multi-KB
+// log-line budget, so rendering one needs its cap revisited first.
 var alertAttrBudgets = map[string]int{
 	"alert_title":             maxAlertTextBytes,
 	"alert_recommended_group": maxAlertTextBytes,
@@ -113,17 +109,13 @@ var alertAttrBudgets = map[string]int{
 	"seadex_tags":             0,
 }
 
-// TestAlertContractMatchesShippedRules pins the ONE observable contract this
-// package has: observability is slog-only, and the repo ships alerts/logql.yaml whose
-// better-release rule matches an exact message literal and groups by a fixed
-// label set. The two halves are deployed independently (this binary vs a rules
-// file loaded into Loki/Mimir) with no import edge between them, so a renamed
-// or dropped attribute key otherwise goes silently quiet with a green build.
-// Reading the message and the labels OUT of the rules file - rather than
-// re-spelling them here - is what makes the halves unable to drift: this test
-// is a check of the real consumer, not a third hand-copied version of the
-// contract. It asserts key PRESENCE only, so it pins the contract and not the
-// sample data.
+// TestAlertContractMatchesShippedRules pins the one observable contract this
+// package has: the repo ships alerts/logql.yaml, whose better-release rule
+// matches an exact message literal and groups by a fixed label set. The two
+// halves deploy independently with no import edge, so a renamed or dropped
+// attribute key otherwise goes silently quiet with a green build. Reading the
+// message and the labels OUT of the rules file is what makes them unable to
+// drift. Presence only, so it pins the contract and not the sample data.
 func TestAlertContractMatchesShippedRules(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
 	if err != nil {
@@ -157,23 +149,13 @@ func TestAlertContractMatchesShippedRules(t *testing.T) {
 }
 
 // TestAlertAnnotationBudgetFitsTheEmbedLimit pins the ARITHMETIC behind
-// maxAlertURLBytes, which is the part a reader cannot check by eye and the part
-// a future cap change would silently break.
+// maxAlertURLBytes, which a reader cannot check by eye.
 //
-// The failure it guards is specific: alerts/logql.yaml interpolates several untrusted
-// values into ONE Discord annotation and renders the clickable tracker links
-// LAST, so if the values can collectively exceed the embed's 4096-rune
-// description limit, the half the operator acts on is what gets cut. Capping
-// every interpolated value is therefore not enough on its own - their SUM has to
-// fit, which is why the URL bound is 256 rather than reusing the 512 the text
-// attributes carry or the multi-KB Loki log-line budget the URLs used to.
-//
-// The inventory is READ from the shipped rules file rather than re-spelled here
-// (the sibling TestAlertContractMatchesShippedRules reads its contract the same
-// way). A hand-copied one had counted release_url among the interpolated URL
-// attributes, which alerts/logql.yaml neither groups by nor renders - so an attribute
-// nothing in the annotation reads was paying the annotation's budget, and the
-// arithmetic "proved" a sum that did not describe the shipped template.
+// alerts/logql.yaml interpolates several untrusted values into ONE Discord
+// annotation and renders the clickable tracker links LAST, so if the values can
+// collectively exceed the embed's 4096-rune description limit, the half the
+// operator acts on is what gets cut. Capping each value is not enough on its
+// own: their SUM has to fit, which is why the URL bound is 256.
 func TestAlertAnnotationBudgetFitsTheEmbedLimit(t *testing.T) {
 	t.Parallel()
 	// Discord's embed description limit, the ceiling Alertmanager's notifier
@@ -216,8 +198,7 @@ func TestAlertAnnotationBudgetFitsTheEmbedLimit(t *testing.T) {
 }
 
 // TestCapURLAttrHoldsTheAlertBound checks the bound is actually APPLIED, not
-// merely declared: capURLAttr used to re-cap on the Loki log-line budget, so a
-// hostile URL rode into the annotation multi-KB long.
+// merely declared: a hostile URL must not reach the annotation multi-KB long.
 func TestCapURLAttrHoldsTheAlertBound(t *testing.T) {
 	t.Parallel()
 	for name, raw := range map[string]string{
@@ -247,16 +228,13 @@ func TestCapURLAttrHoldsTheAlertBound(t *testing.T) {
 }
 
 // TestCapAlertTextAttrHoldsTheAlertBound is the TEXT twin of
-// TestCapURLAttrHoldsTheAlertBound: it checks the annotation's text budget is
-// actually APPLIED, not merely declared. capAlertTextAttr re-caps on
-// maxAlertTextBytes rather than the multi-KB Loki log-line budget, and that is
-// what makes TestAlertAnnotationBudgetFitsTheEmbedLimit's arithmetic
-// (4 x maxAlertTextBytes + 4 x maxAlertURLBytes inside Discord's 4096-rune
-// description limit) describe the shipped template rather than just its
-// constants. Every other assertion on this function bounds it by maxAttrBytes,
-// 16x looser, so a regression to the log-line budget - exactly the defect
-// capURLAttr already had - would let an oversized SeaDex title push the
-// clickable tracker links out of the embed with the whole suite green.
+// TestCapURLAttrHoldsTheAlertBound: capAlertTextAttr must re-cap on
+// maxAlertTextBytes rather than the multi-KB Loki log-line budget, which is
+// what makes TestAlertAnnotationBudgetFitsTheEmbedLimit's arithmetic describe
+// the shipped template rather than just its constants. Every other assertion on
+// this function bounds it by maxAttrBytes, 16x looser, so a regression to the
+// log-line budget would let an oversized SeaDex title push the clickable
+// tracker links out of the embed with the whole suite green.
 func TestCapAlertTextAttrHoldsTheAlertBound(t *testing.T) {
 	t.Parallel()
 	for name, raw := range map[string]string{

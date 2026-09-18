@@ -33,7 +33,7 @@ func TestSnapshotInfoURLAllowedProperty(t *testing.T) {
 
 		// Acceptance is ENUMERATED over the sampled hosts, never computed with a
 		// fold: an oracle built on strings.EqualFold (or on the production
-		// asciiLowerHost) agrees with the very bug l-f114 fixed, since EqualFold
+		// asciiLowerHost) reproduces the bug the ASCII-only fold closes, since EqualFold
 		// maps U+017F to 's'. Spelled out, the two homograph hosts fail a gate
 		// that reverts to that fold or drops urlform.IsASCIIHost.
 		canonical := host == seadexInfoHost() || host == strings.ToUpper(seadexInfoHost())

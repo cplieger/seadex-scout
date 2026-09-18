@@ -185,16 +185,13 @@ func TestMemoUnexpiredEntryServedWithoutRefetch(t *testing.T) {
 	}
 }
 
-// TestMemoPruneDropsExpiredUnrenewedKeepsLive pins the save-side hygiene: an
-// already-expired entry the pass neither consulted nor renewed is dropped from
-// the memo (it is a miss either way; the next batch re-fetches it if it is ever
-// needed again), while a live unconsulted entry survives untouched. The
-// catalogue is empty here, so nothing is held back for the feed's stale tier
-// (that retention is TestMemoPruneKeepsExpiredStaleDataForCuratedEntries).
-// Pruning itself spends no AniList requests.
-//
-// It is an EXPLICIT call by the pass that holds a catalogue, not something Match
-// does on the way out - see PruneMemo.
+// TestMemoPruneDropsExpiredUnrenewedKeepsLive pins the save-side hygiene: an already-expired
+// entry the pass neither consulted nor renewed is dropped from the memo (it is a miss either
+// way, and the next batch re-fetches it if it is needed), while a live unconsulted entry
+// survives untouched. The catalogue is empty here, so nothing is held back for the feed's
+// stale tier (TestMemoPruneKeepsExpiredStaleDataForCuratedEntries covers that retention).
+// Pruning spends no AniList requests, and it is an EXPLICIT call by the pass that holds a
+// catalogue rather than something Match does on the way out - see PruneMemo.
 func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
@@ -263,16 +260,13 @@ func TestMemoPruneKeepsExpiredStaleDataForCuratedEntries(t *testing.T) {
 	}
 }
 
-// TestMemoEntryWithoutAnExpiryIsRefetchedNotServed pins the absence of a
-// migration, which is a deliberate policy and not an oversight: this app ships
-// no old-to-new conversion for persisted state.
-//
-// An entry written by a build older than the expiry policy carries no expiry at
-// all. Rather than being stamped and served, it reads as expired: consulted, it
-// is re-fetched and re-stamped like any other miss; unconsulted, it is pruned at
-// the end of a clean pass. The cost is a one-time re-fetch of whatever the memo
-// held, which the batched prefetch amortizes; the benefit is that there is no
-// conversion path to carry, test, or get wrong.
+// TestMemoEntryWithoutAnExpiryIsRefetchedNotServed pins the ABSENCE of a migration, which
+// is deliberate policy: this app ships no old-to-new conversion for persisted state. An
+// entry written by a build older than the expiry policy carries no expiry at all, and
+// rather than being stamped and served it reads as expired - consulted, it is re-fetched
+// and re-stamped like any other miss; unconsulted, it is pruned at the end of a clean pass.
+// The cost is a one-time re-fetch of whatever the memo held, which the batched prefetch
+// amortizes.
 func TestMemoEntryWithoutAnExpiryIsRefetchedNotServed(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
@@ -349,7 +343,7 @@ func TestMemoEntryExpiryWireFormat(t *testing.T) {
 	}
 }
 
-// TestMemoDegradedPassRetainsExpiredEntries pins the prune guard (h-f8): a
+// TestMemoDegradedPassRetainsExpiredEntries pins the prune guard: a
 // degraded pass (here a total AniList outage) could not renew what expired,
 // so it must NOT prune the expired entries — the feed's stale-title tier
 // (scout/feedinfo.go) still serves them, and they stay pending for next

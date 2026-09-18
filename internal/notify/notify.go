@@ -1,9 +1,7 @@
 // Package notify emits the current finding SET as structured slog events,
-// re-stating every row on every pass - the daemon's NOTIFICATION path (Loki
-// alerting rides these lines). Nothing is persisted and nothing is deduped
-// across cycles; see Notifier for why.
-// Observability is slog-only; there is no metrics endpoint. It is distinct
-// from the user-facing report FEATURE (the `report` subcommand's season-level
+// re-stating every row on every pass - the daemon's NOTIFICATION path. Nothing
+// is persisted and nothing is deduped across cycles; see Notifier for why. It
+// is distinct from the report FEATURE (the `report` subcommand's season-level
 // audit), which lives in internal/audit.
 package notify
 
@@ -19,8 +17,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
-
-// --- Notifier / state reporting ---
 
 // Notifier reports findings as STATE rather than as events: it holds the set
 // of conditions currently true and re-emits the whole set on every pass, so
@@ -44,9 +40,7 @@ func NewNotifier(logger *slog.Logger, ignore map[int]struct{}) *Notifier {
 }
 
 // Report replaces the current finding set with findings and emits the whole
-// set. It is the only way findings reach the log.
-//
-// incompleteIDs scopes what replacement may DELETE.
+// set. incompleteIDs scopes what replacement may DELETE.
 func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]struct{}) {
 	n.report(findings, nil, incompleteIDs)
 }
@@ -56,8 +50,8 @@ func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]stru
 // untouched.
 func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
 	if comparedIDs == nil {
-		// Load-bearing: Report overloads a nil set as FULL deletion authority, so
-		// forwarding nil would make this partial pass delete every row outside its window.
+		// report overloads a nil set as FULL deletion authority, so forwarding nil would
+		// make this partial pass delete every row outside its window.
 		comparedIDs = map[int]struct{}{}
 	}
 	n.report(findings, comparedIDs, incompleteIDs)
@@ -115,15 +109,14 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 // SLICES survive retention.
 const maxRetainedListItems = 64
 
-// maxRetainedElemBytes bounds one ELEMENT of a retained slice, and it is what
-// makes the row bound real.
+// maxRetainedElemBytes bounds one ELEMENT of a retained slice: the count cap
+// alone left a hostile row at 2 MiB.
 const maxRetainedElemBytes = 256
 
 // capRetainedList clones the retained PREFIX of an untrusted slice, dropping
 // anything past maxRetainedListItems. Cloning is what keeps boundRetained's
 // aliasing guard (f is a shallow copy, so the header still points at the
-// compare result the audit report and the cycle log line also read); cloning
-// the PREFIX additionally releases the caller's oversized backing array.
+// compare result other readers share); the PREFIX releases the oversized array.
 func capRetainedList[T any](s []T) []T {
 	if len(s) > maxRetainedListItems {
 		s = s[:maxRetainedListItems]
@@ -146,14 +139,11 @@ func boundRetained(f *compare.Finding) {
 	f.InfoHash = capAttr(f.InfoHash)
 	f.CurrentGroup = capAttr(f.CurrentGroup)
 	f.RecommendedGroup = capAttr(f.RecommendedGroup)
-	// capAttr, NOT capURLAttr: the retention bound is a SIZE bound, while
-	// capURLAttr is the emit path's link-destination ENCODER (it percent-encodes
-	// for a Markdown sink).
+	// capAttr, NOT capURLAttr: the retention bound is a SIZE bound, while capURLAttr
+	// is the emit path's link-destination ENCODER.
 	f.ReleaseURL = capAttr(f.ReleaseURL)
 	f.ArrURL = capAttr(f.ArrURL)
-	// The three untrusted SLICES are bounded per ELEMENT on the measured
-	// maxRetainedElemBytes rather than the Loki log-line budget capAttr carries:
-	// the count cap alone left the row at 2 MiB (see maxRetainedElemBytes).
+	// Per ELEMENT on maxRetainedElemBytes, not capAttr's log-line budget.
 	for i := range f.RecommendedGroups {
 		f.RecommendedGroups[i] = capRetainedElem(f.RecommendedGroups[i])
 	}
@@ -169,8 +159,7 @@ func boundRetained(f *compare.Finding) {
 // capRetainedElem bounds one element of a retained slice. capAttr runs first so
 // the value is rune-sanitized under the same policy every other retained field
 // gets, then the element budget applies; an in-budget value passes through
-// byte-identical, which is what keeps an honest row unchanged across passes
-// (capAttr is idempotent and so is a re-cap of an already-short value).
+// byte-identical, so an honest row stays unchanged across passes.
 func capRetainedElem(s string) string { return reboundTo(capAttr(s), maxRetainedElemBytes) }
 
 // emitAll logs every row of the current set, in a deterministic order so a
@@ -198,10 +187,8 @@ func (n *Notifier) emitAll(preserved, carried, resolved int) {
 		"resolved", resolved)
 }
 
-// --- Emission / rendering ---
-
 // emit logs a finding at the level its status maps to, with the full field
-// set the dashboard and Loki alert key on.
+// set the alert rules key on.
 func (n *Notifier) emit(f *compare.Finding) {
 	n.log.Log(context.Background(), level(f.Status), message(f.Status), findingKVs(f)...)
 }
@@ -217,21 +204,19 @@ const maxAttrBytes = logattr.MaxBytes
 const maxAlertTextBytes = 512
 
 // maxAlertURLBytes is the same budget for an ALERT-destined URL attribute - one
-// the shipped alerts/logql.yaml actually interpolates - and it is MEASURED rather than
-// chosen.
+// the shipped alerts/logql.yaml interpolates.
 const maxAlertURLBytes = 256
 
 // attrTruncMarker is the suffix a capped attribute carries so a reader can
 // tell a truncated value from an honest one.
 const attrTruncMarker = logattr.TruncMarker
 
-// capAttr renders one untrusted single-value attribute for the JSON slog
-// sink through the shared bounded primitive: honest values pass
-// byte-identical; a hostile oversized value (SeaDex admits multi-MB URLs, up
-// to 512 per entry) is truncated on a rune boundary with the "..." marker so
-// one record can never balloon past downstream log-pipeline line limits (alert
-// suppression) or amplify memory. A MULTI-SOURCE attribute renders through
-// joinGroupsAttr / joinLinksAttr instead (see findingKVs).
+// capAttr renders one untrusted single-value attribute for the JSON slog sink
+// through the shared bounded primitive: honest values pass byte-identical; a
+// hostile oversized value (SeaDex admits multi-MB URLs, up to 512 per entry) is
+// truncated on a rune boundary with the "..." marker, so one record cannot
+// balloon past a downstream line limit or amplify memory. A MULTI-SOURCE
+// attribute renders through joinGroupsAttr / joinLinksAttr instead.
 func capAttr(s string) string { return logattr.Cap(s) }
 
 // reboundTo re-applies a byte budget to a value a post-cap transform may have
@@ -263,7 +248,7 @@ var mdTextEscaper = strings.NewReplacer(
 // capAlertTextAttr renders one untrusted text attribute for a MARKDOWN sink:
 // capAttr's bounded, sanitized pass first (so the escaper never walks an
 // unbounded string), then the markup escaping, then a re-cap because escaping
-// grows the value - the same shape capURLAttr uses.
+// grows the value.
 func capAlertTextAttr(s string) string {
 	capped := reboundTo(capAttr(s), maxAlertTextBytes)
 	return trimTruncatedEscape(reboundTo(mdTextEscaper.Replace(capped), maxAlertTextBytes))
@@ -285,17 +270,16 @@ func trimTruncatedEscape(s string) string {
 	return body + attrTruncMarker
 }
 
-// findingKVs builds the structured key-value attributes for a finding line.
-// It carries the arr deep-link, the split Nyaa/AnimeBytes URLs, the season, and
-// a compact seadex_tags line so an alert can render a self-contained,
-// clickable notification straight from the labels.
+// findingKVs builds the structured key-value attributes for a finding line: the
+// arr deep-link, the split Nyaa/AnimeBytes URLs, the season and a compact
+// seadex_tags line, so an alert renders a clickable notification from the labels.
 func findingKVs(f *compare.Finding) []any {
 	publicLink, abLink := trackerURLs(f.Links)
 	return []any{
 		"title", capAttr(f.Title),
 		// alert_title / alert_recommended_group are the MARKDOWN-safe twins of title /
-		// recommended_group: the raw labels keep their meaning for Loki search and `sum
-		// by` grouping, while alerts/logql.yaml interpolates these into Discord annotations.
+		// recommended_group: the raw labels keep their meaning for log search and `sum by`
+		// grouping, while alerts/logql.yaml interpolates these into an annotation body.
 		"alert_title", capAlertTextAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
@@ -317,18 +301,13 @@ func findingKVs(f *compare.Finding) []any {
 		// publishing enforces a canonical host and shape, never a length.
 		"release_url", capAttr(f.ReleaseURL),
 		"release_urls", joinLinksAttr(f.Links),
-		// nyaa_url keeps its name and its meaning: the shipped alerts/logql.yaml
-		// renders it as a "[Nyaa]" link, so it may only ever hold a Nyaa URL.
 		"nyaa_url", capURLAttr(publicLink.nyaaURL()),
 		"public_url", capURLAttr(publicLink.otherURL()),
-		// public_tracker is interpolated INSIDE a Markdown link label, so it takes the
-		// markup-safe render: canonicalTracker's bare-host last resort can return a value
-		// carrying ']' or '(', which would close the label early.
+		// public_tracker and ab_tracker are interpolated INSIDE a Markdown link label, so
+		// they take the markup-safe render: canonicalTracker's bare-host last resort can
+		// return a value carrying ']' or '(', which would close the label early.
 		"public_tracker", capAlertTextAttr(publicLink.otherTracker()),
 		"ab_url", capURLAttr(abLink.url),
-		// ab_tracker names the ab_url link the way public_tracker names
-		// public_url, and takes the same markup-safe render for the same
-		// reason (it is interpolated INSIDE a Markdown link label).
 		"ab_tracker", capAlertTextAttr(abLink.abTracker()),
 		"info_hash", capAttr(f.InfoHash),
 		"seadex_tags", seadexTags(f),
@@ -349,8 +328,7 @@ const (
 // classifyTrackerLink maps a link to its slot kind: definite AnimeBytes
 // evidence wins outright, ambiguous evidence is the conservative AB fallback,
 // a known Nyaa link is the public Nyaa source, and anything else is a generic
-// public link. The switch is exhaustive over tracker.ABEvidence, so the three
-// grades cannot be tested in the wrong order.
+// public link.
 func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 	switch link.AB {
 	case tracker.ABDefinite:
@@ -419,10 +397,8 @@ func (p *publicLink) setFirst(other publicLink) {
 }
 
 // canonicalTracker resolves the name to label this link with, through
-// tracker.CanonicalName - the one home of the label-then-host ladder, so the
-// alert and the season report's links cell name the same link the same way and
-// a tracker-table edit reaches both. Empty only for a link with
-// neither a known host, a known label, nor any host at all.
+// tracker.CanonicalName - the one home of the label-then-host ladder. Empty only
+// for a link with neither a known host, a known label, nor any host at all.
 func (p publicLink) canonicalTracker() string {
 	return tracker.CanonicalName(p.tracker, p.url)
 }
@@ -430,8 +406,7 @@ func (p publicLink) canonicalTracker() string {
 // isNyaa reports whether the link is Nyaa's - the one public tracker the shipped
 // alert template has a hardcoded "[Nyaa]" label for. Resolved through
 // canonicalTracker, so a Nyaa URL carrying an alias, odd casing, or no tracker
-// label at all still reads as Nyaa instead of falling into the generic slot with
-// nothing to name it.
+// label at all still reads as Nyaa.
 func (p publicLink) isNyaa() bool {
 	return p.url != "" && p.canonicalTracker() == tracker.NameNyaa
 }
@@ -456,10 +431,7 @@ func (p publicLink) otherURL() string {
 }
 
 // otherTracker returns the tracker name accompanying otherURL, so the alert can
-// label the link with the tracker it actually came from. Resolved through
-// canonicalTracker rather than the raw upstream label, so a public link whose
-// SeaDex tracker field is an alias, oddly cased, or empty is still named (by its
-// host as a last resort) instead of rendering a nameless link.
+// label the link with the tracker it came from rather than rendering it nameless.
 func (p publicLink) otherTracker() string {
 	if p.otherURL() == "" {
 		return ""
@@ -468,8 +440,7 @@ func (p publicLink) otherTracker() string {
 }
 
 // abTracker returns the tracker name accompanying the AB slot's URL, so the
-// alert labels that link with the tracker it actually came from instead of a
-// hardcoded "AB".
+// alert labels that link with the tracker it came from, not a hardcoded "AB".
 func (p publicLink) abTracker() string {
 	if p.url == "" {
 		return ""
@@ -512,10 +483,9 @@ func seadexTags(f *compare.Finding) string {
 
 // joinLinksAttr renders every obtainable source for the recommended release as
 // a space-separated "tracker=url" list, so a finding carries both a Nyaa and an
-// AnimeBytes link when the release exists on both, not just the headline one.
-// Each link is charged as one unit: a tracker without its "=url" is not a
-// source, and rendering one would put a bare tracker name where the attribute's
-// readers expect a pair.
+// AnimeBytes link when the release exists on both. Each link is charged as one
+// unit: a tracker without its "=url" is not a source, and rendering one would
+// put a bare tracker name where the attribute's readers expect a pair.
 func joinLinksAttr(links []compare.ReleaseLink) string {
 	j := logattr.NewJoiner()
 	for i := range links {
@@ -530,8 +500,8 @@ func joinLinksAttr(links []compare.ReleaseLink) string {
 }
 
 // joinGroupsAttr renders the recommended release groups as a comma-separated
-// list through the same bounded joiner, for the same reason: the group list is
-// untrusted SeaDex data and must not be materialized before the cap applies.
+// list through the same bounded joiner: the group list is untrusted SeaDex data
+// and must not be materialized before the cap applies.
 func joinGroupsAttr(groups []string) string {
 	j := logattr.NewJoiner()
 	for i := range groups {
@@ -546,10 +516,8 @@ func joinGroupsAttr(groups []string) string {
 }
 
 // level maps a finding status to its slog level: an actionable better release
-// warns, every informational nudge logs at info. It is the emission-level
-// policy's one home, beside message() - the sibling half of the same
-// status-to-log-line contract - so a new status cannot ship with a message
-// entry and a silently wrong level.
+// warns, every informational nudge logs at info. The one home of that policy,
+// beside message().
 func level(s compare.Status) slog.Level {
 	if s == compare.StatusBetter {
 		return slog.LevelWarn

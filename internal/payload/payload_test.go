@@ -23,12 +23,10 @@ func TestNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
 	}
 }
 
-// TestNamesMaxInt64LengthKeepsOnlyPrimary pins the overflow
-// boundary of the ceil-half threshold: a JSON-valid file length of
-// math.MaxInt64 must not wrap the threshold negative and let a tiny
-// marker-bearing extra survive beside the primary payload. The extra is a
-// type-gate SURVIVOR (a video file with no creditless marker), so the size
-// layer alone must exclude it.
+// TestNamesMaxInt64LengthKeepsOnlyPrimary pins the overflow boundary of the
+// ceil-half threshold: a JSON-valid math.MaxInt64 length must not wrap it
+// negative and let a tiny extra survive. The extra is a type-gate SURVIVOR (a
+// video file with no creditless marker), so the size layer alone must exclude it.
 func TestNamesMaxInt64LengthKeepsOnlyPrimary(t *testing.T) {
 	files := []seadex.File{
 		{Name: "Show - 01 [1080p][HEVC].mkv", Length: math.MaxInt64},
@@ -97,12 +95,10 @@ func TestIsCreditlessExtraCaseFolds(t *testing.T) {
 	}
 }
 
-// TestNamesLayeredRule pins the combined eligibility rule's layer
-// interplay on the exact cases where the two historical rules (compare/
-// audit's size-only torrentFileNames, the indexer's name-only
-// isContentMediaFile filter) diverged: type gate
-// first, size refinement among the survivors, with the no-lengths and
-// no-content-survivor fallbacks keeping the rule total.
+// TestNamesLayeredRule pins the layer interplay on the cases where a size-only
+// and a name-only rule diverge: type gate first, size refinement among the
+// survivors, with the no-lengths and no-content-survivor fallbacks keeping the
+// rule total.
 func TestNamesLayeredRule(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -205,17 +201,13 @@ func TestIsSampleExtraMarkers(t *testing.T) {
 }
 
 // TestPopulationMedianAnchoredFloor pins the census rule against the
-// primary-payload rule. Population answers "how many distinct episodes
-// does this torrent span", where a shorter file is a legitimately shorter
-// episode; primaryFiles answers "which names vote on the release's quality",
-// where anything far below the primary is a diluting extra. Anchoring the
-// census floor on the MAXIMUM instead deletes every regular
+// primary-payload rule, comparing the two floors where both are decided.
+// Population answers "how many distinct episodes does this torrent span", where
+// a shorter file is a legitimately shorter episode; primaryFiles answers "which
+// names vote on the release's quality", where anything far below the primary is a
+// diluting extra. A census floor anchored on the MAXIMUM deletes every regular
 // episode of any pack carrying one over-long file, so the pack reads as a single
 // episode. Both rules must still exclude an episode-shaped sample.
-//
-// It is the assertion the extraction of this package bought (l-f195, h-f21):
-// the two floors are compared HERE, where both are decided, instead of the
-// difference living as prose in one package and a test in another.
 func TestPopulationMedianAnchoredFloor(t *testing.T) {
 	const gib = 1 << 30
 	episodes := func(n int, size int64) []seadex.File {
@@ -248,27 +240,23 @@ func TestPopulationMedianAnchoredFloor(t *testing.T) {
 			wantPayload:    1,
 		},
 		"episode-shaped sample is still excluded": {
-			// Both rules must drop it: a sample that counted would inflate a
-			// lone episode into a "pack". It is dropped by NAME here
-			// (IsSampleExtra), not by the census floor - at these two lengths
-			// the floor no longer excludes it, which is the whole point: the
-			// ratio between a sample and its payload overlaps the ratio
-			// between two real episodes of unequal length.
+			// Dropped by NAME (IsSampleExtra), not by the census floor: at these
+			// two lengths the floor no longer excludes it, because a
+			// sample-to-payload ratio overlaps two real episodes of unequal length.
 			files:          withFirst(seadex.File{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20}, episodes(1, gib)),
 			wantPopulation: 1,
 			wantPayload:    1,
 		},
 		"marked sample is excluded at payload size": {
-			// The name gate is size-independent: a sample as large as the
-			// episode - or larger - still cannot vote or be counted.
+			// The name gate is size-independent: a sample as large as the episode,
+			// or larger, still cannot vote or be counted.
 			files:          withFirst(seadex.File{Name: "Show S01E00 sample.mkv", Length: 4 * gib}, episodes(1, gib)),
 			wantPopulation: 1,
 			wantPayload:    1,
 		},
 		"sample-only list still yields evidence": {
-			// The type-gate fallback keeps the rule total: a record whose
-			// every name is a sample falls back to all named files rather
-			// than losing its evidence entirely.
+			// The type-gate fallback keeps the rule total: an all-sample record
+			// falls back to every named file rather than losing its evidence.
 			files:          []seadex.File{{Name: "Show sample.mkv", Length: gib}},
 			wantPopulation: 1,
 			wantPayload:    1,
@@ -280,35 +268,26 @@ func TestPopulationMedianAnchoredFloor(t *testing.T) {
 		},
 		"no type survivor falls back to every named file": {
 			// The fallback pool is BOTH names, and on a two-file pool the
-			// lower-middle anchor cannot exclude either (the smaller file IS
-			// the anchor). Harmless by contract: Population returns a file
-			// SUBSET, not a census verdict, so a consumer that counts episodes
-			// re-applies the type gate and drops the .nfo - while the
-			// primary-payload rule still resolves the container alone.
+			// lower-middle anchor cannot exclude either (the smaller file IS the
+			// anchor). Population returns a file SUBSET, not a census verdict.
 			files:          []seadex.File{{Name: "Show S01 remux.iso", Length: 20 * gib}, {Name: "Show S01 remux.nfo", Length: 1 << 10}},
 			wantPopulation: 2,
 			wantPayload:    1,
 		},
 		"MaxInt64 length does not wrap the floor negative": {
-			// The overflow invariant is that the floor stays positive and
-			// anchored on a real pool value: the lower middle is 1, so the
-			// census keeps both files rather than wrapping negative and
-			// keeping everything by accident. Keeping both is unobservable
-			// here - the two files carry the SAME episode token, so the
-			// indexer's census still reads one episode - and the
-			// primary-payload rule still keeps only the MaxInt64 file.
+			// The floor stays positive and anchored on a real pool value: the
+			// lower middle is 1, so the census keeps both rather than wrapping
+			// negative and keeping everything by accident. Unobservable here,
+			// since both files carry the SAME episode token.
 			files:          withFirst(seadex.File{Name: "Show S01E01 [1080p].mkv", Length: math.MaxInt64}, episodes(1, 1)),
 			wantPopulation: 2,
 			wantPayload:    1,
 		},
 		"two-file pack keeps the shorter episode": {
-			// The characterization case for the median anchor: on a two-file
-			// pool the upper-middle statistic IS the maximum, so the old
-			// implementation floored at 1.25 GiB and counted this pack as ONE
-			// episode - the pack then served as "Show S01E01" and Sonarr grabbed
-			// it as a single episode. The property's even-pool bounds
-			// deliberately admit either tie-break, so only this case fails under
-			// the upper middle.
+			// The characterization case for the median anchor: on a two-file pool
+			// the upper-middle statistic IS the maximum, so anchoring there floors
+			// at 1.25 GiB and counts this pack as ONE episode. The property's
+			// even-pool bounds admit either tie-break, so only this case fails.
 			files: []seadex.File{
 				{Name: "Show S01E01 [1080p].mkv", Length: gib},
 				{Name: "Show S01E02 [1080p].mkv", Length: 5 * gib / 2},
@@ -317,12 +296,9 @@ func TestPopulationMedianAnchoredFloor(t *testing.T) {
 			wantPayload:    1,
 		},
 		"two-file pack keeps a strongly skewed episode": {
-			// The midpoint anchor only protected the smaller file while the
-			// larger stayed within ~3x of it, so a two-part OVA (or a season
-			// pair bundling the franchise movie) whose finale runs 4x its
-			// sibling still lost the sibling, read as one episode, and was
-			// served under that episode's own SxxExx marker (l-f234 /
-			// d-gpt-u3c1-1). The lower-middle anchor keeps both.
+			// A midpoint anchor protects the smaller file only while the larger
+			// stays within ~3x, so a two-part OVA whose finale runs 4x its sibling
+			// loses the sibling and reads as one episode. Lower-middle keeps both.
 			files: []seadex.File{
 				{Name: "Show S01E01 [1080p].mkv", Length: gib},
 				{Name: "Show S01E02 [1080p].mkv", Length: 4 * gib},

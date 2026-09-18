@@ -312,9 +312,7 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 }
 
 // FetchMany resolves many AniList ids in batched requests (up to batchSize ids each,
-// every batch throttled and retried like Fetch), returning a BatchResult whose Media
-// holds the media that exist keyed by id and whose Verdicts answers, per REQUESTED id,
-// what the batch learned about it.
+// every batch throttled and retried like Fetch). BatchResult owns what its fields mean.
 //
 // A TOTAL failure (no chunk completed) returns a zero BatchResult with the error, so
 // every id reads VerdictUnrequested and an all-not-found batch is distinguishable from
@@ -635,15 +633,12 @@ func plausibleYear(year int) bool {
 }
 
 // knownFormat returns the CANONICAL form of format when it names a real AniList media
-// format, else "" - Media.Format's own documented "type unknown" value. Returning the
-// canonical token rather than the raw wire string is what makes the field bounded and
-// single-line-safe by construction, and the accepted vocabulary lives in the shared
-// internal/mediatype leaf so this half and the mapping half cannot drift.
-//
-// It is load-bearing because arr routing reads the format by exclusion (MOVIE routes
-// to Radarr, everything else to Sonarr): an unrecognized non-empty token did not read
-// as "unknown", it read as "not a movie" and supplied false Sonarr evidence. A format
-// AniList adds in future degrades to unknown, which is the safe side.
+// format, else "" - Media.Format's documented "type unknown" value. The canonical token
+// makes the field bounded and single-line-safe by construction; the accepted vocabulary
+// lives in the shared internal/mediatype leaf so this half and the mapping half cannot
+// drift. arr routing reads the format by exclusion (MOVIE routes to Radarr, everything
+// else to Sonarr), so an unrecognized non-empty token would read as "not a movie" and
+// supply false Sonarr evidence. A format AniList adds in future degrades to unknown.
 func knownFormat(format string) string {
 	canonical := mediatype.Normalize(format)
 	if mediatype.Known(canonical) {

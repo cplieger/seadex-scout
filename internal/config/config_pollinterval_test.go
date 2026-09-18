@@ -7,23 +7,14 @@ import (
 	"time"
 )
 
-// TestPollIntervalDefaultAndFloorValues pins the two poll_interval CONSTANTS by
-// value, not symbolically.
-//
-// Every other test in this package derives its expectation from these constants,
-// so all of them keep passing if a constant drifts. These are the ones that
-// would catch it, and the values are not arbitrary: both follow the CONSUMER.
-// Sonarr's RSS Sync Interval is 10-120 minutes with a default of 15, so fetching
-// faster than 15m cannot reach the arrs any sooner, and below Sonarr's own
-// 10-minute minimum a shorter interval buys freshness no arr can read while
-// still costing the upstream a probe every time.
-//
-// The interval is also no longer the cost knob it used to be: most iterations
-// are a cheap tick and every 24h worth of them is one full reconcile, so the
-// upstream load is proportional to the change RATE rather than to 1/interval.
-// That is what makes a 15m default defensible against a community-run upstream
-// at all, and it is why lowering the floor further is a different decision from
-// lowering the default.
+// TestPollIntervalDefaultAndFloorValues pins the two poll_interval CONSTANTS by value, not
+// symbolically: every other test in this package derives its expectation from them, so all
+// of those keep passing if a constant drifts. The values follow the CONSUMER - Sonarr's RSS
+// Sync Interval is 10-120 minutes with a default of 15, so fetching faster than 15m cannot
+// reach the arrs any sooner, and below Sonarr's 10-minute minimum a shorter interval buys
+// freshness no arr can read while still costing the upstream a probe. Upstream load is
+// proportional to the change RATE rather than to 1/interval (most iterations are a cheap
+// tick, one reconcile per 24h), so the floor and the default are separate decisions.
 func TestPollIntervalDefaultAndFloorValues(t *testing.T) {
 	t.Parallel()
 	if DefaultPollInterval != 15*time.Minute {

@@ -9,19 +9,14 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
-// FuzzCapAttrBoundedAndSanitized fuzzes the emit path's per-attribute
-// boundary over arbitrary untrusted text: every finding-line attribute
-// derived from SeaDex, tracker, or library data (title, groups, tracker,
-// classification_reason, URLs, info hash) rides through capAttr, and SeaDex
-// admits multi-MB values. The invariants are the three properties the emitted
-// Loki record depends on and that no table test can cover exhaustively:
-// bounded volume (at most the budget plus the "..." marker, so one hostile
-// record can never exceed a downstream log-pipeline line limit and suppress
-// the warn line the better-release alert keys on), valid UTF-8 with no unsafe
-// rune (no C1 terminal-escape introducer, bidi override, or partial rune
-// re-minted by a naive re-cap), and honest passthrough - a value that needs
-// neither the cap nor the growth re-cap must emit byte-identical to
-// runesafe.Sanitize, never gaining a spurious truncation marker.
+// FuzzCapAttrBoundedAndSanitized fuzzes the emit path's per-attribute boundary:
+// every finding-line attribute derived from SeaDex, tracker or library data
+// rides through capAttr, and SeaDex admits multi-MB values. Three invariants no
+// table test covers exhaustively: bounded volume, so one hostile record cannot
+// exceed a downstream log-pipeline line limit and suppress the warn line the
+// better-release alert keys on; valid UTF-8 with no unsafe rune (no C1
+// introducer, bidi override, or partial rune from a naive re-cap); and honest
+// passthrough, byte-identical to runesafe.Sanitize with no spurious marker.
 func FuzzCapAttrBoundedAndSanitized(f *testing.F) {
 	f.Add("")
 	f.Add("Frieren")
@@ -90,18 +85,13 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 }
 
 // FuzzCapAlertTextAttrBoundedAndInertMarkup fuzzes the alert-annotation text
-// encoder. alerts/logql.yaml interpolates alert_title / alert_recommended_group into
-// a Discord annotation BODY, so an untrusted SeaDex title must never render as
-// a link or a code span (CWE-116). The escaper emits every dangerous byte as a
-// two-byte backslash escape, so walking escape pairs is an exact oracle rather
-// than a second copy of the replacer - and it covers the growth re-cap
-// boundary, where a cut can land inside an escape pair, which the value-level
-// table cannot reach.
-//
-// '<', '>' and '@' are deliberately NOT in the live-markup set. The angle
-// brackets are ordinary text for Discord (the Slack-mrkdwn entity half was
-// dropped in l-f84), and mention delivery is controlled by the sender's
-// allowed_mentions policy, not by a backslash inserted into annotation text.
+// encoder. alerts/logql.yaml interpolates alert_title / alert_recommended_group
+// into a Discord annotation BODY, so an untrusted SeaDex title must never render
+// as a link or code span (CWE-116). Every dangerous byte becomes a two-byte
+// backslash escape, so walking escape pairs is an exact oracle rather than a
+// second copy of the replacer, and it reaches the re-cap boundary where a cut
+// lands inside a pair. '<' and '>' are ordinary Discord text and '@' delivery is
+// the sender's allowed_mentions policy, so none of the three is live markup.
 func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 	f.Add("")
 	f.Add("Frieren")
@@ -143,10 +133,9 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 // release_url / nyaa_url / public_url / ab_url as `[label](<attr>)`, so any
 // surviving destination-breaking byte closes the destination early and the rest
 // of an untrusted SeaDex URL renders as attacker-authored markdown (CWE-116).
-// The invariants are the three properties that must hold for every input, which
-// no per-character table can cover: bounded volume (the re-cap keeps the "..."
-// marker INSIDE the budget, so the ceiling is maxAttrBytes exactly), valid UTF-8
-// with no unsafe rune, and not one live destination-breaking byte left.
+// Three invariants no per-character table covers: bounded volume (the re-cap
+// keeps the "..." marker INSIDE the budget, so the ceiling is maxAttrBytes
+// exactly), valid UTF-8 with no unsafe rune, and no live breaking byte left.
 func FuzzCapURLAttrBoundedAndInertDestination(f *testing.F) {
 	f.Add("")
 	f.Add("https://nyaa.si/view/1")

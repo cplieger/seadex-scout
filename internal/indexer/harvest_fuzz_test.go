@@ -6,16 +6,13 @@ import (
 	"testing"
 )
 
-// FuzzHarvestCheckpointCodec exercises the persisted harvest_cursor decoder
-// on arbitrary snapshot strings (the decoder's own contract covers hand-edited
-// or corrupted snapshots). Invariants: decode never panics, the surviving
-// rotation cursor is always either empty or exactly the "<scope>:<alID>" shape
-// harvestCursorKey produces (a garbage value must never be carried forward
-// verbatim into every future snapshot), and decode is its own fixpoint now that
-// the persisted form is the bare cursor.
-// The JSON object forms a pre-paging-removal binary could persist stay in the
-// seed corpus: no released binary can write them, so they must now decode to
-// the empty baseline rather than being carried forward.
+// FuzzHarvestCheckpointCodec exercises the persisted harvest_cursor decoder on arbitrary
+// snapshot strings (its contract covers hand-edited or corrupted snapshots). Invariants:
+// decode never panics, the surviving rotation cursor is always either empty or exactly
+// the "<scope>:<alID>" shape harvestCursorKey produces (a garbage value must never be
+// carried forward verbatim into every future snapshot), and decode is its own fixpoint.
+// The JSON object forms stay in the seed corpus: no released binary can write them, so
+// they must decode to the empty baseline rather than being carried forward.
 func FuzzHarvestCheckpointCodec(f *testing.F) {
 	f.Add("")
 	f.Add("nyaa:1500")
@@ -38,19 +35,14 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 	})
 }
 
-// FuzzMatchHarvest_cacheHygiene exercises the harvest's untrusted-response
-// boundary: matchHarvest consumes Prowlarr-supplied titles, page URLs, and
-// info hashes, and writes into the titles cache that is persisted verbatim
-// into the snapshot and rendered into every RSS response. Invariants of the
-// cache-admission contract: the returned count equals the number of NEW
-// entries; an already-cached title is never overwritten or dropped (torrents
-// are immutable, so the first harvested title stands); every admitted key is
-// a pending journal key of the QUERIED scope (a foreign, cross-scope, or
-// contradictory identity titles nothing); and every admitted value is exactly
-// the trimmed upstream title, non-empty and within harvestMaxTitleLen. The
-// second arm is the two-sided oracle: on a result whose identity is the
-// canonical page URL of an indexed key, the title is admitted exactly when it
-// is non-blank and within the bound.
+// FuzzMatchHarvest_cacheHygiene exercises the harvest's untrusted-response boundary:
+// matchHarvest consumes Prowlarr-supplied titles, page URLs and info hashes, and writes
+// into the titles cache persisted verbatim into the snapshot and rendered into every RSS
+// response. Cache-admission invariants: the returned count equals the number of NEW
+// entries; an already-cached title is never overwritten or dropped (torrents are
+// immutable); every admitted key is a pending journal key of the QUERIED scope; and every
+// admitted value is exactly the trimmed upstream title, non-empty and within
+// harvestMaxTitleLen. The second arm is the two-sided oracle on a canonical page URL.
 func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 	f.Add("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42", "https://nyaa.si/view/42", "")
 	f.Add("Tampered", "https://nyaa.si/view/42", "https://nyaa.si/view/43", "")

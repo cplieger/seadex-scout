@@ -8,28 +8,25 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// boundedTrackerID reports whether id is a non-empty, width-bounded run of
-// ASCII digits - the charset/width half of validTrackerID's contract (it
-// deliberately does not re-assert the canonical-decimal-form rule, which
-// TestTrackerIDExtractionRejectsNonCanonicalDecimalForms pins, so this stays a
-// necessary condition on every returned id). The digit test is
-// an INDEPENDENT oracle (strings.Trim), never the production isAllDigits
-// helper: sharing that helper would let a mutation loosening it govern both
-// the code under test and the assertion, so a parser admitting a non-digit id
-// would still pass.
+// boundedTrackerID reports whether id is a non-empty, width-bounded run of ASCII
+// digits - the charset/width half of validTrackerID's contract (it deliberately does not
+// re-assert the canonical-decimal-form rule, which
+// TestTrackerIDExtractionRejectsNonCanonicalDecimalForms pins, so this stays a necessary
+// condition on every returned id). The digit test is an INDEPENDENT oracle
+// (strings.Trim), never the production isAllDigits helper: sharing that helper would let
+// a mutation loosening it govern both the code under test and the assertion, so a parser
+// admitting a non-digit id would still pass.
 func boundedTrackerID(id string) bool {
 	return id != "" && len(id) <= maxTrackerIDDigits && strings.Trim(id, "0123456789") == ""
 }
 
 // FuzzExtractID_alwaysDigitsOrEmpty pins the security-relevant invariant of the id
-// extraction that runs on Prowlarr-supplied (tracker-controlled) URL strings: every id
-// it returns is a non-empty run of ASCII digits, or it returns "" - a bogus tracker key
-// (a non-numeric id) must never reach the curation match set. The seed corpus covers the
-// Nyaa /view, AnimeBytes permalink, and AnimeBytes torrentid= forms plus a non-numeric id.
-// The digit check is the INDEPENDENT boundedTrackerID oracle, not the
-// production isAllDigits helper: sharing that helper would let a mutation
-// loosening it govern both the code under test and the assertion, so the
-// property would still pass on a parser that admits a non-digit id.
+// extraction that runs on Prowlarr-supplied (tracker-controlled) URL strings: every id it
+// returns is a non-empty run of ASCII digits, or it returns "" - a bogus tracker key must
+// never reach the curation match set. The seed corpus covers the Nyaa /view, the
+// AnimeBytes permalink and torrentid= forms, plus a non-numeric id. The digit check is
+// the INDEPENDENT boundedTrackerID oracle, not the production isAllDigits helper:
+// sharing it would let one mutation govern both the code under test and the assertion.
 func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 	f.Add("https://nyaa.si/view/1234567")
 	f.Add("https://animebytes.tv/torrent/1167293/group?nh=709E38EC")
@@ -107,16 +104,14 @@ func FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment(f *testing.F) {
 	})
 }
 
-// FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs pins the SeaDex-side half
-// of the curation trust boundary (trackerKey runs on tracker labels and URLs
-// from untrusted SeaDex records; the Prowlarr-side twin is
+// FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs pins the SeaDex-side half of the
+// curation trust boundary (trackerKey runs on tracker labels and URLs from untrusted
+// SeaDex records; the Prowlarr-side twin is
 // FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment): any non-empty key is
 // scope:<bounded digits> for a supported scope, and under the package's urlform
-// structural vocabulary the source is either an http(s) URL on exactly that
-// tracker's canonical host - in its absolute or its scheme-free spelling, which
-// name the same page (l-f19) - or, for AnimeBytes only, a rooted relative
-// reference, so a tracker label can never authorize an id extracted from a
-// foreign, subdomain, or opaque URL.
+// structural vocabulary the source is either an http(s) URL on exactly that tracker's
+// canonical host - absolute or scheme-free, which name the same page - or, for
+// AnimeBytes only, a rooted relative reference.
 func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 	f.Add("Nyaa", "https://nyaa.si/view/1234567")
 	f.Add("AB", "/torrents.php?id=1&torrentid=456")
@@ -143,7 +138,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		// (urlform), not in net/url's: the two disagree on exactly the shape this
 		// oracle used to describe as a "true relative reference" (a schemeless
 		// host like "animebytes.tv/x" is triple-empty to net/url but host
-		// evidence to urlform, l-f162), so pinning the old reading here would
+		// evidence to urlform), so pinning the old reading here would
 		// re-assert the divergence the adoption removed.
 		f := urlform.Classify(raw)
 		// A trailing DNS-root dot is the fully-qualified spelling of the same
@@ -152,7 +147,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		// "https://nyaa.si./view/1". The oracle must normalize the same way or a
 		// legitimate input is reported as a crasher.
 		host := strings.TrimSuffix(f.Host, ".")
-		// Both spellings of a host-bearing URL are admissible (l-f19); a
+		// Both spellings of a host-bearing URL are admissible; a
 		// schemeless one carries no scheme by construction, so the oracle keys
 		// on the class, not on the scheme text.
 		hostForm := f.Class == urlform.ClassAbsolute || f.Class == urlform.ClassSchemelessHost

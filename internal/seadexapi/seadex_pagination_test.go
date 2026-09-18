@@ -487,17 +487,14 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesBelowHalfShortfallErrors pins the last path on which a
-// truncated catalogue used to be ACCEPTED (h-f7). A short terminal chunk ends
-// the keyset walk, and a shortfall against the API's own reported totalItems was
-// waved through with a WARN however large it was - so an upstream that ended the
-// walk early while records remained handed the comparison a partial catalogue,
-// which resolves every finding whose entry went missing. The keyset cursor makes
-// a genuinely SKIPPED record impossible, so an ordinary shortfall is a handful
-// of mid-fetch deletions; losing more than HALF the catalogue is not credible
-// and now fails the fetch, degrading the cycle and PRESERVING existing findings.
-// The trigger is the app-wide shrink policy (degradation.Shrunk),
-// shared with the mapping-refresh and library-walk guards.
+// TestFetchEntriesBelowHalfShortfallErrors pins the shortfall threshold. A short
+// terminal chunk ends the keyset walk, so an upstream ending it early while
+// records remained hands the comparison a partial catalogue, which resolves every
+// finding whose entry went missing. The keyset cursor makes a genuinely SKIPPED
+// record impossible, so an ordinary shortfall against the reported totalItems is
+// a handful of mid-fetch deletions and only WARNs; losing more than HALF is not
+// credible and fails the fetch, PRESERVING existing findings. The trigger is
+// degradation.Shrunk, shared with the mapping-refresh and library-walk guards.
 func TestFetchEntriesBelowHalfShortfallErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":5,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
@@ -601,9 +598,7 @@ func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
 // aggregate degradation gates (count mismatch, the window shortfall, the
 // cross-fetch shrink signal): a fully healthy fetch with counts agreeing must
 // emit none of the alert-stable WARN lines, so the Loki alerts keyed on them can
-// never fire on a clean cycle. The
-// tracker-link quality lines are internal/scout's (l-f156) and are pinned
-// there.
+// never fire on a clean cycle.
 func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[{"tracker":"Nyaa","url":"https://nyaa.si/view/1"}]}}]}`)
@@ -635,9 +630,8 @@ func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 // upstream serving a truncated-but-self-consistent catalogue (a partially
 // restored PocketBase, a poisoned CDN response) returns a clean success that
 // would resolve every finding whose entry vanished. A client that already
-// accepted a larger catalogue in this process must WARN on the shrink - and
-// must still return the entries, since the strictness beyond a diagnostic is
-// the operator's call.
+// accepted a larger catalogue in this process must WARN on the shrink, and must
+// still return the entries: strictness beyond a diagnostic is the operator's call.
 func TestFetchEntriesWarnsWhenCatalogueShrinksAgainstPreviousFetch(t *testing.T) {
 	entryCount := 4
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -734,15 +728,14 @@ func TestFetchEntriesExactlyFullChunkCompletesOnEmptyFollowUp(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesRetainsReportedPagesAcrossChunks pins the retained-highest
-// rule for the reported PAGE count (fetchTotals.reportedPages is never
-// overwritten downward), the page twin of the totalItems retention
+// TestFetchEntriesRetainsReportedPagesAcrossChunks pins the retained-highest rule
+// for the reported PAGE count (fetchTotals.reportedPages is never overwritten
+// downward), the page twin of the totalItems retention
 // TestFetchEntriesErrorsOnMetadataRegression pins. The terminal chunk here
-// reports totalItems but OMITS totalPages (which decodes as zero), so a
-// counter that overwrote instead of retaining would make finishFetch's
-// metadata self-consistency guard read "totalItems 501 cannot fit the reported
-// 0 pages" and hard-fail an otherwise healthy two-chunk walk - every cycle,
-// against an upstream that merely omits the field.
+// reports totalItems but OMITS totalPages (which decodes as zero), so a counter
+// that overwrote instead of retaining would make finishFetch read "totalItems 501
+// cannot fit the reported 0 pages" and hard-fail an otherwise healthy two-chunk
+// walk, every cycle, against an upstream that merely omits the field.
 func TestFetchEntriesRetainsReportedPagesAcrossChunks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("filter") == "" {
@@ -810,15 +803,14 @@ func TestFinishFetchWarnsWhenBudgetMostlySpent(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesRejectsBrokenEntryIdentities pins the catalogue's
-// primary-key invariant (validatePageIdentities): the byte/element/count
-// budgets prove a chunk is well-shaped and the pagination arithmetic proves
-// the counts add up, but neither notices KEY loss - an entry omitting alID
-// decodes it as 0 (which the matcher would read as an ordinary unmapped
-// entry) and a repeated alID can stand in for a record that was dropped, both
-// while the aggregate counts still agree. Either shape must fail the whole
-// fetch with a nil slice so the caller preserves its last known findings and
-// feed instead of resolving them against a catalogue that lost an anime.
+// TestFetchEntriesRejectsBrokenEntryIdentities pins the catalogue's primary-key
+// invariant (validatePageIdentities): the byte/element/count budgets prove a
+// chunk is well-shaped and the pagination arithmetic proves the counts add up,
+// but neither notices KEY loss - an entry omitting alID decodes it as 0 (which
+// the matcher reads as an ordinary unmapped entry) and a repeated alID can stand
+// in for a dropped record, both while the aggregate counts agree. Either shape
+// must fail the whole fetch with a nil slice so the caller preserves its last
+// known findings and feed instead of resolving them against a lost anime.
 func TestFetchEntriesRejectsBrokenEntryIdentities(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -939,10 +931,9 @@ func TestFetchEntriesUnusableCursorAborts(t *testing.T) {
 // only because the filter asked for everything after the cursor under
 // sort=created,id. Here the second chunk is short, carries unique positive
 // AniList IDs, and agrees with the reported total - every count, identity and
-// shortfall guard passes - but its keyset pair sorts BEFORE the position the
-// first chunk established, so the records after that position were never
-// delivered. The walk must refuse it rather than return a count-complete but
-// key-incomplete catalogue that falsely resolves existing findings.
+// shortfall guard passes - but its keyset pair sorts BEFORE the position the first
+// chunk established, so the records after that position were never delivered. The
+// walk must refuse it rather than return a key-incomplete catalogue.
 func TestFetchEntriesRegressingCursorAborts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("filter") == "" {
@@ -968,11 +959,11 @@ func TestFetchEntriesRegressingCursorAborts(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesDisorderedShortChunkAborts pins the same validation on a
-// SINGLE short chunk - the terminal-chunk case the walk used to skip entirely,
-// because the cursor was only checked when another request would be issued. The
-// chunk's own records are out of sort order, so the response is not the sorted
-// suffix that was requested and its shortness proves nothing about exhaustion.
+// TestFetchEntriesDisorderedShortChunkAborts pins the same validation on a SINGLE
+// short chunk, the terminal-chunk case a cursor check made only before issuing
+// another request would skip. The chunk's own records are out of sort order, so
+// the response is not the sorted suffix that was requested and its shortness
+// proves nothing about exhaustion.
 func TestFetchEntriesDisorderedShortChunkAborts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+

@@ -206,15 +206,12 @@ func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 	}
 }
 
-// TestABEvidenceAdapterReadsRawEvidence pins the third adapter's policy surface
-// at its defining site, mirroring the ABVisible and Obtainable adapter tests:
-// an AB tracker label or definitively extracted raw-URL host evidence (absolute
-// or schemeless animebytes.tv) grades ABDefinite, a hidden-host host:port form
-// grades ABAmbiguous (evidence that settles nothing), and an honest public URL
-// or an empty URL grades ABNone. The adapter must feed the RAW upstream URL
-// (t.URL) to the host cross-check: passing PublishURL(t) instead (which drops
-// the schemeless AB form under a public label to "") would grade that case
-// ABNone and fail this test.
+// TestABEvidenceAdapterReadsRawEvidence pins the third adapter's policy surface at
+// its defining site: an AB label or definitive raw-URL host evidence grades
+// ABDefinite, a hidden-host host:port form grades ABAmbiguous, an honest or empty
+// URL grades ABNone. The adapter must feed the RAW upstream URL to the host
+// cross-check: PublishURL(t) drops the schemeless AB form under a public label to
+// "", which would grade that case ABNone.
 func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -238,11 +235,10 @@ func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
 }
 
 // TestPublishRefusalNamesTheCause pins the adapter that carries the publisher's
-// refusal reason to the two diagnostic consumers (l-f127): the audit row marker
-// and the SeaDex client's catalogue WARN must be able to tell a tracker this
-// build does not carry (remedy: a seadex-scout table entry) from an unvouchable
-// url (remedy: fix the SeaDex record), and the link half stays byte-identical to
-// PublishURL so a consumer reading only the link is unaffected.
+// refusal reason to its two diagnostic consumers: the audit row marker and the
+// SeaDex client's catalogue WARN must be able to tell a tracker this build does not
+// carry (remedy: a table entry) from an unvouchable url (remedy: fix the SeaDex
+// record), and the link half stays byte-identical to PublishURL.
 func TestPublishRefusalNamesTheCause(t *testing.T) {
 	tests := []struct {
 		name    string

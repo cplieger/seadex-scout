@@ -182,18 +182,14 @@ func TestParseMediaPageErrorFailsBatch(t *testing.T) {
 	}
 }
 
-// TestParseMediaFieldLimits pins the per-field wire rules on the untrusted
-// AniList boundary in BOTH the single and batch parsers: a boundary-sized title
-// is accepted while a max+1 title is rejected outright (never truncated, which
-// could forge a normalized-title match), so a hostile near-body-cap payload
-// cannot inflate the memo or state.json.
-//
-// A defective FORMAT is deliberately NOT a rejection (l-f140): knownFormat
-// republishes the field as a canonical mediatype token, so an over-long,
-// unrecognized, or unsafe wire value costs the record only its arr hint - the
-// bound on Media.Format is the vocabulary itself, not a byte cap, and the
-// record keeps the usable titles it would otherwise have lost to a permanent
-// negative memo.
+// TestParseMediaFieldLimits pins the per-field wire rules on the untrusted AniList
+// boundary in BOTH the single and batch parsers: a boundary-sized title is accepted
+// while a max+1 title is rejected outright (never truncated, which could forge a
+// normalized-title match), so a hostile near-body-cap payload cannot inflate the memo
+// or state.json. A defective FORMAT is deliberately NOT a rejection: knownFormat
+// republishes the field as a canonical mediatype token, so an over-long, unrecognized
+// or unsafe wire value costs the record only its arr hint - the bound on Media.Format
+// is the vocabulary itself, not a byte cap.
 func TestParseMediaFieldLimits(t *testing.T) {
 	okTitle := strings.Repeat("a", maxTitleBytes)
 	bigTitle := strings.Repeat("a", maxTitleBytes+1)
@@ -208,10 +204,9 @@ func TestParseMediaFieldLimits(t *testing.T) {
 	}{
 		{name: "boundary-sized romaji accepted", fields: `"title":{"romaji":"` + okTitle + `"}`, wantErr: false},
 		{name: "over-limit romaji rejected", fields: `"title":{"romaji":"` + bigTitle + `"}`, wantErr: true},
-		// An over-limit SIBLING costs the record that title and nothing else
-		// (h-f1): the three titles are independent facts, each memoized and
-		// republished on its own, so one over-cap alias must not take the usable
-		// ones with it into a permanent negative memo.
+		// An over-limit SIBLING costs the record that title and nothing else: the three
+		// titles are independent facts, each memoized and republished on its own, so one
+		// over-cap alias must not take the usable ones into a permanent negative memo.
 		{name: "over-limit english drops only that title", fields: `"title":{"romaji":"A","english":"` + bigTitle + `"}`, wantTitles: []string{"A"}},
 		{name: "over-limit native drops only that title", fields: `"title":{"romaji":"A","native":"` + bigTitle + `"}`, wantTitles: []string{"A"}},
 		{name: "known format canonical", fields: `"format":"MOVIE","title":{"romaji":"A"}`, wantFormat: "MOVIE"},
@@ -250,12 +245,11 @@ func TestParseMediaFieldLimits(t *testing.T) {
 	}
 }
 
-// TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective pins l-f140's whole point
-// at the consumer-visible level: a record whose ONLY defect is its format field
-// must still yield its usable titles, because ErrRecordUnusable is a definitive
-// answer the matcher negative-memoizes - rejecting the record would have cost it
-// every future title match until the memo expired, with an overrides.json entry
-// as the operator's only remedy.
+// TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective pins the consumer-visible half: a
+// record whose ONLY defect is its format field must still yield its usable titles,
+// because ErrRecordUnusable is a definitive answer the matcher negative-memoizes -
+// rejecting the record costs it every future title match until the memo expires, with an
+// overrides.json entry as the operator's only remedy.
 func TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective(t *testing.T) {
 	defective := map[string]string{
 		"over-long":      strings.Repeat("F", 4096),
@@ -280,18 +274,12 @@ func TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective(t *testing.T) {
 	}
 }
 
-// TestParseMediaDropsUnsafeTitleTextKeepingSiblings pins the title single-line
-// guard on its own: each payload carries ONE unsafe title field plus a safe
-// sibling, so the ONLY thing that can produce the expected result is the
-// runesafe.SanitizeSingleLine check in toMedia running and dropping exactly that
-// member.
-//
-// This assertion is STRONGER than the "record rejected" one it replaces (h-f1
-// stopped a defective alias from killing its siblings, which made rejection the
-// wrong expectation). Rejection could be produced by any record-wide failure;
-// "the unsafe member is absent AND the safe member is present" can only be
-// produced by the per-title guard. So dropping the guard still fails here, which
-// is what this test exists for.
+// TestParseMediaDropsUnsafeTitleTextKeepingSiblings pins the title single-line guard on
+// its own: each payload carries ONE unsafe title field plus a safe sibling, so the only
+// thing that can produce the expected result is the runesafe.SanitizeSingleLine check in
+// toMedia running and dropping exactly that member. Rejection could be produced by any
+// record-wide failure, while "the unsafe member is absent AND the safe member is present"
+// can only be produced by the per-title guard, so dropping the guard fails here.
 func TestParseMediaDropsUnsafeTitleTextKeepingSiblings(t *testing.T) {
 	tests := map[string]struct {
 		raw    string
@@ -409,7 +397,7 @@ func TestParseMediaPageBoundsMediaCardinality(t *testing.T) {
 // TestObserveRateHeadersCapsResetWindow pins the proactive (pre-429) path's
 // ceiling. It is the POLITENESS ceiling, not the per-attempt one: this path
 // penalizes the shared throttle without any retry loop involved, so
-// maxRetryAfter would be the wrong bound here (l-f7).
+// maxRetryAfter would be the wrong bound here.
 func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", WithRate(30))
@@ -777,27 +765,14 @@ func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
 	}
 }
 
-// TestValidateResponseBoundsThePreflightWalk is the cross-library acceptance
-// test for the structural preflight this package delegates to
-// (jsoncap.Preflight): an all-opens body must be rejected by a depth ceiling
-// rather than recursing once per byte of a 1 MiB '[' body, and a key-dense
-// object must still validate (the library tracks per-object keys in a
-// fold-canonicalized set, so the cost is O(keys) rather than a rescan of
-// every prior key on an upstream-controlled key count).
-//
-// The ceiling is the JSON TOKENIZER's, not the library's, and that is the
-// contract worth pinning here. Since Go 1.27 encoding/json is backed by
-// encoding/json/v2 and json.Decoder.Token enforces jsontext's own
-// 10000-container nesting limit - at exactly jsoncap.MaxDepth, and one call
-// BELOW the library's depth check, which therefore never sees the token that
-// would trip it. jsoncap.ErrMaxDepth is structurally unreachable through
-// Preflight, so asserting on it would pin a sentinel that can no longer fire.
-// What replaces it is stronger: the refusal arrives as encoding/json's own
-// *json.SyntaxError, and Preflight's depth acceptance set is now exactly
-// json.Unmarshal's, so the preflight cannot admit a body the decode step would
-// reject on depth. Both boundary levels are pinned because that parity is the
-// claim; the error TEXT deliberately is not, since jsontext exports no depth
-// sentinel and documents its syntactic-error contents as unstable.
+// TestValidateResponseBoundsThePreflightWalk is the cross-library acceptance test for
+// jsoncap.Preflight. The depth ceiling is the JSON TOKENIZER's, not the library's:
+// json.Decoder.Token enforces jsontext's 10000-container limit at exactly
+// jsoncap.MaxDepth, one call BELOW the library's depth check, so jsoncap.ErrMaxDepth is
+// unreachable through Preflight and the refusal arrives as *json.SyntaxError. Both
+// boundary levels are pinned because parity with json.Unmarshal's depth acceptance IS
+// the claim; the error TEXT is not, since jsontext exports no depth sentinel and
+// documents its syntactic-error contents as unstable.
 func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
 	// A WELL-FORMED body one level over the ceiling, so the refusal is depth and
 	// nothing else - an all-opens body is also truncated, which muddies the
@@ -826,6 +801,8 @@ func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
 		t.Error("validateResponse(1 MiB of open brackets) = nil, want it rejected")
 	}
 
+	// A key-dense object must still validate: the library tracks per-object keys in a
+	// fold-canonicalized set, so the cost is O(keys) rather than a rescan per key.
 	var wide strings.Builder
 	wide.WriteByte('{')
 	for i := range 20000 {
@@ -842,16 +819,13 @@ func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
 	}
 }
 
-// TestParseMediaRejectsUnknownFormatAsTypeEvidence pins l-f12: the format is
-// the only arr-routing evidence the AniList fallback carries, and
-// match.formatArr routes it by EXCLUSION (MOVIE to Radarr, everything else to
-// Sonarr). An unrecognized non-empty token therefore did not read as "unknown",
-// it read as "not a movie" - so a garbled or hostile value supplied false Sonarr
-// evidence for an unmapped entry, removed the Radarr candidate a title+year
-// match would have left ambiguous, and persisted the wrong match in state.json
-// for the memo's life. An unknown token must collapse to "", which every
-// consumer already reads as type-unknown. The record itself stays usable: only
-// the TYPE claim is discarded, never the titles.
+// TestParseMediaRejectsUnknownFormatAsTypeEvidence pins the collapse of an unrecognized
+// format token to "" (knownFormat owns why). The consequence guarded is downstream: the
+// format is the only arr-routing evidence this fallback carries and match.formatArr
+// routes by EXCLUSION, so a garbled value would supply false Sonarr evidence for an
+// unmapped entry, remove the Radarr candidate a title+year match would have left
+// ambiguous, and persist the wrong match in state.json for the memo's life. The record
+// itself stays usable: only the TYPE claim is discarded, never the titles.
 func TestParseMediaRejectsUnknownFormatAsTypeEvidence(t *testing.T) {
 	tests := map[string]struct {
 		wire string
@@ -882,14 +856,13 @@ func TestParseMediaRejectsUnknownFormatAsTypeEvidence(t *testing.T) {
 }
 
 // TestParseMediaRejectionsWrapErrRecordUnusable pins the PRODUCER half of the
-// permanent-vs-transient classification contract. Every toMedia rejection is a
-// function of the record's own content, so match.lookup memoizes it negatively
-// and resets the degradation streak (errors.Is(err, anilist.ErrRecordUnusable));
-// a rejection that surfaced as a plain error would instead be re-fetched every
-// cycle forever, keep Result.Degraded true, and escalate to a standing ERROR
-// whose remediation text points at graphql.anilist.co reachability that is
-// healthy. The consumer's own test constructs the sentinel by hand, so nothing
-// else in the tree fails if this package stops wrapping it.
+// permanent-vs-transient classification contract. Every toMedia rejection is a function
+// of the record's own content, so match.lookup memoizes it negatively and resets the
+// degradation streak; a rejection surfacing as a plain error would be re-fetched every
+// cycle forever, keep Result.Degraded true, and escalate to a standing ERROR whose
+// remediation text points at graphql.anilist.co reachability that is healthy. The
+// consumer's own test constructs the sentinel by hand, so nothing else in the tree
+// fails if this package stops wrapping it.
 func TestParseMediaRejectionsWrapErrRecordUnusable(t *testing.T) {
 	tests := map[string]string{
 		"over-limit title":             `{"data":{"Media":{"format":"TV","title":{"romaji":"` + strings.Repeat("a", maxTitleBytes+1) + `"}}}}`,

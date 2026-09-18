@@ -15,11 +15,10 @@ const feedKeyBytes = 16
 // substituted for the example's empty one.
 //
 // The key gates the Torznab feed, whose /ab responses embed the operator's AnimeBytes
-// passkey in every download link, and it is the ONE credential here the operator
-// invents rather than copies - so generating it removes the weak-key possibility at
-// the only moment the app authors this file. Deliberately scoped to the starter write:
-// an empty key on a configured feed stays the hard validation error it is, and the
-// committed config.example.yaml keeps its empty value so no key is ever published.
+// passkey in every download link, and it is the ONE credential here the operator invents
+// rather than copies, so generating it removes the weak-key possibility. Scoped to the
+// starter write: an empty key on a configured feed stays the hard validation error it is,
+// and the committed config.example.yaml keeps its empty value so no key is published.
 func SeedStarter(example []byte) ([]byte, error) {
 	buf := make([]byte, feedKeyBytes)
 	if _, err := rand.Read(buf); err != nil {

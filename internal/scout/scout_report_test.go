@@ -464,7 +464,7 @@ func TestReportCanceledBeforeWalkPreservesCancellation(t *testing.T) {
 
 // TestReportSurfacesOverridesRefusalAndMappingDegraded pins that the one-shot
 // report gets the same two mapping diagnostics the daemon cycle does, because
-// both run the same shared loader: the l-f69 overrides-refusal ERROR (an opt-in
+// both run the same shared loader: the overrides-refusal ERROR (an opt-in
 // file the operator's pinned mappings are inert without) and the contextual
 // "report: mapping degraded" record for the failed refresh. The two are
 // independent signals - a broken overrides file is an operator-config fault
@@ -511,18 +511,13 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 }
 
 // TestReportWarnsWhenTheWalkShrankBelowHalf pins the one-shot report's shrink
-// disclosure, which is the only thing that stops a silently-incomplete artifact.
-//
-// The daemon GATES its whole compare on this exact shape (handleLibraryGate's
-// shrink guard): a non-failed walk retaining under half the last persisted
-// snapshot is a suspicious truncation, not a real change. The report cannot
-// gate - it is read-only and it is the operator's fallback view while the cycle
-// is stuck - so it renders and must SAY so instead. Without the line the
-// timestamped report omits every missing series and reads as authoritative,
-// which is the same incompleteness reportSnapshot refuses a partial snapshot
-// over. The complementary case matters as much: a prior-snapshot-less run (a
-// report-only deployment never persists one) has no baseline and must stay
-// quiet rather than guess.
+// disclosure. The daemon GATES its whole compare on this exact shape: a non-failed
+// walk retaining under half the last persisted snapshot is a suspicious truncation,
+// not a real change. The report cannot gate - it is read-only and is the operator's
+// fallback view while the cycle is stuck - so it renders and must SAY so, or the
+// timestamped artifact omits every missing series and reads as authoritative. The
+// complementary case matters as much: a run with no prior snapshot has no baseline
+// and must stay quiet rather than guess.
 func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
 	const shrinkWarn = "report: library walk shrank below half the last persisted snapshot; " +
 		"the audit covers the smaller library - inspect the arrs and arr_tags"

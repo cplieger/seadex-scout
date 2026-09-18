@@ -9,13 +9,10 @@ import (
 	"github.com/cplieger/runesafe/v2"
 )
 
-// TestMaxBytesMirrorsKeyencBudget pins the equality logattr's doc comment
-// asserts: the slog-attribute budget is kept equal to the bound the dedupe-key
-// path applies to the same SeaDex data. audit/render.go used to alias
-// keyenc.MaxComponentBytes directly (a compile-time tie); after the extraction
-// the relationship is only a comment, so this test is what keeps a change to
-// keyenc from silently diverging the two budgets. keyenc imports stdlib only,
-// so the test-only import keeps logattr a dependency-free production leaf.
+// TestMaxBytesMirrorsKeyencBudget is what keeps a change to keyenc from silently
+// diverging the two budgets: the relationship is a comment, not a compile-time
+// tie. keyenc imports stdlib only, so the test-only import keeps logattr a
+// dependency-free production leaf.
 func TestMaxBytesMirrorsKeyencBudget(t *testing.T) {
 	if MaxBytes != keyenc.MaxComponentBytes {
 		t.Errorf("MaxBytes = %d, want keyenc.MaxComponentBytes (%d)", MaxBytes, keyenc.MaxComponentBytes)
@@ -104,21 +101,13 @@ func TestJoinerHonestAggregateMatchesJoinThenCap(t *testing.T) {
 }
 
 // TestCapOrderDivergesOnlyForShrinkingHostileValues pins both sides of the ONE
-// observable difference between this package's cap-before-sanitize order and a
-// sanitize-then-cap composition (d-u14c2-2, which flagged the shift as
-// untested rather than wrong).
-//
-// Sanitizing can SHRINK - strings.Map replaces each unsafe rune with a
-// single-byte space, so a 3-byte bidi control collapses to one byte - so a raw
-// value over the budget can sanitize to well under it. Under sanitize-then-cap
-// that value emits whole and UNMARKED; here it emits cut and MARKED, because the
-// cap runs first. Both properties are deliberate: the pre-sanitize cap is what
-// makes the budget bound the WORK (one hostile multi-MB SeaDex value must never
-// walk the sanitizer in a 256 MiB container, CWE-400), and the marker is honest
-// because bytes really were dropped. An HONEST value must be byte-identical
-// under either order - that is the half a regression would break silently, since
-// every emitted attribute (title, groups, tracker, classification_reason, the
-// URLs, info_hash) and the retention bound all ride this primitive.
+// observable difference between cap-before-sanitize and sanitize-then-cap.
+// Sanitizing can SHRINK (strings.Map maps each unsafe rune to a single-byte
+// space), so a raw value over the budget can sanitize to well under it:
+// sanitize-then-cap emits it whole and UNMARKED, cap-first cut and MARKED. Both
+// are deliberate - the pre-sanitize cap makes the budget bound the WORK
+// (CWE-400), and the marker is honest because bytes were dropped. An HONEST value
+// must be byte-identical under either order, the half a regression breaks silently.
 func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
 	sanitizeThenCap := func(raw string) string {
 		clean := runesafe.Sanitize(raw)
@@ -170,18 +159,11 @@ func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
 	})
 }
 
-// TestJoinerPairIsAllOrNothing pins WritePair's atomicity, the property a
-// pair charged piece by piece cannot hold. Three ways the budget can run out
-// mid-triple, and every one of them leaves an element that is not a pair:
-//
-//	left cut       -> a truncated key, which names nothing
-//	separator cut  -> the key alone, which reads as a value
-//	right cut      -> "key=" with no value
-//
-// All three are refused whole. Charging left, separator and right as three
-// writes admits every one of them, and the "..." marker cannot distinguish
-// "there was more" from "this element is malformed", so a consumer splitting the
-// attribute on the separator has no way to tell.
+// TestJoinerPairIsAllOrNothing pins WritePair's atomicity, the property a pair
+// charged piece by piece cannot hold. Three writes admit a budget running out
+// after the left, after the separator or after nothing at all, each leaving an
+// element that is not a pair, and the "..." marker cannot distinguish "there was
+// more" from "this element is malformed".
 func TestJoinerPairIsAllOrNothing(t *testing.T) {
 	const (
 		key   = "Nyaa"

@@ -13,17 +13,14 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestAniListExhaustionWarnsOnceWithAppContext pins the OTHER half of the
-// AniList door's terminal-level demotion (h-f21) across the real client: the
-// generic httpx verdict is gone from WARN, and the contextual matcher record
-// that replaces it is still published. This is the cross-layer assertion the
-// package-local tests cannot make - the sibling tests here
-// (TestMatchTotalOutageLogsSingleWarn, TestMatchTransientFailuresLogWarn) pin
-// the matcher's records against fakes with no httpx in the stack, and
-// internal/anilist's TestRequestExhaustedTerminalRecordIsDemoted pins the level
-// on both request paths with no matcher above it. A total batch outage is the
-// shape reachable through one permanently-failing upstream (the per-id fallback
-// is deliberately skipped in that case, which is what makes this ONE warning).
+// TestAniListExhaustionWarnsOnceWithAppContext pins the OTHER half of the AniList door's
+// terminal-level demotion across the real client: the generic httpx verdict is absent from
+// WARN and the contextual matcher record is still published. It is the cross-layer
+// assertion the package-local tests cannot make - the siblings here pin the matcher's
+// records against fakes with no httpx in the stack, and internal/anilist's
+// TestRequestExhaustedTerminalRecordIsDemoted pins the level with no matcher above it. A
+// total batch outage is the shape one permanently-failing upstream reaches, and the per-id
+// fallback is skipped in that case, which is what makes this ONE warning.
 func TestAniListExhaustionWarnsOnceWithAppContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

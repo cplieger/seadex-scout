@@ -5,16 +5,13 @@ import (
 	"testing"
 )
 
-// FuzzEscapeCell fuzzes the Markdown-table sanitizer over arbitrary untrusted
-// text (titles and release groups arrive from the arrs, SeaDex, and AniList).
-// The invariant is bounded output: the escaped cell may never contain a raw
-// table or link metacharacter (| [ ] \ < >), a line break, any other C0
-// control character, DEL, or a C1 control character (terminal-escape
-// smuggling), or a Unicode bidi override/isolate character (visual
-// reordering) — which is exactly what keeps
-// a crafted title from breaking out of its cell, forging a link label,
-// smuggling raw HTML, or manipulating the terminal/viewer that renders the
-// report.
+// FuzzEscapeCell fuzzes the Markdown-table sanitizer over arbitrary untrusted text
+// (titles and release groups arrive from the arrs, SeaDex, and AniList). The
+// invariant is bounded output: the escaped cell may never contain a raw table or
+// link metacharacter (| [ ] \ < >), a line break, any other C0 control, DEL, a C1
+// control (terminal-escape smuggling), or a Unicode bidi override/isolate (visual
+// reordering) - which is what keeps a crafted title from breaking out of its cell,
+// forging a link label, smuggling raw HTML, or manipulating the viewer.
 func FuzzEscapeCell(f *testing.F) {
 	f.Add("plain title")
 	f.Add("a|b\nc")
@@ -32,15 +29,13 @@ func FuzzEscapeCell(f *testing.F) {
 	})
 }
 
-// FuzzMdLink fuzzes the Markdown link builder over arbitrary labels and
-// destinations (tracker URLs are untrusted upstream data). Invariants: the
-// output never contains a raw pipe, angle bracket, or line break (table and
-// HTML safety); when a link is emitted its destination carries an http/https
-// scheme and no character that could close or re-open the ](...) syntax; when
-// no link is emitted the output is exactly the escaped label, so an active
-// javascript:/data: link can never survive. The destination also never carries
-// a raw C1 control, bidi override/isolate, or U+2028/U+2029 rune (terminal
-// escape / visual reordering smuggling through the link destination).
+// FuzzMdLink fuzzes the Markdown link builder over arbitrary labels and destinations
+// (tracker URLs are untrusted upstream data). Invariants: the output never contains a
+// raw pipe, angle bracket, or line break; when a link is emitted its destination
+// carries an http/https scheme and no character that could close or re-open the
+// ](...) syntax; when no link is emitted the output is exactly the escaped label, so
+// an active javascript:/data: link can never survive. The destination also never
+// carries a raw C1 control, bidi override/isolate, or U+2028/U+2029 rune.
 func FuzzMdLink(f *testing.F) {
 	f.Add("nyaa", "https://nyaa.si/view/1")
 	f.Add("label", "javascript:alert(1)")

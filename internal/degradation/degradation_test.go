@@ -24,13 +24,9 @@ func TestShrunk(t *testing.T) {
 	}
 }
 
-// TestAdvanceIsTheTransitionRuleForBothCadences pins the rule the four
-// reconcile-cadence streaks and the mapping loader's tick-cadence streak share,
-// now that it lives beside the thresholds it is compared against (h-f23).
-//
-// The reset arm is the half that matters and the half that could drift: a streak
-// counts CONSECUTIVE failures, so evidence of success has to zero it. The
-// threshold being a PARAMETER is what lets one rule serve both cadences.
+// TestAdvanceIsTheTransitionRuleForBothCadences pins the rule the reconcile- and
+// tick-cadence streaks share. The reset arm is the half that could drift: a streak
+// counts CONSECUTIVE failures, so evidence of success has to zero it.
 func TestAdvanceIsTheTransitionRuleForBothCadences(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct {
@@ -84,18 +80,12 @@ func TestCadenceThresholdsAreDistinctAndOrdered(t *testing.T) {
 	}
 }
 
-// TestApproachingLimitIsTheOneWarningThresholdEveryByteCapShares pins the
-// policy the three persisted-file caps used to each recompute for themselves -
-// the indexer feed snapshot, the Fribb download and state.json - and which they
-// disagreed about at the exact boundary, one warning at the fraction while two
-// stayed silent until one byte past it.
-//
-// Two properties, and the second is the one a reader cannot infer: the
-// comparison is INCLUSIVE, so a payload landing exactly on the fraction warns;
-// and the limit is divided before it is multiplied, so the threshold truncates
-// DOWN. The expected byte counts are therefore hardcoded rather than recomputed
-// from the fraction - a threshold derived from the same expression it is
-// checking against cannot see the operation order change.
+// TestApproachingLimitIsTheOneWarningThresholdEveryByteCapShares pins the two
+// properties a reader cannot infer: the comparison is INCLUSIVE, so a payload
+// landing exactly on the fraction warns, and the limit is divided before it is
+// multiplied, so the threshold truncates DOWN. The expected byte counts are
+// hardcoded rather than recomputed - a threshold derived from the expression it
+// checks cannot see the operation order change.
 func TestApproachingLimitIsTheOneWarningThresholdEveryByteCapShares(t *testing.T) {
 	t.Parallel()
 	// 16 MiB truncates to 13421768 (16777216/10*8), NOT the 13421772 that

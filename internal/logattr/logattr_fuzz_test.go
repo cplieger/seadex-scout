@@ -8,19 +8,14 @@ import (
 	"github.com/cplieger/runesafe/v2"
 )
 
-// FuzzCapBoundsAndPreservesHonestValues fuzzes the slog-attribute volume
-// primitive every untrusted SeaDex string is rendered through, with the three
-// invariants the callers rely on: the output never exceeds the budget plus the
-// marker (CWE-400 - the bound is what keeps one hostile multi-MB value from
-// ballooning a Loki record or the 256 MiB container), it is always valid UTF-8
-// (the pre-sanitize cap and the post-sanitize re-cap both cut on rune
-// boundaries, so no arbitrary byte offset may re-mint a partial rune), and an
-// IN-BUDGET input is rendered byte-identically to its sanitized form while an
-// over-budget one is marked (nothing is silently dropped, and the verdict is
-// read off the input so an honest "..." tail cannot excuse a drop). The seed
-// corpus carries the boundary shapes the table tests cannot enumerate: a cut
-// landing mid-rune, an invalid byte at the budget edge, and a value whose
-// sanitized form shrinks below the budget.
+// FuzzCapBoundsAndPreservesHonestValues fuzzes the volume primitive every
+// untrusted SeaDex string is rendered through, on three invariants: the output
+// never exceeds the budget plus the marker (CWE-400), it is always valid UTF-8
+// (both cuts land on rune boundaries, so no byte offset re-mints a partial rune),
+// and an in-budget input renders byte-identically while an over-budget one is
+// marked, with the verdict read off the INPUT so an honest "..." tail cannot
+// excuse a drop. The seeds carry the boundary shapes a table cannot enumerate: a
+// cut landing mid-rune, an invalid byte at the edge, and a shrinking value.
 func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 	f.Add("")
 	f.Add("[SubsPlease] Show - S01E01 (1080p)")
@@ -41,14 +36,11 @@ func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 		if !utf8.ValidString(got) {
 			t.Fatalf("Cap(%d bytes) is not valid UTF-8", len(raw))
 		}
-		// The marker is content, not metadata: an honest value whose own tail is
-		// "..." is indistinguishable from a cut one in the OUTPUT, so whether
-		// truncation is expected is derived from the INPUT instead. Cap truncates
-		// on exactly two conditions (both from Joiner.Write under the full
-		// budget): the raw value exceeds the budget, or its sanitized form does
-		// (sanitizing grows each invalid byte to a three-byte U+FFFD). Anything
-		// else must pass through byte-identical to the sanitized input, which is
-		// the check a silent drop has to fail.
+		// The marker is content, not metadata: an honest value ending in "..." is
+		// indistinguishable from a cut one in the OUTPUT, so the expectation is
+		// derived from the INPUT. Cap truncates on exactly two conditions: the raw
+		// value exceeds the budget, or its sanitized form does (each invalid byte
+		// grows to a three-byte U+FFFD).
 		want := runesafe.Sanitize(raw)
 		truncated := len(raw) > MaxBytes || len(want) > MaxBytes
 		if !truncated {

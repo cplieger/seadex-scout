@@ -196,15 +196,14 @@ func TestTrackerIDExtractionRejectsNonCanonicalDecimalForms(t *testing.T) {
 	}
 }
 
-// TestTrackerKeyRejectsForeignHostURLs pins the SeaDex-side host gate
-// (trackerOwnForm): the record's tracker LABEL alone must never authorize an
-// id extracted from a foreign URL - a malformed or compromised SeaDex record
-// (Tracker "Nyaa", https://evil.example/view/123) would otherwise mint
-// nyaa:123 as curation authorization for the REAL Nyaa torrent 123. An
-// absolute URL keys only on the tracker's own host; the relative site form is
-// accepted for AnimeBytes alone (SeaDex's documented AB shape, resolved
-// against animebytes.tv by the publisher); opaque non-hierarchical forms fail
-// closed.
+// TestTrackerKeyRejectsForeignHostURLs pins the SeaDex-side host gate (trackerOwnForm):
+// the record's tracker LABEL alone must never authorize an id extracted from a foreign
+// URL - a malformed or compromised SeaDex record (Tracker "Nyaa",
+// https://evil.example/view/123) would otherwise mint nyaa:123 as curation
+// authorization for the REAL Nyaa torrent 123. An absolute URL keys only on the
+// tracker's own host; the relative site form is accepted for AnimeBytes alone (SeaDex's
+// documented AB shape, resolved against animebytes.tv by the publisher); opaque
+// non-hierarchical forms fail closed.
 func TestTrackerKeyRejectsForeignHostURLs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -257,7 +256,7 @@ func TestTrackerIDHelpersFailClosedOnUnparseableInput(t *testing.T) {
 
 // ownURL is the raw-string spelling of trackerOwnForm for the ownership tables:
 // production callers classify once and keep the form (so they can extract the id
-// from the same reading, h-f8), while a table case reads better as the URL text
+// from the same reading), while a table case reads better as the URL text
 // it pins.
 func ownURL(scope, raw string) bool {
 	f := urlform.Classify(raw)
@@ -297,25 +296,14 @@ func TestTrackerIDUnknownScopeFailsClosed(t *testing.T) {
 	}
 }
 
-// TestTrackerOwnURLReadsOneStructuralVocabulary pins the urlform adoption at
-// the writer-side admission gate (l-f162). It used to hand-roll the raw-URL
-// vocabulary with net/url, and the two readings had already diverged on a live
-// shape: for a schemeless-host SeaDex URL, urlform reports host evidence (so
-// trackerlink.Publish and internal/filter's AB gate treat it as AnimeBytes and
-// publish the link) while the triple-empty net/url test
-// (Scheme=="" && Host=="" && Opaque=="") called the same string a "true relative
-// reference" and admitted it here - after which the id extraction found nothing
-// and the release was silently dropped as unresolvable. One string, two
-// structural readings, one app.
-//
-// The gate now reads urlform throughout: a host-bearing form is judged on its
-// host evidence and must be a userinfo-free http(s) URL on the exact canonical
-// host, in either of that URL's two spellings (absolute, or the scheme-free
-// form a browser reads the same way - admitted since l-f19), and only a ROOTED
-// relative reference takes the AB relative arm. The relative arm stays ClassRelative rather than the narrower
-// tracker.LookupByRelativeURL (which also demands the
-// "/torrents.php?...torrentid=" shape), so a relative Prowlarr permalink keeps
-// working.
+// TestTrackerOwnURLReadsOneStructuralVocabulary pins the urlform adoption at the
+// writer-side admission gate. Hand-rolling the vocabulary with net/url diverged on a
+// live shape: for a schemeless-host SeaDex URL urlform reports host evidence (so the
+// publisher and internal/filter's AB gate treat it as AnimeBytes) while a triple-empty
+// net/url test called it a true relative reference and admitted it here, after which id
+// extraction found nothing and the release was silently dropped. Now a host-bearing form
+// must be a userinfo-free http(s) URL on the exact canonical host in either spelling,
+// and only a ROOTED relative reference (ClassRelative) takes the AB relative arm.
 func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {
 	tests := map[string]struct {
 		scope string
@@ -334,7 +322,7 @@ func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {
 		"non-http scheme refused":       {upstreamAB, "javascript:/torrents.php?torrentid=456", false},
 		// The divergent shape: host evidence to urlform, so it takes the HOST
 		// arm and is judged on its host like any other absolute-ish form - and
-		// admitted there (l-f19), which is what stops the daemon alerting on a
+		// admitted there, which is what stops the daemon alerting on a
 		// release the feed omits. The host policy still decides everything.
 		"schemeless canonical ab host admitted":     {upstreamAB, "animebytes.tv/torrents.php?id=1&torrentid=456", true},
 		"schemeless canonical nyaa host admitted":   {upstreamNyaa, "nyaa.si/view/1234567", true},
@@ -385,17 +373,13 @@ func TestTrackerKeyRejectsNonHTTPTrackerURLs(t *testing.T) {
 }
 
 // TestTrackerKeysReadTheVouchedForm pins the classify-once contract on both key
-// builders (h-f8). Ownership is decided on urlform's reading of the raw string -
-// which preprocesses edge padding the way a browser does - so the id must be
-// extracted from that same reading (Form.Trimmed). Before the fix the original
-// spelling reached nyaaID/animeBytesID, whose net/url parse kept the padding, so
-// an edge-padded SeaDex or Prowlarr URL passed ownership and then minted no key:
-// the release was silently absent from the curation set and the RSS journal.
-//
-// The strictness of nyaaID/animeBytesID is unchanged; they simply receive a
-// cleaned string. Everything the ownership gate refuses is still refused before
-// an id is read, so edge padding is the ONLY family that newly keys - the
-// refusal rows below are the regression guard for that.
+// builders. Ownership is decided on urlform's reading of the raw string - which
+// preprocesses edge padding the way a browser does - so the id must be extracted from
+// that same reading (Form.Trimmed): with the original spelling reaching
+// nyaaID/animeBytesID, whose net/url parse kept the padding, an edge-padded SeaDex or
+// Prowlarr URL passed ownership and then minted no key, silently absent from both the
+// curation set and the RSS journal. The extractors' strictness is unchanged, so edge
+// padding is the ONLY family that newly keys; the refusal rows guard that.
 func TestTrackerKeysReadTheVouchedForm(t *testing.T) {
 	tests := map[string]struct {
 		tracker, sourceURL string
@@ -443,19 +427,14 @@ func TestTrackerKeysReadTheVouchedForm(t *testing.T) {
 	}
 }
 
-// TestSchemelessHostKeysAsItsAbsoluteSpelling pins l-f19: a SeaDex record may
-// spell a tracker page without its scheme ("animebytes.tv/torrents.php?...").
-// The publisher and the AnimeBytes evidence gate have always read that as host
-// evidence and published a working https link, while this package refused it -
-// so the daemon emitted "better release available" for a release the Torznab
-// feed silently omitted as unresolvable, breaking the invariant that one cycle
-// means an alert and the feed cannot diverge.
-//
-// The two spellings must produce the SAME key, not merely a non-empty one: they
-// name one torrent, so a record that changes spelling (or a catalogue carrying
-// both) must not enter the curation set and the publication log twice. That
-// equality is intended same-tracker deduplication, and it is also what makes
-// the journal GUID (the canonical absolute URL) round-trip to the same key.
+// TestSchemelessHostKeysAsItsAbsoluteSpelling pins that a SeaDex record may spell a
+// tracker page without its scheme ("animebytes.tv/torrents.php?..."). The publisher and
+// the AnimeBytes evidence gate have always read that as host evidence and published a
+// working https link, so this package refusing it made the daemon emit "better release
+// available" for a release the Torznab feed silently omitted. The two spellings must
+// produce the SAME key, not merely a non-empty one: they name one torrent, so a record
+// that changes spelling must not enter the curation set and the publication log twice,
+// and that equality is what makes the journal GUID round-trip to the same key.
 func TestSchemelessHostKeysAsItsAbsoluteSpelling(t *testing.T) {
 	pairs := map[string]struct {
 		tracker, schemeless, absolute string
@@ -490,14 +469,13 @@ func TestSchemelessHostKeysAsItsAbsoluteSpelling(t *testing.T) {
 }
 
 // TestSchemelessHostAdmissionKeepsEveryRefusal is the regression guard for the
-// admission above: it widens exactly one spelling of a canonical-host URL and
-// nothing else. Every refusal a schemeless form could plausibly smuggle through
-// is asserted at the key builders, past the ownership table, because these are
-// the functions whose output authorizes curation and a download link.
-//
-// The strict id extractors are deliberately unchanged, so a schemeless form
-// whose route is not the tracker's own still mints nothing - the normalization
-// hands them a properly-schemed string, it does not relax them.
+// admission above: it widens exactly one spelling of a canonical-host URL and nothing
+// else. Every refusal a schemeless form could plausibly smuggle through is asserted at
+// the key builders, past the ownership table, because these are the functions whose
+// output authorizes curation and a download link. The strict id extractors are
+// deliberately unchanged, so a schemeless form whose route is not the tracker's own
+// still mints nothing - the normalization hands them a properly-schemed string, it does
+// not relax them.
 func TestSchemelessHostAdmissionKeepsEveryRefusal(t *testing.T) {
 	tests := map[string]struct{ tracker, sourceURL string }{
 		"foreign host":                 {"AB", "evil.example/torrents.php?id=1&torrentid=456"},

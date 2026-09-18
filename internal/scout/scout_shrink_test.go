@@ -49,17 +49,14 @@ func shrinkSeaDexEntries() []seadex.Entry {
 	})
 }
 
-// twoArrShrinkFixture is the two-arr deployment the per-arr shrink guard's
-// tests run on: Sonarr lists four series and Radarr two movies, one curated on
-// each side, so both arrs carry a live finding and each side's item count moves
-// independently.
+// twoArrShrinkFixture is the two-arr deployment the per-arr shrink guard's tests
+// run on: Sonarr lists four series and Radarr two movies, one curated on each side,
+// so both arrs carry a live finding and each side's item count moves independently.
 //
-// The counts are chosen so the AGGREGATE comparison this guard replaced stays
-// SILENT on the regression it exists for: prior 4+2 = 6 items, and a walk where
-// Radarr answers ZERO while Sonarr grows to five is 5 items - above half of 6 -
-// so the whole-library test never fired while an entire arr had vanished, the
-// compare ran against a library missing that side, and every finding for it
-// silently resolved.
+// The counts are load-bearing: prior 4+2 = 6 items, and a walk where Radarr answers
+// ZERO while Sonarr grows to five is 5 items, above half of 6 - so an AGGREGATE
+// comparison stays SILENT while an entire arr has vanished, which is the regression
+// these tests must be able to see.
 type twoArrShrinkFixture struct {
 	sonarr *fakeSonarr
 	radarr *fakeRadarr
@@ -155,12 +152,8 @@ func findingArrs(recorder *capture.Recorder) []string {
 // successfully returns zero items while the other keeps the library total above
 // half, the emptied side must be judged suspect on its OWN prior count, its
 // prior items carried into the merged snapshot, the comparison must still RUN,
-// and that side's findings must NOT resolve.
-//
-// Before the guard was per-arr this was silent: the aggregate item comparison
-// never fired (5 fresh items against a prior 6 is above half), the compare ran
-// at full authority against a library missing an entire arr, and every finding
-// for that arr resolved with only the walker's empty-list WARN to show for it.
+// and that side's findings must NOT resolve. twoArrShrinkFixture's counts are what
+// keep an aggregate comparison silent here.
 func TestCycleOneArrEmptiedKeepsThatSidesFindings(t *testing.T) {
 	f := newTwoArrShrinkFixture()
 	f.seed(t, 2)
@@ -254,15 +247,10 @@ func TestCycleShrunkSideDoesNotRatchetPriorCount(t *testing.T) {
 // the single shrink log site, per arr: below degradation.ReconcileEscalationThreshold a
 // shrunken side WARNs, at that threshold the SAME site logs ERROR (firing the
 // SeadexScoutCycleError Loki rule) while still withholding the side, and at
-// degradation.ShrunkWalkAcceptThreshold the guard ACCEPTS the smaller library - one loud
-// WARN, not an ERROR, because acceptance is a designed outcome rather than a
-// condition needing an operator.
-//
-// Acceptance is the case worth reading closely: the fresh (empty) side is
-// persisted, its streak entry is deleted, the compare resolves its stale
-// findings normally, and the cycle closes CLEAN. What makes that acceptable is
-// that it is deliberate, logged, and time-bounded - a silent mass-resolve after
-// six days is exactly what the guard exists to prevent.
+// degradation.ShrunkWalkAcceptThreshold the guard ACCEPTS the smaller library with
+// one loud WARN, not an ERROR, because acceptance is a designed outcome rather than
+// a condition needing an operator. On acceptance the fresh (empty) side is persisted,
+// its streak entry deleted, its stale findings resolved, and the cycle closes CLEAN.
 func TestCycleShrunkSideEscalatesThenAcceptsAtThreshold(t *testing.T) {
 	tests := map[string]struct {
 		priorStreak  int
@@ -358,7 +346,7 @@ func TestCycleShrunkSideEscalatesThenAcceptsAtThreshold(t *testing.T) {
 // TestCycleRecoveredSideResetsOnlyItsOwnStreak pins the per-arr independence of
 // the reset: the arr whose walk passes the guard ends ITS streak and nothing
 // else, so one side recovering never clears the evidence standing against the
-// other. The whole-library reset this replaced did exactly that.
+// other.
 func TestCycleRecoveredSideResetsOnlyItsOwnStreak(t *testing.T) {
 	f := newTwoArrShrinkFixture()
 	f.seed(t, 2)
@@ -496,11 +484,10 @@ func TestMergeShrunkSidesDisabledArrIsNeverSuspect(t *testing.T) {
 
 // TestCycleShrunkSidePersistsSeaDexStreakReset pins the reset arm of the
 // documented SeadexFailures contract ("resets to 0 on any successful fetch")
-// across a shrunken cycle: a shrink no longer stops the pass, so the reset
-// rides the cycle's own closing save. Its predecessor pinned the same property
-// on the arm that saved and returned early; the property outlives that arm,
-// because a recovery during a persistent shrink must not leave a stale streak
-// frozen in state.json and falsely escalate the first later blip to ERROR.
+// across a shrunken cycle: a shrink does not stop the pass, so the reset rides
+// the cycle's own closing save. A recovery during a persistent shrink must not
+// leave a stale streak frozen in state.json and falsely escalate the first later
+// blip to ERROR.
 func TestCycleShrunkSidePersistsSeaDexStreakReset(t *testing.T) {
 	f := newTwoArrShrinkFixture()
 	f.seed(t, 2)

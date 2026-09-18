@@ -71,8 +71,7 @@ func main() {
 	}
 
 	if runHealthProbe(args) {
-		// health.RunProbe exits 0/1; a return means that contract changed, so fail
-		// closed and name the cause - docker records only the probe's own output.
+		// Fail closed and name the cause: docker records only the probe's own output.
 		slog.Error("health probe returned without exiting; reporting unhealthy",
 			"path", health.DefaultPath)
 		os.Exit(1)

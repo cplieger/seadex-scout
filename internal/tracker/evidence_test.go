@@ -2,17 +2,13 @@ package tracker
 
 import "testing"
 
-// TestClassifyAB pins the grade of every AnimeBytes-evidence shape, replacing
-// the two boolean tables (fail-closed gate, fail-open predicate) this one table
-// now covers in a single pass. The three grades carry the two fail directions
-// the app needs: ABNone surfaces with the toggle off, ABDefinite is the audit
-// report's row-listing gate, and ABAmbiguous is the band where the two
-// directions disagree - hidden by ABVisible, still LISTED by the report.
-//
-// The subset invariant the old tables cross-checked (definite implies gated) is
-// now structural: one value cannot be definite without also being non-None, so
-// it is asserted once through filter.ABVisible's exhaustive reading
-// (internal/filter's TestABVisibleReadsEveryGrade) rather than restated per row.
+// TestClassifyAB pins the grade of every AnimeBytes-evidence shape. The three grades carry
+// the two fail directions the app needs: ABNone surfaces with the toggle off, ABDefinite
+// is the audit report's row-listing gate, and ABAmbiguous is the band where the two
+// directions disagree - hidden by ABVisible, still LISTED by the report. The subset
+// relation (definite implies gated) is structural rather than a row assertion: one value
+// cannot be definite without also being non-None, and internal/filter's
+// TestABVisibleReadsEveryGrade reads it once.
 func TestClassifyAB(t *testing.T) {
 	tests := []struct {
 		name    string

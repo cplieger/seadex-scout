@@ -8,21 +8,13 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// FuzzPayloadNames is the coverage-guided twin of TestNamesProperty:
-// the rapid property samples six fixed base names, so the type-gate
-// predicates (extension table, creditless regex) are never explored over
-// arbitrary untrusted SeaDex names. The fuzz target feeds arbitrary names and
-// int64 lengths (negative, zero, and MaxInt64 are all constructible upstream)
-// and asserts the rule's structural invariants: the output is an in-order
-// subsequence of the eligible pool (modeled with the exported type gate, so
-// with any content survivor no sidecar or creditless extra ever votes), a
-// named input never loses ALL its evidence (totality), every maximum-length
-// pool file survives, and no pool file below the ceil-half threshold does.
-// Names are made unique per index so presence checks are sound; the prefix
-// changes neither the extension nor a creditless token.
+// FuzzPayloadNames is the coverage-guided twin of TestNamesProperty: the rapid
+// property samples six fixed base names, so the type-gate predicates (extension
+// table, creditless regex) are never explored over arbitrary untrusted SeaDex
+// names. Names are made unique per index or presence checks prove nothing, and
+// the prefix changes neither the extension nor a creditless token.
 //
-// The target keeps its name across the move out of internal/classify so any
-// committed corpus directory keyed on it stays attached.
+// Do not rename the target: a committed corpus directory is keyed on its name.
 func FuzzPayloadNames(f *testing.F) {
 	f.Add("a.mkv", int64(1000), "NCED01 [BDRemux].mkv", int64(900), "sub.ass", int64(10))
 	f.Add("movie.iso", int64(1000), "Sample.iso", int64(10), "", int64(0))

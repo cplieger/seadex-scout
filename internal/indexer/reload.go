@@ -593,7 +593,7 @@ func (l *snapshotLoader) readSnapshot(ctx context.Context, f *os.File) (snapshot
 	// without the same correction a restored future-skewed or hand-edited snapshot is
 	// served with a future <pubDate> until the next rebuild - indefinitely in
 	// resident-idle mode - where an arr's delay profile sees a negative release age and
-	// can hold the release instead of honoring the bounded journal window (h-f15).
+	// can hold the release instead of honoring the bounded journal window.
 	now := time.Now().UTC()
 	if rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now); rebased > 0 {
 		// Counts only; the rejected timestamp comes from a tamperable file.
@@ -612,7 +612,7 @@ func (l *snapshotLoader) readSnapshot(ctx context.Context, f *os.File) (snapshot
 // scrub, and for the same reason: a hand-edited or partially corrupted
 // feed.json is the only way such an item gets there, and the operator needs to
 // know WHICH journal lost items. The count is the whole message: the dropped
-// item's fields come from a tamperable file (l-f45).
+// item's fields come from a tamperable file.
 func (c *snapshotCache) warnDroppedItems(scrub snapshotScrub) {
 	for _, scope := range feedScopes {
 		if n := scrub.droppedItems[scope]; n > 0 {
@@ -625,7 +625,7 @@ func (c *snapshotCache) warnDroppedItems(scrub snapshotScrub) {
 // warnBlankedInfoURLs reports the info-URL scrub PER TRACKER, one line per
 // affected feed. The attribution is the point: a tampered or hand-edited
 // feed.json is the only way these URLs get there, and an operator seeing a
-// single summed count cannot tell which journal was touched (l-f176). Scopes are
+// single summed count cannot tell which journal was touched. Scopes are
 // iterated in a fixed order so the lines are deterministic for a test to pin and
 // for a human to diff across reloads.
 func (c *snapshotCache) warnBlankedInfoURLs(scrub snapshotScrub) {

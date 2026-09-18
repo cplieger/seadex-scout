@@ -5,22 +5,14 @@ import (
 	"testing"
 )
 
-// curationWarned reports whether a tag list carries a curation warning. It is
-// the boolean reading of curationWarnings, and it lives HERE because production
-// asks neither question this way: the report renders the LIST
-// (curationWarnings(t.Tags)), and whether a release is excluded from a
-// surface is the operator's filters.exclude_tags policy in internal/tagfilter,
-// which by default excludes nothing - so a release SeaDex tags Broken still
-// reaches the findings, the report and the feed.
-//
-// Its job is to be this vocabulary's own oracle: the unit table below, the
-// property test and the fuzz target all cross-check it against
-// curationWarnings, which is what pins the vocabulary discipline (exact,
-// case-insensitive, order-independent) the annotation depends on. Keeping it in
-// curation.go made it a production function with no production caller - the
-// deadcode gate reports exactly that, and the previous doc block argued for
-// retaining it "should a consumer need it", which is the speculative half. Give
-// it a production caller and it moves back, in that same change.
+// curationWarned reports whether a tag list carries a curation warning. It is the
+// boolean reading of curationWarnings, and it lives HERE because production asks
+// neither question this way: the report renders the LIST, and whether a release is
+// excluded from a surface is the operator's filters.exclude_tags policy in
+// internal/tagfilter, which by default excludes nothing. Its job is to be this
+// vocabulary's own oracle: the unit table below, the property test and the fuzz
+// target all cross-check it against curationWarnings, which is what pins the
+// vocabulary discipline (exact, case-insensitive, order-independent).
 func curationWarned(tags []string) bool {
 	return len(curationWarnings(tags)) > 0
 }

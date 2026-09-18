@@ -13,17 +13,14 @@ func TestDownloadURLEscapesAnimeBytesPasskey(t *testing.T) {
 	}
 }
 
-// TestDownloadURLBuildsFromTheVouchedForm pins the classify-once contract on the
-// download path (h-f8): the ownership gate vouches the BROWSER's reading of a
-// raw SeaDex URL, so the id must be extracted from that same reading rather than
-// from the original spelling. Before the fix an edge-padded URL passed ownership
-// and then lost its id to a net/url re-parse of the padded string, so the
-// release silently carried no download link.
-//
-// The refusal half is equally load-bearing: an embedded tab or newline, a
-// backslash and a hidden-host form are refused by the gate BEFORE any id is
-// extracted, so cleaning the vouched form does not widen what can be grabbed
-// beyond edge padding.
+// TestDownloadURLBuildsFromTheVouchedForm pins the classify-once contract on the download
+// path: the ownership gate vouches the BROWSER's reading of a raw SeaDex URL, so the id
+// must be extracted from that same reading rather than from the original spelling - with
+// the original, an edge-padded URL passed ownership and then lost its id to a net/url
+// re-parse of the padded string, so the release silently carried no download link. The
+// refusal half is equally load-bearing: an embedded tab or newline, a backslash and a
+// hidden-host form are refused BEFORE any id is extracted, so cleaning the vouched form
+// does not widen what can be grabbed beyond edge padding.
 func TestDownloadURLBuildsFromTheVouchedForm(t *testing.T) {
 	const passkey = "pk"
 	tests := map[string]struct {

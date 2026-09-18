@@ -16,14 +16,11 @@ import (
 // TestReportPathsRedactedFromLogsAndErrors pins the report pipeline's
 // credential posture: report.dir is a secret-capable config value (config
 // expansion can place an allowlisted ${SEADEX_SCOUT_*} secret in any string
-// field), so neither the pipeline's slog records (shipped to Loki) nor its
-// returned errors (logged by main) may carry the configured directory value.
-// Filesystem calls keep the real path — the report pair is still written to
-// the configured directory — only the diagnostics are redacted.
-//
-// The masking MECHANISM is exercised in internal/pathredact (Text/Err/Logger
-// and their guard branches); what these cases pin is this package's use of it:
-// every pipeline surface it must be applied at.
+// field), so neither the pipeline's slog records nor its returned errors may carry
+// the configured directory value.
+// Filesystem calls keep the real path; only the diagnostics are redacted. The
+// masking MECHANISM is exercised in internal/pathredact; what these cases pin is
+// every pipeline surface this package must apply it at.
 func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 	const sentinel = "sekret-passkey-sentinel"
 

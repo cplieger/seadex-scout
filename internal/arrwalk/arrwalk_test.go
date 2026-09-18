@@ -18,19 +18,9 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
-// t.Errorf, so one run names every wrong value in the cluster instead of stopping
-// at the first. It stays a t.Fatal* when (a) a later line indexes or dereferences
-// what the check guards, so converting would trade a named failure for a panic;
-// (b) the check establishes the object its siblings read, so continuing asserts
-// against a known-bad fixture; (c) a sibling would pass VACUOUSLY once it fails;
-// (d) the body is a rapid property or a fuzz target, whose harness re-runs it
-// while shrinking; or (e) continuing risks a synctest deadlock or a blocked send.
-
-// The walker produces the internal/library model; these test-local aliases keep
-// the walk assertions reading as they did when the model lived in this package.
-// The walker itself always names the model explicitly (library.Item), so the
-// dependency direction stays visible in the production code.
+// Test-local aliases for the internal/library model the walker produces. The
+// walker itself always names the model explicitly, so the dependency direction
+// stays visible in the production code.
 type (
 	Item     = library.Item
 	Snapshot = library.Snapshot
@@ -710,13 +700,6 @@ func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 	}
 }
 
-// TestWalkUnmatchedTagWarningNeverEmitsTagValues pins the credential-safety
-// contract of the unmatched-tag diagnostic: configured arr_tags values pass
-// through allowlisted ${VAR} expansion, so a typo like ${SONARR_API_KEY} can
-// place a secret in the label set. The warning is pinned structurally to the
-// count-only shape (exact message, exactly the which + unmatched_count
-// attributes), so any future full OR partial tag-value field fails the test
-// without relying on spotting a particular secret substring.
 // TestWalkNeverLogsAConfiguredTagValue pins the credential-safety property for
 // the whole walk rather than for one message. A configured tag label reaches
 // the app through ${VAR} expansion, so a config typo can place a secret there,
@@ -1100,15 +1083,13 @@ func (f *budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
-// TestWalkSonarrBudgetTripSkipsQueuedFetches pins the cancel-on-budget
-// behavior of fetchEpisodeItems: once episodeFailureBudget fetches have
-// failed, the fan-out context is cancelled, so queued series never reach
-// EpisodeFiles. Exactly episodeConcurrency fetches start up front; each
-// released failure lets one more start, except the last, which trips the
-// budget — so the total started is episodeConcurrency + episodeFailureBudget
-// - 1 and the walk fails with the budget error. Deleting the cancelFan() call
-// on the budget branch (or mutating >= to >) leaves an extra fetch blocked
-// forever, which synctest detects as a durable deadlock.
+// TestWalkSonarrBudgetTripSkipsQueuedFetches pins the cancel-on-budget behavior
+// of fetchEpisodeItems: once episodeFailureBudget fetches have failed the fan-out
+// context is cancelled, so queued series never reach EpisodeFiles. Exactly
+// episodeConcurrency fetches start up front and each released failure lets one
+// more start except the last, which trips the budget, so the total started is
+// episodeConcurrency + episodeFailureBudget - 1. Without the cancel an extra
+// fetch blocks forever, which synctest reports as a durable deadlock.
 func TestWalkSonarrBudgetTripSkipsQueuedFetches(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		seriesCount := episodeConcurrency + 10
@@ -1493,16 +1474,12 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 }
 
 // TestWalkWarnsWhenTagFilteringEmptiesASide pins the dead-but-resolving-filter
-// diagnostic: every configured arr_tags label resolves to a real tag id, but no
-// item carries it (renamed or unassigned on the arr side), so the side
-// contributes zero items while the cycle still reads healthy. resolveOne warns
-// only when a LABEL missed, so this WARN and the snapshot's FilteredEmptyArrs
-// (which the scout's completion line republishes as reason=tags-emptied-side)
-// are the two signals that separate a silently-emptied side from a genuinely
-// empty library - hence both negative arms below (a filter that keeps something,
-// and an arr that listed nothing) as well as the positive one. Counts only: the
-// arr and listed attrs never carry label values, which pass through ${VAR}
-// expansion.
+// diagnostic: every configured arr_tags label resolves to a real tag id but no
+// item carries it, so the side contributes zero items while the cycle still reads
+// healthy. resolveOne warns only when a LABEL missed, so this WARN and the
+// snapshot's FilteredEmptyArrs are the two signals separating a silently-emptied
+// side from a genuinely empty library, hence the two negative arms below. Counts
+// only: the attrs never carry label values, which pass through ${VAR} expansion.
 func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 	const msg = "arr_tags filtering kept no items from a non-empty arr library; this side contributes nothing this cycle"
 	// A side whose arr listed NOTHING is a legitimately empty library, which
@@ -1580,11 +1557,9 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 	})
 
 	t.Run("both sides emptied by an exclude-only filter", func(t *testing.T) {
-		// An EXCLUDE filter with no include list: the arms above configure the
-		// include side, and either list alone already means "a filter is
-		// configured", so only this shape says the diagnostic reads the exclude
-		// list too. An operator who excludes one label and narrows nothing is a
-		// normal configuration, and every item here carries that label.
+		// An EXCLUDE filter with no include list: either list alone already means
+		// "a filter is configured", so only this shape says the diagnostic reads
+		// the exclude list too.
 		skip := []arrapi.Tag{{ID: 8, Label: "skip"}}
 		fs := &fakeSonarr{
 			series: []arrapi.Series{{ID: 1, Title: "Skipped", Tags: []int{8}}},
@@ -1645,10 +1620,8 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		if n := rec.CountExact(emptyMsg); n != 0 {
 			t.Errorf("empty-list warnings = %d, want none (the arr listed two series); messages = %q", n, rec.Messages())
 		}
-		// Every configured label resolved to a real tag id here, so the
-		// dead-LABEL diagnostic must stay quiet too: it names a config typo an
-		// operator has to fix, and one that fires on every healthy walk names
-		// nothing.
+		// Every label resolved, so the dead-LABEL diagnostic must stay quiet: it
+		// names a config typo, and one firing on every healthy walk names nothing.
 		if n := rec.CountExact("configured tags matched no arr tag"); n != 0 {
 			t.Errorf("unmatched-label warnings = %d, want none (every label resolved); messages = %q", n, rec.Messages())
 		}
@@ -1684,13 +1657,10 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 
 // TestWalkStripsBaseURLCredentialsFromItemArrURL pins the Item-level credential
 // invariant Item.ArrURL documents: the walker builds the deep-link THROUGH
-// SafeLogURL, so a reverse-proxy Basic Auth credential configured in
-// sonarr.url / radarr.public_url never enters an Item, a Snapshot, a Finding, or
-// an audit Row. The audit render's sink-side SafeLogURL call is documented as
-// belt-and-braces, so nothing else fails if a construction-side wrap is
-// dropped. The link must also stay usable, so the
-// assertion is the exact credential-free deep-link, not merely the absence of
-// the secret.
+// SafeLogURL, so a Basic Auth credential in sonarr.url / radarr.public_url never
+// enters an Item, a Snapshot, a Finding or an audit Row. The sink-side SafeLogURL
+// call is belt-and-braces, so nothing else fails if this wrap is dropped. The link
+// must stay usable, so the assertion is the exact credential-free deep-link.
 func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha", TitleSlug: "alpha"}},

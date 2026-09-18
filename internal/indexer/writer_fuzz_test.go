@@ -28,21 +28,14 @@ func (s snapshotScrub) totalDropped() int {
 	return n
 }
 
-// FuzzDecodeSnapshot is the coverage-guided complement of the unit tests over
-// the ONE persisted-snapshot decode gate both consumers share (the writer's
-// loadPrevious and the server's readSnapshot): /config/feed.json is a
-// hand-editable, corruptible boundary, and every downstream guarantee rests
-// on this one function - the curation maps are indexed unconditionally, the
-// persisted-item limits keep renderFeed's XML escaping bounded, and the info
-// hash is read as torrent identity by both the served infohash attr and the
-// writer's warning-retraction gates. Invariants: a rejected snapshot returns
-// zero data (never partially materialized state), a rejection is reported
-// exactly once (an error or a reason, never both), an accepted snapshot
-// carries non-nil curation maps, only within-limit items, and canonical info
-// hashes and download-volume-factor markers, and re-decoding an accepted snapshot's own re-encoding is accepted
-// unchanged (the gate never rejects what a rebuild would persist, and the
-// canonical re-encoding is byte-identical, so no field, map entry, item, or
-// ordering shifts on the second pass and nothing further is blanked).
+// FuzzDecodeSnapshot is the coverage-guided complement of the unit tests over the ONE
+// persisted-snapshot decode gate both consumers share (the writer's loadPrevious and the
+// server's readSnapshot): /config/feed.json is a hand-editable, corruptible boundary and
+// every downstream guarantee rests on this function. Invariants: a rejected snapshot
+// returns zero data (never partially materialized state), a rejection is reported exactly
+// once (an error or a reason, never both), an accepted snapshot carries non-nil curation
+// maps, only within-limit items and canonical hashes and markers, and re-decoding its own
+// re-encoding is accepted unchanged and byte-identical.
 func FuzzDecodeSnapshot(f *testing.F) {
 	f.Add([]byte(emptyFeedJSON))
 	f.Add([]byte(`null`))

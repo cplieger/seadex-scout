@@ -27,15 +27,13 @@ func asciiLower(s string) bool {
 	return len(s) == 1 && s[0] >= 'a' && s[0] <= 'z'
 }
 
-// TestNonWordEdgeIsExactlyTheNonToLowerAlnumRunes is the load-bearing invariant
-// of this package: a rune is a WORD rune exactly when strings.ToLower maps it
-// onto an ASCII alphanumeric. That equivalence is what makes the boundary rule
-// and the folding rule impossible to contradict - the alphabet a token is spelled
-// in is the alphabet its edges are defined against - and it is why the
-// ToLower reading won over a global (?i), which cannot state such a relation.
-// Exhaustive over the whole rune space, so a hand-edited class body that adds a
-// rune ToLower does not fold (or drops one it does - U+0130, U+212A) fails here
-// rather than in one consumer's classification.
+// TestNonWordEdgeIsExactlyTheNonToLowerAlnumRunes is the load-bearing invariant of
+// this package: a rune is a WORD rune exactly when strings.ToLower maps it onto an
+// ASCII alphanumeric. That equivalence is what makes the boundary rule and the
+// folding rule impossible to contradict, and it is why the ToLower reading won over
+// a global (?i), which cannot state such a relation. Exhaustive over the rune space,
+// so a hand-edited class that adds a rune ToLower does not fold (or drops one it
+// does, U+0130 and U+212A) fails here rather than in one consumer.
 func TestNonWordEdgeIsExactlyTheNonToLowerAlnumRunes(t *testing.T) {
 	edge := regexp.MustCompile(`^` + NonWordEdge + `$`)
 	forEachRune(func(r rune) {

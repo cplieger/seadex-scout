@@ -82,17 +82,13 @@ func isUnsafeForDisplay(r rune) bool {
 }
 
 // TestMdLinkPropertyHTTPDestinationsStayContained complements
-// TestMdLinkPropertyOnlyHTTPLinks by constructing a syntactically valid
-// http/https URL on every trial (rapid.String almost never produces one, so
-// the generic property mostly exercises the plain-label fallback): every
-// dangerous destination character is embedded in random surrounding text, so
-// the active-link destination escaping branch is exercised on every draw.
-//
-// The backslash is deliberately NOT in the dangerous set: it is a
-// browser-vs-net/url smuggling shape the shared structural vouch step refuses
-// outright, so it never reaches the escaper. The trial asserts that refusal
-// separately, which keeps both halves pinned - escaping for a vouched
-// destination, dropping for a de-smuggled one (h-f8/l-f189).
+// TestMdLinkPropertyOnlyHTTPLinks by constructing a syntactically valid http/https
+// URL on every trial (rapid.String almost never produces one, so the generic
+// property mostly exercises the plain-label fallback): every dangerous destination
+// character is embedded in random surrounding text, so the escaping branch is
+// exercised on every draw. The backslash is deliberately NOT in the dangerous set:
+// the shared structural vouch step refuses that smuggling shape outright, so it
+// never reaches the escaper, and the trial asserts that refusal separately.
 func TestMdLinkPropertyHTTPDestinationsStayContained(t *testing.T) {
 	plain := rapid.StringOfN(rapid.RuneFrom([]rune("abcXYZ0123456789")), 0, 20, -1)
 	const dangerous = " ()<>|`\u0085\u202e\u2028\u2029"

@@ -7,16 +7,12 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestGroupsOverlapProperties property-tests the shared three-valued
-// group-set comparison compare and audit key alignment on, with metamorphic
-// invariants that do not reimplement the normalizer: the overlap is
-// symmetric; an empty side is always None (nothing overlaps an empty set and
-// nothing can hide behind one); appending a shared KNOWN group to both sides
-// forces Known, with whitespace padding of the shared element not breaking
-// the match; appending an unknown-evidence member (the NoGroup sentinel) to
-// one side of a two-non-empty-sides comparison never yields a divergence
-// proof (the result is Known or Unknown, never None); and Known requires a
-// known group present on both sides.
+// TestGroupsOverlapProperties property-tests the shared three-valued group-set comparison
+// compare and audit key alignment on, with metamorphic invariants that do not reimplement
+// the normalizer: symmetry; an empty side is always None (nothing overlaps an empty set and
+// nothing can hide behind one); appending a shared KNOWN group to both sides forces Known
+// even with whitespace padding; appending the unknown-evidence NoGroup sentinel to one side
+// never yields a divergence proof; and Known requires a known group on both sides.
 func TestGroupsOverlapProperties(t *testing.T) {
 	group := rapid.OneOf(
 		rapid.SampledFrom([]string{"", "NOGRP", "no-group", "SubsPlease", " pmr ", "LostYears"}),
@@ -60,17 +56,12 @@ func TestGroupsOverlapProperties(t *testing.T) {
 	})
 }
 
-// TestClassifyPlantedMarkerProperties property-tests Classify with an
-// oracle-style planted-marker construction (never a reimplementation of the
-// tokenizer): a name is BUILT from a marker-free title vocabulary and one or
-// more known marker tokens joined by a random scene delimiter, so the
-// expected classification is known by construction. It pins, over random
-// composition: a marker-free name classifies unknown with no codec or
-// resolution; a planted remux token always classifies remux; a planted
-// encoder marker always classifies encode; remux wins when both are planted
-// in the same name; a planted resolution is extracted lowercased and ranks
-// positive; markers planted in a LATER Names element still classify; and the
-// group fallback and structured-only dual-audio contracts hold throughout.
+// TestClassifyPlantedMarkerProperties property-tests Classify with an oracle-style
+// planted-marker construction, never a reimplementation of the tokenizer: a name is BUILT
+// from a marker-free title vocabulary plus one or more known marker tokens joined by a
+// random scene delimiter, so the expected classification is known by construction. Each
+// per-assertion message carries its own claim (remux beats encode, a marker in a LATER
+// Names element still classifies, the group fallback and dual-audio contracts hold).
 func TestClassifyPlantedMarkerProperties(t *testing.T) {
 	// Title words are marker-free by construction: no substring of any codec
 	// text token (avc/x264/h264/x265/h265/hevc, matched unbounded), no
@@ -138,19 +129,14 @@ func TestClassifyPlantedMarkerProperties(t *testing.T) {
 	})
 }
 
-// TestClassifyToLowerFaithfulness pins the in-place matcher's central design
-// claim directly: classifying raw evidence text must decide every
-// text-derived field (Kind, Reason, Codec, Resolution) exactly as classifying
-// its strings.ToLower image, which is what the shared case classes
-// (nametoken.Literal) and the shared word-alphabet edges
-// (nametoken.NonWordEdge) exist to guarantee. Any
-// boundary or case-class regression - a (?i) rewrite (SimpleFold matches
-// U+017F but misses U+0130), a dropped U+0130/U+212A class member, or an
-// edge class that is not fold-invariant - breaks this equivalence on some
-// generated input, so the whole marker machinery is pinned structurally
-// instead of only by the example rows in TestClassifyKind and
-// TestClassifyResolution. Group and Tracker are deliberately excluded: they
-// pass raw casing through by contract.
+// TestClassifyToLowerFaithfulness pins the in-place matcher's central design claim: every
+// text-derived field (Kind, Reason, Codec, Resolution) must classify raw evidence exactly
+// as it classifies the strings.ToLower image, which is what the shared case classes
+// (nametoken.Literal) and word-alphabet edges (nametoken.NonWordEdge) guarantee. A (?i)
+// rewrite (SimpleFold matches U+017F but misses U+0130), a dropped U+0130/U+212A class
+// member or a non-fold-invariant edge class breaks the equivalence on some generated input,
+// so the marker machinery is pinned structurally rather than only by example rows. Group
+// and Tracker are excluded: they pass raw casing through by contract.
 func TestClassifyToLowerFaithfulness(t *testing.T) {
 	piece := rapid.OneOf(
 		rapid.SampledFrom([]string{

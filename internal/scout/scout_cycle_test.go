@@ -256,12 +256,9 @@ func TestCycleEmptySeaDexEntriesReportsNothing(t *testing.T) {
 // zero items while its prior count was non-zero must NOT stop the cycle (the
 // comparison runs on a merged snapshot) and must NOT let the empty snapshot
 // through - the gate hands back a snapshot carrying that side's prior items and
-// names it suspect, and it saves nothing of its own (the streak rides whichever
-// save closes the cycle).
-//
-// This is the shape the guard's whole design turns on, so it is pinned at the
-// gate as well as end-to-end (see scout_shrink_test.go): the arm it replaced
-// returned handled=true and skipped the comparison entirely.
+// names it suspect, saving nothing of its own (the streak rides whichever save
+// closes the cycle). Pinned at the gate as well as end-to-end
+// (scout_shrink_test.go).
 func TestHandlePreCompareGateEmptyArrCarriesPriorItemsInsteadOfSkipping(t *testing.T) {
 	logger := scoutTestLogger()
 	st := state.State{Library: library.Snapshot{Items: []library.Item{
@@ -366,17 +363,14 @@ func TestCyclePartialWalkComparesCleanSubset(t *testing.T) {
 	}
 }
 
-// TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept pins the
-// shrink guard's feed-outage contract: a library-shrink + SeaDex double outage
-// with a feed configured must still surface the SeaDex failure (its standard log
-// line, recorded ahead of gate selection, carrying feed_kept) and still advance
-// the persisted per-arr shrink streak, so the outage does not read as
-// shrink-only in Loki and cannot escape escalation behind a winning gate.
-//
-// The completion line is the SeaDex gate's now, not the shrink's: the shrink no
-// longer stops the cycle (it merges and lets the compare run), so the pass that
-// closes early here closes because SeaDex is down. The shrink evidence stands
-// beside it in its own escalating line and in the persisted streak.
+// TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept pins the shrink
+// guard's feed-outage contract: a library-shrink plus SeaDex double outage with a
+// feed configured must still surface the SeaDex failure (its standard log line,
+// recorded ahead of gate selection, carrying feed_kept) and still advance the
+// persisted per-arr shrink streak, so the outage cannot read as shrink-only in Loki
+// or escape escalation behind a winning gate. The completion line is the SeaDex
+// gate's, because the shrink merges and lets the compare run instead of stopping
+// the cycle.
 func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 	logger, recorder := capture.New()
 	feed := &fakeFeed{}
@@ -1253,21 +1247,14 @@ func idlessShowMedia() anilist.Media {
 	return anilist.Media{Format: "TV", Titles: []string{"Idless Show"}, Year: 2024}
 }
 
-// TestCycleReportCarriesForwardIncompleteEvidence pins the ONE argument
-// finishCompletedCycle computes for Report beyond the findings themselves: the
-// preserve set is the UNION of the failed-walk item ids and the
-// AniList-incomplete lookup ids, so neither degradation can mask the other's
-// carry-forward.
-//
-// It is asserted end to end rather than by inspecting the call, because the
-// union only matters through its effect: a healthy first cycle reports all
-// three rows, then a cycle where ONE series' episode fetch fails (a Failed
-// placeholder, partial walk) and a DIFFERENT id-less entry's AniList lookup
-// fails transiently must still emit both affected rows - their absence from the
-// compare is missing data, not alignment - alongside the unaffected majority,
-// with the summary line's preserved counter naming both. If the union dropped
-// either half, that half's row would vanish from the log and the operator's
-// alert would silently stop firing for a condition that is still true.
+// TestCycleReportCarriesForwardIncompleteEvidence pins the one argument
+// finishCompletedCycle computes beyond the findings themselves: the preserve set is
+// the UNION of the failed-walk item ids and the AniList-incomplete lookup ids, so
+// neither degradation can mask the other's carry-forward. Asserted end to end,
+// because the union only matters through its effect: ONE series' episode fetch
+// fails (a Failed placeholder, partial walk) and a DIFFERENT id-less entry's
+// AniList lookup fails transiently, and both affected rows must still be emitted
+// with the summary line's preserved counter naming both.
 func TestCycleReportCarriesForwardIncompleteEvidence(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
@@ -1455,14 +1442,11 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 }
 
 // TestCycleCompletionLineCarriesAniListCycleDeltas pins the per-cycle AniList
-// counter arithmetic on the completion line: anilist_calls/anilist_waits are
-// the client's cumulative counters, and their _cycle twins must be the delta
-// against the cycle-start snapshot - the pair the documented "cycle complete"
-// Loki line carries. A scripted AniListStats closure (the same seam build.go
-// wires the real client's Stats into) returns different values on the
-// cycle-start and completion snapshots, so a broken subtraction, a swapped
-// operand, or a completion line reading the start snapshot is directly
-// observable.
+// counter arithmetic on the completion line: anilist_calls/anilist_waits are the
+// client's cumulative counters, so their _cycle twins must be the delta against the
+// cycle-start snapshot. A scripted AniListStats closure returns different values on
+// the cycle-start and completion snapshots, so a broken subtraction, a swapped
+// operand, or a completion line reading the start snapshot is observable.
 func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
@@ -1510,16 +1494,13 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 	}
 }
 
-// TestCycleCompletionLineCarriesCountsAndCoverage pins the count half of the
-// documented "cycle complete" line: seadex_entries, library_items, findings,
-// the ID-bridge coverage totals (mapped/unmapped, summed across arrs by
-// sumCounts), and the snapshot diff counters. The scenario separates the pairs
-// a swap could hide - two coverage hits under DIFFERENT arrs (a Sonarr series
-// record plus a Radarr movie record) against one unmapped id-less record, and
-// zero added against one removed - so a per-arr total that reports one bucket
-// instead of their sum, a swapped mapped/unmapped pair, or a swapped
-// added/removed pair is observable. The remaining 1-valued attrs
-// (library_items, findings, unmapped, removed, changed) are not mutually
+// TestCycleCompletionLineCarriesCountsAndCoverage pins the count half of the "cycle
+// complete" line: seadex_entries, library_items, findings, the ID-bridge coverage
+// totals (mapped/unmapped, summed across arrs by sumCounts), and the snapshot diff
+// counters. The scenario separates the pairs a swap could hide - two coverage hits
+// under DIFFERENT arrs against one unmapped id-less record, zero added against one
+// removed - so a per-arr total reporting one bucket instead of their sum, or a
+// swapped pair, is observable. The remaining 1-valued attrs are not mutually
 // distinguishable, so a swap purely among them is not covered here.
 func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 	logger, recorder := capture.New()
@@ -1586,9 +1567,9 @@ func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 // class: a persistent AniList degradation (result.Degraded on consecutive
 // completed cycles) must escalate its log site to ERROR (firing the
 // SeadexScoutCycleError rule) at the shared threshold, exactly like the
-// shrunk-walk, SeaDex-failure, and mapping-rejection streaks - a permanently
-// broken egress to graphql.anilist.co previously WARNed "cycle degraded"
-// forever while findings stayed frozen. Below the threshold no ERROR fires,
+// shrunk-walk, SeaDex-failure, and mapping-rejection streaks: a permanently
+// broken egress to graphql.anilist.co would otherwise WARN "cycle degraded"
+// forever while findings stay frozen. Below the threshold no ERROR fires,
 // the streak persists in state, and an undegraded completed cycle resets it.
 func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 	newScout := func(store *fakeStore) (*Scout, *capture.Recorder) {
@@ -1650,15 +1631,13 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 	}
 }
 
-// TestCycleExactlyHalfWalkPassesShrinkGuard pins the shrink guard's exact
-// boundary through the public cycle: the policy
-// (degradation.Shrunk) is "fewer than 1/factor of the prior items for that arr"
-// - strictly BELOW half at the default 2 - so a walk returning exactly half of
-// the arr's prior items must pass the guard. The externally meaningful
-// consequences are asserted, not the orchestration decomposition: the halved
-// walk is persisted as the new snapshot, the shrunk-walk streak resets, the
-// cycle stays healthy, and it closes with the completion (not the degraded)
-// line. A 1-of-4 walk (1*2 < 4) is the tripping case the escalation test pins.
+// TestCycleExactlyHalfWalkPassesShrinkGuard pins the shrink guard's exact boundary
+// through the public cycle: degradation.Shrunk trips strictly BELOW 1/factor of the
+// arr's prior items, so a walk returning exactly half must pass. The externally
+// meaningful consequences are asserted rather than the orchestration: the halved
+// walk is persisted as the new snapshot, the shrunk-walk streak resets, the cycle
+// stays healthy, and it closes with the completion line. A 1-of-4 walk (1*2 < 4) is
+// the tripping case the escalation test pins.
 func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
@@ -1889,16 +1868,14 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 	}
 }
 
-// TestLoadMappingEscalatesOnTerminalNon2xxStreak pins l-f100 at the operator
-// boundary: a status whose only remedy is the operator (a 404 or 410 on the
-// fixed Fribb URL) advances the persisted rejection streak, so a permanently
-// refusing upstream escalates the scout's mapping log from WARN to ERROR once
-// the streak reaches degradation.TickEscalationThreshold consecutive cycles.
-// Before this it warned forever from a frozen zero streak. The come-back-later
-// row is the other side (h-f3): a 5xx neither advances the streak nor escalates,
-// however long it lasts, because this ERROR's remediation tells the operator to
-// inspect the upstream or delete state.json and an outage that clears on its own
-// needs neither.
+// TestLoadMappingEscalatesOnTerminalNon2xxStreak pins the operator boundary: a
+// status whose only remedy is the operator (a 404 or 410 on the fixed Fribb URL)
+// advances the persisted rejection streak, so a permanently refusing upstream
+// escalates the mapping log from WARN to ERROR once the streak reaches
+// degradation.TickEscalationThreshold consecutive cycles. The come-back-later row
+// is the other side: a 5xx neither advances the streak nor escalates, however long
+// it lasts, because this ERROR's remediation tells the operator to inspect the
+// upstream or delete state.json and a self-clearing outage needs neither.
 func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 	for name, tc := range map[string]struct {
 		status      int

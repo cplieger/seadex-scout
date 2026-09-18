@@ -21,7 +21,7 @@ func TestCatalogueHas(t *testing.T) {
 		// Sonarr item, nor a series record's IMDb id a Radarr item (TVDB
 		// reuses a film's IMDb id on the parent series). A series-typed
 		// record's unambiguous movie TMDB ids DO claim a Radarr movie when the
-		// record routes no series id (h-f9/l-f73, mirroring FindByID's
+		// record routes no series id (mirroring FindByID's
 		// secondary movie lookup); a record that routes a TVDB id keeps series
 		// routing as its only claim.
 		{AniListID: 3, Type: "MOVIE", TvdbID: 555},

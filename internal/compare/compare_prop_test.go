@@ -10,17 +10,14 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestRepresentativePermutationInvariantProperty pins the headline selection's
-// order independence over pools of any size: representative must pick a
-// content-identical candidate whatever order PocketBase returned the torrents
-// relation in, because the headline's identity enters the dedupe key notify
-// derives (an order-dependent pick emits a different key for an unchanged
-// finding - a duplicate alert plus a false resolution). The pairwise tests pin
-// 2-candidate reversals; this property covers N-candidate pools, where a
-// single-pass max is order-independent ONLY while betterCandidate stays a
-// total order (a transitive lexicographic chain) - the invariant a future
-// tie-break edit could silently break. Small alphabets deliberately force
-// rank ties so the stable-key tie-break is exercised.
+// TestRepresentativePermutationInvariantProperty pins the headline selection's order
+// independence over pools of any size: representative must pick a content-identical
+// candidate whatever order PocketBase returned the torrents relation in, because the
+// headline's identity enters the dedupe key notify derives (an order-dependent pick emits a
+// different key for an unchanged finding - a duplicate alert plus a false resolution). The
+// pairwise tests pin 2-candidate reversals; this covers N-candidate pools, where a
+// single-pass max is order-independent ONLY while betterCandidate stays a total order.
+// Small alphabets deliberately force rank ties so the stable-key tie-break is exercised.
 func TestRepresentativePermutationInvariantProperty(t *testing.T) {
 	resolutions := []string{"", "720p", "1080p", "2160p"}
 	trackerTypes := []tracker.Type{tracker.Public, tracker.Private, tracker.Unknown}

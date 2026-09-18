@@ -36,13 +36,12 @@ func unquoteFilterValue(t *testing.T, s string) (value, rest string) {
 
 // FuzzQuoteFilterValueRoundTrips pins the filter-literal escaping that is the
 // belt to filterSafe's braces. Because filterSafe refuses a quote and a
-// backslash outright, no test ever hands quoteFilterValue a metacharacter, so
-// the escaper is unexercised today and a regression in it - a dropped
-// backslash rule, an inverted pair - is invisible until someone relaxes
-// filterSafe, at which point an upstream-controlled cursor value would close
-// the literal early and append its own terms to the outbound PocketBase filter
-// expression. The round-trip property holds the escaper to its contract
-// independently of the validator in front of it.
+// backslash outright, no test ever hands quoteFilterValue a metacharacter, so a
+// regression in the escaper - a dropped backslash rule, an inverted pair - is
+// invisible until someone relaxes filterSafe, at which point an
+// upstream-controlled cursor value would close the literal early and append its
+// own terms to the outbound PocketBase filter expression. The round-trip
+// property holds the escaper to its contract independently of that validator.
 func FuzzQuoteFilterValueRoundTrips(f *testing.F) {
 	seeds := []string{
 		"", "abc", "rec000001", "2026-01-02 03:04:05.000Z",

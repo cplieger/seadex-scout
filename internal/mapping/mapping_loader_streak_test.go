@@ -91,13 +91,11 @@ func TestLoader_refreshCache_notModifiedResetsRejectionStreak(t *testing.T) {
 }
 
 // TestLoader_refreshCache_transportFailureKeepsRejectionStreak pins that a
-// transient outage is not a persistent refusal: a transport failure (no
-// response at all) neither advances the persisted streak nor resets it, so the
-// scout never escalates on an outage. It used to assert this with a 404, which l-f100
-// reclassified as PERSISTENT - see
-// TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak - so the
-// transient side is now pinned with the one fetch failure that carries no HTTP
-// status at all.
+// transient outage is not a persistent refusal: a transport failure (no response
+// at all) neither advances the persisted streak nor resets it, so the scout never
+// escalates on an outage. The subject is the one fetch failure carrying no HTTP
+// status; a 404 or 410 on the fixed Fribb URL is PERSISTENT instead (see
+// TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak).
 func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) {
 	prev := &Cache{
 		FetchedAt:         time.Now().Add(-2 * time.Hour),
@@ -114,12 +112,11 @@ func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) 
 	}
 }
 
-// TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak pins
-// l-f100's persistent half: a status on the FIXED Fribb URL whose only remedy is
-// the operator (a 404 or 410 on a URL that is a package constant) is a
-// persistent refusal, not a transient outage. Before l-f100, only
-// *httpx.ResponseTooLargeError advanced the streak, so such a status warned
-// forever from a zero streak and the scout's WARN never escalated.
+// TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak pins the
+// persistent half: a status on the FIXED Fribb URL whose only remedy is the
+// operator (a 404 or 410 on a URL that is a package constant) is a persistent
+// refusal, not a transient outage. A status that failed to advance the streak
+// would warn forever from zero and the scout's WARN would never escalate.
 func TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusGone} {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +172,7 @@ func TestLoader_refreshCache_comeBackLaterStatusKeepsRejectionStreak(t *testing.
 }
 
 // TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold pins the
-// operator-visible half of l-f100: a permanently 404ing Fribb URL escalates the
+// operator-visible half: a permanently 404ing Fribb URL escalates the
 // scout's mapping log from WARN to ERROR only once the streak reaches
 // degradation.TickEscalationThreshold consecutive cycles, so the first refusals
 // stay a WARN.
@@ -209,10 +206,9 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 // record-cap exception to the "parse failures don't advance the streak" rule:
 // an over-cap body is a persistent guard refusal (an over-cap upstream list
 // re-downloads and rejects every cycle, never self-healing), so acceptRefresh
-// must route it through rejectRefresh — the errors.Is-matchable sentinel
-// survives the *StaleMapError wrap, the stale map is kept, and the persisted
-// streak advances so rejections reaches
-// degradation.TickEscalationThreshold (the scout's WARN→ERROR escalation point)
+// must route it through rejectRefresh — the errors.Is-matchable sentinel survives
+// the *StaleMapError wrap, the stale map is kept, and the persisted streak
+// advances to degradation.TickEscalationThreshold, the scout's WARN→ERROR point,
 // instead of degrading at WARN forever.
 func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T) {
 	var b strings.Builder
@@ -381,16 +377,13 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 }
 
 // TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak pins the
-// documented streak classification of a 304 answered to a request that carried
-// NO validators (conditionalGet suppresses them whenever the cache is
-// unusable): that is an upstream or intermediary protocol violation, which
-// repeats identically every cycle and never self-heals, so reuseCachedRecords
-// routes it through rejectRefresh rather than plain staleOrFail. The two
-// existing unusable-cache 304 tests assert only the error and the suppressed
-// validators, so a regression back to staleOrFail would freeze the streak at 0
-// and the scout's WARN would never escalate to ERROR at
-// degradation.TickEscalationThreshold - a permanently broken upstream degrading
-// silently at WARN forever.
+// documented streak classification of a 304 answered to a request that carried NO
+// validators (conditionalGet suppresses them whenever the cache is unusable): that
+// is an upstream or intermediary protocol violation, which repeats identically
+// every cycle and never self-heals, so reuseCachedRecords routes it through
+// rejectRefresh rather than plain staleOrFail. The two existing unusable-cache 304
+// tests assert only the error and the suppressed validators, so a regression to
+// staleOrFail would freeze the streak at 0 and degrade silently at WARN forever.
 func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
@@ -418,19 +411,12 @@ func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *test
 }
 
 // TestIsPersistentRefreshFailure is the table over the ONE home of the
-// transient-vs-persistent refresh classification (l-f100's structural half).
-// Before it, each failure arm of refreshCache chose staleOrFail or
-// rejectRefresh for itself, so Cache.RejectedRefreshes' documented list and the
-// code implementing it could drift - and had, in three arms. Every class named
-// persistent in isPersistentRefreshFailure's doc comment appears here, so adding a
-// class to the doc without the code (or the reverse) fails.
-//
-// The ACCEPTED third outcome is not a failure and so is not classified here:
-// its two reset paths are pinned end-to-end by
-// TestLoader_refreshCache_rejectionStreakCountsAndResets (an accepted refresh)
-// and TestLoader_refreshCache_notModifiedResetsRejectionStreak (a 304 over a
-// usable cache, including its "rejection streak ended by 304 revalidation"
-// INFO, pinned by TestLoader_refreshCache_notModifiedLogsEndedRejectionStreak).
+// transient-vs-persistent refresh classification. Every class named persistent in
+// isPersistentRefreshFailure's doc comment appears here, so adding a class to the
+// doc without the code (or the reverse) fails. The ACCEPTED third outcome is not a
+// failure and so is not classified here: its two reset paths are pinned end-to-end
+// by TestLoader_refreshCache_rejectionStreakCountsAndResets and
+// TestLoader_refreshCache_notModifiedResetsRejectionStreak.
 func TestIsPersistentRefreshFailure(t *testing.T) {
 	for name, tc := range map[string]struct {
 		cause error

@@ -407,15 +407,13 @@ func (o *notFoundAmongOutageAniList) FetchMany(_ context.Context, ids []int) (an
 	}, errors.New("anilist 500")
 }
 
-// TestMatchNotFoundResetsFailureBreaker pins the OTHER half of the breaker's
-// reset rule (TestMatchSuccessfulLookupResetsFailureBreaker pins the media
-// half): a definitive ErrNotFound is an answer, proving the upstream responds,
-// so it must reset the consecutive-transient-failure streak too. Sequence: id
-// 10 is batch-returned; 20 and 30 fail transiently (streak 2); 40 answers
-// not-found and RESETS the streak; 50, 60, 70 fail transiently (streak 3,
-// tripping the breaker); 80 fails fast without a request - 6 per-id requests.
-// Without the reset, 40 would leave the streak at 2, id 50 would trip the
-// breaker and 60/70/80 would fail fast: 4 requests.
+// TestMatchNotFoundResetsFailureBreaker pins the OTHER half of the breaker's reset rule
+// (TestMatchSuccessfulLookupResetsFailureBreaker pins the media half): a definitive
+// ErrNotFound is an answer, proving the upstream responds, so it resets the
+// consecutive-transient-failure streak too. Sequence: 10 batch-returned; 20 and 30 fail
+// transiently (streak 2); 40 answers not-found and RESETS the streak; 50, 60, 70 fail
+// transiently (streak 3, tripping the breaker); 80 fails fast without a request - 6 per-id
+// requests. Without the reset, 50 trips the breaker and 60/70/80 fail fast: 4 requests.
 func TestMatchNotFoundResetsFailureBreaker(t *testing.T) {
 	fake := &notFoundAmongOutageAniList{}
 	entries := []seadex.Entry{

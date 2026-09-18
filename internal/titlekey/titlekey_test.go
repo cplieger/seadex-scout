@@ -27,15 +27,13 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
-// TestContainsKey pins the containment rule the indexer's title harvest reads:
-// a key matches only as an EXACT run of the candidate's own alphanumeric
-// tokens, at every key length. Normalize strips every separator, so a plain
-// normalized-substring test carries no boundary evidence at any length - "x"
-// is satisfied by "Remux", and a real title-length key just as blindly
-// ("gate" inside "Propagate", "bleach" inside "Unbleached", "zero" inside
-// "ReZero"). Both directions are pinned here: a token run matches across the
-// decoration a release name carries, and a key buried inside a longer token
-// does not.
+// TestContainsKey pins the containment rule the indexer's title harvest reads: a
+// key matches only as an EXACT run of the candidate's own alphanumeric tokens, at
+// every key length. Normalize strips every separator, so a plain
+// normalized-substring test carries no boundary evidence at any length - "x" is
+// satisfied by "Remux", "gate" by "Propagate", "zero" by "ReZero". Both directions
+// are pinned: a token run matches across a release name's decoration, and a key
+// buried inside a longer token does not.
 func TestContainsKey(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -55,11 +53,9 @@ func TestContainsKey(t *testing.T) {
 		{"title-length key as a word suffix is refused", "[Grp] Propagate - S01 (BD 1080p)", "gate", false},
 		{"title-length key inside a CamelCase token is refused", "[Grp] ReZero - S01 (BD 1080p)", "zero", false},
 		{"key straddling token boundaries is refused", "[Grp] Sousou no Frieren - S01", "ousounofrier", false},
-		// The split class is the same [0-9a-z] alphabet Normalize keeps, and its
-		// range ends are where a rune silently leaves that alphabet: a rune read
-		// as a separator splits one token in two, so a key that really is a run
-		// of the candidate's tokens stops matching. ("a" is pinned by the
-		// adjacent-token case above.)
+		// The range ends are where a rune silently leaves Normalize's [0-9a-z]
+		// alphabet: read as a separator it splits one token in two, so a key that
+		// really is a run of the candidate's tokens stops matching.
 		{"a leading-range digit continues a token", "[Grp] Mobile Suit Gundam 00 - S01", "gundam00", true},
 		{"a trailing-range digit continues a token", "[Grp] Show 99 - S01 (BD 1080p)", "show99", true},
 		{"the last letter continues a token", "[Grp] Re Zero - S01 (BD 1080p)", "rezero", true},
