@@ -1,10 +1,6 @@
 # seadex-scout
 
-[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout)
-![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
-![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker)
-[![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
+[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue) ![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
 <!-- hub-overview BEGIN -->
 A report-only watcher that compares your Sonarr/Radarr anime library against
