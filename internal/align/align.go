@@ -21,7 +21,7 @@ import (
 const specialSeason = 0
 
 // ScopeKind names the semantic comparison scope resolved for an item: which
-// branch of the movie / season / special / whole-series dispatch fired.
+// branch of the movie / season / offered / whole-series dispatch fired.
 // It travels with the resolved groups in scopeResult so consumers (compare's
 // findings and audit's rendered Scope column) branch and label from the one
 // decision instead of re-deriving it.
@@ -36,15 +36,18 @@ const (
 	ScopeMovie
 	// ScopeSeason is a series scoped to a positive Fribb TVDB season (exact).
 	ScopeSeason
-	// ScopeSpecial is a special compared against the season-0 bucket Sonarr
-	// lumps specials into.
-	ScopeSpecial
+	// ScopeOffered is a unit the app OFFERS in the feed and never compares: a
+	// film or special whose upstream season is a mapped zero, so it lands in
+	// Sonarr's season-0 bucket, which can hold a different work entirely and
+	// so cannot attribute one file to one entry.
+	ScopeOffered
 )
 
 // scopeResult is the single scoping decision returned by scope: the semantic
 // Kind, the on-disk release groups to compare against, whether the scoped unit
-// has any file on disk, and whether the comparison is approximate (the
-// season-0 specials bucket held more than one group).
+// has any file on disk, and whether the comparison is approximate (an offered
+// bucket holding any file, or a whole-series aggregate spanning more than one
+// season or group).
 type scopeResult struct {
 	Groups  []string
 	Kind    ScopeKind
@@ -52,18 +55,31 @@ type scopeResult struct {
 	Approx  bool
 }
 
-// RecordSeason resolves, from a Fribb record ALONE, which season the record
-// pins and which scope kind pins it: ScopeSeason with its positive Fribb TVDB
-// season, ScopeSpecial with the season-0 bucket a Fribb-typed special is filed
-// under (a MAPPED season zero, not an absent one), or ScopeWholeSeries with no
-// season (an absolute-numbered run, a title-only match, or a record with no
-// Fribb typing at all).
+// RecordSeason resolves, from a Fribb record ALONE, which season the record pins
+// and which scope kind pins it: a mapped zero is offered, an absent season is a
+// whole-series comparison, a positive season keeps its season.
+//
+// The dispatch input is the season's PRESENCE, never the type label, because an
+// absent season and a mapped zero mean opposite things upstream and both leave
+// SeasonTvdb 0. A positive season is never overridden: FLCL has no season 0.
 func RecordSeason(rec *mapping.Record) (kind ScopeKind, season int) {
+	switch rec.SeasonPresence() {
+	case mapping.SeasonPresent:
+		if rec.HasMappedSeason() {
+			return ScopeSeason, rec.SeasonTvdb
+		}
+		return ScopeOffered, specialSeason
+	case mapping.SeasonAbsent:
+		return ScopeWholeSeries, 0
+	}
+	// Unknown reaches here from one producer only, a Record persisted before the
+	// season kind existed. Both halves of the union must stay: IsMovie alone
+	// strands the mapped-zero specials, IsSpecial alone strands the films.
 	switch {
 	case rec.HasMappedSeason():
 		return ScopeSeason, rec.SeasonTvdb
-	case rec.IsSpecial():
-		return ScopeSpecial, specialSeason
+	case rec.IsSpecial() || rec.IsMovie():
+		return ScopeOffered, specialSeason
 	default:
 		return ScopeWholeSeries, 0
 	}
@@ -85,10 +101,12 @@ func scope(item *library.Item, rec *mapping.Record) scopeResult {
 		// release.Classify falls back to the literal NOGRP for a group-less file.
 		g := item.SeasonGroups[season]
 		return scopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
-	case ScopeSpecial:
-		// a special: compare against the season-0 specials bucket
+	case ScopeOffered:
+		// The bucket is read for what it HOLDS, never to attribute a file to this
+		// entry, so Approx means "never attributed" and must stay true for a
+		// SINGLE-group bucket too: that one escapes every multi-group guard.
 		g := item.SeasonGroups[season]
-		return scopeResult{Kind: ScopeSpecial, Groups: g, HasFile: len(g) > 0, Approx: len(g) > 1}
+		return scopeResult{Kind: ScopeOffered, Groups: g, HasFile: len(g) > 0, Approx: len(g) > 0}
 	default:
 		// Everything left is a whole-series comparison with no single-unit scope;
 		// Decide resolves it by conservative per-real-season aggregation.
@@ -97,7 +115,7 @@ func scope(item *library.Item, rec *mapping.Record) scopeResult {
 }
 
 // String names the scope kind for an operator-facing label: "movie",
-// "season", "special", or "series" for a whole-series comparison. It is the
+// "season", "offered", or "series" for a whole-series comparison. It is the
 // one home of that vocabulary, shared by the daemon's finding line and the
 // audit report's scope cell (which adds the season NUMBER for ScopeSeason).
 func (k ScopeKind) String() string {
@@ -106,15 +124,15 @@ func (k ScopeKind) String() string {
 		return "movie"
 	case ScopeSeason:
 		return "season"
-	case ScopeSpecial:
-		return "special"
+	case ScopeOffered:
+		return "offered"
 	default:
 		return "series"
 	}
 }
 
 // MarshalJSON encodes the kind as its String() name, so a machine-readable
-// consumer reads the same vocabulary a human does ("season", "movie", "special",
+// consumer reads the same vocabulary a human does ("season", "movie", "offered",
 // "series") instead of an integer whose meaning is this file's iota order.
 //
 // The type owns its own encoding deliberately.
@@ -128,13 +146,25 @@ func (k *ScopeKind) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
 	}
-	for _, candidate := range []ScopeKind{ScopeWholeSeries, ScopeMovie, ScopeSeason, ScopeSpecial} {
+	for _, candidate := range []ScopeKind{ScopeWholeSeries, ScopeMovie, ScopeSeason, ScopeOffered} {
 		if candidate.String() == name {
 			*k = candidate
 			return nil
 		}
 	}
 	return fmt.Errorf("unknown scope kind %q", name)
+}
+
+// ClaimsCoverage reports whether this (item, record) pair can be COMPARED, and so
+// whether the entry may stand in for SeaDex covering the item's files. Everything
+// but the offered kind can.
+//
+// It must resolve the SCOPE rather than read the record: scope's arr-first early
+// return keeps a Radarr-owned film with a mapped zero comparable as a movie, so a
+// record-keyed predicate would strip its coverage. No file state is read, so a
+// partial walk changes no answer.
+func ClaimsCoverage(item *library.Item, rec *mapping.Record) bool {
+	return scope(item, rec).Kind != ScopeOffered
 }
 
 // ItemKind resolves the comparison scope kind of a library item that has no
@@ -165,16 +195,15 @@ type summary struct {
 }
 
 // summarizeWholeSeries walks the item's real seasons (season 0 excluded), unions
-// their on-disk groups (sorted, deduped), and classifies each filed season
-// under the three-valued release.GroupsOverlap - proven best, unverifiable,
-// proven alt, or unlisted - so wholeSeriesStanding can pick the most
-// conservative whole-series standing (proven downgrades outrank
-// unverifiability; any unverifiable season blocks the best claim).
-func summarizeWholeSeries(item *library.Item, best, alt []string) summary {
+// their on-disk groups (sorted, deduped), and classifies each filed season under
+// release.GroupsOverlap for wholeSeriesStanding to collapse. Which of those
+// seasons are THIS entry's is ownSeason's single-source call. Reachable edge: an
+// item whose every season belongs to siblings sums to ZERO seasons.
+func summarizeWholeSeries(item *library.Item, best, alt []string, siblingSeasons []int, seasons []mapping.SeasonRange) summary {
 	seen := make(map[string]struct{})
 	var s summary
 	for season, groups := range item.SeasonGroups {
-		if season == specialSeason || len(groups) == 0 {
+		if season == specialSeason || len(groups) == 0 || !ownSeason(season, siblingSeasons, seasons) {
 			continue
 		}
 		s.Seasons++
@@ -194,6 +223,16 @@ func summarizeWholeSeries(item *library.Item, best, alt []string) summary {
 	slices.Sort(s.Groups)
 	s.Approx = s.Seasons > 1 || len(s.Groups) > 1
 	return s
+}
+
+// ownSeason reports whether a filed real season belongs to the entry under
+// comparison: named by one of the entry's own ranges when it has any, else not
+// claimed by a sibling record.
+func ownSeason(season int, siblingSeasons []int, seasons []mapping.SeasonRange) bool {
+	if len(seasons) > 0 {
+		return slices.ContainsFunc(seasons, func(r mapping.SeasonRange) bool { return r.Season == season })
+	}
+	return !slices.Contains(siblingSeasons, season)
 }
 
 // appendMissingGroups appends each group not already in seen to out, recording

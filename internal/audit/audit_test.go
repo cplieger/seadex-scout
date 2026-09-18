@@ -2,6 +2,7 @@ package audit
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,24 +14,35 @@ import (
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 )
 
-// TestVerdictFor pins the 1:1 rendering of the shared decision core's
-// group-ladder standing in the report's verdict vocabulary.
+// TestVerdictFor pins the rendering of the shared decision core's group-ladder
+// standing in the report's verdict vocabulary: 1:1 except the unverified standing,
+// which the report splits by origin into unverified and unattributed.
 func TestVerdictFor(t *testing.T) {
 	tests := []struct {
-		name     string
-		standing align.Standing
-		want     Verdict
+		name          string
+		decision      align.Decision
+		groupsUnknown bool
+		want          Verdict
 	}{
-		{"no file", align.StandingNoFile, VerdictNoFile},
-		{"unverified", align.StandingUnverified, VerdictUnverified},
-		{"best", align.StandingBest, VerdictBest},
-		{"alt", align.StandingAlt, VerdictAlt},
-		{"unlisted", align.StandingUnlisted, VerdictUnlisted},
+		{name: "no file", decision: align.Decision{Standing: align.StandingNoFile}, want: VerdictNoFile},
+		{name: "best", decision: align.Decision{Standing: align.StandingBest}, want: VerdictBest},
+		{name: "alt", decision: align.Decision{Standing: align.StandingAlt}, want: VerdictAlt},
+		{name: "unlisted", decision: align.Decision{Standing: align.StandingUnlisted}, want: VerdictUnlisted},
+		// The three origins of an unverified standing the report keeps as
+		// unverified: a NOGRP side on a compared scope, a placeholder whose files
+		// could not be read, and an offered unit whose files could not be read
+		// (byte-identical to the offered case below on the decision alone).
+		{name: "unverified nogrp side", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeSeason}, want: VerdictUnverified},
+		{name: "unverified failed placeholder", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeSeason}, groupsUnknown: true, want: VerdictUnverified},
+		{name: "unverified offered placeholder", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeOffered}, groupsUnknown: true, want: VerdictUnverified},
+		// The one origin that is a different verdict: an offered unit whose bucket
+		// was read, which the app never compares.
+		{name: "unattributed offered comparable", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeOffered}, want: VerdictUnattributed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := verdictFor(tt.standing); got != tt.want {
-				t.Errorf("verdictFor(%v) = %q, want %q", tt.standing, got, tt.want)
+			if got := verdictFor(&tt.decision, tt.groupsUnknown); got != tt.want {
+				t.Errorf("verdictFor(%+v, %v) = %q, want %q", tt.decision, tt.groupsUnknown, got, tt.want)
 			}
 		})
 	}
@@ -175,15 +187,13 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 	}
 }
 
-// TestAuditUnknownGroupEvidenceIsUnverified pins the tri-state evidence model
-// end to end through the audit (deliberately INVERTING the former
-// TestAuditNoGroupMatchesBest, which pinned the sentinel-identity defect): the
-// NoGroup sentinel is unknown evidence, never an identity token, so a
-// group-less on-disk release against a group-less SeaDex best reads
-// unverified - "we could not verify either side" - rather than have_best, and
-// unknown evidence on EITHER side alone (a NOGRP-only library item against a
-// known best, or a known library group against a NOGRP-only best torrent)
-// yields the same unverified verdict instead of have_unlisted.
+// TestAuditUnknownGroupEvidenceIsUnverified pins the tri-state evidence model end to
+// end through the audit: the NoGroup sentinel is unknown evidence, never an identity
+// token, so a group-less on-disk release against a group-less SeaDex best reads
+// unverified - "we could not verify either side" - rather than have_best, and unknown
+// evidence on EITHER side alone (a NOGRP-only library item against a known best, or a
+// known library group against a NOGRP-only best torrent) yields the same unverified
+// verdict instead of have_unlisted.
 func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 	a := New(Config{})
 	tests := []struct {
@@ -276,15 +286,14 @@ func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
 	}
 }
 
-// TestAuditMislabeledAnimeBytesURLHiddenWhenOff proves the URL-aware AB guard:
-// a torrent whose untrusted tracker label says "Nyaa" but whose URL carries
-// DEFINITIVE animebytes.tv host evidence - absolute or schemeless - must be
-// dropped from the report's releases while the AnimeBytes toggle is off,
-// exactly like a correctly labeled AB torrent (the guard reads the RAW
-// upstream URL). The host:port form hides its host evidence (net/url parses
-// the host as an opaque scheme), so it is NOT definitive: its row stays
-// LISTED - link dropped, annotated unobtainable - rather than erased, while
-// the AB link itself still never surfaces.
+// TestAuditMislabeledAnimeBytesURLHiddenWhenOff proves the URL-aware AB guard: a
+// torrent whose untrusted tracker label says "Nyaa" but whose URL carries DEFINITIVE
+// animebytes.tv host evidence - absolute or schemeless - must be dropped from the
+// report's releases while the AnimeBytes toggle is off, exactly like a correctly
+// labeled AB torrent (the guard reads the RAW upstream URL). The host:port form hides
+// its host evidence (net/url parses the host as an opaque scheme), so it is NOT
+// definitive: its row stays LISTED - link dropped, annotated unobtainable - rather
+// than erased, while the AB link itself still never surfaces.
 func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 	for _, tc := range []struct {
 		sneakyURL  string
@@ -366,9 +375,8 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 // verdict gate (filter.ABVisible) cannot prove it is AnimeBytes, so with
 // the toggle off the row must remain LISTED with an empty URL and
 // Unobtainable=true - the operator sees why it did not affect the verdict -
-// while a definite AB release in the same entry stays hidden. Regression
-// test: classifyReleases previously used ABVisible as the row-visibility
-// gate, silently erasing such rows.
+// while a definite AB release in the same entry stays hidden. Reading ABVisible
+// as the row-visibility gate silently erases such rows.
 func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 	entry := seadex.Entry{AniListID: 12, Torrents: []seadex.Torrent{
 		{Tracker: "Nyaa", URL: "https://nyaa.si/\x7f", ReleaseGroup: "Mangled", IsBest: true},
@@ -499,15 +507,14 @@ func TestAuditIncompleteMappings(t *testing.T) {
 	}
 }
 
-// TestRowQualifier pins the daemon-vocabulary qualifier over the shared
-// decision: theoretical/incomplete when SeaDex lists no best at all
-// (theoretical taking precedence, the classify.Fallback order shared with the
-// daemon's emptyResult, annotated even on a no-file row the daemon silences),
-// mixed only on a not-aligned multi-group row, incomplete on a diverged row
-// of an incomplete entry, and empty everywhere else (an aligned row is never
-// mixed - alignment wins). Decisions are built through align.Decide from real
-// season/record inputs, so the qualifier is pinned against decisions the
-// production path can actually produce.
+// TestRowQualifier pins the daemon-vocabulary qualifier over the shared decision:
+// theoretical/incomplete when SeaDex lists no best at all (theoretical taking
+// precedence, the classify.Fallback order shared with the daemon's emptyResult,
+// annotated even on a no-file row the daemon silences), mixed only on a not-aligned
+// multi-group row, incomplete on a diverged row of an incomplete entry, and empty
+// everywhere else (an aligned row is never mixed - alignment wins). Decisions are
+// built through align.Decide from real season/record inputs, so the qualifier is
+// pinned against decisions the production path can actually produce.
 func TestRowQualifier(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -535,7 +542,7 @@ func TestRowQualifier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
-			d := align.Decide(item, &rec, tt.best, tt.alt)
+			d := align.Decide(item, &rec, tt.best, tt.alt, nil, nil)
 			if got := rowQualifier(&tt.entry, &d); got != tt.want {
 				t.Errorf("rowQualifier() = %q, want %q", got, tt.want)
 			}
@@ -543,16 +550,11 @@ func TestRowQualifier(t *testing.T) {
 	}
 }
 
-// TestAuditBrokenBestCountedAndAnnotatedByDefault pins the report-path DEFAULT
-// after filters.exclude_tags: with no exclusions configured a curation-warned
-// release is LISTED, ANNOTATED with its canonical warning tags, AND counted as
-// BEST evidence - so an on-disk group matching a Broken best reads have_best.
-//
-// This INVERTS the former TestAuditCurationWarnedReleaseAnnotatedNotCounted,
-// whose "warned best neither aligns nor recommends" subtest asserted
-// have_unlisted from the hardcoded exclusion. That expectation now lives in
-// TestAuditExcludedTagBestNotCounted, which configures `broken: [report]`
-// explicitly. The annotation half is unchanged and asserted in both.
+// TestAuditBrokenBestCountedAndAnnotatedByDefault pins the report-path DEFAULT under
+// filters.exclude_tags: with no exclusions configured a curation-warned release is
+// LISTED, ANNOTATED with its canonical warning tags, AND counted as BEST evidence, so
+// an on-disk group matching a Broken best reads have_best. The excluded case lives in
+// TestAuditExcludedTagBestNotCounted, which configures `broken: [report]` explicitly.
 func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
 	rowFor := auditRowFixture(New(Config{}))
 
@@ -600,7 +602,7 @@ func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
 		// The alt rung is descriptive ("is what I have something SeaDex
 		// lists?"), and a curation warning does not change that answer -
 		// have_unlisted would claim SeaDex lists the on-disk group neither
-		// as best nor as alt, which is false here (l-f144).
+		// as best nor as alt, which is false here.
 		if row.Verdict != VerdictAlt {
 			t.Errorf("verdict = %q, want %q (SeaDex lists the on-disk group as an alt, warned or not)", row.Verdict, VerdictAlt)
 		}
@@ -687,15 +689,12 @@ func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) Row {
 	}
 }
 
-// TestAuditUnobtainableBestAnnotatedNotCounted pins the report-path
-// obtainability contract: a SeaDex best
-// the daemon's filter.Obtainable rule rejects (here: no usable URL) stays
-// LISTED, carrying an explicit Unobtainable marker, but counts as no best for
-// the verdict - an on-disk group matching only an
-// unobtainable best reads have_unlisted, never have_best, mirroring the
-// daemon's exclusion - so the rendered facts and the decision inputs no
-// longer silently diverge. An obtainable best on the same entry still
-// classifies as usual and carries no marker.
+// TestAuditUnobtainableBestAnnotatedNotCounted pins the report-path obtainability
+// contract: a SeaDex best the daemon's filter.Obtainable rule rejects (here: no usable
+// URL) stays LISTED carrying an explicit Unobtainable marker, but counts as no best for
+// the verdict - an on-disk group matching only an unobtainable best reads have_unlisted,
+// never have_best, mirroring the daemon's exclusion. An obtainable best on the same
+// entry still classifies as usual and carries no marker.
 func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 	a := New(Config{})
 	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
@@ -746,14 +745,13 @@ func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 	})
 }
 
-// TestAuditExcludedSpecialMatchStillCoversItem pins the covered-mark ordering
-// in Audit's row loop: an item whose only SeaDex match is a special dropped
-// by exclude_specials is still marked covered BEFORE the specials filter
-// fires, so it never resurfaces as not_on_seadex - the item IS on SeaDex
-// (via the special entry), so a not_on_seadex row would be wrong even though
-// its verdict row is filtered out. The sibling TV record keeps the item
-// catalogued, so this test fails if the covered mark ever moves below the
-// specials filter.
+// TestAuditExcludedSpecialMatchStillCoversItem pins the covered-mark ordering in
+// Audit's row loop: an item whose only SeaDex match is a special dropped by
+// exclude_specials is marked covered BEFORE the filter fires, so it never
+// resurfaces as not_on_seadex when the item IS on SeaDex via that entry. The
+// sibling TV record keeps it catalogued, so this fails if the mark moves below the
+// filter. The special's season is ABSENT, so it is comparable, which is the only
+// shape that still isolates the ordering now that an offered special claims none.
 func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 	a := New(Config{ExcludeSpecials: true})
 	snap := &library.Snapshot{Items: []library.Item{{
@@ -769,7 +767,7 @@ func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 5},
-		Record: mapping.Record{Type: "OVA", TvdbID: 700},
+		Record: mapping.Record{Type: "OVA", TvdbID: 700, SeasonKind: mapping.SeasonAbsent},
 	}}
 
 	rep := a.Audit(matches, snap, idx, nil)
@@ -779,6 +777,329 @@ func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 	}
 	if n := rep.Totals[string(VerdictNotOnSeaDex)]; n != 0 {
 		t.Errorf("not_on_seadex total = %d, want 0", n)
+	}
+}
+
+// TestAuditCoverageFollowsComparability pins that coverage is a property of the
+// COMPARISON, not of the link. The alternative was measured - resolving a film to
+// its parent series marks the series covered, which silently deletes the two
+// truthful not_on_seadex rows the report exists to produce (Macross Plus's season
+// 1 holds four files belonging to an OVA SeaDex does not list). Both directions
+// are asserted here, because keying on the item alone loses the first and keying
+// on the RECORD alone loses the second: 54 live rows are Radarr-owned films with
+// a mapped zero, fully comparable as movies.
+func TestAuditCoverageFollowsComparability(t *testing.T) {
+	tests := []struct {
+		name          string
+		record        mapping.Record
+		item          library.Item
+		wantUncovered bool
+	}{
+		{
+			name:          "an offered film on a Sonarr series claims no coverage",
+			record:        mapping.Record{Type: "MOVIE", TvdbID: 700, SeasonKind: mapping.SeasonPresent},
+			item:          library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "Macross", TvdbID: 700, Groups: []string{"g"}, HasFile: true, SeasonGroups: map[int][]string{1: {"g"}}},
+			wantUncovered: true,
+		},
+		{
+			name:   "a comparable season entry claims coverage",
+			record: mapping.Record{Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+			item:   library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "Macross", TvdbID: 700, Groups: []string{"g"}, HasFile: true, SeasonGroups: map[int][]string{1: {"g"}}},
+		},
+		{
+			// The same mapped-zero record on the arr that CAN identify the file:
+			// scope's Radarr early return keeps it a movie, so it still covers.
+			name:   "a Radarr-owned film with a mapped zero keeps its coverage",
+			record: mapping.Record{Type: "MOVIE", TmdbMovies: []int{635302}, SeasonKind: mapping.SeasonPresent},
+			item:   library.Item{Arr: library.ArrRadarr, ArrID: 2, Title: "Mugen Train", TmdbID: 635302, Groups: []string{"g"}, HasFile: true},
+		},
+		{
+			// LoGH: a SPECIAL-typed record whose season is ABSENT compares against
+			// the real seasons, so it keeps coverage. Fails if the dispatch reads
+			// the type label.
+			name:   "an absent-season special is comparable and keeps its coverage",
+			record: mapping.Record{Type: "OVA", TvdbID: 700, SeasonKind: mapping.SeasonAbsent},
+			item:   library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "LoGH", TvdbID: 700, Groups: []string{"koala"}, HasFile: true, SeasonGroups: map[int][]string{1: {"koala"}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := New(Config{})
+			snap := &library.Snapshot{Items: []library.Item{tt.item}}
+			indexed := tt.record
+			indexed.AniListID = 5
+			records := []mapping.Record{indexed}
+			if tt.item.Arr == library.ArrSonarr {
+				// The reverse catalogue is what makes an uncovered item VISIBLE, and
+				// RoutedIDs deliberately still drops a MOVIE record's tvdb id (only
+				// FindByID reads the type-blind AllIDs). A sibling series record is
+				// what catalogues the item live - Macross Plus's own shape - so every
+				// negative assertion here is against an item the catalogue can see.
+				records = append(records, mapping.Record{AniListID: 9, Type: "TV", TvdbID: tt.item.TvdbID})
+			}
+			idx := mapping.NewIndex(records)
+			matches := []match.Match{{
+				Item:   &snap.Items[0],
+				Arr:    tt.item.Arr,
+				Source: match.SourceID,
+				Entry:  seadex.Entry{AniListID: 5},
+				Record: tt.record,
+			}}
+
+			rep := a.Audit(matches, snap, idx, nil)
+
+			uncovered := rep.Totals[string(VerdictNotOnSeaDex)]
+			if tt.wantUncovered && uncovered != 1 {
+				t.Errorf("not_on_seadex rows = %d, want 1 (an entry the app cannot compare covers nothing): %+v", uncovered, rep.Rows)
+			}
+			if !tt.wantUncovered && uncovered != 0 {
+				t.Errorf("not_on_seadex rows = %d, want 0 (a comparable entry covers its item): %+v", uncovered, rep.Rows)
+			}
+		})
+	}
+}
+
+// TestAuditOfferedRowIsHonest pins what the REPORT says where the daemon says
+// nothing, and asserts the verdict MOVES. The row keeps the bucket's groups in its
+// current-groups column with the approximation marker, so the operator sees what
+// IS on disk and that the app is not claiming to match it.
+//
+// The two subtests run the same assertions on a film and on a SPECIAL record, so
+// the existing special rows are covered by construction rather than by intention.
+func TestAuditOfferedRowIsHonest(t *testing.T) {
+	entry := seadex.Entry{AniListID: 5, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/5"},
+	}}
+	for _, typ := range []string{"MOVIE", "SPECIAL"} {
+		t.Run(typ, func(t *testing.T) {
+			a := New(Config{})
+			snap := &library.Snapshot{Items: []library.Item{{
+				Arr: library.ArrSonarr, ArrID: 1, Title: "Bucketed", TvdbID: 700,
+				Groups: []string{"erai-raws"}, HasFile: true, SeasonGroups: map[int][]string{0: {"erai-raws"}},
+			}}}
+			rec := mapping.Record{Type: typ, TvdbID: 700, SeasonKind: mapping.SeasonPresent}
+			matches := []match.Match{{
+				Item: &snap.Items[0], Arr: library.ArrSonarr, Source: match.SourceID, Entry: entry, Record: rec,
+			}}
+
+			rep := a.Audit(matches, nil, nil, nil)
+
+			if len(rep.Rows) != 1 {
+				t.Fatalf("rows = %+v, want exactly the offered row", rep.Rows)
+			}
+			row := rep.Rows[0]
+			if row.Verdict != VerdictUnattributed {
+				t.Errorf("verdict = %q, want %q (the verdict must MOVE: the app never compares this one)", row.Verdict, VerdictUnattributed)
+			}
+			if row.Scope != align.ScopeOffered {
+				t.Errorf("scope = %v, want %v", row.Scope, align.ScopeOffered)
+			}
+			if len(row.CurrentGroups) != 1 || row.CurrentGroups[0] != "erai-raws" {
+				t.Errorf("CurrentGroups = %v, want the bucket's groups (what IS on disk)", row.CurrentGroups)
+			}
+			if !row.Approx {
+				t.Error("Approx = false, want true (on an offered row the marker means the bucket was never attributed at all)")
+			}
+		})
+	}
+}
+
+// TestAuditOfferedEmptyBucketKeepsNoFile is the other standing: an offered entry
+// whose season-0 bucket holds no file renders no_file rather than unverified,
+// because absence is proven without attributing anything.
+func TestAuditOfferedEmptyBucketKeepsNoFile(t *testing.T) {
+	a := New(Config{})
+	snap := &library.Snapshot{Items: []library.Item{{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "Bucketed", TvdbID: 700,
+		Groups: []string{"koala"}, HasFile: true, SeasonGroups: map[int][]string{1: {"koala"}},
+	}}}
+	rec := mapping.Record{Type: "MOVIE", TvdbID: 700, SeasonKind: mapping.SeasonPresent}
+	matches := []match.Match{{
+		Item: &snap.Items[0], Arr: library.ArrSonarr, Source: match.SourceID,
+		Entry: seadex.Entry{AniListID: 5, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/5"},
+		}},
+		Record: rec,
+	}}
+
+	rep := a.Audit(matches, nil, nil, nil)
+
+	if len(rep.Rows) != 1 {
+		t.Fatalf("rows = %+v, want exactly the offered row", rep.Rows)
+	}
+	if got := rep.Rows[0].Verdict; got != VerdictNoFile {
+		t.Errorf("verdict = %q, want %q (an empty bucket proves absence)", got, VerdictNoFile)
+	}
+}
+
+// TestAuditWholeSeriesSiblingSeasonsAndFairyTail pins both sides of the sibling
+// ruling in the report. Gintama, the half that ships: the aggregate drops the
+// seasons its siblings map, reads have_best, and keeps a comparable row.
+//
+// Fairy Tail, the half that is declined: three seasonless entries share one
+// series whose only other row is a special the offered kind already takes, so
+// routing them there too would leave the item with NO comparable row and emit a
+// false not_on_seadex. That subtest fails if the declined half is implemented.
+func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
+	best := seadex.Entry{AniListID: 918, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "CBT", Tracker: "Nyaa", URL: "https://nyaa.si/view/918"},
+	}}
+
+	t.Run("Gintama keeps its coverage and reads have_best", func(t *testing.T) {
+		a := New(Config{})
+		snap := &library.Snapshot{Items: []library.Item{{
+			Arr: library.ArrSonarr, ArrID: 1, Title: "Gintama", TvdbID: 79895, HasFile: true,
+			Groups:       []string{"cbt", "kh"},
+			SeasonGroups: map[int][]string{1: {"cbt"}, 5: {"kh"}, 10: {"kh"}},
+		}}}
+		idx := mapping.NewIndex([]mapping.Record{
+			{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 5},
+			{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 10},
+		})
+		rec, _ := idx.Lookup(918)
+		matches := []match.Match{{
+			Item: &snap.Items[0], SiblingSeasons: idx.SiblingSeasons(&rec), Arr: library.ArrSonarr,
+			Source: match.SourceID, Entry: best, Record: rec,
+		}}
+
+		rep := a.Audit(matches, snap, idx, nil)
+
+		if len(rep.Rows) != 1 {
+			t.Fatalf("rows = %+v, want exactly the one verdict row (no not_on_seadex row: the item keeps a comparable row)", rep.Rows)
+		}
+		if rep.Rows[0].Verdict != VerdictBest {
+			t.Errorf("verdict = %q, want %q (seasons 5 and 10 belong to the siblings)", rep.Rows[0].Verdict, VerdictBest)
+		}
+	})
+
+	t.Run("Fairy Tail's seasonless siblings keep their contaminated verdicts", func(t *testing.T) {
+		a := New(Config{})
+		snap := &library.Snapshot{Items: []library.Item{{
+			Arr: library.ArrSonarr, ArrID: 1, Title: "Fairy Tail", TvdbID: 114701, HasFile: true,
+			Groups:       []string{"kitsune"},
+			SeasonGroups: map[int][]string{1: {"kitsune"}, 2: {"kitsune"}},
+		}}}
+		records := []mapping.Record{
+			{AniListID: 6702, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 20626, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 99749, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 9982, Type: "SPECIAL", TvdbID: 114701, SeasonKind: mapping.SeasonPresent},
+		}
+		idx := mapping.NewIndex(records)
+		var matches []match.Match
+		for _, id := range []int{6702, 20626, 99749} {
+			rec, _ := idx.Lookup(id)
+			matches = append(matches, match.Match{
+				Item: &snap.Items[0], SiblingSeasons: idx.SiblingSeasons(&rec), Arr: library.ArrSonarr,
+				Source: match.SourceID, Entry: seadex.Entry{AniListID: id, Torrents: best.Torrents}, Record: rec,
+			})
+		}
+
+		rep := a.Audit(matches, snap, idx, nil)
+
+		if len(rep.Rows) != 3 {
+			t.Fatalf("rows = %+v, want exactly the three verdict rows and NO not_on_seadex row", rep.Rows)
+		}
+		for _, row := range rep.Rows {
+			if row.Scope != align.ScopeWholeSeries {
+				t.Errorf("alID %d scope = %v, want %v (half two is declined: a seasonless sibling must not route to the offered kind)", row.AniListID, row.Scope, align.ScopeWholeSeries)
+			}
+			if row.Verdict != VerdictUnlisted {
+				t.Errorf("alID %d verdict = %q, want %q (the contamination is the accepted residue)", row.AniListID, row.Verdict, VerdictUnlisted)
+			}
+		}
+	})
+}
+
+// TestAuditFairyTailOwnSeasonsAreTruthful is what the declined half above wanted
+// and the Anime-Lists mapping-list delivers: with each entry's OWN TVDB seasons
+// on its Match, the three Fairy Tail entries stay whole-series and comparable
+// (no not_on_seadex row) and each verdict reads its own seasons - S1-S4 best,
+// S5-S7 alt, S8 unlisted - instead of three contaminated copies of one.
+func TestAuditFairyTailOwnSeasonsAreTruthful(t *testing.T) {
+	a := New(Config{})
+	snap := &library.Snapshot{Items: []library.Item{{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "Fairy Tail", TvdbID: 114801, HasFile: true,
+		Groups: []string{"cbt", "kh", "erai"},
+		SeasonGroups: map[int][]string{
+			1: {"cbt"}, 2: {"cbt"}, 3: {"cbt"}, 4: {"cbt"},
+			5: {"kh"}, 6: {"kh"}, 7: {"kh"},
+			8: {"erai"},
+		},
+	}}}
+	idx := mapping.NewIndexWithMappings([]mapping.Record{
+		{AniListID: 6702, Type: "TV", TvdbID: 114801, AniDBID: 6662, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 99749, Type: "TV", TvdbID: 114801, AniDBID: 13295, SeasonKind: mapping.SeasonAbsent},
+	}, map[int]mapping.Mapping{
+		6662:  {Seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 48}, {Season: 2, First: 49, Last: 96}, {Season: 3, First: 97, Last: 150}, {Season: 4, First: 151, Last: 175}}},
+		9980:  {Seasons: []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}, {Season: 7, First: 91, Last: 102}}},
+		13295: {Seasons: []mapping.SeasonRange{{Season: 8, First: 1, Last: 51}}},
+	})
+	torrents := []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "CBT", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{ReleaseGroup: "KH", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	}
+	var matches []match.Match
+	for _, id := range []int{6702, 20626, 99749} {
+		rec, _ := idx.Lookup(id)
+		m, _ := idx.MappingFor(&rec)
+		matches = append(matches, match.Match{
+			Item: &snap.Items[0], SiblingSeasons: idx.SiblingSeasons(&rec), Seasons: m.Seasons, Arr: library.ArrSonarr,
+			Source: match.SourceID, Entry: seadex.Entry{AniListID: id, Torrents: torrents}, Record: rec,
+		})
+	}
+
+	rep := a.Audit(matches, snap, idx, nil)
+
+	if len(rep.Rows) != 3 {
+		t.Fatalf("rows = %+v, want exactly the three verdict rows and NO not_on_seadex row (coverage untouched)", rep.Rows)
+	}
+	want := map[int]struct {
+		verdict Verdict
+		groups  []string
+	}{
+		6702:  {VerdictBest, []string{"cbt"}},
+		20626: {VerdictAlt, []string{"kh"}},
+		99749: {VerdictUnlisted, []string{"erai"}},
+	}
+	for _, row := range rep.Rows {
+		w := want[row.AniListID]
+		if row.Scope != align.ScopeWholeSeries {
+			t.Errorf("alID %d scope = %v, want %v (the entries stay comparable)", row.AniListID, row.Scope, align.ScopeWholeSeries)
+		}
+		if row.Verdict != w.verdict {
+			t.Errorf("alID %d verdict = %q, want %q (its own seasons, not the whole series)", row.AniListID, row.Verdict, w.verdict)
+		}
+		if !slices.Equal(row.CurrentGroups, w.groups) {
+			t.Errorf("alID %d CurrentGroups = %v, want %v", row.AniListID, row.CurrentGroups, w.groups)
+		}
+	}
+}
+
+// TestAuditPartialWalkKeepsCoverage pins the half of the coverage rule a
+// file-presence predicate would have broken: a Failed placeholder's file state
+// could not be READ, which is not the same as being unattributable, so it still
+// claims coverage and a partial walk adds no rows.
+func TestAuditPartialWalkKeepsCoverage(t *testing.T) {
+	a := New(Config{})
+	snap := &library.Snapshot{Items: []library.Item{{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "Frieren", TvdbID: 700, Failed: true,
+	}}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 5, Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}})
+	matches := []match.Match{{
+		Item:   &snap.Items[0],
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 5},
+		Record: mapping.Record{Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+	}}
+
+	rep := a.Audit(matches, snap, idx, nil)
+
+	if n := rep.Totals[string(VerdictNotOnSeaDex)]; n != 0 {
+		t.Errorf("not_on_seadex rows = %d, want 0 (a placeholder whose walk failed still claims coverage): %+v", n, rep.Rows)
 	}
 }
 
@@ -860,8 +1181,7 @@ func TestGroupSets(t *testing.T) {
 		// rejected it: no usable link, or a tracker the operator cannot use)
 		// forfeits the PRESCRIPTIVE best rung - the eligibility there IS the
 		// daemon's obtainability rule - but still counts on the DESCRIPTIVE
-		// alt rung, which only asks whether SeaDex lists what is on disk
-		// (l-f144).
+		// alt rung, which only asks whether SeaDex lists what is on disk.
 		{Group: "LinklessBest", Best: true, Unobtainable: true},
 		{Group: "LinklessAlt", Best: false, Unobtainable: true},
 	}
@@ -955,15 +1275,14 @@ func TestBestCellMarksOnlyHiddenBests(t *testing.T) {
 	}
 }
 
-// TestAuditGroupsUnknownMarksPlaceholders pins the fact d-u2-2 was filed against:
-// a library item whose file data the walk could not establish carries NO group
-// evidence, and both row producers must say so rather than publishing an empty
-// group set that reads as "nothing identifiable is on disk".
-//
-// The two producers reach it by different routes and both matter: the matched row
-// goes through align.Decide (which answers a placeholder with StandingUnverified),
-// while uncoveredRows never calls Decide at all and its not_on_seadex verdict stays
-// TRUE - so the marker is that row's only way to qualify its own groups column.
+// TestAuditGroupsUnknownMarksPlaceholders pins the group-evidence marker: a library
+// item whose file data the walk could not establish carries NO group evidence, and both
+// row producers must say so rather than publishing an empty group set that reads as
+// "nothing identifiable is on disk". The two producers reach it by different routes and
+// both matter: the matched row goes through align.Decide (which answers a placeholder
+// with StandingUnverified), while uncoveredRows never calls Decide at all and its
+// not_on_seadex verdict stays TRUE, so the marker is that row's only way to qualify its
+// own groups column.
 func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
 	a := New(Config{})
 
@@ -1015,18 +1334,13 @@ func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
 }
 
 // TestClassifyReleasesMapsPublisherRefusalToItsOwnMarker pins the two report
-// diagnostics classifyReleases derives from the publisher's refusal REASON, and
-// the implication forfeitsBest now rests on. A refused url value and a tracker
-// this build does not carry get their OWN marker because the remedies differ (an
-// upstream SeaDex record to fix vs an internal/tracker table entry to ship,
-// l-f127), and BOTH leave the release Unobtainable - which is the only thing
-// keeping a refused best out of the verdict's BEST set now that forfeitsBest
-// names neither flag.
-//
-// Nothing else pins either half: the render tests build a Release literal by
-// hand, so they never exercise the assignment, and no test anywhere feeds an
-// unknown tracker through the report pipeline. The groupSets assertion is what
-// makes the implication itself falsifiable rather than assumed.
+// diagnostics classifyReleases derives from the publisher's refusal REASON, and the
+// implication forfeitsBest rests on. A refused url value and a tracker this build does
+// not carry get their OWN marker because the remedies differ (an upstream SeaDex record
+// to fix vs an internal/tracker table entry to ship), and BOTH leave the release
+// Unobtainable, which is the only thing keeping a refused best out of the verdict's
+// BEST set now that forfeitsBest names neither flag. The groupSets assertion is what
+// makes that implication falsifiable rather than assumed.
 func TestClassifyReleasesMapsPublisherRefusalToItsOwnMarker(t *testing.T) {
 	tests := map[string]struct {
 		tracker            string

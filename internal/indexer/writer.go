@@ -79,10 +79,10 @@ const (
 // negative/overflowing sums), so a hand-edited or corrupted snapshot with a negative
 // value is rejected at load instead of rendering an invalid enclosure length/size attr.
 func validPersistedItem(it *journalItem) bool {
-	if it.Size < 0 || it.Seeders < 0 || it.Leechers < 0 {
+	if it.Size < 0 || it.Seeders < 0 || it.Leechers < 0 || it.TvdbID < 0 {
 		return false
 	}
-	for _, f := range []string{it.Title, it.GUID, it.InfoURL, it.DownloadURL, it.InfoHash, it.DownloadVolumeFactor, it.Key} {
+	for _, f := range []string{it.Title, it.GUID, it.InfoURL, it.DownloadURL, it.InfoHash, it.DownloadVolumeFactor, it.Key, it.SonarrTitle, it.SonarrGUID} {
 		if len(f) > maxPersistedFieldBytes {
 			return false
 		}
@@ -210,15 +210,13 @@ func claimSnapshotField(claimed map[snapshotMember]struct{}, member snapshotMemb
 }
 
 // decodeSnapshotOwners decodes the per-entry curation ownership fact under the
-// shared entry budget. BOTH dimensions are charged - the outer owner keys and
-// every release inside them - because the fact is a map of arrays and either
-// dimension alone can carry hostile cardinality: a million owners with one
-// release each and one owner with a million releases cost the same heap. ONE
-// counter across both dimensions is also why this walks the object with
-// jsoncap's token primitives rather than d.Map, whose per-container cap plus
-// d.Array's would bound each dimension independently and their product not at
-// all. A JSON null KEEPS the caller's map, the opposite of Unmarshal's
-// null-into-map; decodeSnapshotMap carries why that is safe at both sites.
+// shared entry budget. BOTH dimensions are charged - owner keys and every release
+// inside them - because a million owners with one release each and one owner with
+// a million releases cost the same heap. ONE counter across both is also why this
+// walks the object with jsoncap's token primitives rather than d.Map, whose
+// per-container cap plus d.Array's bounds each dimension independently and their
+// product not at all. A JSON null KEEPS the caller's map; decodeSnapshotMap
+// carries why that is safe at both sites.
 func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
 	const what = string(memberOwners)
 	open, err := d.Open('{')
@@ -284,18 +282,14 @@ func decodeSnapshotFeed(d *jsoncap.Decoder, dst *[]journalItem, what string) err
 	return nil
 }
 
-// decodeSnapshotMap decodes one persisted map field (a curation index, the seen
-// publication log, or the harvested-title cache) entry by entry under the shared entry
-// budget, and RETURNS the map for the caller to store back. A JSON null KEEPS the
-// caller's map, the OPPOSITE of Unmarshal's null-into-map (measured: json.Unmarshal
-// nils a pre-populated map, and jsoncap.Map matches Unmarshal). That is
-// unobservable here only because claimSnapshotField refuses a repeated top-level
-// member, so the prior is always nil and either policy yields the nil the
-// structural gate then refuses - re-check that precondition before lifting this
-// shape anywhere the prior can be non-nil. An empty object allocates, because a
-// nil map is the structural sentinel both consumers read. Per-value LENGTH stays
-// loadPrevious's own ingress prune (retainValidTitles): this pass bounds
-// cardinality, which is what json.Unmarshal cannot.
+// decodeSnapshotMap decodes one persisted map field entry by entry under the
+// shared entry budget - bounding cardinality, which json.Unmarshal cannot - and
+// RETURNS the map for the caller to store back. A JSON null KEEPS the caller's
+// map, the OPPOSITE of Unmarshal and of jsoncap.Map; that is unobservable only
+// because claimSnapshotField refuses a repeated top-level member, so the prior is
+// always nil - re-check before lifting this shape where it can be non-nil. An
+// empty object allocates: a nil map is the structural sentinel both consumers
+// read. Per-value LENGTH stays loadPrevious's ingress prune (retainValidTitles).
 func decodeSnapshotMap[V bool | string](d *jsoncap.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
 	open, err := d.Open('{')
 	if err != nil || !open {
@@ -681,8 +675,7 @@ func publicationLogWithinLimits(published map[string]bool) bool {
 }
 
 // readPrevious reads the persisted snapshot CONFINED to its own directory, the
-// same shape h-f24 applied to the mapping loader's overrides read, which named
-// this call site as the sibling that should be swept with it.
+// same shape the mapping loader's overrides read uses.
 func (w *FeedWriter) readPrevious(ctx context.Context) ([]byte, error) {
 	dir := filepath.Dir(w.path)
 	root, err := os.OpenRoot(dir)

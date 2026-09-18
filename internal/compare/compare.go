@@ -78,7 +78,7 @@ type Finding struct {
 	Status           Status
 	// Scope is the comparison scope the shared decision resolved
 	// (align.Decision.Kind, rendered via its String): "season", "movie",
-	// "special" or "series".
+	// "offered" or "series".
 	Scope             string
 	RecommendedGroups []string
 	Links             []ReleaseLink
@@ -89,11 +89,10 @@ type Finding struct {
 	AniListID     int
 	Season        int
 	DualAudio     bool
-	// Approx marks a coarse comparison (align.Decision.Approx): the season-0
-	// specials bucket held more than one group, or the whole-series fallback
-	// spanned more than one real season or group, so CurrentGroup is an
-	// aggregate rather than an exact per-unit attribution. The audit report
-	// renders the same fact as "(approx)".
+	// Approx marks a coarse comparison (align.Decision.Approx): an offered
+	// bucket held any file, or the whole-series fallback spanned more than one
+	// real season or group, so CurrentGroup is an aggregate rather than an exact
+	// per-unit attribution. The audit report renders the same fact as "(approx)".
 	Approx bool
 }
 
@@ -166,7 +165,14 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	recGroups := groupSet(recommended)
 	// The daemon only distinguishes best-vs-not, so alt is nil: an on-disk
 	// unit lacking a recommended group reads as unlisted (not aligned).
-	d := align.Decide(m.Item, &m.Record, recGroups, nil)
+	d := align.Decide(m.Item, &m.Record, recGroups, nil, m.SiblingSeasons, m.Seasons)
+	// The gate must stay ahead of the outcome switch: an offered kind linearizes
+	// to OutcomeUnverifiable, or to OutcomeNoBest on an empty best set, and that
+	// arm's emptyResult would publish a theoretical_best row carrying a bucket
+	// group the app cannot attribute to this entry.
+	if d.Kind == align.ScopeOffered {
+		return nil
+	}
 	if d.Outcome == align.OutcomeNoFile {
 		return nil
 	}

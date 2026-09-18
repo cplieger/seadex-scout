@@ -16,11 +16,13 @@ import (
 )
 
 // Fribb type strings route the arr: MOVIE goes to Radarr (TMDB movie / IMDb);
-// every other type goes to Sonarr (TVDB). The token vocabulary and its
-// canonicalization live in the dependency-free internal/mediatype leaf.
+// every other type goes to Sonarr (TVDB). The token vocabulary is mediatype's.
 
 // RecordFromFormat builds the type-only Record a consumer uses to reuse the
 // arr/season routing decisions for an AniList format that has no Fribb record.
+// Its season kind stays UNKNOWN rather than absent: no upstream said anything
+// about a season here, and absent would route a title-matched OVA to a
+// whole-series comparison against every real season.
 func RecordFromFormat(format string) Record { return Record{Type: mediatype.Normalize(format)} }
 
 // nullLiteral is the JSON null token, checked before decoding tolerant fields.
@@ -41,6 +43,7 @@ type fribbRecord struct {
 	Season    seasonObject `json:"season"`
 	AniListID flexInt      `json:"anilist_id"`
 	TvdbID    flexInt      `json:"tvdb_id"`
+	AniDBID   flexInt      `json:"anidb_id"`
 }
 
 // toRecord converts a decoded Fribb record into a public Record, normalizing
@@ -52,13 +55,23 @@ func (r *fribbRecord) toRecord() (Record, bool) {
 		return Record{}, false
 	}
 	typ := mediatype.Normalize(string(r.Type))
+	season, present := r.Season.season()
+	// Set on BOTH arms rather than left zero for absent: encoding/json never calls
+	// seasonObject.UnmarshalJSON for an omitted key, so the zero value would read
+	// unknown forever - the state reserved for a cache written before this field.
+	kind := SeasonAbsent
+	if present {
+		kind = SeasonPresent
+	}
 	rec := Record{
 		IMDbIDs:    r.IMDbID,
 		TmdbMovies: r.TmdbID.movieIDs(typ == mediatype.Movie),
 		Type:       typ,
+		SeasonKind: kind,
 		AniListID:  int(r.AniListID),
 		TvdbID:     int(r.TvdbID),
-		SeasonTvdb: r.Season.tvdbOrZero(),
+		AniDBID:    int(r.AniDBID),
+		SeasonTvdb: season,
 	}
 	rec.canonicalize() // idempotent here; pins both producers to one rule
 	return rec, true
@@ -121,9 +134,8 @@ type fribbParseResult struct {
 // sentinel before the excess elements are decoded, and trailing data after the
 // closing bracket is rejected. It also reports the top-level element count.
 func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, error) {
-	// Element budget 0 disables bounded's own aggregate cap deliberately:
-	// maxFribbRecords below is the app-level ceiling, and it must reject with the
-	// errRecordCapExceeded sentinel acceptRefresh matches on.
+	// Element budget 0 disables jsoncap's own aggregate cap: maxFribbRecords below is
+	// the ceiling, and it must reject with the sentinel acceptRefresh matches on.
 	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
 	ok, err := dec.Open('[')
 	if err != nil {
@@ -154,15 +166,11 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 	return fribbParseResult{records: counts.records, elements: counts.elements}, nil
 }
 
-// logFribbParseDiagnostics emits the decode's tolerated-outcome diagnostics: the
-// skipped-malformed WARN, the keyless-record Debug line, and the two advance
-// warnings for the approaching record cap and identifier budget.
 func logFribbParseDiagnostics(log *slog.Logger, counts *fribbDecodeCounts) {
 	if counts.skipped > 0 {
 		attrs := []any{"skipped", counts.skipped, "parsed", len(counts.records)}
 		if counts.firstErr != nil {
-			// The first skipped record's error is untrusted-input-derived, so it
-			// passes the package's log-boundary policy (see maxLoggedErrorBytes).
+			// Untrusted-input-derived, so it passes maxLoggedErrorBytes.
 			attrs = append(attrs, "error",
 				errors.New(runesafe.SanitizeSingleLineBounded(counts.firstErr.Error(), maxLoggedErrorBytes)))
 		}
@@ -216,9 +224,8 @@ func decodeFribbRecords(dec *jsoncap.Decoder) (fribbDecodeCounts, error) {
 type fribbDecodeCounts struct {
 	firstErr error
 	records  []Record
-	// elements counts every top-level array element the loop OBSERVED - the
-	// acceptance denominator (see fribbParseResult). The loop counts it rather
-	// than the caller re-deriving it, so a new outcome class cannot shrink it.
+	// elements counts every top-level array element the loop OBSERVED - the acceptance
+	// denominator, counted here so a new outcome class cannot shrink it.
 	elements    int
 	skipped     int
 	dropped     int
@@ -228,8 +235,7 @@ type fribbDecodeCounts struct {
 // add folds one record's decode outcome in: a tolerated decode failure counts as
 // skipped (keeping the first error), a record without an AniList ID counts as
 // dropped, a record breaching the aggregate identifier budget returns
-// errIdentifierBudgetExceeded (fatal to the whole document), and anything else
-// is accepted. rec is by pointer only because Record is a heavy value.
+// errIdentifierBudgetExceeded (fatal to the whole document), else it is accepted.
 func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) error {
 	if decodeErr != nil {
 		c.skipped++
@@ -244,9 +250,8 @@ func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) error {
 	}
 	n := len(rec.IMDbIDs) + len(rec.TmdbMovies)
 	if c.identifiers+n > maxFribbIdentifiersTotal {
-		// The aggregate identifier budget is a whole-document guarantee, not a
-		// per-record tolerance: retaining the prefix would publish a knowably
-		// truncated map. Returned rather than counted, so it cannot be forgotten.
+		// Returned rather than counted: it is a whole-document guarantee, not a
+		// per-record tolerance.
 		return errIdentifierBudgetExceeded
 	}
 	c.identifiers += n
@@ -282,12 +287,15 @@ func decodeFribbRecord(msg json.RawMessage) (Record, bool, error) {
 }
 
 // seasonObject decodes the tvdb member of the season object; the unused tmdb
-// member and the upstream episode_offset are deliberately not decoded. An odd
-// season SHAPE zeroes the field - SeasonTvdb 0 falls back to whole-series or
-// season-0 scoping - while the record survives. The interior flexInt is
-// narrower: "2", " 2 " and 2.0 still decode, only 1.5 or negative zeroes.
+// member and the upstream episode_offset are deliberately not decoded. It
+// answers TWO questions - which season, and whether the member was there at all
+// - because absent and a mapped zero scope to opposite things and both leave
+// the number 0.
 type seasonObject struct {
-	Tvdb flexInt `json:"tvdb"`
+	Tvdb flexInt
+	// present is true only when UnmarshalJSON RAN and found the tvdb member as a
+	// JSON number >= 0. Unexported, so no decoder can set it from the wire.
+	present bool
 }
 
 // UnmarshalJSON decodes the object form and tolerates any other shape as absent.
@@ -299,17 +307,35 @@ func (o *seasonObject) UnmarshalJSON(b []byte) error {
 	if isNullOrEmpty(b) || b[0] != '{' {
 		return nil
 	}
-	type alias seasonObject
-	var a alias
-	if err := json.Unmarshal(b, &a); err != nil {
+	// The tvdb member is captured RAW because presence is a question about the
+	// wire form, which a decode into flexInt has already thrown away.
+	var wire struct {
+		Tvdb json.RawMessage `json:"tvdb"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
 		return nil //nolint:nilerr // tolerate an odd season shape rather than fail the record
 	}
-	*o = seasonObject(a)
+	raw := bytes.TrimSpace(wire.Tvdb)
+	if !nonNegativeJSONNumber(raw) {
+		return nil
+	}
+	o.present = true
+	if err := o.Tvdb.UnmarshalJSON(raw); err != nil {
+		o.Tvdb = 0
+	}
 	return nil
 }
 
-// tvdbOrZero returns the tvdb season or 0 when absent or odd-shaped.
-func (o seasonObject) tvdbOrZero() int { return int(o.Tvdb) }
+// nonNegativeJSONNumber reports whether raw is a JSON number whose value is >= 0,
+// the presence bound applied to the WIRE form rather than the decoded value. A
+// JSON number is non-negative exactly when its first byte is a digit ('+' is not
+// JSON), so a quoted "2" and a null read absent while a fractional 1.5 reads
+// present at whatever season flexInt collapses it to.
+func nonNegativeJSONNumber(raw []byte) bool {
+	return len(raw) > 0 && raw[0] >= '0' && raw[0] <= '9'
+}
+
+func (o seasonObject) season() (season int, present bool) { return int(o.Tvdb), o.present }
 
 // flexString decodes a JSON string; any other shape is tolerated as empty rather
 // than failing the record. An empty Fribb type routes as a non-movie series.
@@ -337,8 +363,8 @@ func (s *flexString) UnmarshalJSON(b []byte) error {
 // MOVIE-typed record, whose own type disambiguates it into a movie id. Any other
 // shape (the "unknown" string some rows carry) is tolerated and left empty.
 type tmdbID struct {
-	// Movie holds the object form's movie ids. Neither field carries a json tag:
-	// UnmarshalJSON below owns the whole decode, so a tag here would be inert.
+	// Movie holds the object form's movie ids. No json tag on either field:
+	// UnmarshalJSON owns the whole decode, so a tag would be inert.
 	Movie []flexInt
 	// Scalar is the retained bare-number form; consumed only via movieIDs.
 	Scalar flexInt
@@ -357,11 +383,10 @@ func (t *tmdbID) UnmarshalJSON(b []byte) error {
 		// "unknown" placeholder stays empty.
 		return t.Scalar.UnmarshalJSON(b)
 	}
-	// Capture the movie member as RAW bytes first. encoding/json continues past a
-	// type mismatch, so decoding straight into []flexInt let a duplicate movie key
-	// whose EARLIER value has the wrong shape return a type error ALONGSIDE the
-	// valid later value, which the tolerant arm then threw away. A json.RawMessage
-	// member has no shape to mismatch, so the last value always wins.
+	// Capture the movie member as RAW bytes first. encoding/json continues past a type
+	// mismatch, so decoding straight into []flexInt would return a type error for a
+	// duplicate movie key whose EARLIER value has the wrong shape, discarding the valid
+	// later value. A json.RawMessage member has no shape to mismatch, so last wins.
 	var wire struct {
 		Movie json.RawMessage `json:"movie"`
 	}
@@ -402,7 +427,7 @@ func (t tmdbID) movieIDs(isMovie bool) []int {
 // flexInt decodes a JSON number or numeric string into an int. A null, empty,
 // non-numeric, fractional, negative or out-of-range value decodes to 0 rather
 // than erroring or truncating (9.9 truncated to 9 would silently point at a
-// different anime). An alias of jsonx.TolerantInt, the policy this originated.
+// different anime). An alias of jsonx.TolerantInt.
 type flexInt = jsonx.TolerantInt
 
 // stringList decodes a JSON array of strings, a single string, or null into a
@@ -438,8 +463,7 @@ func decodeStringArray(b []byte) ([]string, error) {
 	if err := json.Unmarshal(b, &arr); err != nil {
 		return nil, nil //nolint:nilerr // tolerate an odd imdb_id array rather than fail the record
 	}
-	// The transient decode above is bounded by maxFribbRecordBytes; the cap here
-	// bounds what is RETAINED, rejecting the record instead.
+	// Bounds what is RETAINED, as in tmdbID.UnmarshalJSON.
 	if len(arr) > maxFribbIdentifiers {
 		return nil, fmt.Errorf("imdb_id list exceeds cap %d", maxFribbIdentifiers)
 	}

@@ -62,6 +62,10 @@ type curationEvidence interface {
 	// renderPolicy names which render arm this pass's evidence AUTHORIZES for a key
 	// it is journaling for the FIRST time, plus the occurrences that arm folds.
 	renderPolicy(key string) (renderPolicy, []curatedRef)
+	// hashRefs returns the evaluated occurrences carrying one bare info hash - the
+	// SECOND identity signal, and the half a key-grouped index cannot see. Sound at
+	// both scopes: it reports occurrences the pass HOLDS, never absence.
+	hashRefs(hash string) []curatedRef
 	// census is the file-census verdict for the keys this pass EVALUATED. A key it
 	// did not evaluate is ABSENT rather than present-and-empty, and that absence IS
 	// the authorization: this pass may not judge that key's title (applyTitles).
@@ -70,8 +74,10 @@ type curationEvidence interface {
 	// BOTH scopes, because retraction acts on positive evidence, never on absence.
 	retracts(it *journalItem) bool
 	// ownership is the per-entry curation contribution this pass may write, or nil
-	// when the pass cannot vouch for its own evidence.
-	ownership() map[string][]ownedRelease
+	// when the pass cannot vouch for its own evidence. It takes the entry-info
+	// lookup because each contribution carries its entry's TVDB id: the search
+	// render has no mapping access of its own, so that id has to be at rest.
+	ownership(infoFor EntryInfoFunc) map[string][]ownedRelease
 	// warnedKeys is how many journal keys the tag policy excluded, for the log
 	// line.
 	warnedKeys() int
@@ -81,6 +87,7 @@ type curationEvidence interface {
 // with the catalogue-wide warned-identity closure.
 type catalogueEvidence struct {
 	cur    map[string][]curatedRef
+	byHash map[string][]curatedRef
 	warned warnedSet
 	kept   []seadex.Entry
 }
@@ -89,6 +96,7 @@ type catalogueEvidence struct {
 // warned closure over just those. It holds no catalogue-wide anything.
 type windowEvidence struct {
 	cur    map[string][]curatedRef
+	byHash map[string][]curatedRef
 	warned warnedSet
 	kept   []seadex.Entry
 	// tagPolicySet records whether the operator has ANY tag exclusion configured,
@@ -108,10 +116,13 @@ type windowEvidence struct {
 func newEvidence(entries []seadex.Entry, tags tagfilter.Filter, scope passScope) curationEvidence {
 	kept, warned := splitCurationWarned(entries, tags)
 	cur := indexCurated(kept)
+	// The by-hash index is built beside the key-grouped one, over the SAME kept set,
+	// so the RSS folds and the search projection see one owner set per identity.
+	byHash := indexCuratedByHash(kept)
 	if scope == scopeCatalogue {
-		return &catalogueEvidence{kept: kept, cur: cur, warned: warned}
+		return &catalogueEvidence{kept: kept, cur: cur, byHash: byHash, warned: warned}
 	}
-	return &windowEvidence{kept: kept, cur: cur, warned: warned, tagPolicySet: tags.Len() > 0}
+	return &windowEvidence{kept: kept, cur: cur, byHash: byHash, warned: warned, tagPolicySet: tags.Len() > 0}
 }
 
 func (e *catalogueEvidence) scope() passScope        { return scopeCatalogue }
@@ -144,10 +155,13 @@ func (e *catalogueEvidence) carryPolicy(key string) (carryPolicy, []curatedRef) 
 
 func (e *catalogueEvidence) retracts(it *journalItem) bool { return e.warned.retracts(it) }
 
+// hashRefs: the occurrences this pass evaluated that carry the hash.
+func (e *catalogueEvidence) hashRefs(hash string) []curatedRef { return e.byHash[hash] }
+
 // ownership: the catalogue pass vouches for everything, because its warned
 // closure is complete.
-func (e *catalogueEvidence) ownership() map[string][]ownedRelease {
-	return ownershipOf(e.kept)
+func (e *catalogueEvidence) ownership(infoFor EntryInfoFunc) map[string][]ownedRelease {
+	return ownershipOf(e.kept, infoFor)
 }
 
 func (e *windowEvidence) scope() passScope        { return scopeWindow }
@@ -180,32 +194,41 @@ func (e *windowEvidence) carryPolicy(string) (carryPolicy, []curatedRef) {
 
 func (e *windowEvidence) retracts(it *journalItem) bool { return e.warned.retracts(it) }
 
+// hashRefs: the window's own occurrences carrying the hash. A window holds fewer
+// of them than the catalogue does, which is exactly why the votes of the owners it
+// did NOT evaluate are carried from the previous snapshot (carryUnevaluatedVotes).
+func (e *windowEvidence) hashRefs(hash string) []curatedRef { return e.byHash[hash] }
+
 // ownership admits this window's entries into the search index only when the
 // window's own warned closure is COMPLETE, which is exactly when the operator has
 // configured no tag exclusions at all: with an empty policy nothing is warned
 // anywhere, so there is no reachable-only-from-outside exclusion to miss.
-func (e *windowEvidence) ownership() map[string][]ownedRelease {
+func (e *windowEvidence) ownership(infoFor EntryInfoFunc) map[string][]ownedRelease {
 	if e.tagPolicySet {
 		return nil
 	}
-	return ownershipOf(e.kept)
+	return ownershipOf(e.kept, infoFor)
 }
 
 // ownershipOf reads the PRESENT fact off the entries a pass evaluated: for each
-// entry, the set of releases it contributes, with that entry's OWN isBest vote.
-// Two entries listing the same torrent produce two owner records, which is what
-// makes the cross-owner fold recomputable and a demotion representable.
-func ownershipOf(entries []seadex.Entry) map[string][]ownedRelease {
+// entry, the set of releases it contributes, with that entry's OWN isBest vote and
+// its OWN TVDB id. Two entries listing the same torrent produce two owner records,
+// which is what makes the cross-owner fold recomputable, a demotion representable,
+// and a contested id detectable at the projection's fold.
+func ownershipOf(entries []seadex.Entry, infoFor EntryInfoFunc) map[string][]ownedRelease {
 	out := make(map[string][]ownedRelease, len(entries))
 	for i := range entries {
 		id := ownerKey(entries[i].AniListID)
+		info := infoFor(entries[i].AniListID)
 		torrents := entries[i].Torrents
 		for j := range torrents {
 			t := &torrents[j]
 			r := ownedRelease{
-				Key:    trackerKey(t.Tracker, t.URL),
-				Hash:   validInfoHash(t.InfoHash),
-				IsBest: t.IsBest,
+				Key:         trackerKey(t.Tracker, t.URL),
+				Hash:        validInfoHash(t.InfoHash),
+				SonarrTitle: twinTitle(t, &info),
+				TvdbID:      info.TvdbID,
+				IsBest:      t.IsBest,
 			}
 			if r.Key == "" && r.Hash == "" {
 				// Nothing a search can match on, so nothing to own.
@@ -244,7 +267,7 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 	var js journalStats
 	writes := passWrites{
 		scope:     scope,
-		evaluated: ev.ownership(),
+		evaluated: ev.ownership(infoFor),
 		titles:    prev.titles,
 		cursor:    prev.cursor,
 		published: map[string]bool{},
@@ -337,7 +360,7 @@ func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) 
 
 // logPass emits the one completion line both scopes share. The scope attribute is
 // what an operator reads to tell a reconcile from a tick, and the counters are the
-// same set for both - the tick used to drop several of them.
+// same set for both scopes.
 func (w *FeedWriter) logPass(snap *snapshot, ev curationEvidence, js *journalStats, windowEntries int, scope passScope) {
 	w.log.Info("indexer feed snapshot written",
 		"scope", scope.String(),

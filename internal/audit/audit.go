@@ -35,9 +35,17 @@ const (
 	// VerdictNoFile means the item (or the mapped season) has no file on disk.
 	VerdictNoFile Verdict = "no_file"
 	// VerdictUnverified means the item has files on disk but the comparison is
-	// unverifiable: the release-group evidence on at least one side is unknown,
-	// so neither alignment nor a divergence can honestly be claimed.
+	// unverifiable: the release-group evidence on at least one side is unknown
+	// (an untagged release, NOGRP), or the library walk could not read this
+	// item's file data at all, so neither alignment nor a divergence can
+	// honestly be claimed.
 	VerdictUnverified Verdict = "unverified"
+	// VerdictUnattributed means the item has files on disk but the app never
+	// COMPARES this entry: it is an OFFERED unit, a film or special filed in
+	// Sonarr's season-0 bucket, where nothing ties one file to one entry. The
+	// bucket's groups are reported for what it holds; the feed still serves the
+	// entry.
+	VerdictUnattributed Verdict = "unattributed"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
 	// (present in the Fribb map) but SeaDex lists no entry for it.
 	VerdictNotOnSeaDex Verdict = "not_on_seadex"
@@ -45,7 +53,7 @@ const (
 
 // verdictOrder is the report's most-actionable-first ordering. not_on_seadex is
 // last: it is informational (no SeaDex recommendation exists to act on).
-var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictUnverified, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
+var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictUnverified, VerdictUnattributed, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
 
 // Qualifier annotates a row's verdict with the daemon's finding vocabulary for
 // the same (item, entry). It annotates; it never forks the verdict enum.
@@ -118,9 +126,9 @@ type Row struct {
 	// walk could not establish this item's file data, so no group was ever read.
 	// A not_on_seadex row never reaches align.Decide, so this is where it says so.
 	GroupsUnknown bool `json:"groups_unknown,omitempty"`
-	// Approx marks a coarse comparison: the season-0 specials bucket held more
-	// than one group, or the whole-series fallback compared more than one real
-	// season, so the verdict is not an exact per-season attribution.
+	// Approx marks a coarse comparison: an offered bucket held any file, or the
+	// whole-series fallback compared more than one real season, so the verdict is
+	// not an exact per-season attribution.
 	Approx bool `json:"approx,omitempty"`
 	// HiddenAnimeBytes counts the entry's releases withheld by the operator's
 	// AnimeBytes toggle. Without it a row whose only bests are AnimeBytes releases
@@ -189,7 +197,12 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		if !m.InLibrary() {
 			continue
 		}
-		covered[m.Item.Key()] = struct{}{}
+		// Coverage is a property of the COMPARISON, not of the link. The mark stays
+		// ABOVE the excludeSpecials continue, so an excluded special's coverage
+		// moves only by the comparability rule.
+		if align.ClaimsCoverage(m.Item, &m.Record) {
+			covered[m.Item.Key()] = struct{}{}
+		}
 		if a.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
@@ -279,24 +292,32 @@ func (a *Auditor) assess(m *match.Match) Row {
 			}
 		}
 	}
-	d := align.Decide(m.Item, &m.Record, best, alt)
+	d := align.Decide(m.Item, &m.Record, best, alt, m.SiblingSeasons, m.Seasons)
 	row.Scope = d.Kind
 	row.Season = d.Season
 	row.GroupsUnknown = !m.Item.Comparable()
 	// align.Decision.Groups is caller-owned, so the row can take it without cloning.
 	row.CurrentGroups, row.Approx = d.Groups, d.Approx
-	row.Verdict = verdictFor(d.Standing)
+	row.Verdict = verdictFor(&d, row.GroupsUnknown)
 	row.Qualifier = rowQualifier(&m.Entry, &d)
 	return row
 }
 
 // verdictFor renders the shared decision core's group-ladder standing in the
-// report's verdict vocabulary, 1:1.
-func verdictFor(s align.Standing) Verdict {
-	switch s {
+// report's verdict vocabulary. Every standing maps 1:1 except unverified, which
+// the report splits by origin: an OFFERED unit whose file data was read is
+// unattributed (the app never compares it), while a NOGRP side or a placeholder
+// whose files could not be read (groupsUnknown, which is also what separates an
+// unreadable film from an offered one, since the two decisions are identical)
+// stays unverified.
+func verdictFor(d *align.Decision, groupsUnknown bool) Verdict {
+	switch d.Standing {
 	case align.StandingNoFile:
 		return VerdictNoFile
 	case align.StandingUnverified:
+		if d.Kind == align.ScopeOffered && !groupsUnknown {
+			return VerdictUnattributed
+		}
 		return VerdictUnverified
 	case align.StandingBest:
 		return VerdictBest

@@ -2,10 +2,12 @@ package mapping
 
 import (
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,6 +48,77 @@ func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
 	}
 	if next.ETag != "v-new" {
 		t.Errorf("refresh ETag = %q, want v-new", next.ETag)
+	}
+}
+
+// TestLoader_Load_preservesMappingListAcrossEveryRefreshPath pins that the
+// Anime-Lists mapping-list fields on Cache (Mappings, its validators and its
+// timestamp) belong to a SECOND upstream and survive every Fribb refresh
+// outcome byte-identical. A Fribb refresh that dropped them would re-download
+// the 3.5 MB list every cycle and lose every film and pack label until it
+// arrived.
+func TestLoader_Load_preservesMappingListAcrossEveryRefreshPath(t *testing.T) {
+	ok200 := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "v-new")
+		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"tv","tvdb_id":200}]`))
+	}
+	tests := []struct {
+		handler http.HandlerFunc
+		name    string
+		refresh time.Duration
+		fresh   bool
+	}{
+		{name: "accepted_200", handler: ok200},
+		{name: "not_modified_304", handler: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotModified)
+		}},
+		{name: "server_error_stale", handler: func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}},
+		{name: "persistent_refusal", handler: func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"not":"an array"}`))
+		}},
+		{name: "fresh_cache_early_return", handler: func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "must not be fetched", http.StatusTeapot)
+		}, refresh: time.Hour, fresh: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(tc.handler)
+			defer ts.Close()
+			fetchedAt := time.Now().Add(-2 * time.Hour)
+			if tc.fresh {
+				fetchedAt = time.Now()
+			}
+			prev := &Cache{
+				FetchedAt: fetchedAt,
+				ETag:      "v1",
+				Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+				Mappings: map[int]Mapping{
+					12276: {SpecialEpisode: 8},
+					69:    {Seasons: []SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 23, First: 1156}}},
+				},
+				MappingsETag:         `W/"list-v7"`,
+				MappingsLastModified: "Mon, 02 Jan 2006 15:04:05 GMT",
+				MappingsFetchedAt:    time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC),
+			}
+			l := NewLoader(ts.Client(), ts.URL, WithRefresh(tc.refresh), WithLogger(discardLogger()))
+			next, _, _ := l.Load(t.Context(), prev)
+			if !maps.EqualFunc(next.Mappings, prev.Mappings, func(a, b Mapping) bool {
+				return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons)
+			}) {
+				t.Errorf("Load().Mappings = %+v, want prev's %+v", next.Mappings, prev.Mappings)
+			}
+			if next.MappingsETag != prev.MappingsETag {
+				t.Errorf("Load().MappingsETag = %q, want %q", next.MappingsETag, prev.MappingsETag)
+			}
+			if next.MappingsLastModified != prev.MappingsLastModified {
+				t.Errorf("Load().MappingsLastModified = %q, want %q", next.MappingsLastModified, prev.MappingsLastModified)
+			}
+			if !next.MappingsFetchedAt.Equal(prev.MappingsFetchedAt) {
+				t.Errorf("Load().MappingsFetchedAt = %v, want %v", next.MappingsFetchedAt, prev.MappingsFetchedAt)
+			}
+		})
 	}
 }
 
@@ -118,14 +191,13 @@ func TestLoader_Load_nilCacheFetches(t *testing.T) {
 }
 
 // TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision pins the
-// input-boundary canonicalization (h-f25): a persisted cache whose only record
-// carries non-canonical ids - a MOVIE with tmdb_movies [0] and a blank imdb id -
-// holds NO usable arr identifier, so it is not a usable cache and its validators
-// must not be sent. Without the boundary pass the raw record answered
-// HasArrIdentifier true (the zero and the blank survive an un-normalized read)
-// while the served index answered false, so the refresh sent If-None-Match and a
-// 304 revalidated the unusable cache indefinitely instead of obtaining a
-// replacement 200. It also pins that the caller's own Cache is never mutated.
+// input-boundary canonicalization: a persisted cache whose only record carries
+// non-canonical ids - a MOVIE with tmdb_movies [0] and a blank imdb id - holds NO
+// usable arr identifier, so it is not a usable cache and its validators must not
+// be sent. Without the boundary pass the raw record answers HasArrIdentifier true
+// (the zero and the blank survive an un-normalized read) while the served index
+// answers false, so the refresh sends If-None-Match and a 304 revalidates the
+// unusable cache forever. It also pins that the caller's Cache is not mutated.
 func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *testing.T) {
 	var sentValidators atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -517,9 +589,9 @@ func routingFloorPrevCache() *Cache {
 }
 
 // TestLoader_refreshCache_freshUnusableCacheStillFetches pins the
-// cache-usability gate on the fresh-reuse fast path - the first of the four
-// cache-state gates cacheUsable documents, and the only one previously
-// unpinned: a cache inside the refresh window whose records index to nothing
+// cache-usability gate on the fresh-reuse fast path, the first of the four
+// cache-state gates cacheUsable documents: a cache inside the refresh window
+// whose records index to nothing
 // (records:[{}] - a zero AniList ID buildIndex drops) must NOT be reused as
 // fresh, because serving it would idle a whole refresh window on an empty
 // effective map; the loader must fall through to the fetch and accept the

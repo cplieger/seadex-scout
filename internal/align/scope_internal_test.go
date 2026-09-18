@@ -8,13 +8,10 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
 
-// TestScope pins the four-branch scope dispatch Decide consumes. It lives in an
-// internal test file because scope/scopeResult are package-private: the only
-// production way to obtain a scope is through the decision that consumes it,
-// and Decide's own tests cover this dispatch only indirectly. It is the SINGLE
-// owner of every scoping branch: a second table asserting only a derived
-// Kind == ScopeWholeSeries boolean over the same four branches said strictly
-// less than the Kind + Groups + HasFile + Approx assertions here.
+// TestScope pins the four-branch scope dispatch Decide consumes, and is the SINGLE
+// owner of every scoping branch. It lives in an internal test file because
+// scope/scopeResult are package-private: the only production way to obtain a scope
+// is through the decision that consumes it, which covers the dispatch indirectly.
 func TestScope(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -50,27 +47,47 @@ func TestScope(t *testing.T) {
 			wantGroups: nil, wantKind: ScopeSeason, wantFile: false,
 		},
 		{
-			name:       "special with a single-group season 0 is exact",
+			// A single-group bucket carries no more attribution evidence than a
+			// multi-group one, so Approx marks "never attributed" rather than
+			// "spans several groups".
+			name:       "offered with a single-group season 0 is still approximate",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}}},
 			rec:        mapping.Record{Type: "OVA"},
-			wantGroups: []string{"legion"}, wantKind: ScopeSpecial, wantFile: true, wantApprox: false,
+			wantGroups: []string{"legion"}, wantKind: ScopeOffered, wantFile: true, wantApprox: true,
 		},
 		{
-			name:       "special with a multi-group season 0 is approximate",
+			name:       "offered with a multi-group season 0 is approximate",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}},
 			rec:        mapping.Record{Type: "SPECIAL"},
-			wantGroups: []string{"cait-sidhe", "sallysubs"}, wantKind: ScopeSpecial, wantFile: true, wantApprox: true,
+			wantGroups: []string{"cait-sidhe", "sallysubs"}, wantKind: ScopeOffered, wantFile: true, wantApprox: true,
 		},
 		{
-			name:       "special with no season-0 files has no file",
+			name:       "offered with no season-0 files has no file and no approximation",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"x"}}},
 			rec:        mapping.Record{Type: "OVA"},
-			wantGroups: nil, wantKind: ScopeSpecial, wantFile: false,
+			wantGroups: nil, wantKind: ScopeOffered, wantFile: false,
 		},
 		{
-			name:       "seasonless non-special series is classified whole-series, not a special",
+			name:       "seasonless non-special series is classified whole-series, not offered",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}, 1: {"sam"}}},
 			rec:        mapping.Record{Type: "TV"},
+			wantGroups: nil, wantKind: ScopeWholeSeries, wantFile: false,
+		},
+		{
+			// Heya Camp's shape: Fribb types it TV and maps it to season 0, so the
+			// type label would send it to a whole-series comparison against every
+			// real season while the season presence says offered.
+			name:       "a TV-typed mapped zero is offered, and reads the bucket",
+			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"koala"}, 1: {"sam"}}},
+			rec:        mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent},
+			wantGroups: []string{"koala"}, wantKind: ScopeOffered, wantFile: true, wantApprox: true,
+		},
+		{
+			// LoGH's shape: an OVA-typed absolute-numbered run, whose comparison is
+			// against the real seasons it actually spans.
+			name:       "an OVA-typed absent season is whole-series",
+			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}, 1: {"koala"}}},
+			rec:        mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonAbsent},
 			wantGroups: nil, wantKind: ScopeWholeSeries, wantFile: false,
 		},
 	}

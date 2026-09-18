@@ -85,19 +85,12 @@ func emptyTorznab() string { return torznabBody() }
 
 // TestHarvestMatchesABByTorrentID pins the AnimeBytes harvest end to end: one
 // series-level Prowlarr query (t=search, q = the synthesis title source), the
-// returned item matched back by the AB torrent id in its permalink page URL
-// (AB exposes no info hash), the real title cached in the snapshot and served
-// on this rebuild's write.
-//
-// The fixture is also the class the title audit CORRECTS end to end: the
-// harvested title claims a whole season while the release ships exactly one
-// proven episode, so the served title keeps every byte of the tracker's own name
-// except its season token, which becomes the season+episode form the file census
-// names (titleAudit.served). The CACHE holds that SERVED title, not the raw
-// harvested claim: the correction is derived from a file census a later pass may
-// not hold (a tick's census covers its window only), so caching the raw claim let
-// every such pass re-serve the whole-season title over the correction. Caching
-// what is served is what a pass with no census evidence carries.
+// returned item matched back by the AB torrent id in its permalink page URL (AB
+// exposes no info hash), the real title cached and served on this rebuild's write.
+// The fixture is also the class the title audit CORRECTS: the harvested title
+// claims a whole season while the release ships one proven episode. The CACHE holds
+// the SERVED title, not the raw claim: the correction derives from a file census a
+// later pass may not hold, so caching the claim re-serves it forever.
 func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	mock, srv := newHarvestMock(func(int) string {
 		return torznabBody(torznabItem("[PMR] Frieren S01 [BD Remux 1080p]", "https://animebytes.tv/torrent/1167293/group"))
@@ -235,15 +228,13 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 }
 
 // TestMain replaces the two wall-clock waits the whole package would otherwise
-// spend in real time. The harvest's pacing gap is politeness toward the
-// trackers, not logic under test, and the suite must not spend 2s per simulated
-// query. The Prowlarr retry backoff is the same kind of value, and the
-// retry-exhaustion tests pay it two attempts deep per failed query - about 50s
-// of this package's wall clock, re-paid by every PR run and by every gremlins
-// mutant that re-executes it. Tests that assert on the retry BUDGET (attempt
-// counts, Retry-After hints) are unaffected: none of them measures elapsed
-// time. Tests that exercise the pacer's deadline install their own
-// clock-advancing harvestWait (serially - nothing here runs t.Parallel).
+// spend in real time: the harvest's pacing gap is politeness toward the trackers
+// rather than logic under test, and the Prowlarr retry backoff is the same kind of
+// value - the retry-exhaustion tests pay it two attempts deep per failed query,
+// about 50s of this package's wall clock. Tests asserting on the retry BUDGET
+// (attempt counts, Retry-After hints) are unaffected: none measures elapsed time.
+// Tests exercising the pacer's deadline install their own clock-advancing
+// harvestWait, serially - nothing here runs t.Parallel.
 func TestMain(m *testing.M) {
 	harvestWait = func(context.Context, time.Duration) error { return nil }
 	upstreamBaseDelay = time.Millisecond
@@ -509,15 +500,13 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	}
 }
 
-// TestHarvestSpendsOneQueryPerTitleCandidate pins the post-paging-removal
-// query budget: exactly ONE query per (show, title candidate), whatever the
-// response size. Offset paging was removed because neither upstream honours
-// `offset` through Prowlarr (measured 2026-07-29; see the note in harvest.go),
-// and the cost it left behind was a wasted paced query per unsatisfied
-// AnimeBytes candidate - AB returns the show's whole set in one response, so a
-// full response always read as "there is more". A satisfied show must still
-// cost exactly one query, and an unsatisfied two-candidate ladder must cost
-// exactly two rather than one per candidate per page.
+// TestHarvestSpendsOneQueryPerTitleCandidate pins the query budget: exactly ONE
+// query per (show, title candidate), whatever the response size. Neither upstream
+// honours `offset` through Prowlarr (measured 2026-07-29; see the note in
+// harvest.go), and AB returns the show's whole set in one response, so paging cost
+// a wasted paced query per unsatisfied candidate - a full response always read as
+// "there is more". A satisfied show must cost exactly one query, and an unsatisfied
+// two-candidate ladder exactly two rather than one per candidate per page.
 func TestHarvestSpendsOneQueryPerTitleCandidate(t *testing.T) {
 	// A response at least as large as the retired page stride: under offset
 	// paging this was the shape that kept a show paging, so it is the shape
@@ -575,15 +564,14 @@ func TestHarvestSpendsOneQueryPerTitleCandidate(t *testing.T) {
 	}
 }
 
-// TestHarvestConsumesTheWholeSingleResponse is the evidence h-f50 was dismissed
-// on: AnimeBytes returns a show's entire torrent set in ONE response (725 items
-// for the largest measured show, well inside maxUpstreamItems), and the app
-// decodes all of it, so an adjacent alias run can never be split across a page
-// boundary - there are no pages. The fixture puts the target torrent's two
-// aliases at the very END of a 725-item response, the position a boundary split
-// would have truncated, and requires the alias the COMPLETE set yields (the
-// arr-vocabulary Romaji one, which loses the most-parseable fallback the
-// English alias alone would win).
+// TestHarvestConsumesTheWholeSingleResponse pins that AnimeBytes returns a show's
+// entire torrent set in ONE response (725 items for the largest measured show,
+// well inside maxUpstreamItems) and the app decodes all of it, so an adjacent
+// alias run can never be split across a page boundary - there are no pages. The
+// fixture puts the target torrent's two aliases at the very END of a 725-item
+// response, the position a boundary split would have truncated, and requires the
+// alias the COMPLETE set yields (the arr-vocabulary Romaji one, which loses the
+// most-parseable fallback the English alias alone would win).
 func TestHarvestConsumesTheWholeSingleResponse(t *testing.T) {
 	const (
 		responseItems = 725
@@ -705,16 +693,13 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 }
 
 // TestMatchHarvestGradesRejectionsAgainstTheGroupsPendingKeys pins the pending
-// grade the fruitless backstop reads (d-gpt-u8-1, refined by h-f35). A
-// contradictory result is always refused and always counted in
-// harvest_rejected, but only a refusal that touched one of THIS GROUP's pending
-// releases means this show harvested nothing: a result whose comments and guid
-// disagree with each other is refused before either signal is looked up, and
+// grade the fruitless backstop reads. A contradictory result is always refused and
+// always counted in harvest_rejected, but only a refusal that touched one of THIS
+// GROUP's pending releases means this show harvested nothing: a result whose
+// comments and guid disagree is refused before either signal is looked up, and
 // AnimeBytes answers the SAME broad series-level corpus to every query, so one
-// unrelated malformed item in that corpus repeats across every show. Grading it
-// as no-progress - whether it belongs to no pending show at all, or to a
-// DIFFERENT pending show than the one queried - would let it condemn the scope
-// after consecutiveFruitlessLatch otherwise-clean shows.
+// unrelated malformed item repeats across every show. Grading it as no-progress
+// would condemn the scope after consecutiveFruitlessLatch otherwise-clean shows.
 func TestMatchHarvestGradesRejectionsAgainstTheGroupsPendingKeys(t *testing.T) {
 	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2", "nyaa:7": "nyaa:7"}
 	titles := map[string]string{}
@@ -806,17 +791,13 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 }
 
 // TestHarvestReportsStrandedReleases pins the WARN that carries matchHarvest's
-// pendingRejected/unusable grades to an operator: a result naming this show's
-// own still-untitled release whose title cannot enter the cache may strand that
-// release on its synthesized title for the whole journal window, and unusable
-// rides no stat at all, so this line is its only report. One line per show per
-// rebuild, never per candidate.
-//
-// The ladder is what makes the once-per-show half falsifiable, and it starts
-// CLEAN: the first candidate's response strands nothing, so the second
-// candidate's is the one that must open the line and the third's the one that
-// must not repeat it. A single-candidate show cannot tell that from a line
-// emitted per candidate.
+// pendingRejected/unusable grades to an operator: a result naming this show's own
+// still-untitled release whose title cannot enter the cache may strand that release
+// on its synthesized title for the whole journal window, and unusable rides no stat
+// at all, so this line is its only report. One line per show per rebuild, never per
+// candidate. The ladder makes the once-per-show half falsifiable and starts CLEAN:
+// the first candidate strands nothing, so the second must open the line and the
+// third must not repeat it - a single-candidate show cannot tell those apart.
 func TestHarvestReportsStrandedReleases(t *testing.T) {
 	const warnMsg = "indexer title harvest encountered results it could not use for this show's releases"
 	mock, srv := newHarvestMock(func(call int) string {
@@ -1066,7 +1047,7 @@ func TestHarvestParams(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := harvestParams(tc.meta, tc.scope, strings.TrimSpace(tc.meta.Title))
+			got := harvestParams(&tc.meta, tc.scope, strings.TrimSpace(tc.meta.Title))
 			if got.Get("t") != tc.wantT {
 				t.Errorf("harvestParams(%+v, %q) t = %q, want %q", tc.meta, tc.scope, got.Get("t"), tc.wantT)
 			}
@@ -1129,15 +1110,13 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 }
 
 // TestHarvestMatchesHashlessRecordAgainstHashBearingResult pins the end-to-end
-// half of d-u5-c2-2: SeaDex's record for a curated Nyaa torrent carries no
-// usable info hash (the field is absent, or AB's "<redacted>" form which
-// validInfoHash drops), so the pending index holds only the item's tracker key
-// - while Prowlarr's Nyaa result ALWAYS reports a hash. That hash is unknown to
-// the partial index, and treating the absence as an identity contradiction
-// rejected the result outright. Because the index is rebuilt from the same
-// journal every rebuild the rejection was permanent: the item served its
-// synthesized heuristic title forever, with no diagnostic at all. The page URL
-// resolves the identity on its own, so the harvest must cache the real title.
+// half of the hashless identity path: SeaDex's record for a curated Nyaa torrent
+// carries no usable info hash (absent, or AB's "<redacted>" form which
+// validInfoHash drops), so the pending index holds only the item's tracker key -
+// while Prowlarr's Nyaa result ALWAYS reports a hash. Treating that unknown hash
+// as an identity contradiction rejects the result, and because the index is
+// rebuilt from the same journal every rebuild the rejection is permanent. The page
+// URL resolves the identity alone, so the harvest must cache the real title.
 func TestHarvestMatchesHashlessRecordAgainstHashBearingResult(t *testing.T) {
 	const prowlarrHash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1361,15 +1340,14 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 	}
 }
 
-// TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary pins h-f37: the
-// identity index is GLOBAL, so one show's page routinely resolves ANOTHER
-// pending show's items too - and that show's alias choice must be made against
-// its OWN trusted title, not against the title of whichever show happened to be
-// queried. Show A's page carries two aliases of show B's torrent; the English
-// one wins the ASCII fallback, so a per-query show title (A's, which neither
-// alias contains) would cache the English alias for an arr that carries B under
-// its Romaji name - a title Sonarr cannot match, worse than the synthesized one
-// it replaced.
+// TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary pins that the identity
+// index is GLOBAL, so one show's page routinely resolves ANOTHER pending show's
+// items too - and that show's alias choice must be made against its OWN trusted
+// title, not against the title of whichever show happened to be queried. Show A's
+// page carries two aliases of show B's torrent; the English one wins the ASCII
+// fallback, so a per-query show title (A's, which neither alias contains) would
+// cache the English alias for an arr that carries B under its Romaji name - a
+// title Sonarr cannot match, worse than the synthesized one it replaced.
 func TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary(t *testing.T) {
 	const (
 		english = "Show B English Longer Title S01 1080p BluRay [G]"
@@ -1567,20 +1545,12 @@ func TestRequestScopedClassificationSurvivesKeyRedaction(t *testing.T) {
 
 // TestHarvestHTTPStatusFailureScoping pins the HTTP-status sibling of the
 // Torznab-document classification end to end: a request-specific status
-// (400/414/422) answered to ONE show's query consumes only that show's
-// budget - the SAME upstream's next show is still queried and harvested -
-// while an auth/config status (401/403/404) latches the whole scope, so the
-// next show is never queried. Without the status arm of
-// requestScopedHarvestError, a single title whose encoded query the upstream
-// rejects with 400 would condemn every later healthy show on the tracker to
-// synthesized titles.
-//
-// The scope-latching rows additionally pin the LEVEL split (l-f75): 401/403 are
-// the credentials class and log at ERROR naming the remedy, because they cannot
-// clear without an operator and the same rejection on the search path makes an
-// arr disable this indexer. A 404 stays a WARN - an endpoint answering not-found
-// may be a removed Prowlarr indexer, which is a config question but not provably
-// a credential one. Scoping is identical for all three; only the level differs.
+// (400/414/422) consumes only that show's budget - the SAME upstream's next show
+// is still queried - while an auth/config status (401/403/404) latches the whole
+// scope. Without requestScopedHarvestError's status arm, one title whose query the
+// upstream rejects with 400 condemns every later healthy show to a synthesized
+// title. The latching rows also pin the LEVEL split at equal scope: 401/403 log at
+// ERROR naming the remedy; a 404 may be a removed Prowlarr indexer, so it WARNs.
 func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 	const (
 		showLocalMsg   = "indexer title harvest request rejected; show keeps its synthesized title this rebuild"
@@ -1664,17 +1634,13 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 }
 
 // TestResolveHarvestKeyPartialSignals pins the identity-resolution table of
-// resolveHarvestKey across its three outcomes: a resolved key, a plain
-// non-match (not one of ours), and a CONFLICT (the signals contradict each
-// other, which fails closed and is counted). The distinction matters because a
-// conflict is an untrusted-response signal worth reporting while a non-match is
-// the ordinary fate of most of a season query's page.
-//
-// The row that changed with d-u5-c4-1's sibling d-u5-c2-2: a known page URL
-// carrying a hash the PARTIAL index does not hold now resolves. The index holds
-// only pending items and only the hashes SeaDex published, so a Prowlarr Nyaa
-// result (always hash-bearing) routinely carries an unknown one; rejecting it
-// permanently stranded the item on its synthesized title.
+// resolveHarvestKey across its three outcomes: a resolved key, a plain non-match
+// (not one of ours), and a CONFLICT (the signals contradict each other, which
+// fails closed and is counted). The distinction matters because a conflict is an
+// untrusted-response signal worth reporting while a non-match is the ordinary fate
+// of most of a season query's page. A known page URL carrying a hash the PARTIAL
+// index does not hold resolves: the index holds only pending items and only the
+// hashes SeaDex published, so a Nyaa result routinely carries an unknown one.
 func TestResolveHarvestKeyPartialSignals(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	index := map[string]string{"nyaa:42": "nyaa:42", hash: "nyaa:42"}
@@ -1878,14 +1844,12 @@ func TestPendingHarvestSkipsCrossScopeJournalKey(t *testing.T) {
 
 // TestPendingHarvestRetiresAmbiguousInfoHash pins the collision arm of the
 // identity index: a hash names BYTES, not a journal item, so two pending items
-// publishing the same hash (the same bytes curated under two tracker ids, or
-// listed on both trackers) must make the hash inconclusive rather than let one
-// item win the slot last-write-wins. Under last-write-wins the loser's own
-// honest Prowlarr result read as a contradictory identity and was rejected
-// permanently (the index is rebuilt from the same journal every rebuild),
-// pinning the harvest_rejected tamper counter non-zero on benign data. Which
-// item won was map-iteration-dependent, so this asserts on BOTH results: it
-// fails whichever way the old code happened to order them.
+// publishing the same hash (the same bytes curated under two tracker ids) must make
+// the hash inconclusive rather than let one item win the slot last-write-wins. Under
+// last-write-wins the loser's own honest Prowlarr result reads as a contradictory
+// identity and is rejected permanently (the index is rebuilt from the same journal
+// every rebuild), pinning the harvest_rejected tamper counter non-zero on benign
+// data. Map iteration picks the winner, so this asserts on BOTH results.
 func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
@@ -1949,20 +1913,14 @@ func TestPendingHarvestKeepsAnAmbiguousInfoHashRetired(t *testing.T) {
 	}
 }
 
-// TestPreferredHarvestTitlePicksTheArrsVocabulary pins the alias policy
-// (l-f142). AnimeBytes lists ONE torrent three times - English, Japanese and
-// Romaji titles, distinct ?nh= GUIDs, the same torrent id - so all three resolve
-// to one journal key. Caching whichever Prowlarr listed first made the served
-// title a coin flip, and a JP or Romaji alias the operator's Sonarr series does
-// not carry makes the RSS item LESS matchable than the synthesized title it
-// replaced (synthesizeTitle builds from the arr's own vocabulary on purpose).
-//
-// Torznab carries no language marker, so "prefer English" is expressed as
-// "prefer the alias in the arr's vocabulary": the one whose text contains the
-// show title the synthesis already trusts. For an English-titled series that is
-// the English alias; for a library whose arr carries the Romaji title it is
-// Romaji, which is correct for THAT library. A native-script alias cannot
-// contain a Latin show title and so never wins.
+// TestPreferredHarvestTitlePicksTheArrsVocabulary pins the alias policy.
+// AnimeBytes lists ONE torrent three times - English, Japanese and Romaji titles,
+// distinct ?nh= GUIDs, the same torrent id - so all three resolve to one journal
+// key, and caching whichever Prowlarr listed first made the served title a coin
+// flip: an alias the operator's arr does not carry is LESS matchable than the
+// synthesized title it replaced. Torznab carries no language marker, so the policy
+// is "prefer the alias whose text contains the show title the synthesis already
+// trusts"; a native-script alias cannot contain a Latin title and never wins.
 func TestPreferredHarvestTitlePicksTheArrsVocabulary(t *testing.T) {
 	const (
 		jp     = "[SubsPlease] 葬送のフリーレン - S01 (BD 1080p)"
@@ -2021,7 +1979,7 @@ func TestPreferredHarvestTitlePicksTheArrsVocabulary(t *testing.T) {
 			showTitle: "",
 			want:      "[Group] Alpha - S01 (BD 1080p)",
 		},
-		// h-f36: a one- to three-character title key occurs inside ordinary
+		// A one- to three-character title key occurs inside ordinary
 		// release metadata ("x" in Remux/x265), so a normalized substring test
 		// admits the FIRST alias whatever its vocabulary. A short key needs
 		// token-boundary evidence, which the normalized form threw away.
@@ -2081,19 +2039,13 @@ func TestMatchHarvestChoosesAmongABAliasesOnOnePage(t *testing.T) {
 }
 
 // TestUpdateHarvestScopeStateLatchesAlternatingFailures pins the backstop the two
-// per-kind latches cannot be (l-f91). Each of them resets the OTHER's counter -
-// deliberately, since a definitive request rejection falsifies the
-// answers-garbage-to-everything hypothesis - so an upstream ALTERNATING between a
-// garbled 2xx body and a request rejection tripped NEITHER however long it ran:
-// the full harvestTimeBudget burned with zero title progress on every rebuild and
-// one WARN fired per failed show (up to ~300) instead of the <=3-then-latch bound
-// the homogeneous case gets. A misbehaving reverse proxy answering HTML garbage to
-// one query shape and 400/422 to another produces exactly that, while the pending
-// set interleaves mapped-season groups (tvsearch) with unmapped ones (search).
-//
-// The fruitless counter states the purpose directly - consecutive shows with NO
-// progress of any kind, reset only by a success - and latches at twice the
-// per-kind threshold, so it never preempts the more specific diagnostics.
+// per-kind latches cannot be. Each resets the OTHER's counter - deliberately, since
+// a definitive request rejection falsifies the answers-garbage-to-everything
+// hypothesis - so an upstream ALTERNATING between a garbled 2xx body and a request
+// rejection trips NEITHER however long it runs: the full harvestTimeBudget burns
+// with zero title progress and one WARN fires per failed show (up to ~300). The
+// fruitless counter counts consecutive shows with NO progress, reset only by a
+// success, and latches at twice the per-kind threshold.
 func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 	const msg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
 
@@ -2170,7 +2122,7 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 	})
 }
 
-// TestUpdateHarvestScopeStateLatchesContradictedSuccesses pins h-f52's arm: a
+// TestUpdateHarvestScopeStateLatchesContradictedSuccesses pins one arm: a
 // show whose query SUCCEEDED but whose every candidate result was refused as
 // contradictory resolved nothing, so it keeps the fruitless run charged and a
 // run of them condemns the scope - an upstream returning our releases with
@@ -2217,11 +2169,10 @@ func TestUpdateHarvestScopeStateLatchesContradictedSuccesses(t *testing.T) {
 // of upstream.search. httpx's retry loop publishes its own terminal "retries
 // exhausted" line, and this app publishes a WARN for the same failed query with
 // strictly more context (the show, the query shape and the page on the harvest
-// path; the scope on the request path). Leaving both at Warn produced two
-// terminal WARNs per failure and doubled the log volume of exactly the incident
-// the once-per-onset latch cadence exists to keep readable, so httpx's verdict is
-// demoted to Debug (l-f20). The per-attempt retry diagnostics are deliberately
-// kept, which is why the logger is demoted rather than dropped.
+// path; the scope on the request path). Leaving both at Warn doubles the log volume
+// of exactly the incident the once-per-onset latch exists to keep readable, so
+// httpx's verdict is demoted to Debug. The per-attempt retry diagnostics are
+// deliberately kept, which is why the logger is demoted rather than dropped.
 func TestUpstreamFailureWarnsOnce(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -2252,16 +2203,14 @@ func TestUpstreamFailureWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestHarvestServesTheArrsVocabularyAlias pins the WIRING of the alias policy
-// (l-f142) into the harvest itself: harvestShow must hand matchHarvest the
-// show title the synthesis trusts, not a blank. preferredHarvestTitle's own
-// table proves the policy; nothing proved the harvest actually feeds it, so a
-// blank showTitle silently reverts the served title to the
-// most-parseable-alias fallback - for a Romaji-titled library that is the
-// English alias its Sonarr series does not carry, exactly the coin flip the
-// policy replaced. The fixture is chosen so the fallback disagrees with the
-// policy: the English alias carries MORE ASCII release text than the Romaji
-// one, so only correct wiring can pick Romaji.
+// TestHarvestServesTheArrsVocabularyAlias pins the WIRING of the alias policy into
+// the harvest itself: harvestShow must hand matchHarvest the show title the
+// synthesis trusts, not a blank. preferredHarvestTitle's own table proves the
+// policy; nothing proved the harvest feeds it, so a blank showTitle silently
+// reverts the served title to the most-parseable-alias fallback - for a
+// Romaji-titled library that is the English alias its Sonarr series does not carry.
+// The fixture is chosen so the fallback disagrees with the policy: the English
+// alias carries MORE ASCII release text, so only correct wiring picks Romaji.
 func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
 	const (
 		romaji  = "[PMR] Sousou no Frieren - S01 (BD Remux 1080p)"
@@ -2294,15 +2243,14 @@ func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
 	}
 }
 
-// TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope pins both halves of
-// the group-local pending grade: a contradictory result pending in NO group (the
-// original unrelated case, d-gpt-u8-1) and one pending only for a LATER group
-// (h-f35) are both ordinary misses for the show being queried, so neither may
-// charge the fruitless run. AnimeBytes answers the same broad series-level
-// corpus to every query, so such an item repeats across every otherwise
-// ordinary miss; charging it latched the scope after consecutiveFruitlessLatch
-// clean shows and left the one show whose real title was on offer unqueried,
-// with time and rotation still to spend.
+// TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope pins both halves of the
+// group-local pending grade: a contradictory result pending in NO group and one
+// pending only for a LATER group are both ordinary misses for the show being
+// queried, so neither may charge the fruitless run. AnimeBytes answers the same
+// broad series-level corpus to every query, so such an item repeats across every
+// otherwise ordinary miss; charging it latches the scope after
+// consecutiveFruitlessLatch clean shows and leaves the one show whose real title
+// was on offer unqueried, with time and rotation still to spend.
 func TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope(t *testing.T) {
 	const (
 		latchMsg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
@@ -2368,14 +2316,13 @@ func TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope(t *testing.T) {
 }
 
 // TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope pins the
-// still-pending half of the pending grade (d-gpt-u8c2-1). groupKeys is the
-// immutable start-of-run list, so it keeps naming keys an EARLIER group's broad
-// page titled opportunistically. A contradiction touching only such a key
-// refused nothing this rebuild still wants, so it must not charge the fruitless
-// run: grading it as no-progress condemned the scope after
-// consecutiveFruitlessLatch partially satisfied shows and left the last show -
-// the one whose real title was on offer - unqueried, with time and rotation
-// still to spend.
+// still-pending half of the pending grade. groupKeys is the immutable
+// start-of-run list, so it keeps naming keys an EARLIER group's broad page titled
+// opportunistically. A contradiction touching only such a key refused nothing this
+// rebuild still wants, so it must not charge the fruitless run: grading it as
+// no-progress condemns the scope after consecutiveFruitlessLatch partially
+// satisfied shows and leaves the last show - the one whose real title was on offer
+// - unqueried, with time and rotation still to spend.
 func TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope(t *testing.T) {
 	const (
 		latchMsg  = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
@@ -2442,7 +2389,7 @@ func TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope(t *testing.T)
 	}
 }
 
-// TestHarvestPartialProgressDoesNotLatchTheScope pins h-f51: a show that cached
+// TestHarvestPartialProgressDoesNotLatchTheScope pins that a show that cached
 // a real title before a LATER query failed show-locally made progress, so it must
 // not charge a consecutive-failure run. Each of the four shows answers its as-is
 // title with one of its two keys' titles, stays pending, and gets garbage for the
@@ -2727,21 +2674,13 @@ func TestPermanentUpstreamCredentialErrorBandEdges(t *testing.T) {
 }
 
 // TestHarvestCredentialErrorDocumentLatchesTheScopeAtError pins the harvest's
-// credential classification for the shape it actually arrives in over a healthy
-// HTTP hop: Prowlarr answers 200 with a Torznab <error> document, and codes
-// 100-199 are its auth/credential band (a wrong or revoked
-// indexer.prowlarr_api_key, a suspended account). That band is decided by
-// permanentUpstreamCredentialError's DOCUMENT arm, whose status twin (401/403)
-// TestHarvestHTTPStatusFailureScoping already pins - so the document arm could be
-// deleted, or its range typed as 200-299, and the suite would stay green while
-// the rejection fell through to the generic scope WARN.
-//
-// Two things this shape alone reaches. The LEVEL is the alert contract:
-// alerts/logql.yaml keys SeadexScoutCycleError on level=ERROR and on no message at all,
-// so a re-level to WARN silences the one signal that says the feed is dying while
-// the container stays healthy and the compare loop keeps logging cycle complete.
-// And the scope must LATCH: a credential rejection fails every show identically,
-// so the second show must never be queried.
+// credential classification for the shape it arrives in over a healthy HTTP hop:
+// Prowlarr answers 200 with a Torznab <error> document, and codes 100-199 are its
+// auth/credential band (a wrong indexer.prowlarr_api_key, a suspended account).
+// That band is permanentUpstreamCredentialError's DOCUMENT arm, whose status twin
+// TestHarvestHTTPStatusFailureScoping pins, so the document arm could be deleted and
+// the suite stay green. Only this shape reaches the LEVEL (the alert contract keys
+// SeadexScoutCycleError on level=ERROR) and the LATCH keeping show two unqueried.
 func TestHarvestCredentialErrorDocumentLatchesTheScopeAtError(t *testing.T) {
 	const (
 		credentialsMsg = "indexer title harvest rejected the credentials"
@@ -2786,15 +2725,13 @@ func TestHarvestCredentialErrorDocumentLatchesTheScopeAtError(t *testing.T) {
 }
 
 // TestHarvestFruitlessBackstopLatchesOnCleanlyRefusedShows pins the no-progress
-// backstop's one genuinely non-obvious input: a show whose query SUCCEEDED.
-//
-// The two per-kind latches count failures, and each resets the other's run, so an
-// upstream that answers 200 with a well-formed body forever trips neither however
-// long it runs. An upstream returning this app's own releases with contradictory
-// identity signals is exactly that shape: every result is refused, nothing is
-// titled, and the whole harvest budget burns with zero progress on every rebuild.
-// So a clean answer that resolved nothing is charged to the no-progress run, and
-// the scope is condemned once even a mixed sequence has produced nothing.
+// backstop's one genuinely non-obvious input: a show whose query SUCCEEDED. The
+// two per-kind latches count failures and each resets the other's run, so an
+// upstream answering 200 with a well-formed body forever trips neither. An upstream
+// returning this app's own releases with contradictory identity signals is exactly
+// that shape: every result is refused, nothing is titled, and the whole harvest
+// budget burns with zero progress on every rebuild. So a clean answer that resolved
+// nothing is charged to the no-progress run.
 func TestHarvestFruitlessBackstopLatchesOnCleanlyRefusedShows(t *testing.T) {
 	// One more show than the backstop tolerates, so the latch is observable as a
 	// query the run never spends.
@@ -2842,15 +2779,13 @@ func TestHarvestFruitlessBackstopLatchesOnCleanlyRefusedShows(t *testing.T) {
 }
 
 // TestHarvestShowThatTitledSomethingIsNotChargedForALaterRejection pins the
-// inverse of the backstop: a show that HARVESTED real titles before a later
-// title candidate was rejected made progress, so neither the request-rejection
-// run nor the no-progress run may be charged for it.
-//
-// The ladder widens only while the show is still unsatisfied, so a partially
-// titled show reaching a rejection on its second candidate is the ordinary shape
-// of a multi-release show, not an upstream fault. Charging it would let a run of
-// perfectly productive shows condemn the scope and skip every remaining show's
-// harvest for the rest of the rebuild.
+// inverse of the backstop: a show that HARVESTED real titles before a later title
+// candidate was rejected made progress, so neither the request-rejection run nor
+// the no-progress run may be charged for it. The ladder widens only while the show
+// is still unsatisfied, so a partially titled show reaching a rejection on its
+// second candidate is the ordinary shape of a multi-release show, not an upstream
+// fault. Charging it would let a run of productive shows condemn the scope and skip
+// every remaining show's harvest for the rest of the rebuild.
 func TestHarvestShowThatTitledSomethingIsNotChargedForALaterRejection(t *testing.T) {
 	// One more show than the request-rejection latch tolerates, so a wrongly
 	// charged run would condemn the scope before the last show is queried.

@@ -275,17 +275,21 @@ func (s *Scout) saveTick(ctx context.Context, st *state.State, mapCache *mapping
 }
 
 // mappingWorthPersisting reports whether a refreshed mapping cache differs from
-// the persisted one in a way a future load would miss. FetchedAt is deliberately
-// excluded, and is the whole reason this exists: almost every tick gets a 304
-// and a fresh FetchedAt, so comparing whole Cache values would report a change
-// every single tick and the skip would never fire. Validators plus the record
-// count catch an accepted refresh, and RejectedRefreshes catches a refusal - the
-// streak the mapping-rejection escalation reads, which must survive a restart.
+// the persisted one in a way a future load would miss. Both upstreams are tested
+// the same way - validators plus a size, plus RejectedRefreshes for a refusal -
+// and BOTH fetch timestamps are excluded, which is the whole reason this exists:
+// almost every tick gets a 304 and a fresh timestamp, so comparing whole Cache
+// values would report a change every tick and the skip would never fire. Omitting
+// the list's own two validators instead would leave a tick that accepted the XML
+// re-downloading it every cycle until the reconcile persisted it.
 func mappingWorthPersisting(prev, next *mapping.Cache) bool {
 	return prev.ETag != next.ETag ||
 		prev.LastModified != next.LastModified ||
 		len(prev.Records) != len(next.Records) ||
-		prev.RejectedRefreshes != next.RejectedRefreshes
+		prev.RejectedRefreshes != next.RejectedRefreshes ||
+		prev.MappingsETag != next.MappingsETag ||
+		prev.MappingsLastModified != next.MappingsLastModified ||
+		len(prev.Mappings) != len(next.Mappings)
 }
 
 // evaluatedIDs is the tick's deletion-authority set: the AniList IDs this window

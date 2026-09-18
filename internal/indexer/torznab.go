@@ -44,10 +44,23 @@ type item struct {
 	DownloadURL          string    `json:"DownloadURL"`
 	InfoHash             string    `json:"InfoHash"`
 	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
-	Categories           []int     `json:"Categories"`
-	Size                 int64     `json:"Size"`
-	Seeders              int       `json:"Seeders"`
-	Leechers             int       `json:"Leechers"`
+	// SonarrTitle and SonarrGUID are the film twin's two facts, set on a film
+	// filed under a Sonarr series whose holders agree on the season-0 episode the
+	// Anime-Lists mapping-list names: the "<Series> S00Exx <flags>" title Sonarr's
+	// parser can match, and the original GUID with a fragment. The render expands
+	// a stored item carrying them into a second wire item (sonarrTwin); nothing is
+	// journaled twice. Additive and omitempty, re-derived every reconcile, so an
+	// older binary drops them and nothing accumulates.
+	SonarrTitle string `json:"SonarrTitle,omitempty"`
+	SonarrGUID  string `json:"SonarrGUID,omitempty"`
+	Categories  []int  `json:"Categories"`
+	Size        int64  `json:"Size"`
+	Seeders     int    `json:"Seeders"`
+	Leechers    int    `json:"Leechers"`
+	// TvdbID is the series id the rendered tvdbid attr carries, 0 when the entry
+	// has none. Additive and omitempty, so an older binary reading this snapshot
+	// drops it and re-derives it on its next rebuild.
+	TvdbID int `json:"TvdbID,omitempty"`
 }
 
 // guid returns a stable unique id for the item.
@@ -161,6 +174,12 @@ func writeItem(b *strings.Builder, it *item) {
 	writeAttr(b, "size", strconv.FormatInt(size, 10))
 	if it.InfoHash != "" {
 		writeAttr(b, "infohash", it.InfoHash)
+	}
+	// tvdbid rides beside infohash, both being identity attrs. It is what makes an
+	// offer consumable: Sonarr rejects a title it cannot map as UnknownSeries
+	// before any quality profile runs, and reads the series from this attr instead.
+	if it.TvdbID > 0 {
+		writeAttr(b, "tvdbid", strconv.Itoa(it.TvdbID))
 	}
 	// The marker: best -> downloadvolumefactor 0.75 (Freeleech25), alt -> 0.25
 	// (Freeleech75). uploadvolumefactor 1 keeps it from also flagging DoubleUpload.

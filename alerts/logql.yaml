@@ -5,22 +5,25 @@
 # through your Alertmanager like any Prometheus alert. The rules assume the
 # default JSON log handler (log.format: json); for log.format: text, swap the
 # "| json | level=`ERROR`" parser stage for a "|= `level=ERROR`" line filter.
-# They also assume the default log.level: info. Five of the matched messages are
+# They also assume the default log.level: info. Six of the matched messages are
 # INFO records ("tick complete", "cycle complete", "reconcile started",
-# "reconcile complete", "report written"), so at log.level: warn the report rule
+# "reconcile complete", "report written", "series spans multiple release groups,
+# manual review"), so at log.level: warn the report rule and the mixed-group rule
 # can never fire and BOTH stall rules fire permanently on a healthy app - only
-# the degraded arms of the loop deadman survive. Drop those three rules before
+# the degraded arms of the loop deadman survive. Drop those four rules before
 # raising the level.
 # Thresholds and the severity labels are starting points; adjust the container
 # selector (or job/service, depending on your log collector) to your deployment
 # and the stall window to your poll_interval.
 #
-# STABLE MESSAGES (the log contract). These five are what the rules below match
+# STABLE MESSAGES (the log contract). These six are what the rules below match
 # on, and they are the ONLY log output treated as a contract - they will not be
 # renamed or retyped without a matching change here:
 #
 #   level=ERROR                     any run fault (the rules key on the level, not a message)
 #   msg="better release available"  the better-release finding
+#   msg="series spans multiple release groups, manual review"
+#                                   the mixed-group manual-review nudge
 #   msg="report written"            a report was generated
 #   msg="cycle complete|degraded"   \ the loop deadman, matched as
 #   msg="tick complete|degraded"    / "(cycle|tick) (complete|degraded)"
@@ -314,6 +317,38 @@ groups:
             {{- if $labels.public_url }}{{ if $labels.nyaa_url }} · {{ end }}[{{ $labels.public_tracker }}]({{ $labels.public_url }}){{ end }}
             {{- if $labels.ab_url }}{{ if or $labels.nyaa_url $labels.public_url }} · {{ end }}[{{ $labels.ab_tracker }}]({{ $labels.ab_url }}){{ end }}
             — {{ $labels.seadex_tags }}
+      # Informational: a unit the app could not attribute to ONE current release
+      # group. `compare` emits this for a non-aligned unit whose on-disk group
+      # evidence spans more than one member (align.OutcomeMixed), so no single
+      # current group can be named and the operator has to look. It is a state,
+      # not an event: the finding set is re-emitted every pass, so this carries
+      # the same [12h] lookback as the better-release rule for the same reason
+      # (Loki's ruler has no keep_firing_for, so a shorter window flaps).
+      # `arr` is in the grouping deliberately: one AniList entry can own an item
+      # in each arr, and Loki must treat those as distinct series.
+      # It does NOT cover a film or special filed in Sonarr's season-0 bucket —
+      # the app is silent for those by design, because the bucket cannot
+      # attribute a file to one entry (see the README's offered rows).
+      - alert: SeadexScoutMixedGroupManual
+        expr: |
+          sum by (title, alert_title, al_id, arr, arr_url, season, recommended_group, alert_recommended_group, seadex_tags) (
+            count_over_time(
+              {container="seadex-scout"} | json | msg=`series spans multiple release groups, manual review` [12h]
+            )
+          ) > 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: '{{ $labels.alert_title }}: SeaDex release needs manual review'
+          description: >-
+            [SeaDex](https://releases.moe/{{ $labels.al_id }}) recommends
+            {{ $labels.alert_recommended_group }} for {{ $labels.alert_title }}
+            {{- if $labels.arr_url }} ([open in {{ $labels.arr }}]({{ $labels.arr_url }})){{ end }}
+            {{- if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
+            , but the files on disk span more than one release group, so the app
+            cannot say which one you have. Check it by hand.
+            {{- if $labels.seadex_tags }} — {{ $labels.seadex_tags }}{{ end }}
       # Informational: report mode wrote a season-level alignment report. Report
       # mode is a one-shot (docker exec /seadex-scout report, or mode: report),
       # so this fires once per run. Like the better-release alert, it is a

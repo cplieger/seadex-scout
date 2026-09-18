@@ -62,6 +62,64 @@ func TestRebuildPersistsPairRelation(t *testing.T) {
 	}
 }
 
+// TestRebuildJournalsAFilmTwinAsOneRecord pins that the twin is a render-time
+// expansion of ONE stored record: a film filed under a Sonarr series with a
+// named special episode journals one item carrying SonarrTitle and SonarrGUID,
+// the feed has one row, and the publication log records the release's own
+// identity only - the twin GUID is never a publication of its own.
+func TestRebuildJournalsAFilmTwinAsOneRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	entries := []seadex.Entry{{
+		AniListID: 21519,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634", IsBest: true, ReleaseGroup: "G",
+			Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
+		}},
+	}}
+	info := func(int) EntryInfo {
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"}
+	}
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("nyaa feed = %d rows, want 1: the twin is expanded at render, never journaled: %v", len(snap.NyaaFeed), feedKeys(snap.NyaaFeed))
+	}
+	it := snap.NyaaFeed[0]
+	if it.SonarrTitle != "Code Geass S00E04 1080p [G]" {
+		t.Errorf("SonarrTitle = %q, want %q", it.SonarrTitle, "Code Geass S00E04 1080p [G]")
+	}
+	if it.SonarrGUID != "https://nyaa.si/view/2133634#sonarr" {
+		t.Errorf("SonarrGUID = %q, want %q", it.SonarrGUID, "https://nyaa.si/view/2133634#sonarr")
+	}
+	if got := slices.Sorted(maps.Keys(snap.Published)); !slices.Equal(got, []string{"nyaa:2133634"}) {
+		t.Errorf("published = %v, want exactly the release's own identity [nyaa:2133634]", got)
+	}
+}
+
+// TestApplyTitlesLeavesTheTwinTitleAlone pins that the title harvest writes
+// Title only: a harvested real title upgrades the served title while the film
+// twin's SonarrTitle, which Sonarr's parser needs in its exact "<Series> S00Exx"
+// shape, is untouched.
+func TestApplyTitlesLeavesTheTwinTitleAlone(t *testing.T) {
+	items := []journalItem{{
+		Title: "Lelouch of the Resurrection 1080p [G]", Key: "nyaa:2133634",
+		SonarrTitle: "Code Geass S00E04 1080p [G]", SonarrGUID: "https://nyaa.si/view/2133634#sonarr",
+	}}
+	applyTitles(items, map[string]string{"nyaa:2133634": "[G] Code Geass Lelouch of the Re;surrection [1080p]"}, titleAudit{})
+	if items[0].Title != "[G] Code Geass Lelouch of the Re;surrection [1080p]" {
+		t.Errorf("Title = %q, want the harvested title applied", items[0].Title)
+	}
+	if items[0].SonarrTitle != "Code Geass S00E04 1080p [G]" {
+		t.Errorf("SonarrTitle = %q, want it unchanged by the harvest", items[0].SonarrTitle)
+	}
+	if items[0].SonarrGUID != "https://nyaa.si/view/2133634#sonarr" {
+		t.Errorf("SonarrGUID = %q, want it unchanged by the harvest", items[0].SonarrGUID)
+	}
+}
+
 // TestRebuildWarnsWhenABPasskeyMissing pins the operator nudge: a rebuild that
 // meets AnimeBytes releases with no configured passkey still writes the snapshot
 // (Nyaa unaffected) and logs ONE warning carrying the count of AB releases it
@@ -133,7 +191,7 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 // links for a tracker the operator turned off - while the curation set and the
 // Nyaa feed are unaffected. Construction stays SILENT about the half-configured
 // intent: internal/config owns that diagnostic (see the comment on the assertion
-// below, l-f13).
+// below).
 func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -178,8 +236,8 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 	// writer's: config validation runs in every mode and deliberately reports it
 	// at INFO ("a deliberately parked passkey must not raise Loki alert noise").
 	// The writer used to re-evaluate the same condition at WARN, so a configured
-	// feed emitted both lines at boot and the WARN re-fired on every `poll` run
-	// (l-f13). Construction must stay silent about it.
+	// feed emitted both lines at boot and the WARN re-fired on every `poll` run.
+	// Construction must stay silent about it.
 	if rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
 		t.Errorf("the writer re-reported config's half-configuration diagnostic; log output:\n%s",
 			strings.Join(rec.Messages(), "\n"))
@@ -187,14 +245,13 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 }
 
 // TestRebuildPersistsABItemsGUIDOnly pins the at-rest credential contract: a
-// rebuild with a CONFIGURED AnimeBytes passkey journals AB releases yet
-// persists them GUID-only - the raw feed.json bytes contain ZERO occurrences
-// of the passkey and BOTH stored items have an empty download URL (the
-// snapshot is never authoritative for fetch targets; the reader re-derives
-// Nyaa links too, see rebuildNyaaDownloadURLs) - while a server loading that
-// snapshot with the same passkey still serves the AB item with its correct
-// derived download link (rebuildABDownloadURLs), so keeping the credential
-// off disk costs the served feed nothing.
+// rebuild with a CONFIGURED AnimeBytes passkey journals AB releases yet persists
+// them GUID-only - the raw feed.json bytes contain ZERO occurrences of the passkey
+// and BOTH stored items have an empty download URL (the snapshot is never
+// authoritative for fetch targets; the reader re-derives Nyaa links too, see
+// rebuildNyaaDownloadURLs) - while a server loading that snapshot with the same
+// passkey still serves the AB item with its correct derived download link, so
+// keeping the credential off disk costs the served feed nothing.
 func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -253,13 +310,11 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 
 // TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed pins the misplaced-item
 // arm of the passkey-at-rest invariant: the secret is attached per item by KEY
-// scope, so an ab:-keyed item that a legacy or corrupted snapshot placed in
-// nyaa_feed must never reach the persisted file with a passkey-bearing AB
-// download link. Two layers hold that: carryItem's scope gate drops the
-// cross-scope item at carry admission, and the persist-time Nyaa-feed strip
-// (stripDownloadURLs blanks every item's download URL) catches anything that
-// still rides in on the wrong slice - so the persisted file can never hold the
-// passkey regardless of which feed slice the item came from.
+// scope, so an ab:-keyed item a corrupted snapshot placed in nyaa_feed must never
+// reach the persisted file with a passkey-bearing AB download link. Two layers
+// hold that: carryItem's scope gate drops the cross-scope item at carry admission,
+// and the persist-time Nyaa-feed strip (stripDownloadURLs blanks every item's
+// download URL) catches anything still riding in on the wrong slice.
 func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -334,18 +389,13 @@ func TestRebuildFailsOnUnreadablePreviousSnapshot(t *testing.T) {
 }
 
 // TestRebuildDropsOversizedItem pins the shared persisted-item limits at the
-// creation choke point (h-f10), and its ledger claim is INVERTED from what it
-// used to assert.
-//
-// A torrent whose synthesized field blows maxPersistedFieldBytes (here a
-// file-less torrent whose feed title falls back to an oversized release group) is
-// dropped as unresolvable instead of being persisted - one such value could
-// otherwise pass the whole-snapshot size bound and OOM the reader's XML render.
-//
-// Nothing was published, so nothing is recorded. An over-limit field is an
-// upstream DATA property, and the publication log is never pruned, so recording
-// it would deny the corrected record its RSS exposure forever - the permanent
-// omission settled feed-rss-filtering rules out.
+// creation choke point. A torrent whose synthesized field blows
+// maxPersistedFieldBytes (here a file-less torrent whose feed title falls back to
+// an oversized release group) is dropped as unresolvable rather than persisted -
+// one such value could otherwise pass the whole-snapshot size bound and OOM the
+// reader's XML render. Nothing was published, so nothing is recorded: an
+// over-limit field is an upstream DATA property and the publication log is never
+// pruned, so recording it would deny the corrected record RSS exposure forever.
 func TestRebuildDropsOversizedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
@@ -369,17 +419,14 @@ func TestRebuildDropsOversizedItem(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsOversizedCachedTitle pins the titles-cache ingress of the
-// shared persisted-item limits (h-f10, l-f60): a previous snapshot whose feed
-// items are all bounded but whose harvested-title cache carries an over-limit
-// value must DROP that entry, warn, and keep the journal - the carried item
-// stays in the feed under its synthesized title. Accepting the cache would let
-// one rebuild persist a snapshot the server's reload prunes (applyTitles
-// overwrites a carried item's title AFTER renderJournalItem's creation-time
-// check), but re-baselining over it cost the whole journal window: seen is
-// rebuilt from the current catalogue, so every release then inside
-// feedJournalMaxAge is marked seen without ever being served and can never
-// reach RSS again.
+// TestRebuildDropsOversizedCachedTitle pins the titles-cache ingress of the shared
+// persisted-item limits: a previous snapshot whose feed items are all bounded but
+// whose harvested-title cache carries an over-limit value must DROP that entry,
+// warn, and keep the journal - the carried item stays in the feed under its
+// synthesized title. Accepting the cache would persist a snapshot the server's
+// reload prunes (applyTitles overwrites a carried title AFTER renderJournalItem's
+// creation-time check), but re-baselining costs the whole journal window: seen is
+// rebuilt from the current catalogue, so those releases can never reach RSS.
 func TestRebuildDropsOversizedCachedTitle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -456,16 +503,12 @@ func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 
 // TestRebuildExcludesCurationWarnedTorrents pins the feed-side exclusion gate
 // under a CONFIGURED policy (`broken`/`incomplete`: [feed], see
-// feedExcludesWarnings): an excluded torrent is dropped from the search
-// curation set (a Prowlarr result matching it is purged as uncurated), never
-// journaled onto RSS, and deliberately NOT recorded in the publication log - so a
-// later rebuild with the tag gone journals it as newly grabbable
-// curation - while a kept sibling flows through untouched and the
-// snapshot log line counts the exclusion.
-//
-// The policy argument is what changed with filters.exclude_tags: the exclusion
-// used to be hardcoded, so this test needed no configuration. The default is now
-// to exclude nothing (TestRebuildKeepsCurationWarnedTorrentsByDefault).
+// feedExcludesWarnings): an excluded torrent is dropped from the search curation
+// set (a Prowlarr result matching it is purged as uncurated), never journaled onto
+// RSS, and deliberately NOT recorded in the publication log - so a later rebuild
+// with the tag gone journals it as newly grabbable curation - while a kept sibling
+// flows through untouched and the snapshot log line counts the exclusion. The
+// default excludes nothing (TestRebuildKeepsCurationWarnedTorrentsByDefault).
 func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -529,17 +572,13 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	}
 }
 
-// TestRebuildKeepsCurationWarnedTorrentsByDefault pins the feed surface's
-// DEFAULT after filters.exclude_tags: with no exclusions configured (the
-// shipped default, and the operator's explicit choice) a torrent SeaDex tags
-// Broken IS curated, IS journaled onto RSS, and IS recorded in the publication log,
-// so Sonarr/Radarr see it and decide for themselves.
-//
-// This INVERTS what TestRebuildExcludesCurationWarnedTorrents used to assert
-// for an unconfigured writer: the exclusion did not disappear, it moved into
-// filters.exclude_tags (that test now configures it). A report-only exclusion is
-// asserted here too, so a `broken: [report]` policy provably leaves the feed
-// alone - the three surfaces are independent.
+// TestRebuildKeepsCurationWarnedTorrentsByDefault pins the feed surface's DEFAULT:
+// with no exclusions configured (the shipped default, and the operator's explicit
+// choice) a torrent SeaDex tags Broken IS curated, IS journaled onto RSS, and IS
+// recorded in the publication log, so Sonarr/Radarr see it and decide for
+// themselves. A report-only exclusion is asserted here too, so a `broken:
+// [report]` policy provably leaves the feed alone - the three surfaces are
+// independent.
 func TestRebuildKeepsCurationWarnedTorrentsByDefault(t *testing.T) {
 	warnedEntries := func() []seadex.Entry {
 		return []seadex.Entry{{
@@ -593,19 +632,13 @@ func TestRebuildKeepsCurationWarnedTorrentsByDefault(t *testing.T) {
 }
 
 // TestRebuildWarnedTorrentIdentityWinsAcrossEntries pins the identity-level
-// exclusion scope under a CONFIGURED policy (feedExcludesWarnings): a torrent
-// attached to several SeaDex entries where only ONE
-// occurrence carries the Broken/Incomplete tag is excluded everywhere - the
-// search curation set (proxied searches would otherwise serve and mark the
-// unwarned duplicate) and the RSS journal alike (carryJournal consumes the
-// any-occurrence key set) - so the two indexer paths can never disagree about
-// whether the release is grabbable. The unwarned duplicate deliberately
-// carries a DIFFERENT journal key and shares only the info hash, so the test
-// fails if the warned-identity collector regresses to key-only matching. The
-// duplicate is also seeded as a PREVIOUSLY JOURNALED item, so the test fails
-// if the carry-drop key set regresses to direct-warning keys only (the
-// carried nyaa:99 would then keep serving warned bytes on RSS while search
-// suppresses them).
+// exclusion scope under a CONFIGURED policy (feedExcludesWarnings): a torrent on
+// several SeaDex entries where only ONE occurrence carries the Broken/Incomplete
+// tag is excluded from both the search curation set and the RSS journal, so the
+// two indexer paths cannot disagree about whether it is grabbable. The unwarned
+// duplicate carries a DIFFERENT journal key and shares only the info hash, and is
+// seeded as a PREVIOUSLY JOURNALED item, so the test fails if either the warned
+// collector or the carry-drop key set regresses to key-only matching.
 func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -735,13 +768,12 @@ func TestRebuildBaselinesSnapshotMissingAFact(t *testing.T) {
 
 // TestRebuildDropsOversizedFeedItem pins the feed-items ingress of the shared
 // persisted-item limits - the journal twin of
-// TestRebuildDropsOversizedCachedTitle: a previous snapshot whose maps and
-// titles are bounded but whose persisted journal carries an item past
-// maxPersistedFieldBytes must drop THAT item and keep the rest of the journal.
-// The over-limit item is never carried or re-rendered (the server's readSnapshot
-// prunes the same bytes, so trusting them would wedge reader and writer on a
-// poisoned file), while its bounded sibling survives - one corrupted item out of
-// thousands must not cost the whole journal window (l-f45).
+// TestRebuildDropsOversizedCachedTitle: a previous snapshot whose maps and titles
+// are bounded but whose persisted journal carries an item past
+// maxPersistedFieldBytes must drop THAT item and keep the rest of the journal. The
+// over-limit item is never carried or re-rendered (the server's readSnapshot prunes
+// the same bytes, so trusting them would wedge reader and writer on a poisoned
+// file), while its bounded sibling survives.
 func TestRebuildDropsOversizedFeedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -831,6 +863,7 @@ func TestJournalItemPersistedShapeIsFlat(t *testing.T) {
 		Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
 		DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first,
 		Size: 7, Seeders: 1,
+		SonarrTitle: "Series S00E04 1080p [G]", SonarrGUID: "https://nyaa.si/view/42#sonarr",
 		Key: "nyaa:42", AniListID: 9, FirstSeen: first,
 	}
 	data, err := json.Marshal(&jit)
@@ -844,7 +877,7 @@ func TestJournalItemPersistedShapeIsFlat(t *testing.T) {
 	if _, nested := flat["item"]; nested {
 		t.Fatalf("persisted journal item carries a nested \"item\" object, want the historical flat shape: %s", data)
 	}
-	for _, key := range []string{"Title", "GUID", "DownloadURL", "PubDate", "Key", "AniListID", "FirstSeen"} {
+	for _, key := range []string{"Title", "GUID", "DownloadURL", "PubDate", "Key", "AniListID", "FirstSeen", "SonarrTitle", "SonarrGUID"} {
 		if _, ok := flat[key]; !ok {
 			t.Errorf("persisted journal item lost flat key %q: %s", key, data)
 		}
@@ -943,14 +976,13 @@ func TestValidPersistedItemAcceptsMaxFieldLength(t *testing.T) {
 }
 
 // TestRebuildWarnedIdentityPropagatesTransitively pins the transitive closure in
-// collectWarnedIdentities across MORE than one hop: A (Broken, nyaa:1+H1)
-// links B (nyaa:2+H1) by hash, and B links C (a nyaa:2 occurrence carrying
-// H2) by key, so H2 is only reachable through B (entries are ordered so C is
-// scanned before B, which is what used to require a second sweep). A previously
-// journaled item whose stored info hash is H2 must be retracted through ws.ids;
-// a single-hop regression (a traversal that stops expanding after the directly
-// warned nodes) would leave it serving warned bytes on RSS while
-// every existing warned-exclusion test still passes.
+// collectWarnedIdentities across MORE than one hop: A (Broken, nyaa:1+H1) links B
+// (nyaa:2+H1) by hash, and B links C (a nyaa:2 occurrence carrying H2) by key, so
+// H2 is only reachable through B, and the entries are ordered so C is scanned
+// before B. A previously journaled item whose stored info hash is H2 must be
+// retracted through ws.ids; a single-hop regression (a traversal that stops
+// expanding after the directly warned nodes) leaves it serving warned bytes on RSS
+// while every existing warned-exclusion test still passes.
 func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	h1 := strings.Repeat("a", 40)
@@ -1066,6 +1098,8 @@ func TestValidPersistedItemRejectsOversizedFields(t *testing.T) {
 		"download url":           {item: item{Title: "x", DownloadURL: over}},
 		"info hash":              {item: item{Title: "x", InfoHash: over}},
 		"download volume factor": {item: item{Title: "x", DownloadVolumeFactor: over}},
+		"sonarr twin title":      {item: item{Title: "x", SonarrTitle: over}},
+		"sonarr twin guid":       {item: item{Title: "x", SonarrGUID: over}},
 		"journal key":            {item: item{Title: "x"}, Key: over},
 	}
 	for name, it := range tests {
@@ -1132,7 +1166,7 @@ func TestRebuildDropsOversizedABFeedItem(t *testing.T) {
 // item's title after the creation-time check) and its KEY, which is a journal
 // key carried forward across rebuilds. Each over-limit entry is dropped and
 // counted while the rest of the cache survives - the journal is never
-// re-baselined for a re-earnable derived value (l-f60). The at-limit case pins
+// re-baselined for a re-earnable derived value. The at-limit case pins
 // the inclusive endpoint: the documented contract refuses only values PAST
 // maxPersistedFieldBytes.
 func TestRetainValidTitlesDropsOverLimitEntries(t *testing.T) {
@@ -1193,16 +1227,13 @@ func TestSeenLedgerWithinLimitsBoundary(t *testing.T) {
 }
 
 // TestSeenLedgerWithinLimitsAggregateBoundary pins the inclusive endpoint of the
-// AGGREGATE byte cap, which the key-length boundary above cannot reach: a single
-// key can never approach maxPublicationLogBytes, because the per-key cap rejects
-// it first, so only a ledger of many at-limit keys can stand exactly on the
-// aggregate one.
-//
-// The log is append-only and never pruned, so it walks up to this bound one
-// entry at a time and WILL stand exactly on it. Refusing it there re-baselines
-// the journal: every currently curated identity is forfeited into the log and the
-// RSS feed serves empty until the next reconcile, on a ledger that is honest and
-// exactly within its documented size.
+// AGGREGATE byte cap, which the key-length boundary above cannot reach: one key
+// can never approach maxPublicationLogBytes because the per-key cap rejects it
+// first, so only a ledger of many at-limit keys stands exactly on the aggregate
+// one. The log is append-only and never pruned, so it walks up to this bound one
+// entry at a time and WILL stand exactly on it; refusing it there re-baselines the
+// journal, forfeiting every curated identity into the log and serving an empty RSS
+// feed until the next reconcile, on a ledger inside its documented size.
 func TestSeenLedgerWithinLimitsAggregateBoundary(t *testing.T) {
 	// Each entry is charged its serialized cost, `"<key>":true,`, so the widest
 	// legal key is also the cheapest way to reach the cap: fewest entries, and no
@@ -1247,12 +1278,11 @@ func serializedLedgerCost(published map[string]bool) int {
 // TestSeenLedgerWithinLimitsChargesJSONEscaping pins that the aggregate cap is
 // charged against the SERIALIZED ledger cost, not the decoded key bytes.
 // encoding/json escapes the HTML-sensitive set, so every '<' costs six bytes
-// (\u003c) in the file persist writes: a ledger of escape-heavy keys whose
-// decoded length sits comfortably under maxPublicationLogBytes still pushes the
-// rebuilt snapshot past maxFeedBytes, which is exactly the persist-wedges-
-// forever case the aggregate cap exists to prevent. The test asserts the
-// decoded approximation would have ACCEPTED this ledger, so it fails if the
-// check ever reverts to len(k)+8.
+// (\u003c) in the file persist writes: a ledger of escape-heavy keys whose decoded
+// length sits under maxPublicationLogBytes still pushes the rebuilt snapshot past
+// maxFeedBytes, the persist-wedges-forever case the aggregate cap prevents. The
+// test asserts the decoded approximation would have ACCEPTED this ledger, so it
+// fails if the check reverts to len(k)+8.
 func TestSeenLedgerWithinLimitsChargesJSONEscaping(t *testing.T) {
 	const (
 		keyRunes = 1000
@@ -1449,17 +1479,13 @@ func TestRebuildBaselinesFalseSeenLedgerValue(t *testing.T) {
 }
 
 // TestRebuildOffTrackerJournalSurvivesAndReturns pins the reversibility of a
-// tracker's off switch (l-f161). Blanking a Torznab URL used to skip the carry,
-// so ONE rebuild dropped every journaled item for that scope - while the
-// never-pruned publication log kept their identities, so journalIfNew reported
-// isNew=false forever and those releases could never reach RSS again. An
-// operator disabling AnimeBytes for a few days permanently lost the un-grabbed
-// part of its journal window.
-//
-// The journal must therefore be CARRIED while the tracker is off (it costs
-// nothing at rest - both feeds are stored GUID-only - and the serve side already
-// returns nothing for an unconfigured scope), must not GROW while off, and must
-// be servable again on re-enable.
+// tracker's off switch. A rebuild that skips the carry drops every journaled item
+// for that scope while the never-pruned publication log keeps their identities, so
+// journalIfNew reports isNew=false forever and those releases can never reach RSS
+// again: disabling AnimeBytes for a few days would permanently lose the un-grabbed
+// part of its journal window. So the journal must be CARRIED while the tracker is
+// off (it costs nothing at rest - both feeds are stored GUID-only), must not GROW
+// while off, and must be servable again on re-enable.
 func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 1,
@@ -1549,16 +1575,13 @@ func TestRebuildOffTrackerJournalDoesNotGrow(t *testing.T) {
 	}
 }
 
-// TestCurationProjectionBestWinsAcrossDuplicateOccurrences pins the OR fold in
-// the search curation index: one SeaDex torrent can be attached to several
-// entries, and search marks a matched Prowlarr result best-or-alt from these
-// maps, so the fold must be best-wins in BOTH scan orders.
-//
-// The fold now runs at PROJECTION time over per-owner votes rather than being
-// accumulated destructively into a persisted map, which is what makes it
-// recomputable - and therefore what makes a best-to-alt demotion expressible at
-// all (see TestPerOwnerVotesMakeADemotionRepresentable). The order-independence
-// this test pins is unchanged.
+// TestCurationProjectionBestWinsAcrossDuplicateOccurrences pins the OR fold in the
+// search curation index: one SeaDex torrent can be attached to several entries,
+// and search marks a matched Prowlarr result best-or-alt from these maps, so the
+// fold must be best-wins in BOTH scan orders. The fold runs at PROJECTION time
+// over per-owner votes rather than accumulating destructively into a persisted
+// map, which is what keeps it recomputable and makes a best-to-alt demotion
+// expressible at all (see TestPerOwnerVotesMakeADemotionRepresentable).
 func TestCurationProjectionBestWinsAcrossDuplicateOccurrences(t *testing.T) {
 	const hash = "abcdef1234567890abcdef1234567890abcdef12"
 	mkv := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
@@ -1572,11 +1595,11 @@ func TestCurationProjectionBestWinsAcrossDuplicateOccurrences(t *testing.T) {
 	}
 	for _, order := range []string{"alt first", "best first"} {
 		t.Run(order, func(t *testing.T) {
-			set := projectCuration(ownershipOf(entries))
-			if !set.byHash[hash] {
+			set := projectCuration(ownershipOf(entries, noInfo))
+			if !set.byHash[hash].isBest {
 				t.Errorf("by_hash[%s] = false, want true (best-wins across occurrences)", hash)
 			}
-			if !set.byKey["nyaa:42"] {
+			if !set.byKey["nyaa:42"].isBest {
 				t.Error(`by_key["nyaa:42"] = false, want true (best-wins across occurrences)`)
 			}
 			if !set.byPair[pairKey(hash, "nyaa:42")] {
@@ -1609,19 +1632,14 @@ func TestSplitCurationWarnedLeavesInputUnmutated(t *testing.T) {
 	}
 }
 
-// TestDecodeSnapshotDropsJournalItemWithoutIdentity pins the shared decode
-// gate's journal-record invariant (h-f2): in a post-journal snapshot (seen
-// ledger present) every feed item must carry a Key and a nonzero FirstSeen, or
-// that ITEM is dropped and counted per tracker feed. Without the invariant the
-// READER installs and serves a timestamp-less item indefinitely - the writer's
-// carry gate drops that shape, but in resident-idle mode no rebuild ever runs it
-// - so the item escapes the bounded journal window entirely. Dropping rather
-// than refusing the whole snapshot is what keeps one corrupted item from taking
-// the entire Torznab surface down on a cold start (l-f45): the curation ownership
-// fact and the rest of the journal survive. There is no schema-scoped exemption
-// any more: the version envelope means every snapshot this decode accepts was
-// written by THIS schema, so there is no retired shape whose items must be
-// excused from a promise it never made.
+// TestDecodeSnapshotDropsJournalItemWithoutIdentity pins the shared decode gate's
+// journal-record invariant: in a post-journal snapshot (seen ledger present) every
+// feed item must carry a Key and a nonzero FirstSeen, or that ITEM is dropped and
+// counted per tracker feed. Without it the READER serves a timestamp-less item
+// indefinitely - the writer's carry gate drops that shape, but in resident-idle
+// mode no rebuild ever runs it - so the item escapes the bounded journal window.
+// Dropping rather than refusing the whole snapshot keeps one corrupted item from
+// taking the entire Torznab surface down on a cold start.
 func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 	tests := map[string]struct {
 		doc      string
@@ -1667,18 +1685,14 @@ func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 	}
 }
 
-// TestDecodeSnapshotStructuralGateIsBounded pins the three structural
-// properties of the snapshot decode's own ingress, which stopped riding a
-// whole-document jsoncap.Preflight because that pass holds one key set per
-// traversed object - unbounded in exactly the dimension this decode exists to
-// bound, and paid on every load by both consumers (h-f6).
-//
-// The allocation arm is the finding itself: a key-dense document must cost a
-// small multiple of its own bytes, not the ~24x churn (and tens of MB of LIVE
-// heap) a per-object key set costs inside a 256 MiB container. An unknown field
-// is consumed as one raw value, so the whole object costs about one copy of
-// itself; the 8x bound leaves generous slack over the ~2x this does while still
-// failing the key-set shape by a wide margin.
+// TestDecodeSnapshotStructuralGateIsBounded pins the three structural properties
+// of the snapshot decode's own ingress. A whole-document jsoncap.Preflight holds
+// one key set per traversed object - unbounded in exactly the dimension this
+// decode exists to bound, and paid on every load by both consumers - so the
+// allocation arm is the point: a key-dense document must cost a small multiple of
+// its own bytes, not the ~24x churn and tens of MB of LIVE heap a per-object key
+// set costs inside a 256 MiB container. An unknown field is consumed as one raw
+// value, so the 8x bound leaves slack over the ~2x this does.
 func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 	t.Run("repeated top-level schema field rejected", func(t *testing.T) {
 		// The accumulated facts are the ambiguity that matters: Unmarshal would
@@ -1756,8 +1770,8 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 	})
 }
 
-// TestDecodeSnapshotBoundsCardinality pins the decode-amplification bound
-// (h-f4): maxFeedBytes caps the SERIALIZED file, which does not bound what a
+// TestDecodeSnapshotBoundsCardinality pins the decode-amplification bound:
+// maxFeedBytes caps the SERIALIZED file, which does not bound what a
 // decode allocates - a document far below the byte cap can encode millions of
 // compact array elements or map entries, each costing tens of bytes of live
 // heap, so json.Unmarshal would materialize hundreds of MB past the 256 MiB
@@ -1845,7 +1859,7 @@ func TestDecodeSnapshotChargesEntryBeforeReadingItsKey(t *testing.T) {
 }
 
 // TestCollectWarnedIdentitiesClosesReverseOrderedChain pins the transitive
-// closure on the shape the retired fixpoint form was quadratic on (h-f1): an
+// closure on the shape a re-scanning form is quadratic on: an
 // alternating key/hash chain listed in REVERSE order, where each sweep of a
 // re-scanning implementation could only discover one new link. Every node in
 // the chain must end up warned regardless of catalogue order.
@@ -1882,18 +1896,14 @@ func TestCollectWarnedIdentitiesClosesReverseOrderedChain(t *testing.T) {
 	}
 }
 
-// TestDecodeSnapshotSkipsUnknownFields pins the forward-compatibility arm of
-// the bounded snapshot walk: an unknown object key is token-skipped (and its
-// nested value never materialized) rather than failing the snapshot, so a
-// feed.json written by a NEWER binary still loads after an image rollback -
-// so a member this binary does not know is not by itself a reason to refuse the
-// file (the schema VERSION is what decides that). A regression here (an error on
-// an unrecognized key, or a Skip that mis-advances the token stream) makes the
-// binary classify the snapshot as malformed and re-baseline: the whole RSS
-// journal window is lost and every current release is recorded without being
-// served. The known members must still decode, and an empty "published" object
-// must ALLOCATE - nil is the structural sentinel decodeSnapshot refuses on, so an
-// honestly empty log must round-trip as {} rather than reading as a missing fact.
+// TestDecodeSnapshotSkipsUnknownFields pins the forward-compatibility arm of the
+// bounded snapshot walk: an unknown object key is token-skipped (its nested value
+// never materialized) rather than failing the snapshot, so a feed.json written by
+// a NEWER binary still loads after an image rollback - the schema VERSION is what
+// decides refusal. A regression (an error on an unrecognized key, or a Skip that
+// mis-advances the token stream) classifies the snapshot as malformed and
+// re-baselines. An empty "published" object must ALLOCATE: nil is the structural
+// sentinel decodeSnapshot refuses on, so an empty log round-trips as {}.
 func TestDecodeSnapshotSkipsUnknownFields(t *testing.T) {
 	const doc = `{"version":2,"owners":{"1":[{"key":"nyaa:42","best":true}]},"published":{},"nyaa_feed":[],"ab_feed":[],` +
 		`"future_field":{"nested":[1,2,{"deep":"value"}],"n":null},"another":"scalar"}`
@@ -1909,16 +1919,14 @@ func TestDecodeSnapshotSkipsUnknownFields(t *testing.T) {
 	}
 }
 
-// TestDecodeSnapshotBoundsAggregateMapEntries pins the SNAPSHOT-WIDE half of
-// the decode-cardinality bound (maxSnapshotMapEntriesTotal), which the
-// per-map test cannot reach: three maps each exactly at maxSnapshotMapEntries
-// are individually legal, so only the aggregate budget refuses the 750k
-// entries they add up to. Without it json.Unmarshal materializes every entry -
-// tens of bytes of live heap each - inside Run's warm-up reload, OOMing the
-// 256 MiB container and crashlooping the compare loop with it, and the
-// per-map test keeps passing while that hole is open (CWE-400). The document
-// stays under maxFeedBytes, so the byte cap the read applies does not catch it
-// either.
+// TestDecodeSnapshotBoundsAggregateMapEntries pins the SNAPSHOT-WIDE half of the
+// decode-cardinality bound (maxSnapshotMapEntriesTotal), which the per-map test
+// cannot reach: three maps each exactly at maxSnapshotMapEntries are individually
+// legal, so only the aggregate budget refuses the 750k entries they add up to.
+// Without it json.Unmarshal materializes every entry - tens of bytes of live heap
+// each - inside Run's warm-up reload, OOMing the 256 MiB container while the
+// per-map test keeps passing (CWE-400). The document stays under maxFeedBytes, so
+// the read's byte cap does not catch it either.
 func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
 	var b strings.Builder
 	b.WriteString(`{"version":2,"nyaa_feed":[],"ab_feed":[]`)
@@ -1961,14 +1969,12 @@ func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
 
 // TestChargeSnapshotEntryAggregateBudgetBoundary pins where the aggregate
 // map-entry budget actually falls. The end-to-end test above proves the budget is
-// WIRED INTO the decode, and it can only prove refusal - it reaches the bound by
-// overshooting it with three at-cap maps. Which entry is the last admitted one is
-// a separate question, and getting it wrong by one costs a legal snapshot its
-// whole load: decodeSnapshot returns an error, so loadPrevious re-baselines and
-// the served journal is discarded.
-//
-// Charging the entry is the accumulator both caps run through, so the boundary is
-// stated here directly rather than by building a second multi-megabyte document.
+// WIRED INTO the decode and can only prove refusal, since it reaches the bound by
+// overshooting with three at-cap maps. Which entry is the last admitted one is a
+// separate question, and getting it wrong by one costs a legal snapshot its whole
+// load: decodeSnapshot errors, loadPrevious re-baselines and the served journal is
+// discarded. Charging the entry is the accumulator both caps run through, so the
+// boundary is stated here rather than by building a second multi-megabyte file.
 func TestChargeSnapshotEntryAggregateBudgetBoundary(t *testing.T) {
 	tests := map[string]struct {
 		before  int
@@ -2006,21 +2012,12 @@ func TestChargeSnapshotEntryAggregateBudgetBoundary(t *testing.T) {
 
 // TestPublicationLogPreflightAndDecodeAgreeOnTheEntryCap pins the AGREEMENT
 // between the two sides of maxSnapshotMapEntries rather than either side alone.
-//
-// persist's doc states the contract: the pre-flight mirrors the reader's size
-// bound before committing, so a snapshot the reload would reject never replaces
-// the last-good file. The inverse is the failure nothing else here would catch -
-// a pre-flight that refused what the decode ACCEPTS fails the pass, keeps the
-// stale feed and tells the operator to delete feed.json to re-baseline, all for
-// a snapshot that would have loaded. Refusing at the cap itself rather than past
-// it is a one-character edit away, and the two sides are written as opposite
-// comparisons (<= admits, > refuses) in two different files, so nothing but a
-// test that runs both at the same numbers holds them together.
-//
-// It drives the predicates at the boundary directly. The end-to-end path needs a
-// 250k-entry log, which was measured at ~605ms and ~1.25M allocations under
-// -race, and it can only demonstrate refusal - never which entry is the last one
-// admitted, which is the whole question.
+// The failure nothing else catches is a pre-flight that refuses what the decode
+// ACCEPTS: the pass fails, the stale feed stands and the operator is told to
+// delete feed.json, for a snapshot that would have loaded. The two sides are
+// opposite comparisons (<= admits, > refuses) in two different files, one
+// character from disagreeing. It drives the predicates directly because the
+// end-to-end path can only show refusal, never which entry is last admitted.
 func TestPublicationLogPreflightAndDecodeAgreeOnTheEntryCap(t *testing.T) {
 	tests := map[string]struct {
 		entries int
@@ -2050,21 +2047,13 @@ func TestPublicationLogPreflightAndDecodeAgreeOnTheEntryCap(t *testing.T) {
 }
 
 // TestLoadPreviousRefusesANonRegularSnapshot pins the defence the confined read
-// exists for, and it is a HANG this test would otherwise reproduce rather than a
-// wrong answer.
-//
-// An unconfined read blocks in open(2) on a FIFO with no writer, and a context
-// deadline does not rescue it: the block is in the kernel before any Go-level
-// context check runs. That read sits inside the compare pass, which holds the
-// cross-process cycle lock, so a planted FIFO wedges the pass, starves the
-// health marker (refreshed only on a COMPLETED pass), fails the container
-// healthcheck, and hangs again after the restart. ReadBoundedInRoot opens
-// O_NONBLOCK and stats the OPEN handle, so a FIFO is refused as ErrNotRegular
-// and lands in classifyPreviousReadError's transient arm: the rebuild fails, the
-// last-good snapshot stands, and the next cycle retries.
-//
-// The whole test body runs under a deadline BECAUSE a regression here does not
-// fail an assertion - it hangs the suite.
+// exists for, and the regression is a HANG rather than a wrong answer: an
+// unconfined read blocks in open(2) on a FIFO with no writer, in the kernel before
+// any Go-level context check runs. That read holds the cross-process cycle lock,
+// so a planted FIFO starves the health marker, fails the container healthcheck and
+// hangs again after the restart. ReadBoundedInRoot stats the OPEN handle, so the
+// FIFO is ErrNotRegular in classifyPreviousReadError's transient arm and the
+// last-good snapshot stands. The body runs under a deadline for that reason.
 func TestLoadPreviousRefusesANonRegularSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.json")
@@ -2183,17 +2172,14 @@ func TestPassWithoutAnInProcessServerOnlyWritesTheFile(t *testing.T) {
 	}
 }
 
-// TestDecodeSnapshotBoundsOneItemsInteriorArray pins the PER-ITEM byte bound,
-// the one cardinality dimension neither the file's byte cap nor the per-array
-// item cap can express: a single journal item's own Categories array is decoded
-// by encoding/json, so one hand-edited item can amplify a few hundred KiB of
-// document into a hundreds-of-MB int slice BEFORE validPersistedItem's
-// maxPersistedCategories check can reject it - OOMing the 256 MiB container
-// inside the warm-up load and crashlooping the compare loop with it (CWE-400).
-// Without this assertion the bound can be widened or deleted with the whole
-// suite still green: the over-long item is then pruned by the per-item gate, so
-// decodeSnapshot reports no error and drops it silently, which is exactly what a
-// caller-side check cannot distinguish from a clean load.
+// TestDecodeSnapshotBoundsOneItemsInteriorArray pins the PER-ITEM byte bound, the
+// one cardinality dimension neither the file's byte cap nor the per-array item cap
+// can express: a single journal item's own Categories array is decoded by
+// encoding/json, so one hand-edited item can amplify a few hundred KiB of document
+// into a hundreds-of-MB int slice BEFORE validPersistedItem's
+// maxPersistedCategories check rejects it (CWE-400). Without this assertion the
+// bound can be widened or deleted with the suite green: the over-long item is then
+// pruned silently, which a caller-side check cannot tell from a clean load.
 func TestDecodeSnapshotBoundsOneItemsInteriorArray(t *testing.T) {
 	var it strings.Builder
 	it.WriteString(`{"Key":"nyaa:1","FirstSeen":"2026-07-01T00:00:00Z","Categories":[`)
@@ -2217,19 +2203,14 @@ func TestDecodeSnapshotBoundsOneItemsInteriorArray(t *testing.T) {
 	}
 }
 
-// TestDecodeSnapshotAcceptsAnItemExactlyAtThePerItemByteBound pins the OTHER
-// side of that bound, and it is the side that decides how much a corrupt feed
-// costs.
-//
-// feed.json is an untrusted persisted boundary - hand-edited, restored from a
-// partial write, or tampered with - so the decoder meets a document nobody
-// vouches for. An item standing exactly ON the cap is a legal document, and the
-// two possible readings are not close in consequence: accept it and the per-item
-// gate drops that one item while the rest of the journal and the never-pruned
-// publication log survive; refuse it and the WHOLE snapshot re-baselines, which
-// forfeits every currently curated identity into the publication log and serves
-// an empty RSS journal until the next reconcile. One oversized item must not cost
-// the feed its history.
+// TestDecodeSnapshotAcceptsAnItemExactlyAtThePerItemByteBound pins the OTHER side
+// of that bound, and it decides how much a corrupt feed costs. feed.json is an
+// untrusted persisted boundary - hand-edited, restored from a partial write, or
+// tampered with - and an item standing exactly ON the cap is a legal document. The
+// two readings are far apart in consequence: accept it and the per-item gate drops
+// one item while the journal and the never-pruned publication log survive; refuse
+// it and the WHOLE snapshot re-baselines, forfeiting every curated identity into
+// the log and serving an empty RSS journal until the next reconcile.
 func TestDecodeSnapshotAcceptsAnItemExactlyAtThePerItemByteBound(t *testing.T) {
 	// One item whose serialized JSON measures exactly maxPersistedItemBytes, and
 	// whose Title is far past the per-FIELD cap, so the only thing that can reject
@@ -2264,18 +2245,12 @@ func TestDecodeSnapshotAcceptsAnItemExactlyAtThePerItemByteBound(t *testing.T) {
 
 // TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey pins the SECOND cardinality
 // dimension of the ownership fact, which the per-owner-key charge cannot see:
-// owners is a map of ARRAYS, so a million releases can hide inside ONE owner's
-// list while the document carries a single key. A million owners with one
-// release each and one owner with a million releases cost the same live heap, so
-// a bound that only charges keys leaves the decode unbounded in the dimension a
-// hand-edited or corrupted feed.json is cheapest to grow. Nothing else in the
-// suite exercises a long release list: the aggregate-budget test gives every
-// owner an EMPTY array precisely so only the outer keys are charged, so widening
-// the decoder's element budget passes the whole suite today.
-//
-// The assertion is deliberately on the REFUSAL and not on which bound produced
-// it: at the current sizes the decoder's own element budget answers first, and
-// the point is that some bound must.
+// owners is a map of ARRAYS, so a million releases hide inside ONE owner's list
+// while the document carries a single key, and both shapes cost the same live
+// heap. Nothing else in the suite exercises a long release list - the
+// aggregate-budget test gives every owner an EMPTY array so only outer keys are
+// charged - so widening the decoder's element budget passes the suite today. The
+// assertion is on the REFUSAL, not on which bound produced it.
 func TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey(t *testing.T) {
 	const releases = 2*maxSnapshotFeedItems + 1
 	var b strings.Builder
@@ -2297,13 +2272,12 @@ func TestDecodeSnapshotBoundsReleasesUnderOneOwnerKey(t *testing.T) {
 }
 
 // TestPassOverAHealthySnapshotEmitsNoDegradationDiagnostics pins the absence side
-// of the write path's four degradation reports. Each names a state the operator
-// has to act on - the snapshot approaching the byte cap that will freeze the
-// served feed, cached titles dropped from the previous snapshot, a stat or a
-// directory-handle close that failed around the write - and a cycle over a
-// healthy snapshot is in none of them. Every existing test for these asserts
-// presence only, so a guard that fires on every ordinary cycle would keep the
-// suite green while turning the operator's Loki view into noise and burying the
+// of the write path's four degradation reports. Each names a state the operator has
+// to act on - the snapshot approaching the byte cap that will freeze the served
+// feed, cached titles dropped from the previous snapshot, a stat or a
+// directory-handle close that failed around the write - and a cycle over a healthy
+// snapshot is in none of them. Every existing test for these asserts presence only,
+// so a guard firing on every ordinary cycle keeps the suite green while burying the
 // one line that means the feed is about to stop updating.
 func TestPassOverAHealthySnapshotEmitsNoDegradationDiagnostics(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")

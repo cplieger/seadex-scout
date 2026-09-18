@@ -3,9 +3,7 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)
-[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/coverage.json)](https://github.com/cplieger/seadex-scout/actions/workflows/coverage.yml)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13869/badge)](https://www.bestpractices.dev/projects/13869)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/seadex-scout/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/seadex-scout)
+[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
 <!-- hub-overview BEGIN -->
@@ -163,13 +161,21 @@ groups. Each row gets a verdict:
 - `have_alt`: you have a listed alt; SeaDex marks a different release best.
 - `have_unlisted`: you have a release SeaDex does not list.
 - `no_file`: the mapped season or movie has no file on disk.
-- `unverified`: files are present, but the release-group evidence on at least one
-  side is unknown, so neither alignment nor a divergence can be claimed. Check
-  which non-best bucket the item belongs in.
+- `unverified`: files are present, but the release-group evidence on at least
+  one side is unknown, or the item's file data could not be read. Neither
+  alignment nor a divergence can be claimed; check which non-best bucket the
+  item belongs in.
+- `unattributed`: a film or a special filed inside Sonarr's season-0 bucket,
+  where nothing ties one file to one entry, so the app offers the entry in the
+  Torznab feed with its best/alt marker and never compares it; the arr's own
+  quality profile decides.
 
 A trailing **`not_on_seadex`** section then lists the library items recognized as
-anime (through the Fribb catalogue) that SeaDex does not list at all, so you can
-see which of your titles SeaDex has not curated. Every row links the
+anime (through the Fribb catalogue) that no SeaDex entry the app can compare
+covers, so you can see which of your titles have no recommendation to compare
+against. That includes an item whose only SeaDex entries are films or specials the
+app offers without comparing, so a row here means "nothing comparable covers these
+files", not always "SeaDex has never heard of it". Every row links the
 Sonarr/Radarr item, the SeaDex entry, and each best release.
 
 Each run writes a timestamped pair into `report.dir` (default
@@ -224,9 +230,14 @@ Every item, either way, carries a **download-volume-factor marker**: SeaDex's
 _best_ release is tagged `0.75` (which the arrs read as AnimeBytes Freeleech25)
 and an _alt_ `0.25` (Freeleech75). That marker is the signal you map to a Custom
 Format, which is what makes the arrs prefer SeaDex's pick. Each item's category is
-the entry's real media type, resolved from the anime-list mapping: a film is
-`2000` (Movies → Radarr), while a series, OVA, or special is `5070` (Anime →
-Sonarr).
+the entry's real media type together with the arr its library item resolved to: a
+series, OVA, or special is `5070` (Anime → Sonarr) and a film is `2000` (Movies →
+Radarr), and a film whose library item is a Sonarr series is offered under Anime as
+well, because the arr that owns the media subscribes only to Anime. A film that TVDB
+files as a special of a series you have in Sonarr is served as a second item titled
+`<Series> S00Exx` under Anime, which carries that offer instead, so Sonarr's parser
+can match it, and a season pack whose file names carry no season token gets the token
+of the one TVDB season the mapping places it in.
 
 **It answers whole-season searches, not per-episode ones.** SeaDex tracks season
 packs, so the feed answers a season search with the pack and returns nothing,
@@ -270,13 +281,32 @@ SeaDex keys everything on AniList IDs; Sonarr keys on TVDB, Radarr on TMDB/IMDb.
 seadex-scout bridges them:
 
 - **ID mapping.** The Fribb `anime-list-mini.json` dataset maps `anilist_id` to
-  `type` (TV vs movie), `tvdb_id`, `themoviedb_id`, and `imdb_id`. The `type`
-  decides which arr and which ID field to use.
+  `type` (TV vs movie), `tvdb_id`, `themoviedb_id`, and `imdb_id`. The `type` decides
+  which arr is tried first: a movie by TMDB movie id then IMDb id in Radarr, anything
+  else by TVDB id in Sonarr. A film you do not have in Radarr then falls back to its
+  `tvdb_id`, which is the series TVDB files the film under, so it links in Sonarr
+  instead of being lost.
+- **Episode mapping.** The Anime-Lists `anime-list-master.xml` mapping-list,
+  joined on the record's `anidb_id`, adds two facts Fribb drops: which TVDB
+  season-0 episode a film filed under a series is, and which TVDB seasons an
+  absolute-numbered run's episodes fall in. The first is what lets the feed offer
+  such a film to Sonarr under a title it can match; the second is what lets a
+  tokenless season pack carry its season and the report judge a split show
+  against its own seasons.
 - **Overrides.** To pin the entries Fribb misses, drop a `/config/overrides.json`
   beside the config: a JSON array of records keyed by `anilist_id`, applied ahead
   of Fribb. Absent is fine. Fields per record: `anilist_id` (required), `type`
   (`movie` routes to Radarr, anything else to Sonarr), `tvdb_id`, `tmdb_movies`
-  (array of ints), `imdb_ids` (array of strings), and `season_tvdb`. These are
+  (array of ints), `imdb_ids` (array of strings), `anidb_id` (the mapping-list
+  join key; the episode and season facts themselves always come from the list),
+  `season_tvdb`, and
+  `season_kind`. `season_kind` says whether upstream maps a TVDB season for the
+  entry at all: `present` with a positive `season_tvdb` compares against that
+  season, `present` with `season_tvdb` 0 means the entry lands in Sonarr's
+  season-0 bucket, where it is offered in the feed but never compared, and
+  `absent` judges the entry against the whole series. Omit it and a positive
+  `season_tvdb` still scopes that season; only an entry without one is routed by its
+  `type`. These are
   NOT the upstream Fribb field names (`imdb_id`, `themoviedb_id`, `season`), which
   are ignored with a warning naming the key. An override **replaces** the whole
   mapping record for its `anilist_id` (no field-by-field merge), so when
@@ -372,7 +402,7 @@ An unknown or misplaced key is rejected at startup with an error naming it
 (`unknown configuration key "anime_bytes"`), so a typo fails fast instead of being
 silently ignored.
 
-The upstream endpoints (SeaDex, Fribb, AniList), their request cadences, and the
+The upstream endpoints (SeaDex, Fribb, Anime-Lists, AniList), their request cadences, and the
 internal file locations under `/config` (the state cache, the reports, and the
 overrides file) are fixed and are not config keys, so the file stays limited to
 what you actually tune.
@@ -416,6 +446,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 | `SeadexScoutScanStalled` | no `tick`/`cycle` completion line and no `reconcile started` in 3h, so the poll loop is wedged | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` in 72h, so the 24h full pass has stopped while ticks keep the stall rule satisfied | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
+| `SeadexScoutMixedGroupManual` | the files on disk span more than one release group, so the app cannot say which one you have (informational) | info |
 | `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
 
 Thresholds and the `severity` labels are starting points. Adjust the `container`

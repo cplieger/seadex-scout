@@ -3,6 +3,7 @@ package match
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -86,23 +87,94 @@ func TestFindByIDArrConsistency(t *testing.T) {
 	}
 }
 
-// TestFindByIDMovieRecordIgnoresStrayTvdbID pins the forward direction of the
-// arr-consistency gate for the one id kind only the reverse catalogue tests
-// today: a MOVIE record's stray TVDB id must never resolve a Sonarr series.
-// RoutedIDs zeroes the TVDB id for a movie record, which is what stops
-// FindByID's Sonarr arm from being reached at all - arrItem cannot catch this
-// class, because byTvdb holds only Sonarr items, so a movie record leaking into
-// that arm would return a genuine Sonarr series and re-open the mislink bug the
-// arr gate exists for (the six movie entries that IMDb-collided onto same-named
-// Sonarr series).
-func TestFindByIDMovieRecordIgnoresStrayTvdbID(t *testing.T) {
+// TestFindByIDMovieRecordUsesItsTvdbIDLast pins the per-type route order on the
+// MOVIE arm. TVDB systematically files an anime film as a season-0 special of its
+// parent series, so a MOVIE record's TVDB id is evidence, not an upstream error -
+// 50 live entries are attached to a Sonarr series the operator owns and were
+// invisible to the app. But it is the LAST route: a film owned in Radarr is the
+// one whose file can be identified, so the movie ids win when both resolve.
+func TestFindByIDMovieRecordUsesItsTvdbIDLast(t *testing.T) {
 	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
-		{Arr: library.ArrSonarr, ArrID: 1, Title: "Death Parade", TvdbID: 10},
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Code Geass", TvdbID: 10},
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Lelouch of the Resurrection", TmdbID: 20, ImdbID: "tt9016190"},
 	}})
-	rec := &mapping.Record{Type: "MOVIE", TvdbID: 10}
+	tests := []struct {
+		name      string
+		rec       mapping.Record
+		wantArr   string
+		wantTitle string
+	}{
+		{
+			name:      "both arrs resolve: Radarr wins because its file is identifiable",
+			rec:       mapping.Record{Type: "MOVIE", TvdbID: 10, TmdbMovies: []int{20}},
+			wantArr:   library.ArrRadarr,
+			wantTitle: "Lelouch of the Resurrection",
+		},
+		{
+			name:      "IMDb is the only Radarr route and still outranks TVDB",
+			rec:       mapping.Record{Type: "MOVIE", TvdbID: 10, IMDbIDs: []string{"tt9016190"}},
+			wantArr:   library.ArrRadarr,
+			wantTitle: "Lelouch of the Resurrection",
+		},
+		{
+			name:      "TVDB alone reaches the Sonarr series the film is filed under",
+			rec:       mapping.Record{Type: "MOVIE", TvdbID: 10},
+			wantArr:   library.ArrSonarr,
+			wantTitle: "Code Geass",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			it := li.FindByID(&tc.rec)
+			if it == nil {
+				t.Fatalf("FindByID(%+v) = nil, want %q", tc.rec, tc.wantTitle)
+			}
+			if it.Arr != tc.wantArr || it.Title != tc.wantTitle {
+				t.Errorf("FindByID(%+v) = %q (%s), want %q (%s)", tc.rec, it.Title, it.Arr, tc.wantTitle, tc.wantArr)
+			}
+		})
+	}
+}
 
-	if it := li.FindByID(rec); it != nil {
-		t.Errorf("FindByID(MOVIE record with a stray TVDB id) = %q (%s); a movie record must never resolve a Sonarr series", it.Title, it.Arr)
+// TestFindByIDNonMovieOrderIsUnchanged pins the non-MOVIE half of FindByID's
+// route order, the half two rejected orders inverted: a record carrying both a
+// Sonarr-hitting TVDB id and a movie TMDB id resolves to SONARR (measured, a
+// type-blind TMDB-first order flips 69 records including one live candidate),
+// and a non-MOVIE record's IMDb ids never reach Radarr at all.
+func TestFindByIDNonMovieOrderIsUnchanged(t *testing.T) {
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Some Series", TvdbID: 10},
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", TmdbID: 20, ImdbID: "tt2222222"},
+	}})
+	both := &mapping.Record{Type: "TV", TvdbID: 10, TmdbMovies: []int{20}}
+	if it := li.FindByID(both); it == nil || it.Arr != library.ArrSonarr {
+		t.Errorf("FindByID(series with both id kinds) = %v, want the Sonarr series", it)
+	}
+	imdbOnly := &mapping.Record{Type: "TV", IMDbIDs: []string{"tt2222222"}}
+	if it := li.FindByID(imdbOnly); it != nil {
+		t.Errorf("FindByID(series carrying a film's IMDb id) = %q (%s), want no match", it.Title, it.Arr)
+	}
+}
+
+// TestFindByIDIMDbCollisionStaysArrGatedBothDirections is the 2026-07 mislink
+// regression and its mirror, pinned in both directions because FindByID is the
+// one function that could re-open either. TVDB reuses a film's IMDb id on the
+// parent SERIES, so the film's IMDb route must never reach a Sonarr item (six
+// entries mis-linked that way before the arr gate existed), and the mirror is a
+// SERIES record's IMDb id resolving a Radarr film.
+func TestFindByIDIMDbCollisionStaysArrGatedBothDirections(t *testing.T) {
+	shared := "tt4279012"
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Death Parade", TvdbID: 10, ImdbID: shared},
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Death Billiards", TmdbID: 20, ImdbID: "tt3273444"},
+	}})
+	film := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{shared}}
+	if it := li.FindByID(film); it != nil {
+		t.Errorf("FindByID(film whose IMDb id TVDB reuses on the parent series) = %q (%s), want no match", it.Title, it.Arr)
+	}
+	series := &mapping.Record{Type: "TV", IMDbIDs: []string{"tt3273444"}}
+	if it := li.FindByID(series); it != nil {
+		t.Errorf("FindByID(series carrying the film's IMDb id) = %q (%s), want no match", it.Title, it.Arr)
 	}
 }
 
@@ -621,16 +693,13 @@ func TestFindMovieSkipsBlankIMDbIDs(t *testing.T) {
 }
 
 // TestFindByIDMatchesPaddedIMDbID pins the canonicalization that keeps a padded
-// operator-override IMDb id ("  tt0123456") resolvable on BOTH sides of the
-// lookup, and WHERE each side's trim lives. On the MAPPING side the invariant is
-// the index's: Record.canonicalize trims at every producer and buildIndex
-// reapplies it to a decoded cache, so a record that reaches RoutedIDs carries
-// only canonical ids - which is why the padded-record case reads its record back
-// through mapping.NewIndex instead of hand-building one. On the LIBRARY side
-// imdbKey trims the Item's own id at index time. Without either, a padded id
-// reads as a usable identifier - which suppresses the AniList title fallback -
-// then silently yields no match, and the reverse catalogue reports the item as
-// not_on_seadex.
+// operator-override IMDb id ("  tt0123456") resolvable on BOTH sides of the lookup, and
+// WHERE each side's trim lives. On the MAPPING side it is the index's: Record.canonicalize
+// trims at every producer and buildIndex reapplies it to a decoded cache, so a record
+// reaching RoutedIDs carries only canonical ids - which is why the padded-record case reads
+// its record back through mapping.NewIndex instead of hand-building one. On the LIBRARY
+// side imdbKey trims at index time. Without either, a padded id reads as a usable
+// identifier, suppresses the AniList title fallback, then silently yields no match.
 func TestFindByIDMatchesPaddedIMDbID(t *testing.T) {
 	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", ImdbID: "tt0123456"},
@@ -1045,7 +1114,7 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 }
 
 // TestFindByIDResolvesMovieIDOnANonMovieRecord covers FindByID's secondary
-// movie lookup (h-f9): a record whose type label is not MOVIE but which routes
+// movie lookup: a record whose type label is not MOVIE but which routes
 // no series id still resolves its Radarr movie through its unambiguous movie
 // TMDB ids - the live Fribb shape (non-MOVIE type, no tvdb_id, a positive
 // themoviedb_id.movie) that the type label alone lost. The three negative arms
@@ -1093,9 +1162,9 @@ func TestFindByIDResolvesMovieIDOnANonMovieRecord(t *testing.T) {
 // the cycle: a SPECIAL-typed record carrying only a movie TMDB id links the
 // operator's Radarr copy by ID, counts as a Radarr coverage hit (not unmapped),
 // and reports the RESOLVED item's arr rather than the type label's Sonarr
-// routing. The AniList fake holds no media at all, so the match also proves the
-// resolution costs no rate-limited lookup - previously this entry spent one and
-// then title-searched Sonarr, where the movie can never be.
+// routing. The AniList fake holds no media at all, so the match also proves the resolution
+// costs no rate-limited lookup: without the ID route this entry spends one and then
+// title-searches Sonarr, where the movie can never be.
 func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 7, Title: "Heaven's Feel III", TmdbID: 400, Year: 2020},
@@ -1126,5 +1195,67 @@ func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	}
 	if res.Degraded {
 		t.Error("result degraded: the ID resolution must not consult AniList at all")
+	}
+}
+
+// TestMatchStampsSiblingSeasons pins the producer rule: Fribb
+// semantics are resolved once, where the record and the index meet, so align
+// never reads the map a second time. The matcher stamps the seasons OTHER records
+// on the same tvdb id map positively; a record whose siblings map nothing, and an
+// entry with no record at all, stamp nil.
+func TestMatchStampsSiblingSeasons(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Gintama", TvdbID: 79895},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Frieren", TvdbID: 424536},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 5},
+		{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 10},
+		{AniListID: 154587, Type: "TV", TvdbID: 424536, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+	})
+	entries := []seadex.Entry{{AniListID: 918}, {AniListID: 154587}}
+	m := New(fakeAniList{}, nil)
+
+	res := m.Match(t.Context(), entries, snap, idx, Memo{})
+
+	want := map[int][]int{918: {5, 10}, 154587: nil}
+	if len(res.Matches) != len(entries) {
+		t.Fatalf("matches = %d, want %d", len(res.Matches), len(entries))
+	}
+	for _, got := range res.Matches {
+		if !slices.Equal(got.SiblingSeasons, want[got.Entry.AniListID]) {
+			t.Errorf("alID %d SiblingSeasons = %v, want %v", got.Entry.AniListID, got.SiblingSeasons, want[got.Entry.AniListID])
+		}
+	}
+}
+
+// TestMatchStampsOwnSeasons pins the same producer rule for the Anime-Lists
+// mapping-list: the matcher is where the record and the index meet, so it stamps
+// the entry's own TVDB season ranges onto the Match; a record the list knows
+// nothing about carries nil.
+func TestMatchStampsOwnSeasons(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Fairy Tail", TvdbID: 114801},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Frieren", TvdbID: 424536},
+	}}
+	ranges := []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}}
+	idx := mapping.NewIndexWithMappings([]mapping.Record{
+		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 154587, Type: "TV", TvdbID: 424536, AniDBID: 17617, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+	}, map[int]mapping.Mapping{9980: {Seasons: ranges}})
+	entries := []seadex.Entry{{AniListID: 20626}, {AniListID: 154587}}
+	m := New(fakeAniList{}, nil)
+
+	res := m.Match(t.Context(), entries, snap, idx, Memo{})
+
+	want := map[int][]mapping.SeasonRange{20626: ranges, 154587: nil}
+	if len(res.Matches) != len(entries) {
+		t.Fatalf("matches = %d, want %d", len(res.Matches), len(entries))
+	}
+	for _, got := range res.Matches {
+		if !slices.Equal(got.Seasons, want[got.Entry.AniListID]) {
+			t.Errorf("alID %d Seasons = %v, want %v", got.Entry.AniListID, got.Seasons, want[got.Entry.AniListID])
+		}
 	}
 }

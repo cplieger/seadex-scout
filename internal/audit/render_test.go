@@ -28,7 +28,7 @@ func TestScopeLabel(t *testing.T) {
 		row  Row
 	}{
 		{"movie", "movie", Row{Scope: align.ScopeMovie}},
-		{"special", "special", Row{Scope: align.ScopeSpecial}},
+		{"offered", "offered", Row{Scope: align.ScopeOffered}},
 		{"numbered season", "S2", Row{Scope: align.ScopeSeason, Season: 2}},
 		{"whole series", "series", Row{Scope: align.ScopeWholeSeries}},
 		{"zero value defaults to series", "series", Row{}},
@@ -85,16 +85,13 @@ func TestEscapeCell(t *testing.T) {
 	}
 }
 
-// TestMdLinkAppliesTheSharedStructuralVouch pins the report renderer against the
-// app's one structural vouch step for a browser-destined URL (internal/displaylink,
-// h-f8/l-f189). The renderer used to apply its own weaker gate - TrimSpace plus
-// url.Parse plus an http/https scheme check - which checked neither the absolute
-// class, nor userinfo, nor the browser-vs-net/url smuggling shapes, so a spelling
-// a browser resolves elsewhere still rendered as an active link a reader clicks.
-//
-// The emitted destination is the vouched form's cleaned string, so a padded URL
-// links to the value that was actually judged rather than to a spelling a browser
-// would silently rewrite.
+// TestMdLinkAppliesTheSharedStructuralVouch pins the report renderer against the app's
+// one structural vouch step for a browser-destined URL (internal/displaylink). A gate
+// checking only TrimSpace plus url.Parse plus an http/https scheme misses the absolute
+// class, userinfo, and the browser-vs-net/url smuggling shapes, so a spelling a browser
+// resolves elsewhere would still render as an active link a reader clicks. The emitted
+// destination is the vouched form's cleaned string, so a padded URL links to the value
+// that was actually judged.
 func TestMdLinkAppliesTheSharedStructuralVouch(t *testing.T) {
 	tests := map[string]struct{ raw, want string }{
 		"plain absolute":            {"https://nyaa.si/view/1", "[t](https://nyaa.si/view/1)"},
@@ -144,7 +141,7 @@ func TestEscapeLinkURLEncodesBackslashAndBacktick(t *testing.T) {
 	// The destination is now refused BEFORE escaping: a backslash is one of the
 	// browser-vs-net/url smuggling shapes the shared structural vouch step
 	// (internal/displaylink) drops rather than vouch, so the cell degrades to the
-	// plain label (h-f8/l-f189). The %5C escaping above still guards every
+	// plain label. The %5C escaping above still guards every
 	// destination that IS vouched and happens to carry a backslash-escaped
 	// percent form.
 	link := mdLink("nyaa", `https://x/path\`)
@@ -282,7 +279,7 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNoFile): 2},
+		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNoFile): 2, string(VerdictUnattributed): 3},
 		Rows: []Row{{
 			Title: "Frieren", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 154587,
 			Qualifier: QualifierMixed,
@@ -307,8 +304,8 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		t.Errorf("summary msg = %q, want %q", summary.Message, "report summary")
 	}
 	sAttrs := recordAttrs(summary)
-	if sAttrs["rows"] != int64(1) || sAttrs["have_best"] != int64(1) || sAttrs["no_file"] != int64(2) {
-		t.Errorf("summary counts = rows:%v have_best:%v no_file:%v, want 1/1/2", sAttrs["rows"], sAttrs["have_best"], sAttrs["no_file"])
+	if sAttrs["rows"] != int64(1) || sAttrs["have_best"] != int64(1) || sAttrs["no_file"] != int64(2) || sAttrs["unattributed"] != int64(3) {
+		t.Errorf("summary counts = rows:%v have_best:%v no_file:%v unattributed:%v, want 1/1/2/3", sAttrs["rows"], sAttrs["have_best"], sAttrs["no_file"], sAttrs["unattributed"])
 	}
 	if row.Message != "report item" {
 		t.Errorf("row msg = %q, want %q", row.Message, "report item")
@@ -409,7 +406,7 @@ func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
 	// The last-resort "link" label still applies, but "http://" carries no host
 	// at all (urlform reads it as a hidden-host form), which the shared
 	// structural vouch step refuses - so the cell is the plain label rather than
-	// an active link to a destination a browser resolves differently (h-f8).
+	// an active link to a destination a browser resolves differently.
 	if !strings.Contains(got, linkSep+"link"+linkSep) {
 		t.Errorf("a link with no nameable tracker must fall back to the %q label, got %q", "link", got)
 	}
@@ -742,7 +739,7 @@ func TestRenderJSONSanitizesIncompleteEntries(t *testing.T) {
 }
 
 // TestDisplayBestGroupsAnnotatesWarned pins the SeaDex-best column's contract
-// after the notes split (l-f192): the column carries upstream group text only,
+// after the notes split: the column carries upstream group text only,
 // an unwarned best of the same group wins the dedupe (a group genuinely
 // available as best never displays as the annotated one), and the warned
 // group's canonical tags are rendered by the Notes column instead, joined in
@@ -763,7 +760,7 @@ func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
 	}
 }
 
-// TestBestAndNotesColumnsDoNotShareANamespace pins the l-f192 fix at its
+// TestBestAndNotesColumnsDoNotShareANamespace pins the notes split at its
 // strongest point: the forgery is dead because the two namespaces no longer
 // share a display string. A clean best named `SEV (broken)` - and its
 // quote-carrying escalation `SEV" (broken) "x`, which defeated the earlier
@@ -843,15 +840,13 @@ func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 	}
 }
 
-// TestRenderUnobtainableBestAnnotatedInBothProjections pins the rendered
-// contract for a SeaDex-listed but unobtainable best: obtainability keeps
-// controlling the verdict, and BOTH
-// projections surface the divergence - the Markdown SeaDex-best column
-// carries the "(unobtainable)" annotation and does NOT offer the release as
-// a grab link (the releases.moe link still renders), while the JSON release
-// carries an explicit "unobtainable": true marker so machine consumers can
-// see why the visible best was ignored. An obtainable release's JSON shape
-// is unchanged (the marker is omitted).
+// TestRenderUnobtainableBestAnnotatedInBothProjections pins the rendered contract for a
+// SeaDex-listed but unobtainable best: obtainability keeps controlling the verdict, and
+// BOTH projections surface the divergence - the Markdown SeaDex-best column carries the
+// "(unobtainable)" annotation and does NOT offer the release as a grab link (the
+// releases.moe link still renders), while the JSON release carries an explicit
+// "unobtainable": true marker so machine consumers can see why the visible best was
+// ignored. An obtainable release's JSON shape is unchanged.
 func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 	rep := &Report{
 		GeneratedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
@@ -1028,6 +1023,48 @@ func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 	}
 }
 
+// TestRenderMarkdownLegendsStateTheOfferedClass pins the three reader-facing
+// strings the offered kind made false, TOGETHER: a corrected subset leaves one
+// legend lying beside a fixed one, and this report is read by someone who has only
+// the file. The unverified description now covers a file the app cannot identify
+// (a film or special inside the season-0 bucket) beside unknown group evidence,
+// the not_on_seadex description keys on COMPARABILITY rather than on SeaDex
+// listing the item at all, and the annotation legend says what `approx` means on
+// an offered row.
+func TestRenderMarkdownLegendsStateTheOfferedClass(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals: map[string]int{
+			string(VerdictUnverified):   1,
+			string(VerdictUnattributed): 1,
+			string(VerdictNotOnSeaDex):  1,
+		},
+		Rows: []Row{
+			{Title: "Untagged", Arr: "sonarr", Verdict: VerdictUnverified, Scope: align.ScopeSeason, Season: 1},
+			{Title: "Offered", Arr: "sonarr", Verdict: VerdictUnattributed, Scope: align.ScopeOffered, Approx: true},
+			{Title: "Uncovered", Arr: "sonarr", Verdict: VerdictNotOnSeaDex},
+		},
+	}
+
+	md := renderMarkdown(r)
+
+	if strings.Contains(md, "the app cannot identify the file this entry names") {
+		t.Errorf("unverified legend still describes the offered class, which is unattributed's:\n%s", md)
+	}
+	for name, want := range map[string]string{
+		"unverified is narrowed to unknown evidence": "The release-group evidence is unknown on one side",
+		"unattributed names the offered class":       "the app offers this entry in the feed and never compares it",
+		"not_on_seadex keys on comparability":        "no SeaDex entry the app can compare covers this item's files",
+		"approx on an offered row":                   "on an `offered` row it means the bucket was never attributed at all",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(md, want) {
+				t.Errorf("rendered report is missing %q:\n%s", want, md)
+			}
+		})
+	}
+}
+
 // TestReportLogRendersAnnotatedBestAttribute pins the seadex_best aggregate's
 // clean-first case-insensitive dedupe and the split notes twin through the
 // public Log projection: a clean best wins the dedupe over a differently-cased
@@ -1061,8 +1098,8 @@ func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
 	}
 }
 
-// TestReportLogSplitsNotesFromForgedBestGroup pins the l-f192 fix on the Loki
-// side (l-f192): a forged group `SEV (broken)` reaches seadex_best as upstream
+// TestReportLogSplitsNotesFromForgedBestGroup pins the notes split on the Loki
+// side: a forged group `SEV (broken)` reaches seadex_best as upstream
 // text verbatim and this app adds nothing to that value - no quotes, no
 // parentheses of its own - while the genuine annotation rides
 // seadex_best_notes, positionally aligned with the groups. The Markdown pair
@@ -1243,9 +1280,8 @@ func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestAttrBudgetMirrorsKeyBudget pins the equality maxAttrBytes used to carry
-// structurally (it aliased keyenc.MaxComponentBytes before the logattr extraction).
-// Both bounds apply to the same untrusted SeaDex values - the attribute budget on the
+// TestAttrBudgetMirrorsKeyBudget pins an equality nothing structural enforces. Both
+// bounds apply to the same untrusted SeaDex values - the attribute budget on the
 // emitted line, the component budget on the dedupe key - and logattr states the mirror
 // in prose only, so nothing else catches a one-sided change.
 func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
@@ -1254,15 +1290,14 @@ func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
 	}
 }
 
-// TestFilteredReleaseIsAnnotatedAndNotLinked isolates the Filtered annotation
-// leg h-f7 added to releaseNotes and annotated. The fixture deliberately carries
-// NO Warnings: TestAuditExcludedTagBestNotCounted exercises the Broken tag, which
-// populates Warnings and so made annotated return true even before the fix - it
-// cannot fail if either Filtered check is removed. Here both user-visible
-// corrections are the only thing keeping the assertions true: the "filtered"
-// note that stops the row self-contradicting (best column lists the group while
-// the verdict calls the on-disk copy unlisted), and the suppression of the grab
-// link for a release the operator's own filters.exclude_tags policy excluded.
+// TestFilteredReleaseIsAnnotatedAndNotLinked isolates the Filtered annotation leg in
+// releaseNotes and annotated. The fixture deliberately carries NO Warnings: the Broken
+// tag populates Warnings and makes annotated return true regardless, so a fixture with
+// one cannot fail if either Filtered check is removed. Here both user-visible
+// corrections are the only thing keeping the assertions true: the "filtered" note that
+// stops the row self-contradicting (best column lists the group while the verdict calls
+// the on-disk copy unlisted), and the suppression of the grab link for a release the
+// operator's own filters.exclude_tags policy excluded.
 func TestFilteredReleaseIsAnnotatedAndNotLinked(t *testing.T) {
 	rel := Release{Group: "PMR", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1", Filtered: true}
 	if len(rel.Warnings) != 0 {
@@ -1279,19 +1314,14 @@ func TestFilteredReleaseIsAnnotatedAndNotLinked(t *testing.T) {
 	}
 }
 
-// TestReleaseNotesDistinguishesURLErrorFromUnobtainable pins the report's
-// upstream-data diagnostic. A SeaDex record whose url field carries a
-// value the publisher refuses used to publish a plausible-looking 404 - the live
-// catalogue has one, tracker AB with url "Chihiro", a release-group name typed
-// into the url field, which became "https://animebytes.tv/Chihiro" - and because
-// a link WAS produced it also escaped the unusable-URL accounting, so nothing
-// anywhere named the problem.
-//
-// The link is now dropped and the row says why. It is reported separately from
-// "unobtainable" on purpose: the two point the operator at different places. An
-// unobtainable release is a consequence of THEIR config (a tracker they do not
-// use); a url error is an upstream DATA defect they can go fix at the source. An
-// empty url is not an error - SeaDex simply has no link for that release.
+// TestReleaseNotesDistinguishesURLErrorFromUnobtainable pins the report's upstream-data
+// diagnostic. A SeaDex record whose url field carries a value the publisher refuses
+// would otherwise publish a plausible-looking 404 - the live catalogue has one, tracker
+// AB with url "Chihiro", which became "https://animebytes.tv/Chihiro" - and because a
+// link WAS produced it also escaped the unusable-URL accounting. The link is dropped and
+// the row says why, reported separately from "unobtainable" because that is a
+// consequence of THEIR config while a url error is an upstream DATA defect. An empty url
+// is not an error.
 func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
 	tests := map[string]struct {
 		rel  Release
@@ -1337,7 +1367,7 @@ func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
 				t.Error("a url-error release is not annotated; it would still drive the verdict and be offered as a link")
 			}
 			// Same for the other refusal class: an unknown tracker yields no
-			// link, so the row must not be offered as one either (l-f127).
+			// link, so the row must not be offered as one either.
 			if tc.rel.UnknownTracker && !annotated(&tc.rel) {
 				t.Error("an unknown-tracker release is not annotated; it would still drive the verdict and be offered as a link")
 			}

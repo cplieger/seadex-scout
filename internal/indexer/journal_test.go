@@ -6,6 +6,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -118,20 +120,27 @@ func readSnapshotFile(t *testing.T, path string) snapshot {
 	return snap
 }
 
-// writeSnapshotFile persists a hand-built snapshot for tests that seed feed
-// state directly (titles, first-seen times).
-//
-// It stamps the CURRENT schema version when a fixture leaves it zero, so each
-// test keeps expressing only the property it is about; a fixture testing the
-// version envelope itself sets Version explicitly and is left alone. It also
-// allocates the two required facts a fixture omitted, since a document naming
-// neither is structurally invalid by design.
-//
-// Every feed item must satisfy the shared decode gate's journal-record
-// invariant - a Key and a nonzero FirstSeen (validJournalRecord, h-f2) - or that
-// item is dropped at decode. Fixtures that do not care about the timestamp get
-// one stamped here; a fixture that sets FirstSeen itself (a skewed or aged
-// clock) is left alone, and a deliberately keyless item stays keyless.
+// journalItemForKey returns the journaled item for one key, failing the test
+// when the feed does not carry it: every caller reads fields off the result.
+func journalItemForKey(t *testing.T, feed []journalItem, key string) journalItem {
+	t.Helper()
+	for i := range feed {
+		if feed[i].Key == key {
+			return feed[i]
+		}
+	}
+	t.Fatalf("journal does not carry %q: feed = %v", key, feedKeys(feed))
+	return journalItem{}
+}
+
+// writeSnapshotFile persists a hand-built snapshot for tests that seed feed state
+// directly (titles, first-seen times). It stamps the CURRENT schema version when a
+// fixture leaves it zero, so each test expresses only the property it is about; a
+// fixture testing the version envelope sets Version explicitly and is left alone.
+// It also allocates the two required facts a fixture omitted, since a document
+// naming neither is structurally invalid by design. Every feed item must satisfy
+// validJournalRecord (a Key and a nonzero FirstSeen) or it is dropped at decode, so
+// a timestamp is stamped here unless the fixture set one; a keyless item stays keyless.
 func writeSnapshotFile(t *testing.T, path string, snap *snapshot) {
 	t.Helper()
 	if snap.Version == 0 {
@@ -450,10 +459,11 @@ func TestRenderJournalItemDeterministicSynthesisSource(t *testing.T) {
 	}
 	for name, refs := range orders {
 		t.Run(name, func(t *testing.T) {
-			it, ok, _ := w.renderJournalItem("nyaa:1234567", refs, info)
+			rendered, ok := w.renderJournalItem("nyaa:1234567", refs, nil, info)
 			if !ok {
 				t.Fatal("renderJournalItem: item not rendered")
 			}
+			it := rendered.item
 			if it.AniListID != 1 {
 				t.Errorf("AniListID = %d, want 1 (synthesis source must be the lowest AniList id, not the first occurrence)", it.AniListID)
 			}
@@ -483,24 +493,22 @@ func TestRenderJournalItemUnionsCategoriesWithoutDuplicates(t *testing.T) {
 		{entry: e1, torrent: &e1.Torrents[0]},
 		{entry: e2, torrent: &e2.Torrents[0]},
 	}
-	it, ok, _ := w.renderJournalItem("nyaa:1234567", refs, func(int) EntryInfo { return EntryInfo{} })
+	rendered, ok := w.renderJournalItem("nyaa:1234567", refs, nil, func(int) EntryInfo { return EntryInfo{} })
 	if !ok {
 		t.Fatal("renderJournalItem: item not rendered")
 	}
-	if len(it.Categories) != 1 || it.Categories[0] != catAnime {
+	if it := rendered.item; len(it.Categories) != 1 || it.Categories[0] != catAnime {
 		t.Errorf("Categories = %v, want exactly [%d] (the union must not repeat a category per sharing entry)", it.Categories, catAnime)
 	}
 }
 
 // TestRenderJournalItemSortsCategoryUnion pins the OUTPUT order of foldRefs'
-// category union, which its comment is explicit about ("sorting makes the fold
-// order-independent in its OUTPUT too, not just as a set"): a torrent attached
-// to a series entry and a movie entry must render its categories in ascending
-// order whatever order PocketBase returned the relation in. The order-invariance
-// property compares categories as a SET (it sorts both sides before comparing),
-// so dropping the production sort keeps every existing test green while the
-// persisted snapshot and the served <category> order start flapping with
-// catalogue order - rewriting feed.json on rebuilds that changed nothing.
+// category union: a torrent attached to a series entry and a movie entry must render
+// its categories in ascending order whatever order PocketBase returned the relation
+// in. The order-invariance property compares categories as a SET (it sorts both
+// sides before comparing), so dropping the production sort keeps every existing test
+// green while the persisted snapshot and the served <category> order start flapping
+// with catalogue order - rewriting feed.json on rebuilds that changed nothing.
 func TestRenderJournalItemSortsCategoryUnion(t *testing.T) {
 	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
 	torrent := seadex.Torrent{
@@ -515,28 +523,305 @@ func TestRenderJournalItemSortsCategoryUnion(t *testing.T) {
 		{entry: series, torrent: &series.Torrents[0]},
 		{entry: movie, torrent: &movie.Torrents[0]},
 	}
-	it, ok, _ := w.renderJournalItem("nyaa:1234567", refs, func(alID int) EntryInfo {
+	rendered, ok := w.renderJournalItem("nyaa:1234567", refs, nil, func(alID int) EntryInfo {
 		return EntryInfo{IsMovie: alID == 2}
 	})
 	if !ok {
 		t.Fatal("renderJournalItem: item not rendered")
 	}
-	if len(it.Categories) != 2 || it.Categories[0] != catMovies || it.Categories[1] != catAnime {
+	if it := rendered.item; len(it.Categories) != 2 || it.Categories[0] != catMovies || it.Categories[1] != catAnime {
 		t.Errorf("Categories = %v, want [%d %d] ascending regardless of the occurrence order the catalogue supplied",
 			it.Categories, catMovies, catAnime)
 	}
 }
 
+// TestRenderJournalItemServesFilmOnSonarrItemUnderBothCategories is the category
+// union at the fold site: ONE entry, a film whose library item is a Sonarr
+// series, must render both categories in ascending order. The category carries
+// the offer to the arr that owns the media - Sonarr subscribes only to Anime
+// 5070, so all 50 such entries were served where the operator's Sonarr never
+// looked.
+func TestRenderJournalItemServesFilmOnSonarrItemUnderBothCategories(t *testing.T) {
+	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634",
+		Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
+	}
+	film := &seadex.Entry{AniListID: 21519, Torrents: []seadex.Torrent{torrent}}
+	refs := []curatedRef{{entry: film, torrent: &film.Torrents[0]}}
+	rendered, ok := w.renderJournalItem("nyaa:2133634", refs, nil, func(int) EntryInfo {
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525}
+	})
+	if !ok {
+		t.Fatal("renderJournalItem: item not rendered")
+	}
+	if it := rendered.item; !slices.Equal(it.Categories, []int{catMovies, catAnime}) {
+		t.Errorf("Categories = %v, want [%d %d]", it.Categories, catMovies, catAnime)
+	}
+	if got := rendered.vote.resolve(); got != 79525 {
+		t.Errorf("tvdb vote = %d, want 79525 (the id rides the render, never the persisted item)", got)
+	}
+}
+
+// TestRenderJournalItemFilmTwinDropsAnimeFromAMovieHolderOnly is the twin at the
+// fold site, one holder at a time. A MOVIE holder whose film has a named special
+// episode contributes Movies only - the twin is what carries Anime for it - and
+// the twin vote resolves to "<Series> S00E04 <flags>". An OVA-typed holder with
+// an episode keeps Anime: its only category, and the drop is MOVIE-only.
+func TestRenderJournalItemFilmTwinDropsAnimeFromAMovieHolderOnly(t *testing.T) {
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634", ReleaseGroup: "G",
+		Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
+	}
+	tests := map[string]struct {
+		info      EntryInfo
+		wantCats  []int
+		wantTitle string
+	}{
+		"movie holder with a twin": {
+			info:      EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"},
+			wantCats:  []int{catMovies},
+			wantTitle: "Code Geass S00E04 1080p [G]",
+		},
+		"ova holder with a twin keeps anime": {
+			info:      EntryInfo{Title: "Some OVA", Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"},
+			wantCats:  []int{catAnime},
+			wantTitle: "Code Geass S00E04 1080p [G]",
+		},
+		"movie holder without an episode serves as today": {
+			info:     EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525},
+			wantCats: []int{catMovies, catAnime},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+			film := &seadex.Entry{AniListID: 21519, Torrents: []seadex.Torrent{torrent}}
+			refs := []curatedRef{{entry: film, torrent: &film.Torrents[0]}}
+			rendered, ok := w.renderJournalItem("nyaa:2133634", refs, nil, func(int) EntryInfo { return tc.info })
+			if !ok {
+				t.Fatal("renderJournalItem: item not rendered")
+			}
+			if !slices.Equal(rendered.item.Categories, tc.wantCats) {
+				t.Errorf("Categories = %v, want %v", rendered.item.Categories, tc.wantCats)
+			}
+			if got := rendered.twin.resolve(); got != tc.wantTitle {
+				t.Errorf("twin vote = %q, want %q", got, tc.wantTitle)
+			}
+			if rendered.item.SonarrTitle != "" {
+				t.Errorf("SonarrTitle stamped at the render = %q, want the vote collapsed by the caller only", rendered.item.SonarrTitle)
+			}
+		})
+	}
+}
+
+// TestRenderJournalItemLeavesTheRadarrFilmUntouched is the strongest form of
+// "the Radarr item does not change in any byte": through the pass's own
+// resolution site, the same torrent renders the SAME journal item whether or not
+// the entry carries the mapping-list's film facts, because only a Sonarr target
+// earns a twin. Anything the twin path stamped on a Radarr film would show here
+// as a field difference.
+func TestRenderJournalItemLeavesTheRadarrFilmUntouched(t *testing.T) {
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634", ReleaseGroup: "G", IsBest: true,
+		Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
+	}
+	render := func(info EntryInfo) journalItem {
+		t.Helper()
+		w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+		entries := []seadex.Entry{{AniListID: 21519, Torrents: []seadex.Torrent{torrent}}}
+		pass := &journalPass{w: w, ev: newEvidence(entries, tagfilter.New(nil), scopeCatalogue), publish: map[string]bool{}, infoFor: func(int) EntryInfo { return info }, js: &journalStats{}, now: time.Now()}
+		it, ok := pass.newJournalItem("nyaa:2133634")
+		if !ok {
+			t.Fatal("newJournalItem: item not rendered")
+		}
+		return it
+	}
+	plain := EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetRadarr, TvdbID: 79525}
+	mapped := plain
+	mapped.SpecialEpisode, mapped.SeriesTitle = 4, "Code Geass"
+
+	before, after := render(plain), render(mapped)
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("Radarr film renders differently once the mapping names its episode:\n without %+v\n    with %+v", before, after)
+	}
+	if after.SonarrTitle != "" || after.SonarrGUID != "" {
+		t.Errorf("Radarr film carries a twin (%q, %q), want none", after.SonarrTitle, after.SonarrGUID)
+	}
+	if !slices.Equal(after.Categories, []int{catMovies}) {
+		t.Errorf("Radarr film Categories = %v, want [%d]", after.Categories, catMovies)
+	}
+}
+
+// TestRenderJournalItemFoldsTheTwinAcrossHolders is holders-agree on the twin at
+// the RSS fold, through the pass's own resolution site (newJournalItem): two
+// MOVIE holders naming episodes 2 and 3 (the Minami-ke shape) veto the twin AND
+// the release serves under both categories exactly as today - the Anime a MOVIE
+// holder withheld comes back with the veto, which fails if the drop is applied
+// before the vote; a holder with an episode beside one without yields the twin
+// with both categories (the second holder still offers the film as today).
+func TestRenderJournalItemFoldsTheTwinAcrossHolders(t *testing.T) {
+	tests := map[string]struct {
+		first, second int
+		wantTitle     string
+		wantCats      []int
+	}{
+		"holders disagree": {first: 2, second: 3, wantTitle: "", wantCats: []int{catMovies, catAnime}},
+		"holders agree":    {first: 2, second: 2, wantTitle: "Minami-ke S00E02 1080p [G]", wantCats: []int{catMovies}},
+		"one abstains":     {first: 2, second: 0, wantTitle: "Minami-ke S00E02 1080p [G]", wantCats: []int{catMovies, catAnime}},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			torrent := seadex.Torrent{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567", ReleaseGroup: "G",
+				Files: []seadex.File{{Length: 7, Name: "Minami-ke Special (1080p) [G].mkv"}},
+			}
+			entries := []seadex.Entry{
+				{AniListID: 14575, Torrents: []seadex.Torrent{torrent}},
+				{AniListID: 20221, Torrents: []seadex.Torrent{torrent}},
+			}
+			episodes := map[int]int{14575: tc.first, 20221: tc.second}
+			infoFor := func(alID int) EntryInfo {
+				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, Target: TargetSonarr, TvdbID: 80000, SpecialEpisode: episodes[alID], SeriesTitle: "Minami-ke"}
+			}
+			w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+			pass := &journalPass{w: w, ev: newEvidence(entries, tagfilter.New(nil), scopeCatalogue), publish: map[string]bool{}, infoFor: infoFor, js: &journalStats{}, now: time.Now()}
+			it, ok := pass.newJournalItem("nyaa:1234567")
+			if !ok {
+				t.Fatal("newJournalItem: item not rendered")
+			}
+			if it.SonarrTitle != tc.wantTitle {
+				t.Errorf("SonarrTitle = %q, want %q", it.SonarrTitle, tc.wantTitle)
+			}
+			wantGUID := ""
+			if tc.wantTitle != "" {
+				wantGUID = twinGUID(it.GUID)
+			}
+			if it.SonarrGUID != wantGUID {
+				t.Errorf("SonarrGUID = %q, want %q", it.SonarrGUID, wantGUID)
+			}
+			if !slices.Equal(it.Categories, tc.wantCats) {
+				t.Errorf("Categories = %v, want %v", it.Categories, tc.wantCats)
+			}
+		})
+	}
+}
+
+// TestRenderJournalItemFoldsTheTvdbIDAcrossHolders is holders-agree at the RSS
+// fold: emit the id when every holder that HAS one agrees, nothing when two
+// disagree.
+//
+// Absence must ABSTAIN rather than veto, for the reason tvdbVote.add carries. A
+// disagreement DOES veto: the app has no ground to pick a side, and no live
+// identity is in that state, so it fails closed.
+func TestRenderJournalItemFoldsTheTvdbIDAcrossHolders(t *testing.T) {
+	tests := map[string]struct {
+		desc          string
+		first, second int
+		want          int
+	}{
+		"two holders agree": {
+			desc:  "both owners carry the same id",
+			first: 79525, second: 79525, want: 79525,
+		},
+		"a holder disagrees": {
+			desc:  "two positive ids that differ veto the attribute",
+			first: 79525, second: 12345, want: 0,
+		},
+		"a second holder carries no id": {
+			desc:  "the 204-of-206 shape: absence abstains",
+			first: 79525, second: 0, want: 79525,
+		},
+		"the first holder carries no id": {
+			desc:  "abstention is order-independent",
+			first: 0, second: 79525, want: 79525,
+		},
+		"no holder carries one": {
+			desc: "nothing to render",
+			want: 0,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+			torrent := seadex.Torrent{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
+				Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
+			}
+			e1 := &seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{torrent}}
+			e2 := &seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{torrent}}
+			refs := []curatedRef{
+				{entry: e1, torrent: &e1.Torrents[0]},
+				{entry: e2, torrent: &e2.Torrents[0]},
+			}
+			ids := map[int]int{1: tc.first, 2: tc.second}
+			rendered, ok := w.renderJournalItem("nyaa:1234567", refs, nil, func(alID int) EntryInfo {
+				return EntryInfo{TvdbID: ids[alID]}
+			})
+			if !ok {
+				t.Fatal("renderJournalItem: item not rendered")
+			}
+			if got := rendered.vote.resolve(); got != tc.want {
+				t.Errorf("vote over ids %d and %d = %d, want %d (%s)", tc.first, tc.second, got, tc.want, tc.desc)
+			}
+		})
+	}
+}
+
+// TestRebuildFoldsAllThreeVotesOverTheHashOnlyHolder covers the two folds the
+// tvdb id does not: the marker and the category union must follow the SAME holder
+// set. The hash-only holder is the one voting BEST and the one typed as a film,
+// so under an id-only union this release publishes as an alt and never reaches
+// Radarr.
+//
+// Asserted on the CATALOGUE render: a tick already carries a hash-only holder's
+// vote and typing, so only the reconcile's key-grouped fold can go red here.
+func TestRebuildFoldsAllThreeVotesOverTheHashOnlyHolder(t *testing.T) {
+	sharedHash := strings.Repeat("c", 40)
+	const keyHolderID, hashHolderID = 3001, 3002
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+
+	keyHolder := nyaaEntry(keyHolderID, 888, false, "Union Show - S01E01 (1080p) [G].mkv")
+	keyHolder.Torrents[0].InfoHash = sharedHash
+	// AnimeTosho mints no tracker key (it is a Nyaa mirror of the same bytes), so
+	// this occurrence reaches the fold through its bare info hash alone.
+	hashOnly := seadex.Entry{AniListID: hashHolderID, Torrents: []seadex.Torrent{{
+		Tracker: "AnimeTosho", URL: "https://animetosho.org/view/12", InfoHash: sharedHash, IsBest: true,
+		Files: []seadex.File{{Length: 7, Name: "Union Film (1080p) [Other].mkv"}},
+	}}}
+	info := func(alID int) EntryInfo {
+		if alID == hashHolderID {
+			return EntryInfo{Title: "Union Film", IsMovie: true, Target: TargetRadarr}
+		}
+		return EntryInfo{Title: "Union Show", TvdbID: 79525, Target: TargetSonarr}
+	}
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	it := journalItemForKey(t, readSnapshotFile(t, path).NyaaFeed, "nyaa:888")
+	if it.DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q: the hash-only holder votes this release best, and best wins across every holder",
+			it.DownloadVolumeFactor, dvfBest)
+	}
+	if !slices.Equal(it.Categories, []int{catMovies, catAnime}) {
+		t.Errorf("Categories = %v, want [%d %d]: the hash-only holder's film typing belongs to the same union",
+			it.Categories, catMovies, catAnime)
+	}
+	if it.TvdbID != 79525 {
+		t.Errorf("TvdbID = %d, want 79525: the hash-only holder carries no id, and absence abstains", it.TvdbID)
+	}
+}
+
 // TestRebuildRejectsForeignHostTrackerURLs pins the curation trust boundary
-// (trackerKey's host gate): a SeaDex record whose tracker label says Nyaa but
-// whose URL sits on a foreign host must mint NO curation key and NO journal
-// item - the label alone must never authorize an id extracted from a foreign
-// URL (a compromised record with evil.example/view/111 would otherwise both
-// admit the REAL Nyaa torrent 111 into the search curation set and serve a
-// canonical nyaa.si download link for it on RSS). The gated torrents surface
-// on the unresolvable counter instead of vanishing silently, and their
-// identities stay OUT of the publication log, so the same torrent republished
-// with its real tracker URL still journals as new.
+// (trackerKey's host gate): a SeaDex record whose tracker label says Nyaa but whose
+// URL sits on a foreign host must mint NO curation key and NO journal item - the
+// label alone must never authorize an id extracted from a foreign URL (a compromised
+// record with evil.example/view/111 would otherwise admit the REAL Nyaa torrent 111
+// into the curation set and serve a canonical nyaa.si link for it on RSS). The gated
+// torrents surface on the unresolvable counter, and their identities stay OUT of the
+// publication log, so a republish with the real tracker URL still journals as new.
 func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 9,
@@ -579,17 +864,14 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 // gated torrent HAS a second identity signal to fold.
 const foreignHostInfoHash = "abcdef0123456789abcdef0123456789abcdef01"
 
-// TestRebuildKeepsHashedForeignHostTorrentOutOfLedger closes the hole the
-// sibling TestRebuildRejectsForeignHostTrackerURLs only appeared to cover: its
-// fixture torrents carry no InfoHash, so an empty ledger was guaranteed by the
-// fixture rather than by the rule. A gated torrent WITH a valid info hash used
-// to fold that hash into the never-pruned ledger (journalKey is "" for it, so
-// it can never be journaled), which permanently denied the release RSS
-// exposure once upstream corrected the URL - and silenced the unresolvable
-// diagnostic after the first rebuild, since the folded hash made the next
-// rebuild return before the count. Nothing is folded for a keyless torrent
-// now; only the two OPERATOR switches (an off tracker, a missing AB passkey)
-// consume novelty.
+// TestRebuildKeepsHashedForeignHostTorrentOutOfLedger closes the hole the sibling
+// TestRebuildRejectsForeignHostTrackerURLs only appears to cover: its fixture
+// torrents carry no InfoHash, so an empty ledger is guaranteed by the fixture
+// rather than by the rule. A gated torrent WITH a valid info hash folding that hash
+// into the never-pruned ledger (journalKey is "" for it, so it can never be
+// journaled) permanently denies the release RSS exposure once upstream corrects the
+// URL, and silences the unresolvable diagnostic on later rebuilds. Only the two
+// OPERATOR switches (an off tracker, a missing AB passkey) consume novelty.
 func TestRebuildKeepsHashedForeignHostTorrentOutOfLedger(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 9,
@@ -616,8 +898,8 @@ func TestRebuildKeepsHashedForeignHostTorrentOutOfLedger(t *testing.T) {
 // TestRebuildJournalsReleaseAfterTrackerURLCorrected is the end-to-end half of
 // the same rule: the release the ownership gate refused on the first rebuild
 // must journal as new once SeaDex publishes its real tracker URL, with the info
-// hash unchanged across both rebuilds. Before the fix the first rebuild's
-// folded hash made the corrected record read as already seen forever.
+// hash unchanged across both rebuilds: a hash folded on the first rebuild would
+// make the corrected record read as already seen forever.
 func TestRebuildJournalsReleaseAfterTrackerURLCorrected(t *testing.T) {
 	files := []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}}
 	gated := []seadex.Entry{{
@@ -853,15 +1135,31 @@ func TestRebuildJournalItemShape(t *testing.T) {
 }
 
 // TestCategoriesFor verifies the RSS category comes from the entry's real
-// media typing, not a guess from the file name: a movie routes to Radarr
-// (Movies) and everything else to Sonarr (Anime) - a single-file OVA/special
-// is indistinguishable from a film by name, so the safe default matters.
+// media typing AND its resolved arr, not a guess from the file name: a movie
+// routes to Radarr (Movies), a movie whose library item is a SONARR series
+// routes to both (TVDB files anime films under the parent series, and Sonarr
+// subscribes only to Anime, so a Movies-only offer never reaches it), and
+// everything else to Sonarr (Anime) - a single-file OVA/special is
+// indistinguishable from a film by name, so the safe default matters.
 func TestCategoriesFor(t *testing.T) {
-	if got := categoriesFor(true); len(got) != 1 || got[0] != catMovies {
-		t.Errorf("categoriesFor(movie) = %v, want [%d]", got, catMovies)
+	tests := []struct {
+		name    string
+		isMovie bool
+		target  ArrTarget
+		want    []int
+	}{
+		{name: "film on a Sonarr item is served under both", isMovie: true, target: TargetSonarr, want: []int{catMovies, catAnime}},
+		{name: "Radarr-only film", isMovie: true, target: TargetRadarr, want: []int{catMovies}},
+		{name: "unmatched film", isMovie: true, target: TargetNone, want: []int{catMovies}},
+		{name: "series on a Sonarr item", target: TargetSonarr, want: []int{catAnime}},
+		{name: "unmatched series", target: TargetNone, want: []int{catAnime}},
 	}
-	if got := categoriesFor(false); len(got) != 1 || got[0] != catAnime {
-		t.Errorf("categoriesFor(series) = %v, want [%d]", got, catAnime)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := categoriesFor(tt.isMovie, tt.target); !slices.Equal(got, tt.want) {
+				t.Errorf("categoriesFor(%v, %v) = %v, want %v", tt.isMovie, tt.target, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -949,16 +1247,61 @@ func TestRebuildCarriedGUIDKeptOnlyForSameIdentity(t *testing.T) {
 	}
 }
 
+// TestRebuildCarriedTwinGUIDDerivesFromTheServedGUID pins the ORDER the twin is
+// stamped in on a refreshed carry: the twin GUID derives from the GUID the item
+// is served under, which on a carry is the STORED one, not the freshly rendered
+// URL. The two differ whenever a curator edits a tracker link's spelling while
+// the tracker identity holds - the same URL-text churn the GUID carry exists for
+// - and a twin keyed to a GUID the item is not served under stops keying to its
+// original.
+func TestRebuildCarriedTwinGUIDDerivesFromTheServedGUID(t *testing.T) {
+	const stored = "https://nyaa.si/view/2133634?utm=x"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:2133634": true},
+		NyaaFeed: []journalItem{
+			{Title: "Lelouch of the Resurrection 1080p [G]", GUID: stored, PubDate: first, Key: "nyaa:2133634", AniListID: 21519, FirstSeen: first},
+		},
+	})
+	entries := []seadex.Entry{{
+		AniListID: 21519,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634", IsBest: true, ReleaseGroup: "G",
+			Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
+		}},
+	}}
+	info := func(int) EntryInfo {
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"}
+	}
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("nyaa feed = %d rows, want 1 (the carried item is refreshed, not re-journaled)", len(snap.NyaaFeed))
+	}
+	it := snap.NyaaFeed[0]
+	if it.GUID != stored {
+		t.Fatalf("GUID = %q, want the stored %q (the fixture's premise: the fresh URL differs)", it.GUID, stored)
+	}
+	if it.SonarrTitle != "Code Geass S00E04 1080p [G]" {
+		t.Fatalf("SonarrTitle = %q, want the twin title (the fixture must produce a twin at all)", it.SonarrTitle)
+	}
+	if want := stored + "#sonarr"; it.SonarrGUID != want {
+		t.Errorf("SonarrGUID = %q, want %q derived from the served GUID", it.SonarrGUID, want)
+	}
+}
+
 // TestRebuildCarriesABItemWhenPasskeyRemoved pins the reversibility of the AB
-// passkey - the tracker's SECOND off switch, beside blanking its Torznab URL.
-// The carry used to drop a journaled AnimeBytes item as soon as ab_passkey went
-// missing, so one rebuild destroyed the AB journal and the never-pruned seen
-// ledger stopped those releases ever returning: removing the key to debug
-// something cost the un-grabbed part of the journal window permanently
-// (l-f161). A passkey only supplies the grabbable LINK, and nothing unservable
-// escapes - items persist GUID-only (stripDownloadURLs) and the reader clears
-// the entire AB feed while no passkey is configured (rebuildABDownloadURLs) - so
-// the item is CARRIED and becomes servable again when the key returns.
+// passkey - the tracker's SECOND off switch, beside blanking its Torznab URL. A
+// carry that dropped a journaled AnimeBytes item as soon as ab_passkey went missing
+// destroyed the AB journal in one rebuild, and the never-pruned seen ledger stopped
+// those releases ever returning, so removing the key to debug something cost the
+// un-grabbed part of the journal window permanently. A passkey only supplies the
+// grabbable LINK and nothing unservable escapes (items persist GUID-only; the reader
+// clears the AB feed while no passkey is set), so the item is CARRIED.
 func TestRebuildCarriesABItemWhenPasskeyRemoved(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
@@ -1012,15 +1355,13 @@ func TestRebuildCarriesNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 }
 
 // TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey pins
-// refreshCarriedItem's residual AnimeBytes arm: an item still IN the curation
-// set whose fresh render fails on every occurrence (here no files and no
-// release group, so no title synthesizes) while no indexer.ab_passkey is
-// configured keeps its STORED render instead of being dropped.
-//
-// The drop would be permanent. The never-pruned publication log still holds the
-// identity, so growJournal can never re-admit the release afterwards - which is
-// exactly the irreversible second off switch l-f161 closed for the passkey, and
-// it is invisible in every count assertion that only watches a renderable item.
+// refreshCarriedItem's residual AnimeBytes arm: an item still IN the curation set
+// whose fresh render fails on every occurrence (here no files and no release group,
+// so no title synthesizes) while no indexer.ab_passkey is configured keeps its
+// STORED render instead of being dropped. The drop would be permanent - the
+// never-pruned publication log still holds the identity, so growJournal can never
+// re-admit the release - and it is invisible in every count assertion that only
+// watches a renderable item.
 func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -1066,14 +1407,13 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 }
 
 // TestRebuildDefersNewABItemUntilPasskeyArrives pins the GROWTH half of the
-// AB-passkey reversibility the two carry tests above pin, in the shape the
-// publication log makes possible: a release SeaDex curates while ab_passkey is
-// unset is NOT journaled and NOT published, so it journals as new - with a
-// grabbable link - on the first rebuild after the passkey arrives. The older
-// shape journaled it GUID-only because journalIfNew folded its identity into the
-// never-pruned log BEFORE the render; with the log written on PUBLICATION the
-// general rule (a failed render is retryable, never terminal) covers the case at
-// the root, so that exemption is gone. The nudge still fires and still counts it.
+// AB-passkey reversibility the two carry tests above pin: a release SeaDex curates
+// while ab_passkey is unset is NOT journaled and NOT published, so it journals as
+// new - with a grabbable link - on the first rebuild after the passkey arrives.
+// Folding its identity into the never-pruned log BEFORE the render would journal it
+// GUID-only; with the log written on PUBLICATION the general rule (a failed render
+// is retryable, never terminal) covers the case at the root. The nudge still fires
+// and still counts it.
 func TestRebuildDefersNewABItemUntilPasskeyArrives(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
@@ -1154,15 +1494,14 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsKeylessSeededItem pins where a journal-bookkeeping-less item
-// is now refused: a post-journal snapshot (publication log present) whose feed
-// carries an item with no Key or no FirstSeen violates the shared decode gate's
-// journal-record invariant (validJournalRecord, h-f2), so THAT item is dropped
-// at decode and never carried - the reason the reader can no longer serve such
-// an item forever in resident-idle mode. The rest of the snapshot survives: a
-// per-item defect must not re-baseline the journal or cost the curation set
-// (l-f45), so no malformed warning fires. carryJournal's per-item guards stay
-// as defense in depth for any snapshot that reaches them.
+// TestRebuildDropsKeylessSeededItem pins where a journal-bookkeeping-less item is
+// refused: a post-journal snapshot (publication log present) whose feed carries an
+// item with no Key or no FirstSeen violates the shared decode gate's journal-record
+// invariant (validJournalRecord), so THAT item is dropped at decode and never
+// carried - the reason the reader cannot serve such an item forever in
+// resident-idle mode. The rest of the snapshot survives, since a per-item defect
+// must not re-baseline the journal or cost the curation set, so no malformed warning
+// fires. carryJournal's per-item guards stay as defense in depth.
 func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	const seeded = `{"version":2,"owners":{},"published":{"nyaa:11":true},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"},` +
@@ -1186,11 +1525,10 @@ func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 	}
 }
 
-// TestPrepareCarriedItemCarriesAnInWindowItem pins the phase's surviving
-// verdict. The Key/FirstSeen cases it used to carry are gone with the branch
-// that produced them: the shared decode gate (validJournalRecord, applied by
-// pruneJournalFeed) is the one home of that invariant, and the persisted-input
-// boundary is covered by TestRebuildDropsKeylessSeededItem.
+// TestPrepareCarriedItemCarriesAnInWindowItem pins the phase's surviving verdict.
+// The Key/FirstSeen invariant lives in the shared decode gate (validJournalRecord,
+// applied by pruneJournalFeed), and the persisted-input boundary is covered by
+// TestRebuildDropsKeylessSeededItem.
 func TestPrepareCarriedItemCarriesAnInWindowItem(t *testing.T) {
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	carryable := journalItem{Title: "Show - S01 (1080p) [G]", Key: "nyaa:42", FirstSeen: now.Add(-time.Hour)}
@@ -1203,23 +1541,14 @@ func TestPrepareCarriedItemCarriesAnInWindowItem(t *testing.T) {
 	}
 }
 
-// TestRebuildSkipsTitlelessTorrentAsUnresolvable pins the unresolvable
-// accounting AND the publication rule it turns on, and the second half INVERTS
-// what this test used to assert.
-//
-// A newly curated torrent with a parseable tracker key but no files and no
-// release group synthesizes no title at all, so it is excluded from the journal
-// (an arr cannot parse a title-less item) and counted on the pass log line as
-// skipped_unresolvable - the signal that an upstream data-shape change is
-// shrinking the feed.
-//
-// Its identity must NOT be recorded. Nothing was published, and the log is never
-// pruned, so recording here is what used to make the loss PERMANENT: the reason
-// the render failed is an upstream DATA property (SeaDex published the record
-// with an empty file list), and a curator adding the files an hour later is a
-// legitimate later republish that must journal as new. The two operator switches
-// are the deliberate exceptions and they are elsewhere (an off tracker baselines
-// its scope; a missing AB passkey journals GUID-only, so it publishes).
+// TestRebuildSkipsTitlelessTorrentAsUnresolvable pins the unresolvable accounting
+// AND the publication rule it turns on. A newly curated torrent with a parseable
+// tracker key but no files and no release group synthesizes no title at all, so it
+// is excluded from the journal (an arr cannot parse a title-less item) and counted
+// on the pass log line as skipped_unresolvable - the signal that an upstream
+// data-shape change is shrinking the feed. Its identity must NOT be recorded:
+// nothing was published, the log is never pruned, and the render failed on an
+// upstream DATA property, so a curator adding files later must journal as new.
 func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
@@ -1321,15 +1650,13 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	}
 }
 
-// TestRebuildKeepsCarriedItemBecomingUnresolvable pins carryJournal's
-// stored-render fallback for a still-curated item that can no longer render: a
-// journaled torrent whose current SeaDex record has lost its files and release
-// group synthesizes no title, so the carried item keeps its STORED render
-// rather than being dropped - a drop would be permanent, since the never-pruned
-// publication log stops growJournal re-admitting the release once the upstream
-// record is corrected, which is the omission settled feed-rss-filtering
-// forbids. Nothing is counted as journal_dropped, and nothing is counted as an
-// AB passkey skip either.
+// TestRebuildKeepsCarriedItemBecomingUnresolvable pins carryJournal's stored-render
+// fallback for a still-curated item that can no longer render: a journaled torrent
+// whose current SeaDex record has lost its files and release group synthesizes no
+// title, so the carried item keeps its STORED render rather than being dropped. A
+// drop would be permanent, since the never-pruned publication log stops growJournal
+// re-admitting the release once the upstream record is corrected. Nothing is counted
+// as journal_dropped, and nothing as an AB passkey skip either.
 func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
@@ -1392,10 +1719,11 @@ func TestRenderJournalItemFallsBackToRenderableOccurrence(t *testing.T) {
 		{entry: partial, torrent: &partial.Torrents[0]},
 		{entry: full, torrent: &full.Torrents[0]},
 	}
-	it, ok, noPasskey := w.renderJournalItem("nyaa:77", refs, func(int) EntryInfo { return EntryInfo{} })
-	if !ok || noPasskey {
-		t.Fatalf("renderJournalItem = (ok=%v, noPasskey=%v), want (true, false): a renderable sibling must render", ok, noPasskey)
+	rendered, ok := w.renderJournalItem("nyaa:77", refs, nil, func(int) EntryInfo { return EntryInfo{} })
+	if !ok || rendered.noPasskey {
+		t.Fatalf("renderJournalItem = (ok=%v, noPasskey=%v), want (true, false): a renderable sibling must render", ok, rendered.noPasskey)
 	}
+	it := rendered.item
 	if it.AniListID != 2 {
 		t.Errorf("AniListID = %d, want 2 (the first RENDERABLE occurrence in AniList-ID order)", it.AniListID)
 	}
@@ -1436,17 +1764,19 @@ func TestRenderJournalItemOrderIndependentForDuplicateRelationRows(t *testing.T)
 	reversed := []curatedRef{forward[1], forward[0]}
 	infoFor := func(int) EntryInfo { return EntryInfo{} }
 
-	first, ok, noPasskey := w.renderJournalItem("nyaa:77", forward, infoFor)
-	if !ok || noPasskey {
-		t.Fatalf("renderJournalItem(forward) = (ok=%v, noPasskey=%v), want (true, false)", ok, noPasskey)
+	renderedForward, ok := w.renderJournalItem("nyaa:77", forward, nil, infoFor)
+	if !ok || renderedForward.noPasskey {
+		t.Fatalf("renderJournalItem(forward) = (ok=%v, noPasskey=%v), want (true, false)", ok, renderedForward.noPasskey)
 	}
+	first := renderedForward.item
 	if first.Title == "" {
 		t.Fatal("renderJournalItem(forward) Title is empty, want a synthesized title")
 	}
-	second, ok, noPasskey := w.renderJournalItem("nyaa:77", reversed, infoFor)
-	if !ok || noPasskey {
-		t.Fatalf("renderJournalItem(reversed) = (ok=%v, noPasskey=%v), want (true, false)", ok, noPasskey)
+	renderedReversed, ok := w.renderJournalItem("nyaa:77", reversed, nil, infoFor)
+	if !ok || renderedReversed.noPasskey {
+		t.Fatalf("renderJournalItem(reversed) = (ok=%v, noPasskey=%v), want (true, false)", ok, renderedReversed.noPasskey)
 	}
+	second := renderedReversed.item
 	if first.Title != second.Title {
 		t.Errorf("Title = %q under reversed catalogue order, want %q: duplicated relation rows must not depend on catalogue order",
 			second.Title, first.Title)
@@ -1496,17 +1826,14 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsCarriedItemWarnedAcrossTrackers pins the CROSS-SCOPE half of
-// the warned-identity rule identitySignals documents ("a curator warning
-// against the bytes must retract every tracker listing of them", which is why
-// its info hash stays un-namespaced while the publication log's is scope-qualified
-// in publicationSignals): the same release cross-posted to Nyaa and AnimeBytes is
-// one set of bytes, so an AnimeBytes occurrence tagged Broken must retract the
-// carried Nyaa item storing that hash AND keep the un-warned Nyaa occurrence
-// out of the search curation set. The three sibling warned tests all warn and
-// retract within ONE tracker, so they stay green if the warned graph ever
-// becomes scope-aware; this one is what makes the cross-tracker retraction
-// fail loudly instead of leaving RSS serving bytes search suppresses.
+// TestRebuildDropsCarriedItemWarnedAcrossTrackers pins the CROSS-SCOPE half of the
+// warned-identity rule identitySignals documents - a curator warning against the
+// bytes retracts every tracker listing of them, which is why its info hash stays
+// un-namespaced while publicationSignals' is scope-qualified. The same release
+// cross-posted to Nyaa and AnimeBytes is one set of bytes, so an AnimeBytes
+// occurrence tagged Broken must retract the carried Nyaa item storing that hash AND
+// keep the un-warned Nyaa occurrence out of the search curation set. The three
+// sibling warned tests retract within ONE tracker, so only this one fails loudly.
 func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 	const sharedHash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -1738,9 +2065,9 @@ func TestApplyTitlesSkipsEmptyCachedTitle(t *testing.T) {
 // TestRebuildMirrorTrackerCannotSuppressNyaaJournal pins the tail-tracker
 // publication-log guard: AnimeTosho is a Nyaa mirror carrying the IDENTICAL info
 // hash, and folding its (never-journalable) occurrence into the publication log
-// first - purely a catalogue-order accident - used to mark the Nyaa listing
-// of the same bytes as already seen, silently denying it RSS exposure
-// forever. A tail-tracker occurrence must contribute nothing to the ledger.
+// first - purely a catalogue-order accident - would mark the Nyaa listing of the
+// same bytes as already seen, silently denying it RSS exposure forever. A
+// tail-tracker occurrence must contribute nothing to the ledger.
 func TestRebuildMirrorTrackerCannotSuppressNyaaJournal(t *testing.T) {
 	hash := strings.Repeat("a", 40)
 	entries := []seadex.Entry{{
@@ -1858,15 +2185,14 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 	}
 }
 
-// TestRebuildFallsBackFromUnpublishableOccurrence pins the sibling fallback of
-// the render's creation-time GUID-to-Key gate: two entries share one journal
-// key (nyaa:77), and the LOWER AniList id - the one the deterministic
-// synthesis order tries first - carries an out-of-range-port page URL
-// (":65536" parses, so trackerKey/journalKey still mint nyaa:77, but
-// the publisher's 16-bit port check drops it). Without the
-// journalIdentityMatches fallback that occurrence would win and journal an
-// unpublishable empty GUID (dropped again on every reader load), instead of
-// the publishable sibling.
+// TestRebuildFallsBackFromUnpublishableOccurrence pins the sibling fallback of the
+// render's creation-time GUID-to-Key gate: two entries share one journal key
+// (nyaa:77), and the LOWER AniList id - the one the deterministic synthesis order
+// tries first - carries an out-of-range-port page URL (":65536" parses, so
+// trackerKey/journalKey still mint nyaa:77, but the publisher's 16-bit port check
+// drops it). Without the journalIdentityMatches fallback that occurrence would win
+// and journal an unpublishable empty GUID, dropped again on every reader load,
+// instead of the publishable sibling.
 func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
@@ -1894,16 +2220,13 @@ func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 }
 
 // TestApplyTitlesReportsPackDisagreementOnce pins the title-vs-file-list
-// diagnostic: a harvested title whose season-pack verdict contradicts the
-// release's own file census is warned ONCE per rebuild (the onset latch, so a
-// systematically drifting upstream cannot flood one rebuild), the warning
-// carries the journal key and both verdicts, and it never carries the raw
-// title - untrusted tracker text the decode tags runesafe.Untrusted.
-//
-// The disagreement pinned here is the class the audit does NOT correct (the
-// title names an episode, the file census proves a pack): it keeps warning with
-// corrected=false and the harvested title still wins the served title verbatim.
-// The corrected class has its own tests below.
+// diagnostic: a harvested title whose season-pack verdict contradicts the release's
+// own file census is warned ONCE per rebuild (the onset latch, so a systematically
+// drifting upstream cannot flood one rebuild), the warning carries the journal key
+// and both verdicts, and it never carries the raw title - untrusted tracker text the
+// decode tags runesafe.Untrusted. The disagreement pinned here is the class the
+// audit does NOT correct (the title names an episode, the census proves a pack): it
+// warns with corrected=false and the harvested title still wins verbatim.
 func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	log, rec := capture.New()
 	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
@@ -2026,16 +2349,13 @@ func TestCensusPacksFoldsOccurrences(t *testing.T) {
 }
 
 // TestApplyTitlesCorrectsProvablyWrongSeasonClaim pins the one intervention the
-// audit makes on a served title: a harvested title claiming a whole SEASON over
-// a file list that positively proves ONE episode has its season token rewritten
-// into the season+episode form the census names. Sonarr parses FullSeason from
-// such a title, ranks it above loose episodes and then treats the season as
-// covered, so the operator silently ends up missing that season's real episodes.
-//
-// The rewrite is surgical on purpose, and this test pins that: the tracker's own
-// group, resolution and codec bytes SURVIVE. Falling back to the synthesized
-// title would fix the pack claim and throw exactly those bytes away - strictly
-// worse for the arr's matching - and dropping the item is forbidden outright.
+// audit makes on a served title: a harvested title claiming a whole SEASON over a
+// file list that positively proves ONE episode has its season token rewritten into
+// the season+episode form the census names. Sonarr parses FullSeason from such a
+// title, ranks it above loose episodes and then treats the season as covered, so
+// the operator silently ends up missing that season's real episodes. The rewrite is
+// surgical: the tracker's own group, resolution and codec bytes SURVIVE, where
+// falling back to the synthesized title would throw exactly those away.
 func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
 	log, rec := capture.New()
 	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
@@ -2169,18 +2489,13 @@ func TestApplyTitlesLeavesUnknownCensusEvidenceAlone(t *testing.T) {
 	}
 }
 
-// TestCorrectedUpstreamRecordJournalsAsNew is the central behavioural claim of
-// the publication-log rewrite, and the class of loss it recovers.
-//
-// The ledger write used to sit on the novelty TEST rather than on the journal
-// ADMISSION, so every keyed torrent the pass merely LOOKED AT was recorded -
-// before anything decided whether it was servable. SeaDex publishing a record
-// with an empty file list therefore burned that release's novelty permanently
-// (the log is never pruned) with nothing published, and a curator adding the file
-// list an hour later could never get it onto RSS. Search still found it, which is
-// exactly why the loss was silent: the app looked healthy.
-//
-// Recording on publication instead makes the second pass admit it.
+// TestCorrectedUpstreamRecordJournalsAsNew is the central behavioural claim of the
+// publication log: the ledger write sits on the journal ADMISSION, not on the
+// novelty TEST. Recording every keyed torrent the pass merely LOOKED AT burns a
+// release's novelty permanently (the log is never pruned) whenever SeaDex publishes
+// a record with an empty file list, so a curator adding the file list an hour later
+// could never get it onto RSS. Search still found it, which is why the loss was
+// silent. Recording on publication instead makes the second pass admit it.
 func TestCorrectedUpstreamRecordJournalsAsNew(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
@@ -2243,19 +2558,11 @@ func TestPublishedReleaseIsNeverReadmitted(t *testing.T) {
 // TestCensusMarkerIgnoresOccurrencesWithoutAMarker pins how the census picks the
 // single-episode marker a title correction splices in, across a journal key's
 // several occurrences: an occurrence whose file list yields no marker is SKIPPED,
-// and among those that do yield one the smallest wins, so the choice cannot
-// depend on catalogue order. Occurrences of one key are the same tracker torrent
-// attached to several SeaDex entries - a duplicated relation row can repeat the
-// id, URL and hash while carrying different Files - so a marker-less sibling is a
-// reachable shape.
-//
-// The consequence of losing the skip is silent and one-directional: the marker
-// goes empty, the correction is refused as unreadable, and the harvested title
-// keeps a whole-season claim the file list positively disproves. Sonarr parses
-// FullSeason from it, ranks it above loose episodes, and once it grabs it treats
-// the season as covered - so the operator ends up missing that season's real
-// episodes. The existing census fold test gives every single-evidence key exactly
-// one occurrence, so it stays green through that regression.
+// and among those that do the smallest wins, so the choice cannot depend on
+// catalogue order. Occurrences of one key are the same torrent attached to several
+// SeaDex entries with different Files, so a marker-less sibling is reachable.
+// Losing the skip empties the marker and the correction is refused, so the
+// whole-season claim wins; the census fold test gives each key one occurrence.
 func TestCensusMarkerIgnoresOccurrencesWithoutAMarker(t *testing.T) {
 	single := func(name string) *seadex.Torrent {
 		return &seadex.Torrent{Files: []seadex.File{{Name: name, Length: 1 << 30}}}

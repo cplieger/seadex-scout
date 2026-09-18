@@ -29,8 +29,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
-// DefaultURL is the Fribb anime-list-mini.json endpoint - the AniList<->arr ID
-// bridge. The variant choice is Fribb contract knowledge, so it lives here.
+// DefaultURL is the Fribb anime-list-mini.json endpoint - the AniList<->arr ID bridge.
 const DefaultURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
 
 const (
@@ -48,25 +47,52 @@ const (
 	baseDelay        = time.Second
 )
 
-// Loader fetches and caches the Fribb map and overlays the overrides file.
+// Loader fetches and caches the Fribb map and overlays the overrides file. With
+// a ListLoader attached (WithMappingList) it also revalidates the Anime-Lists
+// mapping-list on every Load and attaches it to the served Index.
 type Loader struct {
 	http          *http.Client
 	log           *slog.Logger
+	list          *ListLoader
 	url           string
 	overridesPath string
 	refresh       time.Duration
 }
 
+// SeasonKind reports whether the upstream row carried a season.tvdb member at
+// all, which is a different question from which season it names: an absent member
+// and a mapped zero mean opposite things and both decode to SeasonTvdb 0.
+//
+// Three constants, so the pair (mapped-positive, SeasonTvdb 0) is unrepresentable
+// rather than merely forbidden: WHICH season stays SeasonTvdb.
+type SeasonKind string
+
+const (
+	// SeasonUnknown is the zero value, and exactly one producer reaches it: a
+	// Record persisted before this field existed. The Fribb decoder sets the kind
+	// explicitly on both arms, so unknown never means "the upstream was odd".
+	SeasonUnknown SeasonKind = ""
+	// SeasonPresent means the row carried season.tvdb as a JSON number >= 0, so
+	// SeasonTvdb is what Fribb said - zero included.
+	SeasonPresent SeasonKind = "present"
+	// SeasonAbsent means the row carried no usable season.tvdb member.
+	SeasonAbsent SeasonKind = "absent"
+)
+
 // Record is the resolved mapping for one AniList entry: its media type and the
-// arr IDs it corresponds to. Fields are ordered for govet fieldalignment.
+// arr IDs it corresponds to.
 //
 // The json tags below are read by TWO decoders: the persisted Cache decodes
 // through encoding/json, while overrides.json is walked key-by-key by
-// decodeOverrideRecord, whose switch restates these six names as literals.
+// decodeOverrideRecord, whose switch restates these eight names as literals.
 // Adding, renaming or removing a field here REQUIRES the matching edit there.
 type Record struct {
-	Type    string   `json:"type"`
-	IMDbIDs []string `json:"imdb_ids,omitempty"`
+	Type string `json:"type"`
+	// SeasonKind is additive under a NEW json key, per the retired-key rule: its
+	// zero value reads unknown, which is what every record in a state.json
+	// written before this field existed carries.
+	SeasonKind SeasonKind `json:"season_kind,omitempty"`
+	IMDbIDs    []string   `json:"imdb_ids,omitempty"`
 	// TmdbMovies is the record's themoviedb_id.movie list, decoded for EVERY
 	// record type and read by the ID bridge regardless of the type label: a TMDB
 	// movie id is a Radarr id by construction. Deliberately NOT the IMDb list,
@@ -75,7 +101,11 @@ type Record struct {
 	TmdbMovies []int `json:"tmdb_movies,omitempty"`
 	AniListID  int   `json:"anilist_id"`
 	TvdbID     int   `json:"tvdb_id,omitempty"`
-	SeasonTvdb int   `json:"season_tvdb,omitempty"`
+	// AniDBID is the join key into the Anime-Lists mapping-list (Cache.Mappings),
+	// additive under a NEW json key; 0 means absent. It routes nothing: an
+	// override naming it points at the list's facts, it never carries them.
+	AniDBID    int `json:"anidb_id,omitempty"`
+	SeasonTvdb int `json:"season_tvdb,omitempty"`
 }
 
 // IsMovie reports whether the entry maps to a Radarr movie (Fribb type MOVIE).
@@ -99,6 +129,17 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	return r.TvdbID, nil, nil
 }
 
+// AllIDs returns every canonical identifier the record carries, with no type gate:
+// the TVDB id when positive, the movie TMDB ids, the IMDb ids. TVDB files anime
+// films under their parent series, so a MOVIE record's TVDB id is evidence.
+//
+// The ONE licensed consumer is match.LibIndex.FindByID, which holds both arr
+// indexes so the map miss is still the arr gate. RoutedIDs must NOT widen:
+// NewCatalogue has no index gate, HasArrIdentifier has five consumers.
+func (r *Record) AllIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
+	return max(0, r.TvdbID), r.TmdbMovies, r.IMDbIDs
+}
+
 // HasArrIdentifier reports whether the record carries a USABLE identifier
 // consumed by the arr selected by its type: TMDB-movie/IMDb for movies, TVDB
 // for series. The canonical arr-routing predicate shared by the refresh
@@ -118,6 +159,24 @@ func (r *Record) IsSpecial() bool { return mediatype.IsSpecial(r.Type) }
 // season - the predicate season-exact comparison and the season floor key on.
 func (r *Record) HasMappedSeason() bool { return r.SeasonTvdb > 0 }
 
+// SeasonPresence returns the record's season kind in canonical form: any value
+// but the two named spellings reads unknown. buildIndex canonicalizes every
+// record it serves, so this differs from the field only for a Record that never
+// passed through an Index - which is the path a scope dispatch must still read
+// as unknown rather than as a fourth state.
+func (r *Record) SeasonPresence() SeasonKind { return canonicalSeasonKind(r.SeasonKind) }
+
+// canonicalSeasonKind is the one home of the normalization both Record
+// producers and canonicalize share.
+func canonicalSeasonKind(k SeasonKind) SeasonKind {
+	switch k {
+	case SeasonPresent, SeasonAbsent:
+		return k
+	default:
+		return SeasonUnknown
+	}
+}
+
 // canonicalize applies Record's canonical field forms - the single home of the
 // rule both producers must agree on, so exact-key lookups and the reverse
 // arr-ID catalogue cannot see two differently-shaped Records for one anime.
@@ -127,23 +186,38 @@ func (r *Record) canonicalize() {
 	r.IMDbIDs = trimmed(r.IMDbIDs)
 	r.TmdbMovies = positiveInts(r.TmdbMovies)
 	r.TvdbID = max(0, r.TvdbID)
+	r.AniDBID = max(0, r.AniDBID)
 	r.SeasonTvdb = max(0, r.SeasonTvdb)
+	// Deliberately NOT clamping the (absent, positive season) pair: the kind wins
+	// the scope dispatch, and the state that would be wrong, a season scope on the
+	// season-0 bucket, is unreachable because HasMappedSeason IS SeasonTvdb > 0.
+	r.SeasonKind = canonicalSeasonKind(r.SeasonKind)
 }
 
 // Cache is the persisted mapping state: the parsed Fribb records plus the HTTP
 // validators and timestamp needed for the next conditional GET.
 type Cache struct {
-	FetchedAt    time.Time `json:"fetched_at"`
-	ETag         string    `json:"etag,omitempty"`
-	LastModified string    `json:"last_modified,omitempty"`
+	FetchedAt time.Time `json:"fetched_at"`
+	// MappingsFetchedAt, Mappings, MappingsETag and MappingsLastModified are the
+	// Anime-Lists mapping-list, keyed by AniDB id, with its own validators and
+	// timestamp: a SECOND upstream on its own cadence, so a Fribb refresh never
+	// touches these four fields and a list refresh never touches Records. Never a
+	// field on Record, which every accepted Fribb 200 rebuilds wholesale. All four
+	// are additive under NEW json keys. Ordered for govet fieldalignment.
+	MappingsFetchedAt time.Time       `json:"mappings_fetched_at,omitzero"`
+	Mappings          map[int]Mapping `json:"mappings,omitempty"`
+	ETag              string          `json:"etag,omitempty"`
+	LastModified      string          `json:"last_modified,omitempty"`
 	// RefusedETag / RefusedLastModified are the validators of the last body a
 	// refresh REFUSED. While they are set the conditional GET asks about THAT
 	// body, so a persistent refusal costs one 304 per cycle instead of a ~5.9 MB
 	// download. Cleared by any accepted refresh and by a 304 that revalidates the
 	// accepted body; empty when the refusal carried no validators.
-	RefusedETag         string   `json:"refused_etag,omitempty"`
-	RefusedLastModified string   `json:"refused_last_modified,omitempty"`
-	Records             []Record `json:"records,omitempty"`
+	RefusedETag          string   `json:"refused_etag,omitempty"`
+	RefusedLastModified  string   `json:"refused_last_modified,omitempty"`
+	MappingsETag         string   `json:"mappings_etag,omitempty"`
+	MappingsLastModified string   `json:"mappings_last_modified,omitempty"`
+	Records              []Record `json:"records,omitempty"`
 	// RejectedRefreshes is the persisted streak of consecutive persistent refresh
 	// refusals, reset by any accepted refresh or a 304 that revalidates a USABLE
 	// cache. It is the ONE carrier: escalation and the logged
@@ -157,6 +231,26 @@ type Cache struct {
 // Index is an AniList-ID-keyed lookup over mapping records.
 type Index struct {
 	byAniList map[int]Record
+	// seasonsByTvdb counts, per tvdb id, how many indexed records map each
+	// POSITIVE season. Counts rather than a set, so SiblingSeasons can answer
+	// "does a SIBLING map this season" for a record that maps it too, which is
+	// the cour-split shape.
+	seasonsByTvdb map[int]map[int]int
+	// mappings is the Anime-Lists mapping-list keyed by AniDB id, reached only
+	// through MappingFor so the join key (Record.AniDBID) has one reader.
+	mappings map[int]Mapping
+}
+
+// MappingFor returns what the Anime-Lists mapping-list says about rec, joined on
+// its AniDB id, and false for a record with no AniDB id or none the list knows.
+// An override record joins the same map: the override names the KEY and the
+// facts stay in the list.
+func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
+	if i == nil || rec == nil || rec.AniDBID <= 0 {
+		return Mapping{}, false
+	}
+	m, ok := i.mappings[rec.AniDBID]
+	return m, ok
 }
 
 // Lookup returns the record for an AniList ID and whether it was present.
@@ -176,6 +270,37 @@ func (i *Index) Len() int {
 	return len(i.byAniList)
 }
 
+// SiblingSeasons returns the positive TVDB seasons that OTHER records sharing
+// rec's tvdb id map, in ascending order, and nil for a record with no tvdb id.
+// The record's own season is excluded when it is the only record mapping it, and
+// kept when a cour-split sibling maps it too.
+//
+// A whole-series comparison drops these seasons rather than judging one entry
+// against a run it does not cover. Resolving it here keeps align from reading
+// the map a second time.
+func (i *Index) SiblingSeasons(rec *Record) []int {
+	if i == nil || rec == nil || rec.TvdbID <= 0 {
+		return nil
+	}
+	counts := i.seasonsByTvdb[rec.TvdbID]
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(counts))
+	for season, n := range counts {
+		if season == rec.SeasonTvdb && n == 1 {
+			// The record itself is the only holder, so no sibling maps it.
+			continue
+		}
+		out = append(out, season)
+	}
+	slices.Sort(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // ForEachRecord calls fn once per indexed record, in unspecified order. It backs
 // the report's reverse (arr-ID) catalogue without materializing a slice copy of
 // all ~40k records.
@@ -193,9 +318,16 @@ func (i *Index) ForEachRecord(fn func(Record)) {
 //
 // Reached only by tests: production obtains an Index from Loader.Load, which
 // decodes and indexes in one pass. This exists so a test can index a handful of
-// hand-written Records without a file, and 93 call sites take it up.
+// hand-written Records without a file.
 func NewIndex(records []Record) *Index {
-	return buildIndex(records)
+	return buildIndex(records, nil)
+}
+
+// NewIndexWithMappings is NewIndex with the Anime-Lists mapping-list attached,
+// for the same reason NewIndex exists: a test of a MappingFor consumer needs an
+// Index carrying a hand-written map without a Loader or a file.
+func NewIndexWithMappings(records []Record, mappings map[int]Mapping) *Index {
+	return buildIndex(records, mappings)
 }
 
 // deduplicateRecords returns one effective record per AniList ID, preserving
@@ -221,19 +353,34 @@ func deduplicateRecords(records []Record) []Record {
 // buildIndex keys records by AniList ID, admitting only positive IDs (real
 // SeaDex lookups use positive AniList IDs, so a zero or negative key could
 // never resolve an entry). A later record with the same ID overwrites an
-// earlier one; overrides are applied on top afterwards.
-func buildIndex(records []Record) *Index {
+// earlier one; overrides are applied on top afterwards. mappings is stored as
+// given (nil is a valid empty list).
+func buildIndex(records []Record, mappings map[int]Mapping) *Index {
 	byAniList := make(map[int]Record, len(records))
 	for _, r := range records {
 		if r.AniListID > 0 {
 			// Canonical form is an INDEX invariant, applied once here rather than
 			// re-checked by every accessor: a cache read back from state.json reaches
-			// buildIndex through plain encoding/json. canonicalize is idempotent.
+			// buildIndex through plain encoding/json.
 			r.canonicalize()
 			byAniList[r.AniListID] = r
 		}
 	}
-	return &Index{byAniList: byAniList}
+	// The sibling summary is accumulated over the DEDUPLICATED set, so a record
+	// an earlier duplicate overwrote cannot contribute a season nothing serves.
+	seasonsByTvdb := make(map[int]map[int]int)
+	for _, r := range byAniList {
+		if r.TvdbID <= 0 || !r.HasMappedSeason() {
+			continue
+		}
+		seasons := seasonsByTvdb[r.TvdbID]
+		if seasons == nil {
+			seasons = make(map[int]int)
+			seasonsByTvdb[r.TvdbID] = seasons
+		}
+		seasons[r.SeasonTvdb]++
+	}
+	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: mappings}
 }
 
 // indexedRecordCount returns how many records survive into the served index
@@ -252,7 +399,7 @@ func indexedRecordCount(records []Record) int {
 
 // IndexedRecords reports how many of the cached records survive into the served
 // index (distinct positive AniList IDs) - the one count every mapping log
-// attribute reports. Exported for internal/state's "state loaded" line.
+// attribute reports.
 func (c *Cache) IndexedRecords() int {
 	if c == nil {
 		return 0
@@ -300,6 +447,7 @@ func populationCollapsed(prevCount, count, previousMinimum int) bool {
 // cfg holds the resolved tuning knobs for a Loader.
 type cfg struct {
 	logger        *slog.Logger
+	list          *ListLoader
 	overridesPath string
 	refresh       time.Duration
 }
@@ -326,6 +474,14 @@ func WithLogger(l *slog.Logger) Option {
 	return func(c *cfg) { c.logger = l }
 }
 
+// WithMappingList attaches the Anime-Lists mapping-list loader: every Load
+// revalidates the list after the Fribb refresh and the served Index answers
+// MappingFor from it. Defaults to nil, which loads no list and serves whatever
+// Mappings the persisted cache already carries. Last one wins.
+func WithMappingList(list *ListLoader) Option {
+	return func(c *cfg) { c.list = list }
+}
+
 // NewLoader returns a mapping loader reading the Fribb JSON source at url.
 // httpClient must be non-nil for any loader that will fetch.
 func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
@@ -341,6 +497,7 @@ func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
 	return &Loader{
 		http:          httpClient,
 		log:           c.logger,
+		list:          c.list,
 		url:           url,
 		overridesPath: c.overridesPath,
 		refresh:       c.refresh,
@@ -353,8 +510,8 @@ func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
 // re-read and applied on top. When a refresh fails but prev holds a usable
 // record set (cacheUsable), it returns the stale index with a *StaleMapError
 // (match with errors.As); any other non-nil error means no usable map at all.
-// The persisted records are canonicalized at this INPUT boundary, on a private
-// copy, so every refresh decision and the served Index read ONE representation.
+// Records are canonicalized on a private copy here, so every refresh decision
+// and the served Index read ONE representation. An attached list never errors.
 func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 	canonicalPrev := prev
 	if prev != nil {
@@ -366,7 +523,10 @@ func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 		canonicalPrev = &clone
 	}
 	next, err := l.refreshCache(ctx, canonicalPrev)
-	idx := buildIndex(next.Records)
+	if l.list != nil {
+		l.list.refresh(ctx, &next)
+	}
+	idx := buildIndex(next.Records, next.Mappings)
 	l.applyOverrides(ctx, idx)
 	return next, idx, err
 }
@@ -375,7 +535,6 @@ func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 // was returned, so the cycle may still compare against the stale index.
 // Consumers discriminate a degraded-but-comparable load with errors.As rather
 // than probing the Cache's Records: the loader owns the usability judgment.
-// Fields are ordered for govet fieldalignment.
 type StaleMapError struct {
 	// cause is the underlying refresh failure; nil for the shrunk-refresh guard.
 	cause error
@@ -386,8 +545,8 @@ type StaleMapError struct {
 	// records is the size of the stale-but-usable record set.
 	records int
 	// shrunkReturned/shrunkPrevious carry the shrink guard's counts as structured
-	// facts, zero for every other class. Keeping the live counts OUT of msg keeps
-	// stale_reason an equality-queryable, fixed-cardinality class discriminator.
+	// facts, zero for every other class: keeping them OUT of msg keeps stale_reason
+	// an equality-queryable, fixed-cardinality class discriminator.
 	shrunkReturned int
 	shrunkPrevious int
 }
@@ -410,9 +569,8 @@ func (e *StaleMapError) Unwrap() error { return e.cause }
 
 // LogAttrs returns the degradation facts Error() flattens into prose as
 // structured slog key/value pairs, so callers can emit a queryable degraded-
-// cycle line without parsing the message text. It deliberately does NOT carry
-// the rejection streak: that lives on Cache.RejectedRefreshes, which is what
-// escalation reads, and a second copy contradicted it on a transient failure.
+// cycle line without parsing the message text. It carries no rejection streak:
+// that lives on Cache.RejectedRefreshes, which is what escalation reads.
 func (e *StaleMapError) LogAttrs() []any {
 	attrs := []any{
 		"stale_reason", e.msg,
@@ -445,12 +603,10 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 
 // rejectRefresh degrades a persistent refresh refusal to the stale map via
 // staleOrFail, additionally advancing the persisted consecutive-rejection
-// streak (Cache.RejectedRefreshes) that escalation reads. It is reached ONLY
-// through degradeRefresh, on a failure isPersistentRefreshFailure graded
-// persistent; a transient failure takes plain staleOrFail there. The streak
-// advances even when there is NO usable stale cache to return: it is state
-// about the upstream, so gating it would freeze it at 0 on a first boot whose
-// every refresh is refused - the never-self-heals case it exists to escalate.
+// streak (Cache.RejectedRefreshes) that escalation reads. Reached ONLY through
+// degradeRefresh. The streak advances even when there is NO usable stale cache
+// to return: it is state about the upstream, so gating it would freeze it at 0
+// on a first boot whose every refresh is refused.
 func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, error) {
 	next, err := staleOrFail(prev, staleMsg, cause, noCache)
 	next.RejectedRefreshes = prev.RejectedRefreshes + 1
@@ -561,9 +717,8 @@ func (e *sanitizedError) Unwrap() error { return e.err }
 // httpx.DoConditional, both directions: a poisoned persisted validator is
 // skipped at replay, and captured validators arrive pre-sanitized.
 func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
-	// Normalize the optional previous cache: Load(ctx, nil) is the natural
-	// representation of "no persisted cache", and an empty Cache makes nil take
-	// the ordinary initial-fetch route instead of panicking on prev.FetchedAt.
+	// Load(ctx, nil) is the natural representation of "no persisted cache"; an empty
+	// Cache makes it take the ordinary initial-fetch route.
 	if prev == nil {
 		prev = &Cache{}
 	}
@@ -602,9 +757,8 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 // errors instead of affirming an unusable map.
 func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 	if !cacheUsable(prev.Records) {
-		// A 304 answered to a request that carried NO validators is an upstream or
-		// intermediary protocol violation, not a transient outage: it repeats
-		// identically every cycle and never self-heals without the operator.
+		// A protocol violation rather than a transient outage: no validators were sent,
+		// so it repeats identically every cycle.
 		return degradeRefresh(prev, failureNotModifiedUnusable, "not modified without a usable cache", nil,
 			errors.New("mapping: not modified but no cache available"))
 	}
@@ -617,8 +771,6 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 		l.log.Info("mapping: rejection streak ended by 304 revalidation", "ended_rejection_streak", prev.RejectedRefreshes, "records", indexedRecordCount(prev.Records))
 	}
 	refreshed.RejectedRefreshes = 0
-	// A 304 against the ACCEPTED validators affirms the cached body is current, so
-	// any remembered refused body is history.
 	refreshed.RefusedETag, refreshed.RefusedLastModified = "", ""
 	return refreshed, nil
 }
@@ -680,8 +832,7 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 	// a below-half refresh (degradation.Shrunk) keeps the stale map.
 	if prevCount := indexedRecordCount(prev.Records); cacheUsable(prev.Records) && degradation.Shrunk(len(records), prevCount) {
 		// The noCache argument is unreachable here (cacheUsable guarantees the stale
-		// branch). The reason string is FIXED (class-queryable in Loki); the live
-		// counts ride as structured fields on the error instead.
+		// branch). The reason string stays FIXED so it is class-queryable.
 		next, err := degradeRefresh(prev, failureShrunk, "refresh shrank below half of previous",
 			nil, errors.New("mapping: refresh shrank unexpectedly and no cache available"))
 		if stale, ok := errors.AsType[*StaleMapError](err); ok {
@@ -690,12 +841,10 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		return next, err
 	}
 	// previous_records is the baseline the absolute count needs: degradation.Shrunk
-	// rejects only BELOW half, so an accepted refresh may legitimately retain
-	// exactly half of the previous map and would otherwise read like any other
-	// success. The two per-population guards refuse only a below-half collapse
-	// too, so the census attributes carry that same reasoning to the populations
-	// they are defined over - a routing loss is one queryable line rather than an
-	// inference. revalidatable reports whether a validator was persisted.
+	// rejects only BELOW half, so an accepted refresh may legitimately retain exactly
+	// half of the previous map and would otherwise read like any other success. The
+	// census attributes carry the same reasoning to each population the two guards are
+	// defined over, so a routing loss is one queryable line rather than an inference.
 	pop := censusOf(records)
 	attrs := []any{
 		"records", len(records),
@@ -713,13 +862,20 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		attrs = append(attrs, "ended_rejection_streak", prev.RejectedRefreshes)
 	}
 	l.log.Info("mapping: refreshed", attrs...)
-	// The fresh Cache literal deliberately omits RejectedRefreshes: an accepted
-	// refresh resets the streak (see Cache.RejectedRefreshes).
+	// The literal resets exactly THREE fields (RejectedRefreshes, RefusedETag,
+	// RefusedLastModified - the rules are on Cache) and carries every other sibling,
+	// the four mapping-list fields included: they belong to an upstream this refresh
+	// did not consult. A field added to Cache is added HERE or every accepted 200
+	// erases it.
 	return Cache{
-		FetchedAt:    time.Now(),
-		Records:      records,
-		ETag:         res.Validators.ETag,
-		LastModified: res.Validators.LastModified,
+		FetchedAt:            time.Now(),
+		Records:              records,
+		ETag:                 res.Validators.ETag,
+		LastModified:         res.Validators.LastModified,
+		Mappings:             prev.Mappings,
+		MappingsETag:         prev.MappingsETag,
+		MappingsLastModified: prev.MappingsLastModified,
+		MappingsFetchedAt:    prev.MappingsFetchedAt,
 	}, nil
 }
 
@@ -881,9 +1037,8 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 		httpx.WithBaseDelay(baseDelay),
 		httpx.WithLabel("mapping"),
 		httpx.WithLogger(l.log),
-		// Demote httpx's terminal "http retries exhausted" line to Debug: a refresh
-		// whose retries ran out always surfaces again from the caller with strictly
-		// more context, and demoting keeps the per-attempt retry diagnostics.
+		// Demoted to Debug: a refresh whose retries ran out surfaces again from the
+		// caller with more context, and demoting keeps the per-attempt diagnostics.
 		httpx.WithExhaustedLevel(slog.LevelDebug))
 }
 
@@ -930,8 +1085,8 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 // directory, so the read can neither be redirected out of /config nor block:
 // atomicfile.ReadBoundedInRoot opens with O_NONBLOCK and refuses a non-regular
 // inode, where a plain os.Open follows a symlink and blocks indefinitely on a
-// writer-less FIFO, past its only context check. A missing file or /config
-// still surfaces as fs.ErrNotExist, so the silent no-overrides case is unchanged.
+// writer-less FIFO, past its only context check. A missing file still surfaces
+// as fs.ErrNotExist.
 func (l *Loader) readOverridesFile(ctx context.Context) ([]byte, error) {
 	dir := filepath.Dir(l.overridesPath)
 	root, err := os.OpenRoot(dir)
@@ -996,10 +1151,9 @@ type overrideSet struct {
 const maxOverrideRecords = 1 << 16
 
 // decodeOverrideRecord walks one override object off the token stream in a
-// single bounded pass: the six canonical keys - Record's own json tags, restated
-// here because a token walk cannot read them, so a field added to Record must be
-// added here too - decode directly into the Record, and an unknown key is
-// counted and skipped.
+// single bounded pass: the eight canonical keys decode directly into the Record
+// and an unknown key is counted and skipped. The literals restate Record's json
+// tags, which is the edit Record's own doc requires.
 func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record, err error) {
 	err = dec.Object(func(key string) error {
 		switch {
@@ -1009,8 +1163,15 @@ func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record
 			return dec.Decode(&record.Type)
 		case strings.EqualFold(key, "tvdb_id"):
 			return dec.Decode(&record.TvdbID)
+		case strings.EqualFold(key, "anidb_id"):
+			return dec.Decode(&record.AniDBID)
 		case strings.EqualFold(key, "season_tvdb"):
 			return dec.Decode(&record.SeasonTvdb)
+		case strings.EqualFold(key, "season_kind"):
+			// A value that is neither named spelling reads unknown through
+			// canonicalize, so it is a recognized KEY carrying an unusable value
+			// rather than an unknown key.
+			return dec.Decode(&record.SeasonKind)
 		case strings.EqualFold(key, "tmdb_movies"):
 			return dec.Decode(&record.TmdbMovies)
 		case strings.EqualFold(key, "imdb_ids"):
@@ -1024,17 +1185,13 @@ func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record
 }
 
 // applyRecord decodes the next override record from the token stream and folds
-// it into the set: Type is normalized, IMDb ids trimmed and TMDB movie ids
-// reduced to positives - the same canonical forms the Fribb decoder produces -
-// a zero-AniList-ID record counts as skipped, and a duplicate ID replaces its
-// earlier record.
+// it into the set, canonicalized: a zero-AniList-ID record counts as skipped,
+// and a duplicate ID replaces its earlier record.
 func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) error {
 	record, err := decodeOverrideRecord(dec, set)
 	if err != nil {
 		return err
 	}
-	// Canonical form is Record's own rule (canonicalize), shared with the Fribb
-	// producer, so the two paths cannot diverge.
 	record.canonicalize()
 	if record.AniListID <= 0 {
 		// Zero (missing) and negative alike: an indexed negative key matches no

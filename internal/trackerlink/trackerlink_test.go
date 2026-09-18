@@ -63,15 +63,44 @@ func TestPublishUnknownTrackerDropsCanonicalAbsoluteURL(t *testing.T) {
 	}
 }
 
-// TestPublishRejectsUnsafeSchemes pins the unsafe-scheme and
-// malformed-URL gate on the untrusted upstream URL: javascript:, data:, and
-// file: values must never be converted into clickable tracker links, and a
-// malformed or anomalous value (hostless, unparseable escape, whitespace in
-// the host, backslash authority, a tab/newline-smuggled form the WHATWG
-// preprocessing de-smuggled, a hidden-host quirk form) must drop to the
-// empty-URL case rather than be published as a link a human cannot follow -
-// publish-or-drop rejects what it cannot vouch for even when the classifier
-// recovered the evidence.
+// TestPublishAnimeToshoMirrorHosts pins mirror-host recognition. AnimeTosho
+// serves one torrent page on three domains and SeaDex records whichever the
+// curator pasted, so an unrecognized spelling costs more than the link: the
+// release fails filter.Obtainable and its finding is suppressed, leaving the
+// operator unaware a better release exists. The unlisted-host case holds the
+// gate closed, so this fails both if a listed spelling stops publishing and if
+// an unlisted one starts.
+func TestPublishAnimeToshoMirrorHosts(t *testing.T) {
+	published := map[string]string{
+		"base_url_xyz": "https://animetosho.xyz/view/451327",
+		"alt_host_org": "https://animetosho.org/view/451327",
+		"alt_host_net": "https://animetosho.net/view/451327",
+	}
+	for name, rawURL := range published {
+		t.Run(name, func(t *testing.T) {
+			link, refusal := PublishReason("AnimeTosho", rawURL)
+			if link != rawURL {
+				t.Errorf("PublishReason(%q, %q) link = %q, want it published verbatim", "AnimeTosho", rawURL, link)
+			}
+			if refusal != RefusalNone {
+				t.Errorf("PublishReason(%q, %q) refusal = %d, want RefusalNone", "AnimeTosho", rawURL, refusal)
+			}
+		})
+	}
+	const unlisted = "https://animetosho.nl/view/451327"
+	link, refusal := PublishReason("AnimeTosho", unlisted)
+	if link != "" || refusal != RefusalUnvouchableURL {
+		t.Errorf("PublishReason(%q, %q) = %q/%d, want empty/RefusalUnvouchableURL for a host the table does not carry", "AnimeTosho", unlisted, link, refusal)
+	}
+}
+
+// TestPublishRejectsUnsafeSchemes pins the unsafe-scheme and malformed-URL gate on the
+// untrusted upstream URL: javascript:, data: and file: values must never become clickable
+// tracker links, and a malformed or anomalous value (hostless, unparseable escape,
+// whitespace in the host, backslash authority, a tab/newline-smuggled form the WHATWG
+// preprocessing de-smuggled, a hidden-host quirk form) must drop to the empty-URL case
+// rather than be published as a link a human cannot follow - publish-or-drop rejects what
+// it cannot vouch for even when the classifier recovered the evidence.
 func TestPublishRejectsUnsafeSchemes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -102,30 +131,14 @@ func TestPublishRejectsUnsafeSchemes(t *testing.T) {
 	}
 }
 
-// TestPublishRelativeShapeFloor pins the relative arm's shape floor (l-f88)
-// through the PUBLIC publisher rather than the unexported helper, so a
-// behavior-preserving rename, inline, or decomposition of that helper cannot
-// break the suite while Publish keeps returning identical links. It keeps only
-// the distinct externally observable cases: a colon safely inside a later path
-// segment publishes, and a structureless token drops instead of publishing a
-// plausible-looking 404 (the live catalogue carries exactly one such record -
-// AB, url "Chihiro", a release-group name typed into the url field). A value
-// that is ONLY a query or fragment has no path segment at all, so publishing it
-// would emit the tracker root ("https://nyaa.si/?id=1"), which the floor
-// refuses; and a delimiter-only tail ("/view?", "/view#") carries no
-// identifying content, so it resolves to the same page as the bare
-// single-segment path and drops with it (h-f30). A FRAGMENT never substitutes
-// for the missing path segment either, however much content it carries
-// ("/view#1" drops): a fragment is resolved client-side, so the browser lands
-// on the single-segment page the floor already refuses and merely scrolls -
-// which is the same reading the host-bearing arm applies, and the reason both
-// arms now share one predicate. Counting a fragment here used to make the arms
-// disagree: ".#0" published, and the absolute link it produced was then
-// refused, so publishing was not idempotent. No live value relies on it - all
-// five fragment-bearing records carry a query as well
-// ("/torrents.php?id=..&torrentid=..#..") and still publish. The
-// colon-before-slash and leading-slash-normalization rows live in
-// TestPublishRejectsUnsafeSchemes and TestPublish.
+// TestPublishRelativeShapeFloor pins the relative arm's shape floor through the PUBLIC
+// publisher rather than the unexported helper, so renaming or inlining that helper cannot
+// break the suite while Publish keeps returning identical links. A colon safely inside a
+// later path segment publishes; a structureless token drops instead of publishing a
+// plausible-looking 404 (the live catalogue carries exactly one such record - AB, url
+// "Chihiro", a release-group name typed into the url field). A query-only, fragment-only
+// or delimiter-only tail names nothing beyond the single-segment page the floor already
+// refuses, a fragment because it resolves client-side, so both arms share one predicate.
 func TestPublishRelativeShapeFloor(t *testing.T) {
 	tests := map[string]struct {
 		raw  string
@@ -142,9 +155,10 @@ func TestPublishRelativeShapeFloor(t *testing.T) {
 		"delimiter-only query drops":            {raw: "/view?", want: ""},
 		"delimiter-only fragment drops":         {raw: "/view#", want: ""},
 		"delimiter-only pair drops":             {raw: "/view?#", want: ""},
-		// The same rule with the fragment CARRYING content: the query is still
-		// empty, and a fragment behind it is resolved client-side, so the value
-		// still names the single-segment page the floor refuses.
+		// The same rule with the fragment CARRYING content: the query is still empty, and
+		// a fragment behind it is resolved client-side, so the value still names the
+		// single-segment page the floor refuses. All five fragment-bearing live records
+		// carry a query as well, so none of them loses its link to this row.
 		"fragment content behind an empty query drops": {raw: "/view?#1167293", want: ""},
 	}
 	for name, tc := range tests {
@@ -185,16 +199,14 @@ func TestPublishPortBoundaries(t *testing.T) {
 	}
 }
 
-// TestPublishCanonicalizesScheme pins the no-cleartext-publish rule
-// (l-f89). Every canonical tracker base in the internal/tracker table is https, and
-// the schemeless publish branch already prefixes "https://" for that reason -
-// but the ABSOLUTE branch emitted the upstream's scheme verbatim, so a tampered
-// SeaDex record could publish "http://nyaa.si/view/1" as the clickable release
-// link. Neither tracker host is HSTS-preloaded, so that first hop is genuinely
-// cleartext and an on-path attacker can answer it with a phishing page under
-// the tracker's own URL bar (AnimeBytes is login-bearing). The host is already
-// proven canonical by the time the scheme is read, so the link is upgraded
-// rather than dropped; everything after the scheme survives byte-for-byte.
+// TestPublishCanonicalizesScheme pins the no-cleartext-publish rule. Every canonical
+// tracker base in the internal/tracker table is https, so a cleartext absolute URL from a
+// tampered SeaDex record must be upgraded rather than published verbatim: neither tracker
+// host is HSTS-preloaded, so that first hop is genuinely cleartext and an on-path attacker
+// can answer it with a phishing page under the tracker's own URL bar (AnimeBytes is
+// login-bearing). The host is already proven canonical by the time the scheme is read, so
+// the link is upgraded rather than dropped, and everything after the scheme survives
+// byte-for-byte.
 func TestPublishCanonicalizesScheme(t *testing.T) {
 	tests := map[string]struct {
 		tracker string
@@ -245,14 +257,12 @@ func TestPublishCanonicalizesScheme(t *testing.T) {
 }
 
 // TestPublishRequiresATargetBeyondTheHost pins the host-form shape floor
-// (hostFormTargeted): a value that carries only a canonical tracker host
-// resolves to the front page, which identifies no torrent, so it drops like
-// every other unvouchable form - and drops rather than publishes so the caller
-// reports it as a URL error instead of a plausible-looking 404. Both
-// host-bearing arms are covered: the absolute branch and the canonicalized
-// schemeless-host branch. A tail made only of further delimiters names no
-// target either, while a genuinely targeted root query still publishes. A
-// fragment-only tail is NOT a target (it resolves client-side, leaving the
+// (hostFormTargeted): a value carrying only a canonical tracker host resolves to the front
+// page, which identifies no torrent, so it drops like every other unvouchable form - and
+// drops rather than publishes so the caller reports a URL error instead of a plausible 404.
+// Both host-bearing arms are covered, absolute and canonicalized schemeless. A tail of
+// further delimiters names no target either, while a genuinely targeted root query still
+// publishes; a fragment-only tail is NOT a target (it resolves client-side, leaving the
 // browser on the front page), matching the relative twin pathShaped.
 func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 	tests := map[string]struct{ tracker, url, want string }{
@@ -297,7 +307,7 @@ func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 }
 
 // TestPublishReasonGrades pins the refusal REASON the diagnostic consumers read
-// (l-f127): the empty string alone cannot distinguish a tracker this build does
+// the empty string alone cannot distinguish a tracker this build does
 // not carry - whose remedy is a seadex-scout table entry - from an unvouchable
 // url, whose remedy is fixing the SeaDex record, and the audit row marker plus
 // the SeaDex client's catalogue WARN each name one of those remedies. It also
@@ -325,23 +335,18 @@ func TestPublishReasonGrades(t *testing.T) {
 		"a query-leading colon is unvouchable":       {"Nyaa", "?x:y", false, RefusalUnvouchableURL},
 		"an unknown tracker beats a bad url shape":   {"beyondhd", "Chihiro", false, RefusalUnknownTracker},
 		"a userinfo authority is an unvouchable url": {"Nyaa", "https://trusted@evil.example/x", false, RefusalUnvouchableURL},
-		// ...but a SMUGGLING-shaped refusal outranks the app-table gap, because
-		// the entry gate above (backslash / tab-newline / userinfo) deliberately
-		// precedes the tracker lookup: those refusals are properties of the URL
-		// value alone and hold whether or not this build carries the tracker.
-		// This row is what pins that ordering - without it nothing stops a later
-		// edit from moving the userinfo check below the lookup and silently
-		// re-grading this input RefusalUnknownTracker. Published output is empty
-		// either way; the grade is what the operator's diagnostic reads (the
-		// audit row's "(url error)" versus the unknown-tracker WARN).
+		// ...but a SMUGGLING-shaped refusal outranks the app-table gap: the entry gate
+		// above (backslash / tab-newline / userinfo) deliberately precedes the tracker
+		// lookup, since those refusals are properties of the URL value alone and hold
+		// whether or not this build carries the tracker. This row pins that ordering.
+		// Published output is empty either way; the grade is what the operator's
+		// diagnostic reads (the audit row's "(url error)" versus the unknown-tracker WARN).
 		"userinfo under an unknown tracker is still unvouchable": {"beyondhd", "https://user@beyondhd.co/t/1", false, RefusalUnvouchableURL},
-		// The userinfo refusal is ONE class-independent gate at the entry
-		// ladder, not a per-arm check, so a credential-bearing authority drops
-		// whichever form carries it: an absolute URL on a canonical host, a
-		// schemeless canonical host (previously demoted into a path and
-		// published under the label's base), and a hidden-host quirk form whose
-		// authority the classifier recovered. ClassRelative is deliberately
-		// absent: a rooted relative reference has no authority at all, so
+		// The userinfo refusal is ONE class-independent gate at the entry ladder, not a
+		// per-arm check, so a credential-bearing authority drops whichever form carries
+		// it: an absolute URL on a canonical host, a schemeless canonical host, and a
+		// hidden-host quirk form whose authority the classifier recovered. ClassRelative
+		// is deliberately absent: a rooted relative reference has no authority at all, so
 		// urlform never records HasUserInfo for one ("/user@x/y" is a path).
 		"userinfo on a canonical absolute host drops":   {"Nyaa", "https://user@nyaa.si/view/1", false, RefusalUnvouchableURL},
 		"userinfo on a canonical schemeless host drops": {"Nyaa", "user@animebytes.tv/torrents.php?id=9", false, RefusalUnvouchableURL},

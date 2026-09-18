@@ -8,19 +8,13 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
 
-// TestDecidePlaceholderItemIsUnverifiedNotNoFile pins the placeholder branch
-// h-f5 added: a library.Item whose file state could not be READ
-// (library.Item.Failed - a series whose episode fetch failed, or a movie Radarr
-// reports a file for while sending no MovieFile payload) has no group evidence at
-// all, so the standing is unverified and Groups stays nil. StandingNoFile would
-// assert the unit has nothing on disk, which is the false claim Comparable exists
-// to stop - and it is what the report rendered before the fix.
-//
-// It is pinned HERE, on Decide, because the audit report is the consumer that
-// relies on Decide handling the placeholder (the daemon's compare pass drops
-// these matches beforehand via scout.splitFailedMatches), and no other align
-// test passes a Failed item to Decide: deleting the branch restored the
-// no_file verdict with the whole suite still green.
+// TestDecidePlaceholderItemIsUnverifiedNotNoFile pins the placeholder branch: a
+// library.Item whose file state could not be READ (library.Item.Failed) has no
+// group evidence at all, so the standing is unverified and Groups stays nil.
+// StandingNoFile would assert the unit has nothing on disk, the false claim
+// Comparable exists to stop. Pinned HERE because the audit report is the consumer
+// relying on Decide to handle the placeholder (the daemon's compare pass drops
+// these matches beforehand) and no other align test passes Decide a Failed item.
 func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
 	movieRec := mapping.Record{Type: "MOVIE"}
 	for name, item := range map[string]library.Item{
@@ -34,7 +28,7 @@ func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
 			if item.Arr == library.ArrSonarr {
 				rec = mapping.Record{Type: "TV", SeasonTvdb: 1}
 			}
-			d := align.Decide(&item, &rec, []string{"sam"}, nil)
+			d := align.Decide(&item, &rec, []string{"sam"}, nil, nil, nil)
 			if d.Standing != align.StandingUnverified {
 				t.Errorf("Standing = %v, want %v (a placeholder's file state is MISSING, not empty)", d.Standing, align.StandingUnverified)
 			}
@@ -52,12 +46,10 @@ func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
 }
 
 // TestDecideSingleUnit pins the file-first group ladder and the outcome
-// linearization for the single-unit scopes (ported from the audit's former
-// verdict table, which the shared core replaced): no file wins over
-// everything including the no-best nudge, a group-less filed unit is
-// unverified (and unverifiable rather than mixed or diverged), a proven best
-// group aligns no matter how many groups the unit spans, and a not-aligned
-// all-known unit is mixed exactly when it spans more than one group.
+// linearization for the single-unit scopes: no file wins over everything including
+// the no-best nudge, a group-less filed unit is unverified (unverifiable rather
+// than mixed or diverged), a proven best group aligns however many groups the unit
+// spans, and a not-aligned all-known unit is mixed exactly when it spans several.
 func TestDecideSingleUnit(t *testing.T) {
 	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
 	movieRec := mapping.Record{Type: "MOVIE"}
@@ -157,7 +149,7 @@ func TestDecideSingleUnit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := align.Decide(&tt.item, &tt.rec, tt.best, tt.alt)
+			d := align.Decide(&tt.item, &tt.rec, tt.best, tt.alt, nil, nil)
 			if d.Standing != tt.wantStanding {
 				t.Errorf("Standing = %v, want %v", d.Standing, tt.wantStanding)
 			}
@@ -178,7 +170,7 @@ func TestDecideSingleUnit(t *testing.T) {
 func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
 	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}}
 	rec := mapping.Record{Type: "TV", SeasonTvdb: 2}
-	d := align.Decide(&item, &rec, []string{"sam"}, nil)
+	d := align.Decide(&item, &rec, []string{"sam"}, nil, nil, nil)
 	if d.Kind != align.ScopeSeason {
 		t.Errorf("Kind = %v, want ScopeSeason", d.Kind)
 	}
@@ -190,16 +182,12 @@ func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
 	}
 }
 
-// TestDecideTriStateEvidence pins the three-valued evidence model over the
-// shared decision: unknown group evidence (the release.NoGroup sentinel, on
-// either side of the comparison) yields StandingUnverified and
-// OutcomeUnverifiable - never a confident alignment (the old
-// sentinel==sentinel defect) and never a divergence - while a known-known
-// best match wins outright even beside unknown members. Unverifiability of
-// the best comparison short-circuits BEFORE the alt rung (when "do you have
-// the best?" is unanswerable, a proven alt must not imply you lack it), and
-// the no-best nudge still outranks the group comparison on a unit whose alt
-// comparison is indeterminate.
+// TestDecideTriStateEvidence pins the three-valued evidence model: unknown group
+// evidence (release.NoGroup on either side) yields StandingUnverified and
+// OutcomeUnverifiable, never a confident alignment and never a divergence, while
+// a known-known best match wins outright even beside unknown members.
+// Unverifiability of the best comparison short-circuits BEFORE the alt rung: when
+// "do you have the best?" is unanswerable, a proven alt must not imply you lack it.
 func TestDecideTriStateEvidence(t *testing.T) {
 	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
 	tests := []struct {
@@ -255,13 +243,10 @@ func TestDecideTriStateEvidence(t *testing.T) {
 			wantOutcome:  align.OutcomeUnverifiable,
 		},
 		{
-			// l-f30: the deliberately conservative sub-case. Best-divergence is
-			// PROVEN here (current "kh" vs best "sam", all evidence known), and
-			// only the alt placement is indeterminate - so the row says
-			// "check this", not "you have an unlisted release". Keeping the
-			// verdict is the reviewed decision; the three docs (Standing,
-			// Outcome, README) name the sub-case explicitly rather than
-			// implying nothing is known.
+			// The deliberately conservative sub-case: best-divergence is PROVEN
+			// (current "kh" vs best "sam", all evidence known) and only the alt
+			// placement is indeterminate, so the row says "check this" rather than
+			// "you have an unlisted release".
 			name:         "proven-divergent best with an unknown-only alt is unverified",
 			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"kh"}}},
 			best:         []string{"sam"},
@@ -280,7 +265,7 @@ func TestDecideTriStateEvidence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := align.Decide(&tt.item, &seasonRec, tt.best, tt.alt)
+			d := align.Decide(&tt.item, &seasonRec, tt.best, tt.alt, nil, nil)
 			if d.Standing != tt.wantStanding {
 				t.Errorf("Standing = %v, want %v", d.Standing, tt.wantStanding)
 			}
@@ -318,7 +303,7 @@ func TestDecideSeasonLabel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			item := library.Item{Arr: tt.arr, HasFile: true, SeasonGroups: map[int][]string{2: {"sam"}}}
 			rec := mapping.Record{Type: tt.recType, SeasonTvdb: tt.seasonTvdb}
-			if d := align.Decide(&item, &rec, []string{"sam"}, nil); d.Season != tt.want {
+			if d := align.Decide(&item, &rec, []string{"sam"}, nil, nil, nil); d.Season != tt.want {
 				t.Errorf("Season = %d, want %d", d.Season, tt.want)
 			}
 		})
@@ -333,11 +318,11 @@ func TestDecideSeasonLabel(t *testing.T) {
 func TestDecideSingleUnitApproxPassThrough(t *testing.T) {
 	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}}
 	rec := mapping.Record{Type: "OVA"}
-	d := align.Decide(&item, &rec, []string{"cait-sidhe"}, nil)
+	d := align.Decide(&item, &rec, []string{"cait-sidhe"}, nil, nil, nil)
 	if !d.Approx {
 		t.Error("Approx = false, want true (multi-group specials bucket is approximate)")
 	}
-	if d.Kind != align.ScopeSpecial {
-		t.Errorf("Kind = %v, want ScopeSpecial", d.Kind)
+	if d.Kind != align.ScopeOffered {
+		t.Errorf("Kind = %v, want ScopeOffered", d.Kind)
 	}
 }

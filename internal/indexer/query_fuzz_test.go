@@ -8,24 +8,19 @@ import (
 
 // FuzzCurationLookup_neverAdmitsCrossWiredIdentity exercises the request-side
 // curation gate with arbitrary Prowlarr-controlled identity signals (the info
-// hash plus the two page URLs). Against a fixed two-torrent curation model, an
-// admitted item must carry at least one CURATED signal (a hash the set knows,
-// or a scoped tracker key), must not name two
-// different tracker keys, must not key outside the served scope, and must not
-// pair one torrent's curated hash with another torrent's curated key (the
-// persisted byPair co-membership relation) - the cross-wiring an untrusted
-// Torznab response would use to attach a curated best/alt marker to a
-// different torrent's download link. An info hash the set does not know is
-// deliberately NOT a signal in either direction: it neither admits an item on
-// its own nor vetoes a curated tracker key beside it (l-f30). The oracle is
-// the fixed model plus the independently fuzzed identity extractors, never a
-// reimplementation of lookup's own policy.
+// hash plus the two page URLs). An admitted item must carry at least one CURATED
+// signal, must not name two different tracker keys, must not key outside the
+// served scope, and must not pair one torrent's curated hash with another's key -
+// the cross-wiring an untrusted Torznab response would use to attach a curated
+// marker to a different download link. An unknown hash is no signal either way,
+// and an unmatched item carries no stamped TVDB id.
 func FuzzCurationLookup_neverAdmitsCrossWiredIdentity(f *testing.F) {
 	const hashA = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	const hashB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const idA, idB = 79525, 12345
 	set := &curation{
-		byHash: map[string]bool{hashA: true, hashB: true},
-		byKey:  map[string]bool{"nyaa:111": true, "nyaa:222": true},
+		byHash: map[string]curatedSignal{hashA: signalWithID(true, idA), hashB: signalWithID(true, idB)},
+		byKey:  map[string]curatedSignal{"nyaa:111": signalWithID(true, idA), "nyaa:222": signalWithID(true, idB)},
 		byPair: map[string]bool{
 			pairKey(hashA, "nyaa:111"): true,
 			pairKey(hashB, "nyaa:222"): true,
@@ -41,14 +36,18 @@ func FuzzCurationLookup_neverAdmitsCrossWiredIdentity(f *testing.F) {
 	f.Add("", "https://evil.example/view/111", "")
 	f.Add("<redacted>", "", "")
 	f.Fuzz(func(t *testing.T, hash, infoURL, guid string) {
-		isBest, matched, conflict := set.lookup(upstreamNyaa, hash, infoURL, guid)
-		if !matched {
-			if isBest {
+		verdict := set.lookup(upstreamNyaa, hash, infoURL, guid)
+		tvdbID := verdict.tvdbID
+		if !verdict.matched {
+			if verdict.isBest {
 				t.Fatalf("lookup(%q, %q, %q) = (isBest=true, matched=false), want isBest false when unmatched", hash, infoURL, guid)
+			}
+			if tvdbID != 0 || verdict.sonarrTitle != "" {
+				t.Fatalf("lookup(%q, %q, %q) stamped tvdb id %d / twin title %q on an unmatched item", hash, infoURL, guid, tvdbID, verdict.sonarrTitle)
 			}
 			return
 		}
-		if conflict {
+		if verdict.conflict {
 			t.Fatalf("lookup(%q, %q, %q) reported a conflict on an ADMITTED item", hash, infoURL, guid)
 		}
 		h := validInfoHash(hash)
@@ -73,18 +72,24 @@ func FuzzCurationLookup_neverAdmitsCrossWiredIdentity(f *testing.F) {
 		if curatedHash && key != "" && !set.byPair[pairKey(h, key)] {
 			t.Fatalf("lookup matched cross-wired identity: hash %q with key %q (no persisted co-membership)", h, key)
 		}
+		if tvdbID != 0 {
+			if id := set.byHash[h].vote.id; curatedHash && id > 0 && id != tvdbID {
+				t.Fatalf("lookup stamped tvdb id %d while the accepted hash %q holds %d", tvdbID, h, id)
+			}
+			if id := set.byKey[key].vote.id; key != "" && id > 0 && id != tvdbID {
+				t.Fatalf("lookup stamped tvdb id %d while the accepted key %q holds %d", tvdbID, key, id)
+			}
+		}
 	})
 }
 
-// FuzzUpstreamParams_limitIsAlwaysTheDecoderWindow exercises the search
-// proxy's forwarded-limit rule with arbitrary client-controlled limit values.
-// Invariant: no client value reaches the upstream as a limit - the forwarded
-// window is always maxItems, the caps-advertised bound parseTorznab rejects a
-// response above. This pins h-f12's contract in both directions: an
-// over-contract limit can never turn a search into a rejected fetch, and a
-// small client limit (Sonarr sends 100) can never truncate the upstream page
-// before curation filters it, which used to hide a curated release sitting
-// past the client's page size.
+// FuzzUpstreamParams_limitIsAlwaysTheDecoderWindow exercises the search proxy's
+// forwarded-limit rule with arbitrary client-controlled limit values. Invariant: no
+// client value reaches the upstream as a limit - the forwarded window is always
+// maxItems, the caps-advertised bound parseTorznab rejects a response above. That holds
+// in both directions: an over-contract limit can never turn a search into a rejected
+// fetch, and a small client limit (Sonarr sends 100) can never truncate the upstream
+// page before curation filters it, hiding a curated release past the client's page size.
 func FuzzUpstreamParams_limitIsAlwaysTheDecoderWindow(f *testing.F) {
 	f.Add("100")
 	f.Add("1000")

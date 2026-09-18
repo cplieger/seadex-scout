@@ -33,19 +33,20 @@ const (
 	emptyCell = "-"
 	// unknownCell marks a column whose fact was never established, as distinct
 	// from emptyCell's positive "there is nothing here". The angle brackets are
-	// load-bearing: escapeCell entity-encodes < and >, so no upstream release
-	// group can render this cell's bytes.
+	// load-bearing: escapeCell entity-encodes < and >, so no upstream group can
+	// render this cell's bytes.
 	unknownCell = "<unknown>"
 )
 
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
-	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
-	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
-	VerdictUnverified:  "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all, so alignment could not be verified.",
-	VerdictNoFile:      "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
-	VerdictBest:        "You already have SeaDex's best release.",
-	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
+	VerdictUnlisted:     "You have a release SeaDex does not list as best or alt.",
+	VerdictAlt:          "You have a listed alt; SeaDex marks a different release best.",
+	VerdictUnverified:   "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
+	VerdictUnattributed: "A film or special filed inside Sonarr's season-0 bucket, where nothing attributes one file to one entry, so the app offers this entry in the feed and never compares it. The groups shown are what the bucket holds.",
+	VerdictNoFile:       "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
+	VerdictBest:         "You already have SeaDex's best release.",
+	VerdictNotOnSeaDex:  "In your library and recognized as anime (Fribb-mapped), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
 }
 
 // renderJSON renders the report as indented JSON (the machine-ingestible copy).
@@ -100,11 +101,12 @@ func renderMarkdown(r *Report) string {
 }
 
 // annotationLegend explains the parenthesized Scope annotations and the Notes
-// column, so the report file stays self-explanatory for a reader who has only
-// the file.
+// column, so the report file stands on its own.
 const annotationLegend = "Scope annotations: `approx` - the comparison used a coarse bucket " +
 	"(the season-0 specials bucket, or a whole-series aggregate spanning more than one season or group), " +
 	"so the verdict means \"present somewhere in the series\" rather than an exact per-season attribution; " +
+	"on an `offered` row it means the bucket was never attributed at all, since nothing ties one file in the " +
+	"season-0 bucket to one entry; " +
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
@@ -244,7 +246,7 @@ func scopeCell(row *Row) string {
 }
 
 // scopeLabel renders the comparison scope recorded on the row at build time:
-// "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
+// "movie", "offered", the TVDB season ("S2"), or "series" for a whole-series
 // comparison. A pure reader of Row.Scope, so the label cannot drift from the
 // comparison actually performed; the JSON renderer publishes the same value
 // through align.ScopeKind.MarshalJSON, keeping kind and number separable.
@@ -403,6 +405,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 		"have_unlisted", r.Totals[string(VerdictUnlisted)],
 		"no_file", r.Totals[string(VerdictNoFile)],
 		"unverified", r.Totals[string(VerdictUnverified)],
+		"unattributed", r.Totals[string(VerdictUnattributed)],
 		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
 		"incomplete_mappings", len(r.Incomplete))
 	for i := range r.Rows {
@@ -478,33 +481,18 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// Reap stale atomicfile temps first: a crash between temp create and rename
 	// orphans a .atomicfile-<digits>.tmp in the report dir forever otherwise. The
 	// caller holds report.lock, so no concurrent writer owns an in-flight temp, and
-	// a missing dir is not an error.
-	//
-	// Failed is reported and Removed is not. A reclaimed orphan is a sweep doing
-	// its job; a candidate the sweep could not unlink means orphans are
-	// ACCUMULATING in a directory this app writes to every cycle, and only an
-	// operator can fix it. That is not implied by any louder failure here:
-	// _measured_ on a sticky (1777) directory holding a temp owned by another
-	// uid, the sweep reports Failed=1 while a normal atomic write in the same
-	// directory still succeeds, so nothing else would surface it. report.dir is
-	// an operator-supplied absolute path whose mode and ownership this app does
-	// not control, and the process is non-root, so that shape is reachable here.
-	// Unreadable is deliberately not read: it is only ever incremented below the
-	// swept directory, and this sweep is flat, so it is a structural zero.
+	// a missing dir is not an error. Failed is surfaced because report.dir's mode
+	// and ownership are the operator's and no louder failure here implies it; a
+	// flat sweep never increments Unreadable.
 	sweep, cleanErr := atomicfile.CleanupStaleTemps(ctx, dir, time.Hour, atomicfile.WithLogger(log))
 	if cleanErr != nil {
 		// No dir attribute: the redacting logger would mask it anyway.
 		log.Warn("stale report temp cleanup failed", "error", cleanErr)
 	}
 	if sweep.Failed > 0 {
-		// WARN, not ERROR, and this is the one place the app's level rule needs
-		// its exception stated. The condition does NOT self-clear (a benign race
-		// is not counted: atomicfile returns ENOENT on either lstat or remove as
-		// neither removed nor failed, so a Failed is a permission or IO fault an
-		// operator must fix), which by the letter of the rule reads as ERROR.
-		// ERROR here is wired to the cycle-fault alert, and the cycle did its
-		// job — the report wrote. Paging a fault for a disk-fill precursor would
-		// misdirect exactly as escalating ErrRecordUnusable would have.
+		// WARN even though the condition needs an operator: ERROR is wired to the
+		// cycle-fault alert and the cycle did its job, so paging here would
+		// misdirect.
 		log.Warn("stale report temps could not be reclaimed; orphans are accumulating in the report dir",
 			"failed", sweep.Failed,
 			"remediation", "check ownership and mode on report.dir and on the temps named at debug level")
@@ -551,9 +539,7 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// The Markdown half rides a detached context: the JSON rename has committed, so
 	// from here a cancellation would half-publish permanently - the next run probes
 	// a fresh stem (reportPairStem needs BOTH halves free), orphaning the .json.
-	// The extra grace is armed ONLY once a shutdown has landed: an unconditional
-	// ceiling would cap the SECOND half of the pair below the budget the FIRST half
-	// just had, so on a slow mount every report would half-publish permanently.
+	// markdownWriteGrace owns why the extra budget is armed only after a shutdown.
 	mdCtx := context.WithoutCancel(ctx)
 	if ctx.Err() != nil {
 		var cancel context.CancelFunc
@@ -576,12 +562,10 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 }
 
 // markdownWriteGrace bounds the detached Markdown write AFTER A SHUTDOWN, and
-// only then: with no signal pending the caller's context carries no deadline and
-// the JSON half is written under exactly that context, so a ceiling on the
-// markdown half alone could only lose the pair. It is deliberately short because
-// it is spent ON TOP of a budget that has already run out - the bytes are
-// rendered, so it covers one atomic write+rename+fsync inside Docker's 10s stop
-// grace.
+// only then: with no signal pending the JSON half runs under the caller's
+// deadline-free context, so capping the markdown half alone could only lose the
+// pair. Short because it is spent ON TOP of an exhausted budget and the bytes are
+// already rendered: one atomic write+rename+fsync inside Docker's 10s stop grace.
 const markdownWriteGrace = 2 * time.Second
 
 // reportWritten emits the report pair's success record. It is the ONE call site
@@ -788,16 +772,10 @@ func joinBestAttrs(releases []Release) (groups, notes string) {
 	first := true
 	annotatedAny := false
 	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
-		// Both SEPARATORS are charged together, so one budget refusing a
-		// separator stops both attributes at the same element count.
-		//
-		// The values are not: writeBestGroupAttr cuts incrementally (see its
-		// doc for why), so a budget exhausted INSIDE a group leaves
-		// seadex_best holding a partial trailing slot that seadex_best_notes
-		// never gained. The pairs before it still align, and String() marks
-		// the aggregate truncated, so the trailing unpaired fragment is
-		// visible as one — this is the accepted scope of the coupling, not a
-		// claim that the two attributes can never differ in length.
+		// Both SEPARATORS are charged together, so one budget refusing a separator
+		// stops both attributes at the same element count. The VALUES are not: a
+		// budget exhausted inside a group leaves seadex_best with a partial trailing
+		// slot seadex_best_notes never gained, which is the coupling's accepted scope.
 		if !first && (!gj.WriteSep(",") || !nj.WriteSep(";")) {
 			return false
 		}
@@ -822,16 +800,8 @@ func joinBestAttrs(releases []Release) (groups, notes string) {
 // writeBestGroupAttr streams one group into j with its commas encoded, so a comma
 // in upstream group text cannot read as the seadex_best separator that
 // seadex_best_notes binds to positionally. It cuts incrementally rather than
-// escaping the whole value first, so a multi-MB group is never copied.
-//
-// Incremental ON PURPOSE, and the alternative was tried and rejected: charging
-// the escaped value atomically (the shape the tracker=url pair uses) means a
-// group that alone exceeds the budget is refused entirely, so the attribute
-// carries nothing but the truncation marker instead of naming the group that
-// overflowed. TestBestGroupDedupeIsBoundedAndCaseInsensitive pins the emitted
-// form at exactly the cap plus the marker, which is that decision: for a
-// SINGLE oversized value there is no partner slot to desynchronize, and a
-// truncated name an operator can read beats a dropped one.
+// escaping the whole value first: a multi-MB group is never copied, and a single
+// oversized group is emitted truncated rather than dropped for the marker alone.
 func writeBestGroupAttr(j *logattr.Joiner, group string) bool {
 	for {
 		before, after, found := strings.Cut(group, ",")

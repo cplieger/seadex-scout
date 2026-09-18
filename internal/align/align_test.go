@@ -52,7 +52,7 @@ func TestScopeKindString(t *testing.T) {
 	}{
 		{"movie", align.ScopeMovie, "movie"},
 		{"season", align.ScopeSeason, "season"},
-		{"special", align.ScopeSpecial, "special"},
+		{"offered", align.ScopeOffered, "offered"},
 		{"whole series", align.ScopeWholeSeries, "series"},
 		{"unknown kind falls back to the series label", align.ScopeKind(99), "series"},
 	}
@@ -79,7 +79,7 @@ func TestScopeKindJSONRoundTrip(t *testing.T) {
 		{align.ScopeWholeSeries, `"series"`},
 		{align.ScopeMovie, `"movie"`},
 		{align.ScopeSeason, `"season"`},
-		{align.ScopeSpecial, `"special"`},
+		{align.ScopeOffered, `"offered"`},
 	} {
 		t.Run(tc.kind.String(), func(t *testing.T) {
 			data, err := json.Marshal(tc.kind)

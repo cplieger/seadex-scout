@@ -184,6 +184,39 @@ func TestFribbRecord_toRecord(t *testing.T) {
 	}
 }
 
+// TestParseFribb_anidbIDDecodes pins the join key into the Anime-Lists
+// mapping-list: anidb_id decodes through the same tolerant flexInt every other
+// numeric id uses, so a quoted number is kept while null, an absent key and a
+// negative value all read 0 (absent). Without it the whole mapping-list join has
+// no key.
+func TestParseFribb_anidbIDDecodes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "number", body: `[{"anilist_id":1,"anidb_id":12276}]`, want: 12276},
+		{name: "quoted_number", body: `[{"anilist_id":1,"anidb_id":"12276"}]`, want: 12276},
+		{name: "null", body: `[{"anilist_id":1,"anidb_id":null}]`, want: 0},
+		{name: "absent", body: `[{"anilist_id":1}]`, want: 0},
+		{name: "negative", body: `[{"anilist_id":1,"anidb_id":-5}]`, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recs, err := parseFribb([]byte(tc.body), discardLogger())
+			if err != nil {
+				t.Fatalf("parseFribb(%s) error: %v", tc.body, err)
+			}
+			if len(recs) != 1 {
+				t.Fatalf("parseFribb(%s) = %d records, want 1", tc.body, len(recs))
+			}
+			if recs[0].AniDBID != tc.want {
+				t.Errorf("parseFribb(%s).AniDBID = %d, want %d", tc.body, recs[0].AniDBID, tc.want)
+			}
+		})
+	}
+}
+
 func TestStringList_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name string
@@ -436,8 +469,8 @@ func TestParseFribb_toleratesVariantRecords(t *testing.T) {
 		t.Fatalf("parseFribb: %v", err)
 	}
 	want := []Record{
-		{Type: "TV", IMDbIDs: []string{"tt001"}, AniListID: 42, TvdbID: 101, SeasonTvdb: 3},
-		{Type: "MOVIE", IMDbIDs: []string{"tt002", "tt003"}, TmdbMovies: []int{303, 404}, AniListID: 43},
+		{Type: "TV", SeasonKind: SeasonPresent, IMDbIDs: []string{"tt001"}, AniListID: 42, TvdbID: 101, SeasonTvdb: 3},
+		{Type: "MOVIE", SeasonKind: SeasonAbsent, IMDbIDs: []string{"tt002", "tt003"}, TmdbMovies: []int{303, 404}, AniListID: 43},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseFribb variant records = %#v, want %#v", got, want)
@@ -683,14 +716,13 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 }
 
 // TestFribbDecodeCounts_aggregateIdentifierBudget pins the aggregate retained-
-// identifier budget. maxFribbIdentifiers bounds EACH of the two retained lists
-// on one record (imdb_id and themoviedb_id.movie), so without this budget the
-// per-record caps multiply (maxFribbRecords x 2 x maxFribbIdentifiers admits
-// ~4.2M retained ids from a body under maxMapBytes). A record that
-// would breach the budget is refused with the fatal
-// errIdentifierBudgetExceeded sentinel (add returns it rather than counting it
-// as a malformed record), which the decode loop propagates as a whole-document
-// refusal rather than a tolerated per-record skip.
+// identifier budget. maxFribbIdentifiers bounds EACH of the two retained lists on
+// one record (imdb_id and themoviedb_id.movie), so without this budget the
+// per-record caps multiply (maxFribbRecords x 2 x maxFribbIdentifiers admits ~4.2M
+// retained ids from a body under maxMapBytes). A record that would breach the
+// budget is refused with the fatal errIdentifierBudgetExceeded sentinel, which the
+// decode loop propagates as a whole-document refusal rather than a tolerated
+// per-record skip.
 func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	atCap := Record{AniListID: 1, IMDbIDs: make([]string, maxFribbIdentifiers)}
 	var c fribbDecodeCounts
@@ -791,17 +823,14 @@ func TestRecordFromFormat_normalizesRoutingType(t *testing.T) {
 	}
 }
 
-// TestParseFribb_approachingIdentifierBudgetWarns pins the aggregate
-// identifier budget's advance warning, the sibling of the record cap's
-// (TestParseFribb_approachingRecordCapWarns): a breach of
-// maxFribbIdentifiersTotal is a whole-document refusal that never self-heals -
-// every cycle re-downloads the multi-MB body, rejects it, and the map stays
-// frozen stale while the persisted rejection streak escalates to ERROR - so
-// the three-quarter warning is the operator's only heads-up while refreshes
-// still succeed. It drives logFribbParseDiagnostics directly because reaching
-// the threshold through a real body needs ~786k retained identifiers (~12k
-// records at the 64-per-record cap), and the threshold arithmetic is what is
-// under test, not the decode that feeds it.
+// TestParseFribb_approachingIdentifierBudgetWarns pins the aggregate identifier
+// budget's advance warning: a breach of maxFribbIdentifiersTotal is a
+// whole-document refusal that never self-heals - every cycle re-downloads the
+// multi-MB body, rejects it, and the map stays frozen stale while the persisted
+// rejection streak escalates to ERROR - so the three-quarter warning is the
+// operator's only heads-up while refreshes still succeed. It drives
+// logFribbParseDiagnostics directly because reaching the threshold through a real
+// body needs ~786k retained identifiers (~12k records at the 64-per-record cap).
 func TestParseFribb_approachingIdentifierBudgetWarns(t *testing.T) {
 	const threshold = maxFribbIdentifiersTotal / 4 * 3
 

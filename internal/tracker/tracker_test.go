@@ -7,17 +7,10 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// TestLookupByHostFailClosed pins the fail-closed guards of the
-// URL-host tracker resolver consumed by the link-safety gate
-// (trackerlink.usableAbsolute), the indexer's host->scope routing
-// (scopeOfHost) and the exported AnimeBytes host predicate
-// (IsAnimeBytesHost): an
-// empty host, a bare DNS-root dot, whitespace-only input, an empty-labeled
-// host (a leading dot or an inner ".." - no resolvable DNS name has an empty
-// label), and a non-ASCII homograph label never match, and neither a
-// suffix-confusion host nor a parent-domain spoof survives the dot-delimited
-// comparison. Positive cases pin the documented tolerance: exact host,
-// real dot-delimited subdomain, case folding, and one DNS-root trailing dot.
+// TestLookupByHostFailClosed pins the fail-closed guards of the URL-host tracker resolver
+// consumed by the link-safety gate (trackerlink.usableAbsolute), the indexer's host->scope
+// routing (scopeOfHost) and the exported AnimeBytes host predicate (IsAnimeBytesHost).
+// The table's own group comments carry what each group defends.
 func TestLookupByHostFailClosed(t *testing.T) {
 	tests := []struct {
 		host     string
@@ -79,14 +72,16 @@ func TestLookupByHostFailClosed(t *testing.T) {
 }
 
 // TestLookupByHostPinsHostSet pins the host allowlist the URL-host
-// resolver derives from the tracker table (one https site host per canonical
-// tracker, order-insensitive by construction), so a table edit that drops or
-// respells a tracker's site cannot silently shrink the allowlist the
-// link-safety gate keys on; an unknown host never matches.
+// resolver derives from the tracker table (each tracker's BaseURL host plus
+// every altHosts entry, order-insensitive by construction), so a table edit
+// that drops or respells a tracker's site cannot silently shrink the allowlist
+// the link-safety gate keys on; an unknown host never matches.
 func TestLookupByHostPinsHostSet(t *testing.T) {
 	wantHosts := map[string]string{
 		"animebytes.tv":  NameAnimeBytes,
+		"animetosho.xyz": NameAnimeTosho,
 		"animetosho.org": NameAnimeTosho,
+		"animetosho.net": NameAnimeTosho,
 		"nyaa.si":        NameNyaa,
 		"rutracker.org":  NameRuTracker,
 	}
@@ -115,7 +110,8 @@ func TestLookupByHostPinsHostSet(t *testing.T) {
 // downgrades a tracker to http or breaks its URL would silently weaken every
 // consumer; the host-set pin above does not guard the scheme.
 func TestTableBaseURLsAreHTTPS(t *testing.T) {
-	for _, tr := range table {
+	for _, e := range table {
+		tr := e.tracker
 		u, err := url.Parse(tr.BaseURL)
 		if err != nil {
 			t.Errorf("tracker %s BaseURL %q does not parse: %v", tr.Name, tr.BaseURL, err)
@@ -130,15 +126,13 @@ func TestTableBaseURLsAreHTTPS(t *testing.T) {
 	}
 }
 
-// TestLookupByHostRejectsClassifiedHomographs pins the cross-library
-// behavior this app actually relies on, instead of unit-testing the urlform
-// dependency (whose own suite already pins homograph preservation and
-// IsASCIIHost's byte boundary): a fold-laundering homograph host classified
-// by urlform.Classify must be preserved as non-ASCII evidence AND rejected by
-// LookupByHost's ASCII gate. Removing the gate would let both planted
-// subdomains pass HostMatchesDomain (strings.ToLower folds U+0130 to ASCII
-// 'i' and U+212A to ASCII 'k'), so this test fails if either side launders
-// or accepts a homograph.
+// TestLookupByHostRejectsClassifiedHomographs pins the cross-library behavior this app
+// relies on rather than unit-testing the urlform dependency (whose own suite pins
+// homograph preservation and IsASCIIHost's byte boundary): a fold-laundering homograph
+// host classified by urlform.Classify must be preserved as non-ASCII evidence AND
+// rejected by LookupByHost's ASCII gate. Without the gate both planted subdomains pass
+// HostMatchesDomain (strings.ToLower folds U+0130 to ASCII 'i' and U+212A to 'k'), so
+// this fails if either side launders or accepts a homograph.
 func TestLookupByHostRejectsClassifiedHomographs(t *testing.T) {
 	tests := []string{
 		"https://an\u0130mebytes.tv/torrents.php?id=1",
@@ -157,23 +151,14 @@ func TestLookupByHostRejectsClassifiedHomographs(t *testing.T) {
 	}
 }
 
-// TestLookupByRelativeURL pins the structural relative-URL tracker
-// resolver consumed by filter's AB evidence gate and the link publisher:
-// only SeaDex's documented AnimeBytes relative page shape - a "/torrents.php"
-// path carrying a "torrentid" query parameter - resolves (to the canonical
-// AnimeBytes table entry), case-insensitively on the path. A host-less
-// slashless value is read as that same path rooted (the href reading the link
-// publisher resolves), so "torrents.php?...torrentid=..." resolves while
-// "animebytes.tv/torrents.php?..." does not - its rooted reading is
-// "/animebytes.tv/torrents.php", not the AB page path. Everything else fails
-// closed: an absolute URL (tracker identity must then come from the host gate,
-// never this shape), a protocol-relative form, a different relative path, a
-// torrentid-less torrents.php query, and the empty string. Two rows are the
-// cross-library homograph acceptance pins (cf.
-// TestLookupByHostRejectsClassifiedHomographs): urlform.EqualASCIIFold's
-// ASCII-only fold is what keeps U+017F in the path and U+0130 in the query
-// name from laundering onto the ASCII protocol tokens a full Unicode fold
-// would accept, so this gate must refuse both.
+// TestLookupByRelativeURL pins the structural relative-URL tracker resolver consumed by
+// filter's AB evidence gate and the link publisher: only SeaDex's documented AnimeBytes
+// relative page shape - a "/torrents.php" path carrying a "torrentid" query parameter -
+// resolves, to the canonical table entry, case-insensitively on the path. A host-less
+// slashless value is read as that same path ROOTED (the href reading the link publisher
+// resolves), which is why "animebytes.tv/torrents.php?..." fails: its rooted reading is
+// "/animebytes.tv/torrents.php". urlform.EqualASCIIFold folds ASCII only, which is what
+// refuses the two Unicode rows a full Unicode fold would accept.
 func TestLookupByRelativeURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -268,16 +253,13 @@ func TestTrackerHost(t *testing.T) {
 	}
 }
 
-// TestLookupByHostMostSpecificWins pins the most-specific-match rule
-// LookupByHost documents as its defense against Go's randomized map
-// iteration order: when two canonical table hosts both match a host (one a
-// subdomain of the other - the sukebei.nyaa.si-beside-nyaa.si shape the
-// comment names), the longer canonical wins, deterministically. No table
-// entry is a subdomain of another today, so bestLen is always 0 when a match
-// lands and the length comparison is never exercised by any other test; this
-// test swaps in a nested two-entry index so the comparison decides the
-// answer. The repeat loop makes the map-order dependence a certain failure
-// rather than a coin flip when the comparison is dropped.
+// TestLookupByHostMostSpecificWins pins the most-specific-match rule LookupByHost
+// documents as its defense against Go's randomized map iteration order: when two canonical
+// table hosts both match (one a subdomain of the other), the longer canonical wins
+// deterministically. No table entry is a subdomain of another today, so bestLen is always
+// 0 when a match lands and nothing else exercises the length comparison; this test swaps
+// in a nested two-entry index so the comparison decides the answer, and the repeat loop
+// makes the map-order dependence a certain failure rather than a coin flip if it is lost.
 func TestLookupByHostMostSpecificWins(t *testing.T) {
 	parent := Tracker{Name: "ParentSite", Type: Public, BaseURL: "https://example.test"}
 	child := Tracker{Name: "ChildSite", Type: Private, BaseURL: "https://sub.example.test"}

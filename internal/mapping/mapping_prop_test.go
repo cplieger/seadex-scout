@@ -11,13 +11,11 @@ import (
 // TestDeduplicateRecordsIndexOracle property-checks deduplicateRecords against
 // buildIndex, the consumer whose semantics it exists to mirror: for any record
 // list, the deduplicated slice must index bijectively (len == index len) and
-// produce exactly the same effective index as the raw input, every surviving
-// ID must be positive and unique, each survivor must be the WHOLE last
-// occurrence of its ID (every field, not a projection - routing and refresh
-// acceptance consume Type, TmdbMovies, IMDbIDs, and SeasonTvdb too), and the
-// operation must be idempotent. This is the invariant the acceptance guards
-// depend on (row counts and identifier coverage are measured on the
-// deduplicated set so they match what consumers receive).
+// produce exactly the same effective index as the raw input, every surviving ID
+// must be positive and unique, each survivor must be the WHOLE last occurrence of
+// its ID (every field, since routing and refresh acceptance consume Type,
+// TmdbMovies, IMDbIDs and SeasonTvdb too), and the operation must be idempotent.
+// The acceptance guards measure their counts on the deduplicated set.
 func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
@@ -43,14 +41,14 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			r.IMDbIDs = slices.Clone(r.IMDbIDs)
 			frozen[i] = r
 		}
-		rawIdx := buildIndex(frozen)
+		rawIdx := buildIndex(frozen, nil)
 
 		out := deduplicateRecords(records)
 
-		if got, want := buildIndex(out).Len(), len(out); got != want {
+		if got, want := buildIndex(out, nil).Len(), len(out); got != want {
 			t.Fatalf("deduplicated set indexes to %d entries, want bijective %d", got, want)
 		}
-		outIdx := buildIndex(out)
+		outIdx := buildIndex(out, nil)
 		if rawIdx.Len() != outIdx.Len() {
 			t.Fatalf("index size diverged: raw %d, deduplicated %d", rawIdx.Len(), outIdx.Len())
 		}
@@ -64,10 +62,9 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			}
 			seen[r.AniListID] = struct{}{}
 			// buildIndex is the last-write-wins oracle: the survivor must be
-			// the WHOLE last occurrence, every field intact. buildIndex also
-			// canonicalizes on insertion (h-f25 moved the id-usability rule to
-			// that boundary), so the comparison is against the canonical form of
-			// the survivor - canonicalize allocates fresh slices, so this cannot
+			// the WHOLE last occurrence, every field intact. It canonicalizes on
+			// insertion, so the comparison is against the canonical form of the
+			// survivor - canonicalize allocates fresh slices, so this cannot
 			// disturb the deduplicated set.
 			got, ok := rawIdx.Lookup(r.AniListID)
 			want := r
