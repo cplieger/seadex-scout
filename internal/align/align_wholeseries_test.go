@@ -3,6 +3,7 @@ package align_test
 import (
 	"maps"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/align"
@@ -19,7 +20,7 @@ var wholeRec = mapping.Record{Type: "TV", SeasonTvdb: 0}
 // per-season groups.
 func decideWhole(seasons map[int][]string, best, alt []string) align.Decision {
 	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: seasons, HasFile: true}
-	return align.Decide(item, &wholeRec, best, alt)
+	return align.Decide(item, &wholeRec, best, alt, nil, nil)
 }
 
 // TestDecideWholeSeriesConservative pins the conservative per-real-season
@@ -100,13 +101,10 @@ func TestDecideWholeSeriesNilAlt(t *testing.T) {
 }
 
 // TestDecideWholeSeriesUnknownEvidence pins the conservative propagation of
-// unverifiability through the whole-series aggregation: a season with unknown
-// group evidence (the release.NoGroup sentinel, on either side of its
-// comparison) blocks the have-best claim - the series reads unverified, never
-// best - while a PROVEN downgrade in another season (unlisted or alt) still
-// outranks the unknown: the proof stands regardless of what the unknown
-// season might hold, so the actionable verdict is not hidden behind
-// unverifiability.
+// unverifiability: a season with unknown group evidence (release.NoGroup on either
+// side) blocks the have-best claim, while a PROVEN downgrade in another season
+// still outranks the unknown, since the proof stands regardless of what the
+// unknown season holds.
 func TestDecideWholeSeriesUnknownEvidence(t *testing.T) {
 	best := []string{"a&c"}
 	alt := []string{"kh"}
@@ -206,13 +204,11 @@ var standingConservativeness = map[align.Standing]int{
 	align.StandingUnlisted:   3,
 }
 
-// TestDecideWholeSeriesMonotoneDowngrade property-checks the conservative
-// aggregation's core invariant: growing a whole-series item by one more filed
-// real season can only hold or downgrade the standing (Best -> Unverified ->
-// Alt -> Unlisted), never upgrade it - the per-season flags only accumulate,
-// so an already-proven downgrade or unverifiability cannot be washed out by
-// adding evidence. A violation would mean one season's verdict masked
-// another's, the exact bug the conservative aggregation exists to prevent.
+// TestDecideWholeSeriesMonotoneDowngrade property-checks the aggregation's core
+// invariant: growing a whole-series item by one more filed real season can only
+// hold or downgrade the standing (Best -> Unverified -> Alt -> Unlisted), never
+// upgrade it, so an already-proven downgrade cannot be washed out by adding
+// evidence. A violation means one season's verdict masked another's.
 func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
 	groupPool := []string{"a&c", "kh", "kitsune", "nogrp", "sam"}
 	best := []string{"a&c"}
@@ -236,13 +232,10 @@ func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
 // TestDecideWholeSeriesMatchesMostConservativeSeason property-checks the
 // whole-series aggregation against an oracle built from the package's OWN
 // single-unit path: the aggregate standing must equal the most conservative
-// (Best < Unverified < Alt < Unlisted) of the standings Decide produces when
-// each filed real season is judged alone as a mapped single season, and
-// no-file exactly when no real season carries files. This is the documented
-// contract ("the most conservative verdict") expressed as a cross-path
-// consistency check, so a drift between summarizeWholeSeries's per-season
-// ladder and unitStanding's - the divergence class the shared package exists
-// to prevent - fails the property.
+// (Best < Unverified < Alt < Unlisted) of the standings Decide produces when each
+// filed real season is judged alone as a mapped single season, and no-file exactly
+// when no real season carries files. So a drift between summarizeWholeSeries's
+// per-season ladder and unitStanding's fails the property.
 func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
 	groupPool := []string{"a&c", "kh", "kitsune", "nogrp", "sam"}
 	rapid.Check(t, func(t *rapid.T) {
@@ -261,7 +254,7 @@ func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
 			}
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{season: groups}}
 			rec := mapping.Record{Type: "TV", SeasonTvdb: season}
-			single := align.Decide(item, &rec, best, alt)
+			single := align.Decide(item, &rec, best, alt, nil, nil)
 			if !filed || standingConservativeness[single.Standing] > standingConservativeness[want] {
 				want = single.Standing
 			}
@@ -273,4 +266,144 @@ func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
 				whole.Standing, want, seasons, best, alt)
 		}
 	})
+}
+
+// TestDecideWholeSeriesDropsSiblingMappedSeasons is the sibling ruling's shipped
+// half: a real season a SIBLING record maps positively belongs to that sibling's
+// own comparison, so folding it into this entry's aggregate contaminates the
+// verdict with a run the entry does not cover. Both live false findings go silent
+// here, Gintama and Bleach.
+//
+// The last case is the reachable edge: an item whose every filed season belongs to
+// siblings summarizes to zero seasons, which is StandingNoFile.
+func TestDecideWholeSeriesDropsSiblingMappedSeasons(t *testing.T) {
+	best := []string{"cbt"}
+	tests := []struct {
+		name     string
+		seasons  map[int][]string
+		siblings []int
+		want     align.Standing
+	}{
+		{
+			name:     "Gintama: the sibling-owned seasons stop contaminating the aggregate",
+			seasons:  map[int][]string{1: {"cbt"}, 2: {"cbt"}, 3: {"cbt"}, 4: {"cbt"}, 5: {"kh"}, 6: {"kh"}, 7: {"kh"}, 8: {"kh"}, 10: {"kh"}},
+			siblings: []int{5, 6, 7, 8, 10},
+			want:     align.StandingBest,
+		},
+		{
+			name:     "Bleach: one sibling-owned season dropped",
+			seasons:  map[int][]string{1: {"cbt"}, 17: {"kitsune"}},
+			siblings: []int{17},
+			want:     align.StandingBest,
+		},
+		{
+			name:     "without the summary the same item is contaminated",
+			seasons:  map[int][]string{1: {"cbt"}, 17: {"kitsune"}},
+			siblings: nil,
+			want:     align.StandingUnlisted,
+		},
+		{
+			name:     "every filed season belongs to siblings, so nothing of the entry's own is on disk",
+			seasons:  map[int][]string{5: {"kh"}, 6: {"kh"}},
+			siblings: []int{5, 6},
+			want:     align.StandingNoFile,
+		},
+		{
+			name:     "a sibling season with no files on disk changes nothing",
+			seasons:  map[int][]string{1: {"cbt"}},
+			siblings: []int{2, 3},
+			want:     align.StandingBest,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
+			d := align.Decide(item, &wholeRec, best, nil, tt.siblings, nil)
+			if d.Standing != tt.want {
+				t.Errorf("Standing = %v, want %v (groups %v)", d.Standing, tt.want, d.Groups)
+			}
+			for _, season := range tt.siblings {
+				for _, group := range tt.seasons[season] {
+					if slices.Contains(d.Groups, group) {
+						t.Errorf("Groups = %v, want no group from the sibling-owned season %d", d.Groups, season)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDecideSiblingSeasonsOnlyReachTheWholeSeriesAggregate pins the parameter's
+// scope: every other comparison is already exact about its unit, so a sibling
+// season must not remove a season-scoped entry's own season or touch a movie.
+func TestDecideSiblingSeasonsOnlyReachTheWholeSeriesAggregate(t *testing.T) {
+	best := []string{"cbt"}
+	seasonItem := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{3: {"cbt"}}}
+	seasonRec := mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent, SeasonTvdb: 3}
+	if d := align.Decide(seasonItem, &seasonRec, best, nil, []int{3}, nil); d.Standing != align.StandingBest {
+		t.Errorf("season-scoped Standing = %v, want %v (a cour-split sibling must not blank the entry's own season)", d.Standing, align.StandingBest)
+	}
+	movieItem := &library.Item{Arr: library.ArrRadarr, Groups: []string{"cbt"}, HasFile: true}
+	movieRec := mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent}
+	if d := align.Decide(movieItem, &movieRec, best, nil, []int{1, 2}, nil); d.Standing != align.StandingBest {
+		t.Errorf("movie Standing = %v, want %v", d.Standing, align.StandingBest)
+	}
+}
+
+// TestDecideOwnSeasonsJudgeASplitShowPerEntry pins the report rule: when the
+// Anime-Lists mapping-list names an entry's own TVDB seasons, a whole-series
+// comparison judges exactly those. Fairy Tail's three entries share one eight-season
+// Sonarr series, and with the verdicts arranged to differ (S1-S4 best, S5-S7 alt,
+// S8 unlisted) each Groups is its own seasons' union, where the sibling rule alone
+// judges each against all eight and returns the same contaminated unlisted thrice.
+func TestDecideOwnSeasonsJudgeASplitShowPerEntry(t *testing.T) {
+	best, alt := []string{"cbt"}, []string{"kh"}
+	item := &library.Item{Arr: library.ArrSonarr, HasFile: true, SeasonGroups: map[int][]string{
+		1: {"cbt"}, 2: {"cbt"}, 3: {"cbt"}, 4: {"cbt"},
+		5: {"kh"}, 6: {"kh"}, 7: {"kh"},
+		8: {"erai"},
+	}}
+	tests := []struct {
+		name       string
+		seasons    []mapping.SeasonRange
+		wantGroups []string
+		want       align.Standing
+	}{
+		{
+			name: "6662 S1-S4", seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 48}, {Season: 2, First: 49, Last: 96}, {Season: 3, First: 97, Last: 150}, {Season: 4, First: 151, Last: 175}},
+			wantGroups: []string{"cbt"}, want: align.StandingBest,
+		},
+		{
+			name: "9980 S5-S7", seasons: []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}, {Season: 7, First: 91, Last: 102}},
+			wantGroups: []string{"kh"}, want: align.StandingAlt,
+		},
+		{
+			name: "13295 S8", seasons: []mapping.SeasonRange{{Season: 8, First: 1, Last: 51}},
+			wantGroups: []string{"erai"}, want: align.StandingUnlisted,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := align.Decide(item, &wholeRec, best, alt, nil, tt.seasons)
+			if d.Kind != align.ScopeWholeSeries {
+				t.Fatalf("Kind = %v, want %v", d.Kind, align.ScopeWholeSeries)
+			}
+			if d.Standing != tt.want {
+				t.Errorf("Standing = %v, want %v (groups %v)", d.Standing, tt.want, d.Groups)
+			}
+			if !slices.Equal(d.Groups, tt.wantGroups) {
+				t.Errorf("Groups = %v, want exactly the entry's own seasons' union %v", d.Groups, tt.wantGroups)
+			}
+		})
+	}
+	// Without the ranges the same item is contaminated for every entry: the
+	// sibling rule has nothing to drop, and every season votes.
+	if d := align.Decide(item, &wholeRec, best, alt, nil, nil); d.Standing != align.StandingUnlisted || len(d.Groups) != 3 {
+		t.Errorf("without ranges Standing = %v groups %v, want %v over all three groups", d.Standing, d.Groups, align.StandingUnlisted)
+	}
+	// Ranges win over the sibling set when both are present: a season a range
+	// names is judged even if a sibling also maps it.
+	if d := align.Decide(item, &wholeRec, best, alt, []int{1, 2, 3, 4}, tests[0].seasons); d.Standing != align.StandingBest {
+		t.Errorf("ranges plus siblings Standing = %v, want %v (the ranges are the one source)", d.Standing, align.StandingBest)
+	}
 }

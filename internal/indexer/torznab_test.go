@@ -53,6 +53,43 @@ func TestRenderFeed_usesStableGUIDFallback(t *testing.T) {
 	}
 }
 
+// TestRenderFeedEmitsTheFilmTwinUnderItsOwnGUID pins the wire shape of a
+// twin-bearing record's expansion: two <item>s with DISTINCT <guid>s (Prowlarr
+// dedupes on the GUID string, so a shared one would collapse the pair), the
+// original under Movies and its stored title, the twin under Anime and the S00E
+// title, both carrying the same tvdbid and infohash.
+func TestRenderFeedEmitsTheFilmTwinUnderItsOwnGUID(t *testing.T) {
+	stored := twinBearingStoredItem()
+	rendered, emitted := renderFeed([]item{stored.item, sonarrTwin(&stored.item)})
+	if emitted != 2 {
+		t.Fatalf("renderFeed emitted %d items, want 2", emitted)
+	}
+	parsed, err := parseTorznab([]byte(rendered))
+	if err != nil {
+		t.Fatalf("parseTorznab(renderFeed(original, twin)): %v", err)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("parsed %d items, want 2:\n%s", len(parsed), rendered)
+	}
+	orig, twin := parsed[0], parsed[1]
+	if orig.GUID != stored.GUID || twin.GUID != stored.SonarrGUID || orig.GUID == twin.GUID {
+		t.Errorf("guids = %q and %q, want the stored %q and the twin's %q, distinct", orig.GUID, twin.GUID, stored.GUID, stored.SonarrGUID)
+	}
+	if orig.Title != stored.Title || twin.Title != stored.SonarrTitle {
+		t.Errorf("titles = %q and %q, want %q and %q", orig.Title, twin.Title, stored.Title, stored.SonarrTitle)
+	}
+	if !slices.Equal(orig.Categories, []int{catMovies}) || !slices.Equal(twin.Categories, []int{catAnime}) {
+		t.Errorf("categories = %v and %v, want [%d] and [%d]", orig.Categories, twin.Categories, catMovies, catAnime)
+	}
+	if orig.InfoHash != twin.InfoHash {
+		t.Errorf("infohash = %q and %q, want one hash on both", orig.InfoHash, twin.InfoHash)
+	}
+	tvdb := `<torznab:attr name="tvdbid" value="79525"/>`
+	if got := strings.Count(rendered, tvdb); got != 2 {
+		t.Errorf("rendered %d tvdbid attrs, want one on each item:\n%s", got, rendered)
+	}
+}
+
 // TestWriteItemSaturatesPeerCount pins writeItem's overflow guard: attrInt
 // accepts counts through math.MaxInt, so a malformed-but-valid upstream item
 // with seeders and leechers both at math.MaxInt must render a peers attr
@@ -462,15 +499,14 @@ func TestParseTorznabSkipsUnknownItemChildren(t *testing.T) {
 	}
 }
 
-// TestRenderFeedSanitizesUnsafeRunes pins the emit-boundary rune policy
-// (escTo composes runesafe.Sanitize under the XML escaper): xml.EscapeText
-// alone passes C1 controls, bidi controls, and U+2028/U+2029 through raw,
-// and every text value here is upstream-controlled (tracker titles via
-// Prowlarr, SeaDex file names synthesized into titles) headed for arr web
-// UIs and operator terminals. The rendered document must never carry the
-// unsafe classes - whatever the item's origin (live search passthrough,
-// persisted journal, or a legacy snapshot written before this policy) -
-// while the in-memory value stays raw for matching and persistence.
+// TestRenderFeedSanitizesUnsafeRunes pins the emit-boundary rune policy (escTo composes
+// runesafe.Sanitize under the XML escaper): xml.EscapeText alone passes C1 controls, bidi
+// controls and U+2028/U+2029 through raw, and every text value here is
+// upstream-controlled (tracker titles via Prowlarr, SeaDex file names synthesized into
+// titles) headed for arr web UIs and operator terminals. The rendered document must never
+// carry the unsafe classes - whatever the item's origin (live search passthrough,
+// persisted journal, or a legacy snapshot) - while the in-memory value stays raw for
+// matching and persistence.
 func TestRenderFeedSanitizesUnsafeRunes(t *testing.T) {
 	title := "Show \u202e[G]\u0085 \u2028S01"
 	got, _ := renderFeed([]item{{Title: title, GUID: "https://nyaa.si/view/1"}})
@@ -510,7 +546,7 @@ func TestRenderFeedTruncatesOversizedDocument(t *testing.T) {
 	}
 }
 
-// TestItemXMLTitleProvenance pins the h-f20 wire-boundary design for
+// TestItemXMLTitleProvenance pins the wire-boundary design for
 // tracker-controlled titles: the decode struct tags Title as
 // runesafe.Untrusted, so any emission of the WIRE form (a bare slog attr,
 // an fmt.Errorf) is sanitized automatically, while toItem unwraps via Raw()
@@ -810,18 +846,14 @@ func TestParseTorznabTrimsWhitespacePaddedFields(t *testing.T) {
 	}
 }
 
-// TestItemSizeResolutionChain pins itemSize's three-source resolution order
-// and its zero-as-unknown normalization. The size a Torznab item reports is
-// what the arr's size-based quality and limit rules judge, and the canonical
-// Torznab carrier is the size torznab:attr - the source no other test asserts,
-// so losing that arm renders a real release as a zero-byte one. The malformed
-// <size> case pins the package's documented fail-closed decode stance (the
-// same reason TestParseTorznabRejectsTruncatedResponses refuses partial data):
-// the whole response fails so the fetch retries. An EMPTY numeric is the
-// deliberate exception on both carriers (element and enclosure length): it
-// decodes as zero, exactly as encoding/xml's own numeric conversion does, so a
-// single empty numeric degrades into the zero-as-unknown domain this chain
-// falls through instead of rejecting every other curated item in the response.
+// TestItemSizeResolutionChain pins itemSize's three-source resolution order and its
+// zero-as-unknown normalization. The size a Torznab item reports is what the arr's
+// size-based quality and limit rules judge, and the canonical Torznab carrier is the size
+// torznab:attr - the source no other test asserts, so losing that arm renders a real
+// release as a zero-byte one. The malformed <size> case pins the package's fail-closed
+// decode stance: the whole response fails so the fetch retries. An EMPTY numeric is the
+// deliberate exception on both carriers, decoding as zero exactly as encoding/xml does,
+// so one empty numeric degrades into the zero-as-unknown domain this chain falls through.
 func TestItemSizeResolutionChain(t *testing.T) {
 	tests := map[string]struct {
 		inner   string
@@ -952,4 +984,59 @@ func TestParseTorznabNormalizesCategoryAttrs(t *testing.T) {
 			t.Errorf("rendered feed lost the anime default category:\n%s", rendered)
 		}
 	})
+}
+
+// TestWriteItemRendersTvdbIDAttr pins the attribute the offer rests on for the
+// film-and-special class: without it Sonarr rejects the release as UnknownSeries
+// before any quality profile runs, so the category alone is not sufficient.
+//
+// It asserts the FULL attr sequence rather than presence, because the attr is
+// positioned deliberately beside infohash and a reordering that moved size or
+// downloadvolumefactor would be invisible to a presence assertion.
+func TestWriteItemRendersTvdbIDAttr(t *testing.T) {
+	base := item{
+		Title: "Lelouch of the Resurrection", GUID: "https://nyaa.si/view/2133634",
+		Categories: []int{catMovies, catAnime}, Size: 7, InfoHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		DownloadVolumeFactor: dvfBest, Seeders: 3, Leechers: 1,
+	}
+	attrNames := func(it item) []string {
+		var b strings.Builder
+		writeItem(&b, &it)
+		var names []string
+		for _, chunk := range strings.Split(b.String(), `<torznab:attr name="`)[1:] {
+			names = append(names, chunk[:strings.Index(chunk, `"`)])
+		}
+		return names
+	}
+
+	withID := base
+	withID.TvdbID = 79525
+	wantWith := []string{"category", "category", "size", "infohash", "tvdbid", "downloadvolumefactor", "uploadvolumefactor", "seeders", "peers"}
+	if got := attrNames(withID); !slices.Equal(got, wantWith) {
+		t.Errorf("attrs with a tvdb id = %v, want %v (no other attr may move)", got, wantWith)
+	}
+	var b strings.Builder
+	writeItem(&b, &withID)
+	if want := `<torznab:attr name="tvdbid" value="79525"/>`; !strings.Contains(b.String(), want) {
+		t.Errorf("rendered item is missing %s:\n%s", want, b.String())
+	}
+
+	wantWithout := []string{"category", "category", "size", "infohash", "downloadvolumefactor", "uploadvolumefactor", "seeders", "peers"}
+	if got := attrNames(base); !slices.Equal(got, wantWithout) {
+		t.Errorf("attrs without a tvdb id = %v, want %v", got, wantWithout)
+	}
+}
+
+// TestValidPersistedItemRefusesNegativeTvdbID pins the new field's decode gate,
+// the shape its Size sibling already has: a hand-edited or corrupted snapshot
+// must not carry an id that renders as a negative attr.
+func TestValidPersistedItemRefusesNegativeTvdbID(t *testing.T) {
+	it := journalItem{Title: "Show", GUID: "https://nyaa.si/view/1", TvdbID: -1, Key: "nyaa:1"}
+	if validPersistedItem(&it) {
+		t.Error("validPersistedItem(negative TvdbID) = true, want false")
+	}
+	it.TvdbID = 0
+	if !validPersistedItem(&it) {
+		t.Error("validPersistedItem(absent TvdbID) = false, want true (0 means the entry has none)")
+	}
 }

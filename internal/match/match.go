@@ -35,11 +35,22 @@ const (
 
 // Match is the result of linking one SeaDex entry.
 type Match struct {
-	Item   *library.Item
-	Arr    string
-	Source Source
-	Entry  seadex.Entry
-	Record mapping.Record
+	Item *library.Item
+	// SiblingSeasons are the positive TVDB seasons OTHER Fribb records sharing
+	// this record's tvdb id map (mapping.Index.SiblingSeasons), resolved here
+	// because the matcher is where the record and the index meet. A whole-series
+	// comparison drops them from its aggregate; every other scope ignores them.
+	// Nil for a record with no tvdb id and for an unmapped entry.
+	SiblingSeasons []int
+	// Seasons are the entry's OWN TVDB seasons from the Anime-Lists mapping-list
+	// (mapping.Index.MappingFor), nil when the list names none. A whole-series
+	// comparison judges exactly these seasons when present, so a split show's
+	// entries are each judged against their own run.
+	Seasons []mapping.SeasonRange
+	Arr     string
+	Source  Source
+	Entry   seadex.Entry
+	Record  mapping.Record
 }
 
 // InLibrary reports whether the entry was matched to a library item.
@@ -240,7 +251,7 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 		// already routed correctly this is the same value recordArr returned.
 		arr = item.Arr
 		r.cov.Hits[arr]++
-		return Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: SourceID}
+		return Match{Item: item, SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceID}
 	}
 	r.cov.Hits[arr]++
 	// A record that carries its arr id but missed FindByID is simply not in
@@ -248,7 +259,17 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	// keeps the fallback off the ~thousands of SeaDex entries the operator
 	// does not have, which otherwise dominate a cold cycle's AniList
 	// traffic.
-	return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+	return Match{SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+}
+
+// seasonsOf reads the entry's own TVDB season ranges off the Anime-Lists
+// mapping-list, nil when the list names none for this record.
+func (r *matchRun) seasonsOf(rec *mapping.Record) []mapping.SeasonRange {
+	m, ok := r.idx.MappingFor(rec)
+	if !ok {
+		return nil
+	}
+	return m.Seasons
 }
 
 // matchUnmappedEntry links an entry with no Fribb record through the AniList
@@ -304,9 +325,9 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	}
 	r.cov.Unmapped[arr]++
 	if matched := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log); matched != nil {
-		return Match{Item: matched, Entry: *e, Record: *rec, Arr: matched.Arr, Source: SourceTitle}
+		return Match{Item: matched, SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: matched.Arr, Source: SourceTitle}
 	}
-	return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+	return Match{SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
 }
 
 // recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).
@@ -394,11 +415,14 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 	}
 }
 
-// FindByID looks up a library item by the arr IDs in a mapping record. The
-// match must be arr-consistent: a MOVIE record resolves only to a Radarr movie
-// and a series record only to a Sonarr series, so a movie whose Fribb record
-// carries a TV themoviedb_id (or an IMDb id TVDB reuses for the parent series)
-// cannot silently link to the same-named Sonarr series.
+// FindByID looks up a library item by the arr IDs in a mapping record, own arr
+// first: a MOVIE record tries its movie TMDB ids, then its IMDb ids, then its
+// TVDB id; every other type tries its TVDB id, then the movie TMDB ids, and its
+// IMDb ids never reach Radarr (TVDB reuses a film's IMDb id on its parent series).
+//
+// The ONE licensed reader of mapping.Record.AllIDs, because it holds both
+// indexes: byTvdb is Sonarr-only and byTmdb/byImdb Radarr-only, so a map miss IS
+// the arr gate.
 func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	if rec.IsMovie() {
 		return li.findMovie(rec)
@@ -415,19 +439,24 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	return li.findMovieByTMDB(rec.TmdbMovies)
 }
 
-// findMovie resolves a MOVIE record to a Radarr movie by TMDB movie id, then by
-// IMDb id (the fields mapping.Record.RoutedIDs enumerates, preserving the
-// TMDB-before-IMDb lookup order). Only Radarr items match (arr-consistency,
-// see FindByID).
+// findMovie resolves a MOVIE record by TMDB movie id, then by IMDb id - both
+// Radarr-only - and only then by its TVDB id, which reaches the Sonarr series
+// TVDB files the film under. The first two run ahead of it so a film the operator
+// owns in Radarr keeps the comparable match.
 func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
-	_, tmdbMovies, imdbIDs := rec.RoutedIDs()
+	tvdb, tmdbMovies, imdbIDs := rec.AllIDs()
 	if it := li.findMovieByTMDB(tmdbMovies); it != nil {
 		return it
 	}
-	for _, imdb := range imdbIDs { // RoutedIDs returns only canonical, usable ids
+	for _, imdb := range imdbIDs { // AllIDs returns only canonical ids
 		if it := li.byImdb[imdb]; it != nil { // byImdb holds only Radarr items
 			return it
 		}
+	}
+	if tvdb > 0 {
+		// byTvdb is populated only with Sonarr items (indexIDs' arr switch), so the
+		// map miss IS the arr gate here exactly as on the series branch.
+		return li.byTvdb[tvdb]
 	}
 	return nil
 }

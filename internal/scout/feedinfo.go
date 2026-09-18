@@ -29,8 +29,17 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 		rec, ok := idx.Lookup(alID)
 		if ok {
 			info.IsMovie = rec.IsMovie()
+			info.TvdbID = rec.TvdbID
 			info.Season, info.SeasonKnown = resolvedSeason(&rec)
-			if it := find(&rec); it != nil && strings.TrimSpace(it.Title) != "" {
+			it := find(&rec)
+			info.Target = arrTarget(it)
+			applyMappingList(idx, &rec, it, &info)
+			// The item's title is taken only when the item is the entry's own work.
+			// FindByID resolves a MOVIE record to the Sonarr series TVDB files it
+			// under, and that series is a DIFFERENT work, so a film on a Sonarr item
+			// falls through to the memo tier and keeps its own name.
+			ownWork := !info.IsMovie || info.Target != indexer.TargetSonarr
+			if it != nil && ownWork && strings.TrimSpace(it.Title) != "" {
 				info.Title, info.Year = it.Title, it.Year
 				return info
 			}
@@ -50,13 +59,58 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 	}
 }
 
-// resolvedSeason resolves the season a Fribb record pins, once, for the feed: its
-// positive TVDB season, or the specials bucket for a Fribb-typed special (a MAPPED
-// season zero - a special IS filed under season 0 by the arrs). An
-// absolute-numbered run, a title-only match and an untyped entry pin no season,
-// and so does a movie, mirroring align's Radarr-first dispatch. The season rule
-// itself is align.RecordSeason, so the feed and the comparison scope cannot
-// drift; this exists so the indexer never re-interprets raw Fribb fields.
+// applyMappingList projects the Anime-Lists mapping-list's two facts onto the
+// feed metadata. The entry's TVDB season ranges ride along whatever the target
+// (a pack's season token is a per-torrent decision the indexer makes over
+// them). The film's special episode is stamped only for the OFFERED class - a
+// record whose season scope is the season-0 bucket - resolved to a Sonarr series
+// with a title: that is the one shape where the feed serves a second title the
+// series' Sonarr can match, and a series node carrying an identically shaped
+// row for one of its own specials must not gain a twin on every pack.
+func applyMappingList(idx *mapping.Index, rec *mapping.Record, it *library.Item, info *indexer.EntryInfo) {
+	m, mapped := idx.MappingFor(rec)
+	if !mapped {
+		return
+	}
+	if len(m.Seasons) > 0 {
+		info.Seasons = make([]indexer.SeasonRange, len(m.Seasons))
+		for i, r := range m.Seasons {
+			info.Seasons[i] = indexer.SeasonRange{Season: r.Season, First: r.First, Last: r.Last}
+		}
+	}
+	if m.SpecialEpisode <= 0 || it == nil || info.Target != indexer.TargetSonarr || strings.TrimSpace(it.Title) == "" {
+		return
+	}
+	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
+		return
+	}
+	info.SpecialEpisode = m.SpecialEpisode
+	info.SeriesTitle = it.Title
+}
+
+// arrTarget names which arr a resolved library item belongs to, three-valued so
+// "not in the library" stays distinguishable from "Radarr". It is what decides
+// the feed categories, which the movie flag alone cannot: measured, 131 curated
+// MOVIE records carry a tvdb id without resolving to Sonarr against 50 that do.
+func arrTarget(it *library.Item) indexer.ArrTarget {
+	switch {
+	case it == nil:
+		return indexer.TargetNone
+	case it.Arr == library.ArrRadarr:
+		return indexer.TargetRadarr
+	default:
+		return indexer.TargetSonarr
+	}
+}
+
+// applyMemoTyping fills the media typing - and the season that typing implies -
+// from the persisted AniList memo. It runs only when Fribb supplied no ARR
+// ROUTING EVIDENCE at all: no record, or a record BOTH untyped and id-less. An
+// untyped record that still routes a positive TVDB id is itself evidence of a
+// series, so the caller's gate keeps it out of here - a memoized format OUTLIVES
+// the id-less shape it was fetched for, and re-typing from a stale MOVIE format
+// is a routing bug. Without the memo an entry the app KNEW was a movie routed to
+// Anime/5070, which Radarr never sees.
 func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
 	format, hasFormat := memo.StaleFormat(alID)
 	if !hasFormat {
@@ -76,14 +130,11 @@ func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
 	}
 }
 
-// applyMemoTyping fills the media typing - and the season that typing implies -
-// from the persisted AniList memo. It runs only when Fribb supplied no ARR
-// ROUTING EVIDENCE at all: no record, or a record BOTH untyped and id-less. An
-// untyped record that still routes a positive TVDB id is itself evidence of a
-// series, so the caller's gate keeps it out of here - a memoized format OUTLIVES
-// the id-less shape it was fetched for, and re-typing from a stale MOVIE format
-// is a routing bug. Without the memo an entry the app KNEW was a movie routed to
-// Anime/5070, which Radarr never sees.
+// resolvedSeason resolves the season a Fribb record pins, once, for the feed: its
+// positive TVDB season, or the specials bucket for a MAPPED season zero. An
+// absolute-numbered run, a title-only match and an untyped entry pin no season,
+// and so does a MOVIE, for the reason applyMemoTyping states. The rule itself is
+// align.RecordSeason, so the feed and the comparison scope cannot drift.
 func resolvedSeason(rec *mapping.Record) (season int, known bool) {
 	if rec.IsMovie() {
 		return 0, false

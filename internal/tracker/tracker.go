@@ -41,11 +41,10 @@ const (
 	Unknown Type = "unknown"
 )
 
-// Tracker is one entry of the canonical SeaDex tracker table: the single home
-// of the tracker vocabulary (canonical name, accepted aliases, public/private
-// class, and site base URL) that classification, link building, and feed
-// routing all consume, so a tracker addition cannot land in one consumer's
-// map and silently miss the others.
+// Tracker is the identity of one canonical SeaDex tracker - name,
+// public/private class, site base URL - that classification, link building and
+// feed routing all consume, so a tracker addition cannot land in one
+// consumer's map and silently miss the others.
 type Tracker struct {
 	// Name is the canonical tracker name, as SeaDex spells it.
 	Name string
@@ -54,29 +53,48 @@ type Tracker struct {
 	BaseURL string
 	// Type is the tracker's obtainability class.
 	Type Type
+}
+
+// tableEntry is one row of the canonical table: a tracker's identity plus the
+// recognition lists the indexes are built from. The lists stay off Tracker so
+// a resolved value carries no slice into this package's shared state.
+type tableEntry struct {
+	tracker Tracker
 	// aliases are additional accepted spellings; the canonical Name is
 	// always accepted case-insensitively and is not repeated here.
 	aliases []string
+	// altHosts are further hostnames the site serves the same torrent pages
+	// on, accepted by LookupByHost beside BaseURL's own host. Recognition
+	// only: a link is always built from BaseURL.
+	altHosts []string
 }
 
 // table is the canonical table, limited to the trackers SeaDex actually
 // uses (verified against the live API: Nyaa and AB carry ~all entries;
 // AnimeTosho and RuTracker are a negligible tail).
-var table = []Tracker{
-	{Name: NameNyaa, Type: Public, BaseURL: "https://nyaa.si"},
-	{Name: NameAnimeBytes, aliases: []string{"ab"}, Type: Private, BaseURL: "https://animebytes.tv"},
-	{Name: NameAnimeTosho, Type: Public, BaseURL: "https://animetosho.org"},
-	{Name: NameRuTracker, Type: Public, BaseURL: "https://rutracker.org"},
+var table = []tableEntry{
+	{tracker: Tracker{Name: NameNyaa, Type: Public, BaseURL: "https://nyaa.si"}},
+	{
+		tracker: Tracker{Name: NameAnimeBytes, Type: Private, BaseURL: "https://animebytes.tv"},
+		aliases: []string{"ab"},
+	},
+	{
+		tracker: Tracker{Name: NameAnimeTosho, Type: Public, BaseURL: "https://animetosho.xyz"},
+		// .xyz is the site's current home; .org labels itself an archive and
+		// .net is the mirror its front page names. All three serve /view/<id>.
+		altHosts: []string{"animetosho.org", "animetosho.net"},
+	},
+	{tracker: Tracker{Name: NameRuTracker, Type: Public, BaseURL: "https://rutracker.org"}},
 }
 
 // byAlias indexes the table by lowercased canonical name and alias for
 // Lookup.
 var byAlias = func() map[string]Tracker {
 	m := make(map[string]Tracker, len(table)*2)
-	for _, t := range table {
-		m[urlform.FoldHostASCII(t.Name)] = t
-		for _, a := range t.aliases {
-			m[urlform.FoldHostASCII(a)] = t
+	for _, e := range table {
+		m[urlform.FoldHostASCII(e.tracker.Name)] = e.tracker
+		for _, a := range e.aliases {
+			m[urlform.FoldHostASCII(a)] = e.tracker
 		}
 	}
 	return m
@@ -162,15 +180,20 @@ func (t Tracker) Host() string {
 	return urlform.FoldHostASCII(u.Hostname())
 }
 
-// byHost indexes the table by canonical lowercased site hostname
-// (derived from BaseURL, so the table stays the single home of the hosts).
-// An entry whose BaseURL does not parse to a hostname is omitted, so a
-// malformed table entry fails closed instead of matching arbitrary hosts.
+// byHost indexes the table by lowercased site hostname: BaseURL's own host
+// plus every altHosts entry, so the table stays the single home of the hosts.
+// A host that does not parse or fold to a hostname is omitted, so a malformed
+// table entry fails closed instead of matching arbitrary hosts.
 var byHost = func() map[string]Tracker {
-	m := make(map[string]Tracker, len(table))
-	for _, t := range table {
-		if h := t.Host(); h != "" {
-			m[h] = t
+	m := make(map[string]Tracker, len(table)*2)
+	for _, e := range table {
+		if h := e.tracker.Host(); h != "" {
+			m[h] = e.tracker
+		}
+		for _, alt := range e.altHosts {
+			if h := urlform.FoldHostASCII(strings.TrimSpace(alt)); h != "" {
+				m[h] = e.tracker
+			}
 		}
 	}
 	return m

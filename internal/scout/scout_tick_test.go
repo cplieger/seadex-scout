@@ -124,20 +124,14 @@ func lastSummaryCounter(t *testing.T, recorder *capture.Recorder, key string) (i
 	return value, seen
 }
 
-// TestCycleDispatchesReconcileThenTicks pins the dispatcher, which is the whole
-// point of the new Cycle: iteration 0 and every reconcileEvery-th iteration run
-// the FULL pass, and every other iteration runs a tick.
-//
-// Iteration 0 must reconcile because everything downstream assumes a complete
-// pass has happened - the notifier's finding set is empty until one runs, and a
-// tick compares against a cached library only a walk can populate. The periodic
-// reconcile is the backstop for everything a window structurally cannot see (a
-// deletion, an in-place torrent edit, an outage longer than the window), so a
-// dispatch that drifted toward ticking forever would make all of those gaps
-// permanent while every iteration still looked healthy.
-//
-// The two paths are counted through the SeaDex seam rather than through logs: a
-// reconcile is exactly one FetchFull, and a tick is exactly one CountWindow.
+// TestCycleDispatchesReconcileThenTicks pins the dispatcher: iteration 0 and
+// every reconcileEvery-th iteration run the FULL pass, every other one a tick.
+// Iteration 0 must reconcile because a tick compares against a cached library
+// only a walk can populate and the notifier's finding set is empty until then;
+// the periodic reconcile is the backstop for what a window structurally cannot
+// see (a deletion, an in-place torrent edit, an outage longer than the window).
+// Counted through the SeaDex seam: a reconcile is exactly one FetchFull, a tick
+// exactly one CountWindow.
 func TestCycleDispatchesReconcileThenTicks(t *testing.T) {
 	logger, recorder := capture.New()
 	// An empty window keeps each tick to its probe, so the counts stay
@@ -351,17 +345,12 @@ func TestTickEmptyWindowSkipsFetch(t *testing.T) {
 	}
 }
 
-// TestTickOversizeWindowSkipsFetchAndEscalates pins the other wedge: a window
-// too large to fetch in one request.
-//
-// The tick must not fetch a prefix of it. The walk sorts on `created`, so page 1
-// of an oversized window holds the OLDEST records - precisely not what a
-// freshness pass wants - so the correct answer is to defer to the reconcile.
-//
-// The escalation to ERROR at the latch is deliberate and matters: nothing in
-// this stack alerts on WARN, and while this condition holds the fast path is
-// FROZEN (no new RSS item, no new finding) with only the daily reconcile still
-// working. That is a real fault with a real remedy, so it must page.
+// TestTickOversizeWindowSkipsFetchAndEscalates pins a window too large to fetch
+// in one request: the tick must not fetch a prefix of it, because the walk sorts
+// on `created` so page 1 holds the OLDEST records, precisely not what a freshness
+// pass wants. The latch escalates to ERROR because nothing in this stack alerts on
+// WARN, and while the condition holds the fast path is FROZEN (no new RSS item, no
+// new finding) with only the daily reconcile still working.
 func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 	logger, recorder := capture.New()
 	sea := &fakeSeaDex{
@@ -493,14 +482,10 @@ func TestTickProductiveResetsTheOversizeRun(t *testing.T) {
 }
 
 // TestTickAdvancesTheFeedAndNeverRebuilds pins the feed dispatch in both
-// directions, because the two calls are not interchangeable and an inverted
-// dispatch is silent.
-//
-// Rebuild REPLACES the search curation index from its argument, so a Rebuild
-// from a window would shrink it from the whole catalogue to the window's handful
-// and take Prowlarr search down until the next full pass. Advance from a full
-// catalogue would be merely wasteful in comparison - it never rewrites the
-// index - which is why the tick-must-not-Rebuild half is the load-bearing one.
+// directions, because an inverted dispatch is silent. Rebuild REPLACES the search
+// curation index from its argument, so a Rebuild from a window shrinks it to the
+// window's handful and takes Prowlarr search down until the next full pass;
+// Advance never rewrites the index, so the must-not-Rebuild half is load-bearing.
 func TestTickAdvancesTheFeedAndNeverRebuilds(t *testing.T) {
 	logger := scoutTestLogger()
 	window := []seadex.Entry{windowEntry(1001, 501), windowEntry(1002, 502)}
@@ -559,26 +544,14 @@ func TestTickFeedAdvanceFailureKeepsTheTickHealthy(t *testing.T) {
 	}
 }
 
-// TestTickDeletesOnlyRowsItEvaluated pins the deletion authority the tick hands
-// the notifier, which is the subtlest correctness property of the whole fast
-// path.
-//
-// Authority is the set of entries the tick EVALUATED, not the set it fetched.
-// Both halves matter:
-//
-//   - a row whose entry the tick never carried must be carried forward: it is
-//     absent from the finding set for exactly the same reason a resolved one is,
-//     and deleting it would clear an alert while the condition still holds, then
-//     re-raise it as new on the next reconcile;
-//   - a row whose entry the tick DID carry but could not link to a library item
-//     must ALSO be carried. An entry whose mapping record no longer resolves, or
-//     whose AniList lookup definitively found nothing, produces no finding
-//     because the app lost track of the item - not because the condition was
-//     fixed. That case is not in IncompleteIDs, so nothing else protects it.
-//
-// The set is asserted through the notifier's own behaviour rather than by
-// intercepting the call: three rows are seeded, the window carries two of their
-// owners, and only the one that resolves to a library item may go.
+// TestTickDeletesOnlyRowsItEvaluated pins the tick's deletion authority: the set
+// of entries it EVALUATED, not the set it fetched. A row whose entry the tick
+// never carried must be carried forward, or the alert clears while the condition
+// holds and re-raises as new on the next reconcile. A row whose entry the tick DID
+// carry but could not link to a library item must ALSO be carried: the app lost
+// track of the item rather than the condition being fixed, and that case is not in
+// IncompleteIDs, so nothing else protects it. Asserted through the notifier's own
+// behaviour: three rows seeded, the window carries two owners, one resolves.
 func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 	logger, recorder := capture.New()
 	notifier := notify.NewNotifier(logger, nil)
@@ -635,29 +608,13 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 }
 
 // TestTickInterruptedDuringMatchingPublishesNothingAndPersists pins the tick's
-// post-match shutdown OUTCOME, which is the sharpest deletion-authority contract
-// on the fast path and the one exit whose three effects differ most from its
-// siblings'.
-//
-// match.Matcher.Match returns early on a cancelled context, so the match set it
-// hands back is TRUNCATED, and evaluatedIDs derives ReportScoped's deletion
-// authority from exactly that set - so a tick that published it would tell the
-// notifier that entries it never finished evaluating are resolved, silently, on
-// any redeploy that lands mid-match. It emits no completion line for the same
-// reason: an interrupted pass did not complete, and counting it turns a redeploy
-// into a pass that ran and failed.
-//
-// What it MUST still do is persist. The three effects are owned per cause
-// (tickInterrupted), and declining the completion line is not a reason to discard
-// the revalidated Fribb validators the pass already accepted - a discarded
-// revalidation re-downloads ~5.9 MB on the next boot, and the persisted
-// refresh-rejection streak the mapping escalation reads only means anything if it
-// survives a restart. The reconcile's finishInterruptedMatch draws exactly that
-// line one file over.
-//
-// The reconcile's half of the publication contract is pinned by
-// TestCycleShutdownDuringMatchingWarnsShutdownNotAniList; the tick's had no test,
-// so nothing failed if the check was removed - or if it kept declining to save.
+// post-match shutdown outcome. match.Matcher.Match returns early on a cancelled
+// context, so the set it hands back is TRUNCATED and evaluatedIDs derives
+// ReportScoped's deletion authority from exactly that set: publishing it would
+// tell the notifier that entries the tick never finished evaluating are resolved.
+// No completion line either, since an interrupted pass did not complete. It must
+// still persist: discarding the revalidated Fribb validators re-downloads ~5.9 MB
+// on the next boot, and the refresh-rejection streak must survive a restart.
 func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) {
 	logger, recorder := capture.New()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -769,25 +726,14 @@ func TestTickNeverWritesTheLibrarySnapshot(t *testing.T) {
 	}
 }
 
-// TestTickUpstreamFailuresAreHealthyAndReportNothing pins both of the tick's
-// failure arms together, because they share one rule: a tick that could not
-// establish what changed CHANGES nothing, and says so.
-//
-// It re-states the finding set unchanged rather than replacing it. Replacing it
-// with an empty set would clear every standing alert (the notifier deletes by
-// omission within its authority), and staying silent instead would let those
-// alerts expire out of their own lookback window and then re-fire as a burst -
-// so the correct behaviour is to keep reporting exactly what was already true,
-// which costs nothing upstream. It also emits the degraded completion line the
-// scan deadman counts, because a silent iteration is indistinguishable from a
-// wedged loop and only the loop's death fits that alert's restart runbook.
-// Neither failure is unhealthy either - container health follows the library
-// ingest, and a restart cannot fix an upstream outage.
-//
-// The two STATE wedge counters must not move on either: they measure what the
-// upstream contains, not whether it answered, and a probe failure counted as an
-// empty window would latch the clock-skew WARN during an ordinary outage. The
-// unreachability streak is the one that does advance.
+// TestTickUpstreamFailuresAreHealthyAndReportNothing pins both failure arms
+// together: a tick that could not establish what changed CHANGES nothing, and says
+// so. It re-states the finding set unchanged - an empty set would clear every
+// standing alert, and silence would let those alerts expire out of their lookback
+// and re-fire as a burst - and emits the degraded completion line the scan deadman
+// counts. Neither failure is unhealthy: container health follows the library
+// ingest. The two STATE wedge counters must not move, because they measure what
+// the upstream contains, not whether it answered; the unreachability streak does.
 func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 	boom := errors.New("upstream boom")
 	tests := map[string]struct {
@@ -915,21 +861,14 @@ func TestTickWindowIsWiderThanTheInterval(t *testing.T) {
 	}
 }
 
-// TestEveryTickExitEmitsALineTheDeadmanCounts is the alerting contract, pinned
-// as one table over every way a tick can end.
-//
-// SeadexScoutScanStalled fires when NO `(cycle|tick) (complete|degraded)` line
-// appears within its window, and its remedy is "restart the container". So every
-// exit a healthy or merely-degraded tick can take must emit one of those lines,
-// or the rule pages for a wedged loop that is not wedged. Two of these exits are
-// measured-normal behaviour rather than faults: the upstream had 154 consecutive
-// empty windows in 90 days of history, and any SeaDex outage longer than the
-// rule's window walks the failed-probe arm every 15 minutes.
-//
-// The same exits must re-state the finding set, because emission is what holds a
-// better-release alert firing: a quiet run longer than that rule's lookback
-// would otherwise resolve every standing finding and re-fire the whole set as
-// new when the upstream next moved.
+// TestEveryTickExitEmitsALineTheDeadmanCounts is the alerting contract, one table
+// over every way a tick can end. SeadexScoutScanStalled fires when NO
+// `(cycle|tick) (complete|degraded)` line appears within its window and its remedy
+// is "restart the container", so every exit a healthy or merely-degraded tick can
+// take must emit one. Two of these exits are measured-normal rather than faults:
+// the upstream had 154 consecutive empty windows in 90 days. The same exits must
+// re-state the finding set, or a quiet run longer than the rule's lookback resolves
+// every standing finding and re-fires the whole set as new.
 func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
 	boom := errors.New("upstream boom")
 	// deadmanVocabulary is the log-message set alerts/logql.yaml's stall rule matches.
@@ -1026,18 +965,12 @@ func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
 }
 
 // TestCycleRetriesReconcileUntilReadyThenGivesUp pins the readiness gate and its
-// bounded retry, which together are the whole mitigation for a false all-clear.
-//
-// The in-memory finding set is empty until a reconcile fills it, so a tick that
-// published before then would emit its handful of window findings as the app's
-// entire state - resolving every other standing condition. Two rules follow:
-// while no reconcile has succeeded the loop RETRIES the reconcile instead of
-// ticking (the dark window is minutes, not a day), and a tick that does run in
-// that state publishes nothing.
-//
-// The retry is bounded because it is a full catalogue fetch plus a full arr
-// walk: retrying forever against a condition that will not clear would run a
-// full pass every 15 minutes against a community-run upstream, which is the
+// bounded retry. The in-memory finding set is empty until a reconcile fills it, so
+// a tick publishing before then would emit its handful of window findings as the
+// app's entire state and resolve every other standing condition: while no reconcile
+// has succeeded the loop RETRIES the reconcile instead of ticking, and a tick that
+// does run publishes nothing. The retry is bounded because a full catalogue fetch
+// plus a full arr walk every 15 minutes against a community-run upstream is the
 // traffic this design exists to remove.
 func TestCycleRetriesReconcileUntilReadyThenGivesUp(t *testing.T) {
 	logger, recorder := capture.New()
@@ -1145,16 +1078,12 @@ func tickDegradedReasons(recorder *capture.Recorder) []string {
 	return reasons
 }
 
-// TestReconcileCompleteIsEmittedByADegradedReconcile pins the other half of that
-// signal's contract: the backstop deadman asks whether the full pass RAN, not
-// whether it was clean.
-//
-// A partial arr walk closes the cycle as degraded, and it still fetched the whole
-// catalogue, walked the whole library it could reach, and rebuilt the whole feed
-// and search index - every gap the 48h window cannot see was covered. Emitting
-// the marker only on the clean path would page SeadexScoutReconcileStalled after
-// three degraded days for a backstop that ran on all three, while the operator
-// already has the `cycle degraded` line telling them about the quality problem.
+// TestReconcileCompleteIsEmittedByADegradedReconcile pins the backstop deadman's
+// question: did the full pass RUN, not was it clean. A partial arr walk closes the
+// cycle as degraded having still fetched the whole catalogue and rebuilt the whole
+// feed and search index, so every gap the 48h window cannot see was covered.
+// Emitting the marker only on the clean path would page
+// SeadexScoutReconcileStalled after three degraded days for a backstop that ran.
 func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 	logger, recorder := capture.New()
 	sonarr := &flakySonarr{
@@ -1194,20 +1123,13 @@ func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 	}
 }
 
-// TestReconcilePrunesTheMemoAndTickDoesNot pins which pass may garbage-collect
-// the AniList memo, which is the whole reason pruning is an explicit call rather
-// than something the match does on its way out.
-//
-// Pruning keeps an expired entry only when SeaDex still lists its AniList id, so
-// the judgement is only sound against a WHOLE catalogue. A tick sees a 48-hour
-// window, so if it pruned it would delete nearly every expired entry in the memo
-// - including the positives the Torznab feed's stale-title tier reads, which
-// silently downgrades those items' RSS titles to the file-name derivation and
-// their category to the default, sending a movie to Sonarr instead of Radarr.
-//
-// The test is also the guard on the failure this shape introduces: pruning now
-// depends on a caller remembering to ask for it, and forgetting means the memo
-// accumulates entries for shows SeaDex no longer carries, forever.
+// TestReconcilePrunesTheMemoAndTickDoesNot pins which pass may garbage-collect the
+// AniList memo. Pruning keeps an expired entry only while SeaDex still lists its
+// AniList id, so the judgement is sound only against a WHOLE catalogue: a tick sees
+// a 48-hour window and would delete nearly every expired entry, including the
+// positives the Torznab feed's stale-title tier reads, downgrading those items' RSS
+// titles and sending a movie to Sonarr instead of Radarr. It also guards the failure
+// an explicit call introduces: a caller forgetting to ask for it.
 func TestReconcilePrunesTheMemoAndTickDoesNot(t *testing.T) {
 	logger := scoutTestLogger()
 	sea := &fakeSeaDex{
@@ -1244,18 +1166,12 @@ func TestReconcilePrunesTheMemoAndTickDoesNot(t *testing.T) {
 }
 
 // TestReconcileAnnouncesItselfBeforeDoingWork pins the one line the scan deadman
-// needs that is not a completion line.
-//
-// Every other line that deadman counts is emitted when a pass FINISHES, so
-// between a container start and the first finished pass an absence rule has
-// nothing to match — and it reads that as a wedged loop. A cold full pass takes
-// ~25 minutes and historically up to 2h, which is why the health marker's lease
-// is floored at three hours; without a start line the deadman would page fifteen
-// minutes into every restart while the app was working normally.
-//
-// It must be emitted BEFORE the walk, not after, and by a gated pass too: a pass
-// that announces itself and then never completes is exactly the wedge the rule
-// should catch, and one that announces itself and then degrades is alive.
+// needs that is not a completion line: every other one is emitted when a pass
+// FINISHES, so between a container start and the first finished pass an absence
+// rule has nothing to match and reads that as a wedged loop, while a cold full pass
+// takes ~25 minutes and historically up to 2h. It must be emitted BEFORE the walk
+// and by a gated pass too, since a pass that announces itself and then never
+// completes is exactly the wedge the rule should catch.
 func TestReconcileAnnouncesItselfBeforeDoingWork(t *testing.T) {
 	for name, tc := range map[string]struct {
 		sea *fakeSeaDex
@@ -1311,20 +1227,14 @@ func (m *rejectingAfterFirstMapping) Load(_ context.Context, prev *mapping.Cache
 	return c, nil, errors.New("fribb refresh refused: indexes to no usable records")
 }
 
-// TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow pins the tick's
-// mapping-unusable OUTCOME, whose three contracts are all silent when they break.
-// With no usable Fribb index nothing can be matched, so comparing anyway would
-// hand ReportScoped an empty finding set with authority over every entry the
-// window carried and resolve conditions that are still true. The scan deadman
-// needs the degraded completion line with reason=mapping-unusable, because a
-// silent iteration is indistinguishable from a wedged loop. And the
-// refresh-rejection streak the mapping escalation reads must still be persisted,
-// or a restart resets it.
-//
-// The reconcile's equivalent gate is pinned twice
-// (TestCycleMappingUnusableReportsNothing and
-// TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept); the tick's half had no
-// test, so a regression that dropped or inverted it kept every tick green.
+// TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow pins three contracts
+// that are all silent when they break. With no usable Fribb index nothing can be
+// matched, so comparing anyway would hand ReportScoped an empty finding set with
+// authority over every entry the window carried and resolve conditions still true.
+// The scan deadman needs the degraded completion line with
+// reason=mapping-unusable, because a silent iteration is indistinguishable from a
+// wedged loop. And the refresh-rejection streak the mapping escalation reads must
+// still be persisted, or a restart resets it.
 func TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow(t *testing.T) {
 	logger, recorder := capture.New()
 	sea := &fakeSeaDex{
@@ -1394,20 +1304,13 @@ func (r *refreshingMapping) Load(_ context.Context, prev *mapping.Cache) (mappin
 	return c, mapping.NewIndex(prev.Records), nil
 }
 
-// TestProductiveTickSkipsTheStateWriteWhenNothingChanged pins the write skip and
-// the one thing that makes it non-trivial.
-//
+// TestProductiveTickSkipsTheStateWriteWhenNothingChanged pins the write skip.
 // state.json is a single ~2.5 MB document dominated by the library snapshot, so
-// persisting a tick's few KB of memo and validators rewrites all of it. At ~92
-// productive ticks a day that is ~230 MB/day of writes, and a tick that renewed
-// no AniList entry and got a 304 for the mapping learned nothing worth any of it.
-//
-// The trap: almost every tick DOES get a 304, and the loader returns the cached
-// map with a fresh FetchedAt. Comparing whole cache values would therefore see a
-// change every time and the skip would never fire, so the comparison excludes
-// that timestamp deliberately. This test is what stops a future "compare the
-// whole struct, it is simpler" from silently restoring the 230 MB - and the
-// second case is what stops the skip from swallowing a real refresh.
+// persisting a tick's few KB of memo and validators rewrites all of it: ~92
+// productive ticks a day is ~230 MB/day for a tick that renewed no AniList entry
+// and got a 304 for the mapping. The trap is that almost every tick DOES get a 304
+// and the loader returns the cached map with a fresh FetchedAt, so the comparison
+// excludes that timestamp deliberately or the skip would never fire.
 func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mapping   MappingSource
@@ -1455,6 +1358,43 @@ func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 					t.Errorf("saves = %d, want the reconcile's %d: a tick that renewed nothing and got an "+
 						"unchanged mapping must not rewrite the whole state document", store.saves, savesAfterReconcile)
 				}
+			}
+		})
+	}
+}
+
+// TestMappingWorthPersistingReadsTheMappingListValidators pins the second
+// upstream's half of the skip: a changed mapping-list validator alone is worth a
+// write (otherwise a tick that accepted the 3.5 MB list re-downloads it every
+// cycle until the reconcile), while a bumped MappingsFetchedAt alone is the 304
+// case and is not.
+func TestMappingWorthPersistingReadsTheMappingListValidators(t *testing.T) {
+	base := func() mapping.Cache {
+		return mapping.Cache{
+			ETag:              "fribb-v1",
+			Records:           []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+			Mappings:          map[int]mapping.Mapping{7: {SpecialEpisode: 2}},
+			MappingsETag:      "list-v1",
+			MappingsFetchedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(c *mapping.Cache)
+		want   bool
+	}{
+		{name: "unchanged", mutate: func(*mapping.Cache) {}, want: false},
+		{name: "only_mappings_fetched_at_moved", mutate: func(c *mapping.Cache) { c.MappingsFetchedAt = time.Now() }, want: false},
+		{name: "mappings_etag_changed", mutate: func(c *mapping.Cache) { c.MappingsETag = "list-v2" }, want: true},
+		{name: "mappings_last_modified_changed", mutate: func(c *mapping.Cache) { c.MappingsLastModified = "Mon, 02 Jan 2006 15:04:05 GMT" }, want: true},
+		{name: "mappings_size_changed", mutate: func(c *mapping.Cache) { c.Mappings[8] = mapping.Mapping{SpecialEpisode: 1} }, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prev, next := base(), base()
+			tc.mutate(&next)
+			if got := mappingWorthPersisting(&prev, &next); got != tc.want {
+				t.Errorf("mappingWorthPersisting(%s) = %v, want %v", tc.name, got, tc.want)
 			}
 		})
 	}

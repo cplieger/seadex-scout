@@ -134,6 +134,84 @@ func indexCurated(entries []seadex.Entry) map[string][]curatedRef {
 	return cur
 }
 
+// indexCuratedByHash indexes the same occurrences by their BARE info hash, the
+// second identity signal a curated release can carry. It exists because the
+// key-grouped index above skips a holder that carries no tracker key at all, and
+// the RSS folds must see the same owner set the search projection folds over -
+// otherwise a reconcile and a tick disagree about the item, and the rendered
+// marker, categories and tvdb id oscillate between pass kinds.
+func indexCuratedByHash(entries []seadex.Entry) map[string][]curatedRef {
+	byHash := make(map[string][]curatedRef)
+	for i := range entries {
+		for j := range entries[i].Torrents {
+			t := &entries[i].Torrents[j]
+			if h := validInfoHash(t.InfoHash); h != "" {
+				byHash[h] = append(byHash[h], curatedRef{entry: &entries[i], torrent: t})
+			}
+		}
+	}
+	return byHash
+}
+
+// tvdbVote folds the tvdb ids of every holder of one release identity into one
+// answer, in THREE states, because two cannot hold "contradicted": a zero would
+// conflate "no holder supplied an id" with "holders disagreed", and the second
+// reads as abstention at the next fold. Holders-agree is decided once per
+// identity, after every holder has been seen.
+type tvdbVote struct {
+	id       int
+	conflict bool
+}
+
+// add records one holder's id. A non-positive id ABSTAINS (204 of the 206
+// asymmetric identities are the parent-series-plus-unmapped-special shape this
+// attribute exists to rescue, so absence must not veto); a second DIFFERENT
+// positive sets the conflict bit.
+func (v *tvdbVote) add(id int) {
+	switch {
+	case id <= 0:
+	case v.id == 0:
+		v.id = id
+	case v.id != id:
+		v.conflict = true
+	}
+}
+
+// merge folds another holder set's vote into this one. The conflict bit travels
+// with it, which is the whole point: a contested vote collapsed to an int before
+// this fold would read as an abstention here, and an agreeing sibling signal would
+// then publish an id its own holders contradict (the search render folds an item's
+// hash signal and its tracker-key signal exactly this way).
+func (v *tvdbVote) merge(other tvdbVote) {
+	if other.conflict {
+		v.conflict = true
+	}
+	v.add(other.id)
+}
+
+// resolve returns the id to render: none on a conflict, and none when no holder
+// supplied one. Measured, the live catalogue has 0 conflicting identities, so the
+// veto is future-safe rather than a live fix - it fails closed.
+func (v tvdbVote) resolve() int {
+	if v.conflict {
+		return 0
+	}
+	return v.id
+}
+
+// renderedItem is one journal render plus the two facts the persisted item cannot
+// carry: the three-state tvdb-id vote, collapsed by the caller once every holder
+// has been seen, and whether an AnimeBytes occurrence was skipped for want of a
+// passkey. The vote is deliberately NOT a field on journalItem - an unexported
+// accumulator on a persisted item would make a carried-verbatim item and a
+// re-rendered one compare unequal over state the wire does not carry.
+type renderedItem struct {
+	twin      twinVote
+	item      journalItem
+	vote      tvdbVote
+	noPasskey bool
+}
+
 // scopeOfKey returns the tracker scope a journal key belongs to (the prefix of
 // its "scope:id" form).
 func scopeOfKey(key string) string {
@@ -156,7 +234,7 @@ func journalIdentityMatches(it *journalItem) bool {
 // occurrences: synthesis from the first RENDERABLE occurrence in ascending AniList-ID
 // order, then best-wins on the marker and category union across all of them (a torrent
 // attached to several entries must not render conflicting duplicates).
-func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor EntryInfoFunc) (it journalItem, ok, noPasskey bool) {
+func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, hashRefs hashLookup, infoFor EntryInfoFunc) (rendered renderedItem, ok bool) {
 	// Deterministic synthesis order: a torrent attached to several entries
 	// must render the same item regardless of catalogue order (marker and
 	// categories are already order-independent folds below).
@@ -174,8 +252,8 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			cmp.Compare(a.torrent.InfoHash, b.torrent.InfoHash),
 			cmp.Compare(a.torrent.Tracker, b.torrent.Tracker),
 			cmp.Compare(
-				synthesizeTitle(a.torrent, infoFor(a.entry.AniListID)),
-				synthesizeTitle(b.torrent, infoFor(b.entry.AniListID)),
+				synthesizeTitle(a.torrent, infoFor.ref(a.entry.AniListID)),
+				synthesizeTitle(b.torrent, infoFor.ref(b.entry.AniListID)),
 			),
 			cmp.Compare(totalSize(a.torrent.Files), totalSize(b.torrent.Files)),
 		)
@@ -187,13 +265,13 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			// passkey): report it so the caller can nudge the operator. Nothing
 			// is published, so the release journals as new once the passkey
 			// arrives (see journalLink).
-			noPasskey = true
+			rendered.noPasskey = true
 		}
 		if !resolved {
 			continue
 		}
-		it = journalItem{
-			Title:                synthesizeTitle(occ.torrent, infoFor(occ.entry.AniListID)),
+		it := journalItem{
+			Title:                synthesizeTitle(occ.torrent, infoFor.ref(occ.entry.AniListID)),
 			GUID:                 classify.PublishURL(occ.torrent),
 			InfoURL:              entryURL(occ.entry.AniListID),
 			DownloadURL:          dl,
@@ -217,7 +295,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			// every reader load then drops as undecodable.
 			continue
 		}
-		foldRefs(&it, refs, infoFor)
+		rendered.vote, rendered.twin = foldRefs(&it, refs, hashRefs, infoFor)
 		if !validPersistedItem(&it) {
 			// An oversized external value (a SeaDex filename synthesized into the
 			// title, an over-long URL) is unservable: renderFeed's XML escaping could
@@ -225,9 +303,10 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			// maxPersistedFieldBytes).
 			continue
 		}
-		return it, true, noPasskey
+		rendered.item = it
+		return rendered, true
 	}
-	return journalItem{}, false, noPasskey
+	return rendered, false
 }
 
 // journalLink resolves the download link for one journal render, splitting the
@@ -247,26 +326,97 @@ func (w *FeedWriter) journalLink(t *seadex.Torrent) (dl string, ok, linkless boo
 	return "", false, false
 }
 
-// foldRefs applies the order-independent folds across all of a torrent's
-// curated occurrences: best-wins on the download-volume-factor marker and
-// category union (a torrent attached to several entries must not render
-// conflicting duplicates).
-func foldRefs(it *journalItem, refs []curatedRef, infoFor EntryInfoFunc) {
-	for _, ref := range refs {
+// hashLookup returns the curated occurrences that carry one bare info hash. It is
+// the second half of a journal identity's owner set; nil is legal and means the
+// caller has no hash index (the folds then see the key occurrences alone).
+type hashLookup func(hash string) []curatedRef
+
+// foldRefs applies the order-independent folds across every HOLDER of this
+// torrent's identity: best-wins on the download-volume-factor marker, the
+// category union, and the two votes it returns for the caller to collapse once
+// every holder has been seen - the tvdb id and the film twin title.
+//
+// All of them see the union of the KEY's occurrences and those sharing only its
+// bare HASH. Without it each fold oscillates between pass kinds, since a
+// reconcile's evidence is key-grouped while a tick adds hash-or-key priors.
+func foldRefs(it *journalItem, refs []curatedRef, hashRefs hashLookup, infoFor EntryInfoFunc) (tvdbVote, twinVote) {
+	var vote tvdbVote
+	var twin twinVote
+	for _, ref := range holdersOf(it, refs, hashRefs) {
 		if ref.torrent.IsBest {
 			it.DownloadVolumeFactor = dvfBest
 		}
-		for _, c := range categoriesFor(infoFor(ref.entry.AniListID).IsMovie) {
-			if !slices.Contains(it.Categories, c) {
-				it.Categories = append(it.Categories, c)
-			}
-		}
+		info := infoFor(ref.entry.AniListID)
+		vote.add(info.TvdbID)
+		title := twinTitle(ref.torrent, &info)
+		twin.add(title)
+		foldHolderCategories(it, &info, title)
 	}
 	// The union above appends in catalogue order, which is the one input
 	// renderJournalItem's sort exists to neutralize: without a canonical order a
 	// torrent attached to both a movie and a series entry persists and serves its
 	// categories in whichever order PocketBase returned the relation in.
 	slices.Sort(it.Categories)
+	return vote, twin
+}
+
+// foldHolderCategories unions one holder's categories into the item. A MOVIE
+// holder whose film has a twin title contributes Movies only: the twin is the
+// item that carries Anime for it, so the original stops offering the film to
+// Sonarr under a title its parser rejects. The drop is MOVIE-only because an
+// OVA- or SPECIAL-typed holder's ONLY category is Anime, and dropping it would
+// leave the list empty. When the twin is later vetoed, stampTwin restores Anime.
+func foldHolderCategories(it *journalItem, info *EntryInfo, twinTitle string) {
+	cats := categoriesFor(info.IsMovie, info.Target)
+	if twinTitle != "" && info.IsMovie {
+		cats = []int{catMovies}
+	}
+	for _, c := range cats {
+		if !slices.Contains(it.Categories, c) {
+			it.Categories = append(it.Categories, c)
+		}
+	}
+}
+
+// stampTwin collapses the film twin vote onto the item, once, after every holder
+// - the pass's own and the carried unevaluated owners - has been seen, and after
+// the item's GUID is final (the twin GUID derives from it). An agreed title sets
+// the two stored fields; a vetoed one (candidates but no agreement) restores the
+// Anime category a MOVIE holder withheld in favor of its twin, so the release
+// serves exactly as it did without the list; nobody voting changes nothing.
+func stampTwin(it *journalItem, twin twinVote) {
+	switch title := twin.resolve(); {
+	case title != "":
+		it.SonarrTitle = title
+		it.SonarrGUID = twinGUID(it.GUID)
+	case twin.candidates > 0:
+		if !slices.Contains(it.Categories, catAnime) {
+			it.Categories = append(it.Categories, catAnime)
+		}
+	}
+	slices.Sort(it.Categories)
+}
+
+// holdersOf returns the item's whole holder set: the occurrences the pass grouped
+// under its journal KEY, plus the ones that share only its bare info HASH.
+func holdersOf(it *journalItem, refs []curatedRef, hashRefs hashLookup) []curatedRef {
+	if hashRefs == nil || it.InfoHash == "" {
+		return refs
+	}
+	var extra []curatedRef
+	for _, ref := range hashRefs(it.InfoHash) {
+		if journalKey(ref.torrent) == it.Key {
+			// Already one of the key occurrences above.
+			continue
+		}
+		extra = append(extra, ref)
+	}
+	if len(extra) == 0 {
+		return refs
+	}
+	// Clone rather than append into the evidence's own slice: refs is the pass's
+	// index entry and every other reader of that key sees it.
+	return append(slices.Clone(refs), extra...)
 }
 
 // journalStats counts one pass's journal transitions for the pass log
@@ -417,16 +567,16 @@ func (p *journalPass) carryStoredItem(it *journalItem) (journalItem, bool) {
 // reason - the item keeps its STORED render (carryStoredItem) rather than being
 // dropped, since the never-pruned publication log makes a drop permanent.
 func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (journalItem, bool) {
-	fresh, ok, noPasskey := p.w.renderJournalItem(it.Key, refs, p.infoFor)
+	rendered, ok := p.w.renderJournalItem(it.Key, refs, p.ev.hashRefs, p.infoFor)
 	if !ok {
-		if !noPasskey {
+		if !rendered.noPasskey {
 			// The fresh render failed for an upstream DATA reason on every occurrence
 			// (a title that no longer synthesizes, an unpublishable page URL, an
 			// over-limit field).
 			p.w.log.Debug("indexer journal item kept on its stored render: still curated but no longer renderable",
 				"key", it.Key, "cause", "render-unresolvable")
 		}
-		// Both failure reasons take the l-f161 stance: keep the stored render, subject
+		// Both failure reasons take the same stance: keep the stored render, subject
 		// to carryStoredItem's GUID-identity gate.
 		kept, keptOK := p.carryStoredItem(it)
 		if keptOK {
@@ -434,6 +584,11 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 		}
 		return kept, keptOK
 	}
+	fresh := rendered.item
+	// The votes are collapsed HERE, once, after every holder the render folded has
+	// been seen. A refresh is authorized only by a catalogue pass, which holds every
+	// occurrence of the key, so there are no unevaluated owners left to carry.
+	fresh.TvdbID = rendered.vote.resolve()
 	fresh.FirstSeen = it.FirstSeen
 	fresh.PubDate = it.FirstSeen
 	// GUID is journal identity, not refreshable presentation: the arrs dedupe RSS
@@ -443,6 +598,8 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 	if journalIdentityMatches(it) {
 		fresh.GUID = it.GUID
 	}
+	// After the GUID is final: the twin GUID derives from it.
+	stampTwin(&fresh, rendered.twin)
 	return fresh, true
 }
 
@@ -556,29 +713,35 @@ func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope str
 // change surfaces on the pass log line instead of silently shrinking the feed.
 func (p *journalPass) newJournalItem(key string) (journalItem, bool) {
 	policy, refs := p.ev.renderPolicy(key)
-	it, ok, noPasskey := p.w.renderJournalItem(key, refs, p.infoFor)
-	if noPasskey {
+	rendered, ok := p.w.renderJournalItem(key, refs, p.ev.hashRefs, p.infoFor)
+	if rendered.noPasskey {
 		p.js.abSkippedNoPasskey++
 	}
 	if !ok {
 		// Includes renderUnevaluated, which hands the render no occurrence at
 		// all: there is nothing to serve, so the general failure path applies
 		// and nothing is published.
-		if !noPasskey {
+		if !rendered.noPasskey {
 			p.js.unresolvable++
 		}
 		return journalItem{}, false
 	}
+	it, vote, twin := rendered.item, rendered.vote, rendered.twin
 	if policy == renderPartial {
-		p.carryUnevaluatedVotes(&it)
+		p.carryUnevaluatedVotes(&it, &vote, &twin)
 	}
+	// Collapsed once, after the carried owners too: a mid-fold int cannot hold a
+	// veto, so an owner disagreeing with the occurrences this pass holds would
+	// otherwise be masked. The twin is collapsed last, on the final GUID.
+	it.TvdbID = vote.resolve()
+	stampTwin(&it, twin)
 	return it, true
 }
 
 // carryUnevaluatedVotes completes a partially-authorized render by carrying the
 // votes of the owners this pass did NOT evaluate, read from the previous
 // snapshot's ownership fact.
-func (p *journalPass) carryUnevaluatedVotes(it *journalItem) {
+func (p *journalPass) carryUnevaluatedVotes(it *journalItem, vote *tvdbVote, twin *twinVote) {
 	if len(p.prior) == 0 {
 		return
 	}
@@ -590,7 +753,7 @@ func (p *journalPass) carryUnevaluatedVotes(it *journalItem) {
 			// fresh evidence is already in the render.
 			continue
 		}
-		if p.carryOwnerVote(it, owner, releases) {
+		if p.carryOwnerVote(it, owner, releases, vote, twin) {
 			carried = true
 		}
 	}
@@ -602,16 +765,25 @@ func (p *journalPass) carryUnevaluatedVotes(it *journalItem) {
 }
 
 // carryOwnerVote applies ONE unevaluated owner's stored votes to the item and
-// reports whether that owner owns this release at all. Both votes are additive:
-// best-wins on the marker and a category union, the same two folds foldRefs
-// applies across the occurrences the pass does hold.
-func (p *journalPass) carryOwnerVote(it *journalItem, owner string, releases []ownedRelease) bool {
-	best, owns := priorOwnerVote(releases, it.Key, it.InfoHash)
-	if !owns {
+// reports whether that owner owns this release at all. Every vote is additive:
+// best-wins on the marker, the category union, the tvdb id and the twin title -
+// the same folds foldRefs applies across the occurrences the pass does hold. An
+// unevaluated owner has no torrent in hand, so its twin title is the one its
+// ownership record stored (ownedRelease.SonarrTitle).
+func (p *journalPass) carryOwnerVote(it *journalItem, owner string, releases []ownedRelease, vote *tvdbVote, twin *twinVote) bool {
+	owned := priorOwnerVote(releases, it.Key, it.InfoHash)
+	if len(owned) == 0 {
 		return false
 	}
-	if best {
-		it.DownloadVolumeFactor = dvfBest
+	title := ""
+	for _, r := range owned {
+		if r.IsBest {
+			it.DownloadVolumeFactor = dvfBest
+		}
+		twin.add(r.SonarrTitle)
+		if r.SonarrTitle != "" {
+			title = r.SonarrTitle
+		}
 	}
 	alID, err := strconv.Atoi(owner)
 	if err != nil {
@@ -619,11 +791,9 @@ func (p *journalPass) carryOwnerVote(it *journalItem, owner string, releases []o
 		// category vote is unknowable; its best vote still counts.
 		return true
 	}
-	for _, c := range categoriesFor(p.infoFor(alID).IsMovie) {
-		if !slices.Contains(it.Categories, c) {
-			it.Categories = append(it.Categories, c)
-		}
-	}
+	info := p.infoFor(alID)
+	vote.add(info.TvdbID)
+	foldHolderCategories(it, &info, title)
 	return true
 }
 
@@ -642,21 +812,19 @@ func (p *journalPass) evaluatedOwners() map[string]bool {
 	return p.evaluated
 }
 
-// priorOwnerVote reports whether one owner's stored contribution names this
-// journal identity, and whether that owner votes it best. The identity test is
-// the snapshot's own (ownedRelease): the journal key, or the item's canonical
-// info hash.
-func priorOwnerVote(releases []ownedRelease, key, hash string) (best, owns bool) {
+// priorOwnerVote returns the stored contributions of one owner that name this
+// journal identity - the releases whose votes (best, twin title) the caller
+// folds. The identity test is the snapshot's own (ownedRelease): the journal key,
+// or the item's canonical info hash. Empty when the owner does not own it.
+func priorOwnerVote(releases []ownedRelease, key, hash string) []ownedRelease {
+	var owned []ownedRelease
 	for _, r := range releases {
 		if r.Key != key && (hash == "" || r.Hash != hash) {
 			continue
 		}
-		owns = true
-		if r.IsBest {
-			best = true
-		}
+		owned = append(owned, r)
 	}
-	return best, owns
+	return owned
 }
 
 // applyTitles upgrades each journal item's served title to its harvested real

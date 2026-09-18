@@ -93,8 +93,11 @@ type Decision struct {
 // Decide resolves the one comparison decision both align consumers project
 // their vocabulary from: the daemon's compare pass maps it to Finding/Status
 // (internal/compare) and the audit report to Row/Verdict/Qualifier
-// (internal/audit).
-func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {
+// (internal/audit). siblingSeasons and seasons both bound a whole-series
+// comparison to the entry's own seasons, from two sources: seasons (the entry's
+// TVDB season ranges from the Anime-Lists mapping-list) wins when present, else
+// the seasons sibling records map are dropped. Every other scope ignores both.
+func Decide(item *library.Item, rec *mapping.Record, best, alt []string, siblingSeasons []int, seasons []mapping.SeasonRange) Decision {
 	scoped := scope(item, rec)
 	d := Decision{Kind: scoped.Kind, NoBest: len(best) == 0}
 	if scoped.Kind == ScopeSeason {
@@ -109,11 +112,21 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 		// series whose episode fetch failed, or a movie Radarr reports a file for
 		// while sending no MovieFile payload).
 		d.Standing = StandingUnverified
+	case scoped.Kind == ScopeOffered:
+		d.Groups, d.Approx = slices.Clone(scoped.Groups), scoped.Approx
+		// HasFile keeps precedence over the kind: an EMPTY bucket proves absence
+		// without attributing anything, so no_file stays the honest answer where
+		// unverified would throw that proof away.
+		if !scoped.HasFile {
+			d.Standing = StandingNoFile
+			break
+		}
+		d.Standing = StandingUnverified
 	case scoped.Kind == ScopeWholeSeries:
 		// An absolute-numbered run has no per-season Fribb mapping, so its single
 		// whole-series recommendation is judged against every real season on disk,
 		// conservatively: best only when every filed season provenly carries a best group.
-		s := summarizeWholeSeries(item, best, alt)
+		s := summarizeWholeSeries(item, best, alt, siblingSeasons, seasons)
 		d.Groups, d.Approx = s.Groups, s.Approx
 		d.Standing = wholeSeriesStanding(s)
 	default:
@@ -127,10 +140,10 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 	return d
 }
 
-// unitStanding derives the group-ladder standing of a single-unit scope (a
-// movie, a mapped season, or the season-0 specials bucket): file presence
-// first, then the current groups matched against the best then the alt sets
-// under the three-valued release.GroupsOverlap.
+// unitStanding derives the group-ladder standing of a single-unit scope (a movie
+// or a mapped season; the offered kind takes its own arm in Decide ahead of
+// this): file presence first, then the current groups matched against the best
+// then the alt sets under the three-valued release.GroupsOverlap.
 func unitStanding(hasFile bool, current, best, alt []string) Standing {
 	switch {
 	case !hasFile:

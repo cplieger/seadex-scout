@@ -31,7 +31,7 @@ func FuzzDerivedTitle_boundedAndTrimmed(f *testing.F) {
 			ReleaseGroup: group,
 			Files:        []seadex.File{{Name: name1}, {Name: name2}},
 		}
-		got := derivedTitle(tor, EntryInfo{})
+		got := derivedTitle(tor, &EntryInfo{})
 		if got != strings.TrimSpace(got) {
 			t.Errorf("derivedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
 		}
@@ -43,14 +43,13 @@ func FuzzDerivedTitle_boundedAndTrimmed(f *testing.F) {
 }
 
 // FuzzDerivedTitle_singleVideoPreservesName pins the single-video oracle the
-// bounded/trimmed target above cannot: for a torrent holding exactly one
-// recognized video file, the synthesized title is a trimmed COMPONENT of that
-// file's own path - and specifically the trimmed base name whenever the base
-// carries episode evidence - so a degenerate implementation that always returns
-// "" (or one that invents text) cannot pass. The component form (rather than
-// always the base name) is titleBase's headline rule: a base carrying no
-// episode evidence yields to the nearest ancestor directory that has both
-// evidence and text of its own.
+// bounded/trimmed target above cannot: for a torrent holding exactly one recognized
+// video file, the synthesized title is a trimmed COMPONENT of that file's own path -
+// specifically the trimmed base name whenever the base carries episode evidence - so a
+// degenerate implementation that always returns "" (or one that invents text) cannot
+// pass. The component form rather than always the base name is titleBase's headline
+// rule: a base carrying no episode evidence yields to the nearest ancestor directory
+// that has both evidence and text of its own.
 func FuzzDerivedTitle_singleVideoPreservesName(f *testing.F) {
 	f.Add("Show - S01E01 (1080p) [Grp]")
 	f.Add("  Movie Title (2026)  ")
@@ -58,7 +57,7 @@ func FuzzDerivedTitle_singleVideoPreservesName(f *testing.F) {
 	f.Add("[Grp] Show S01E01-E12 (1080p)/01")
 	f.Add("S01E01/Movie Cut A")
 	f.Fuzz(func(t *testing.T, base string) {
-		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, EntryInfo{})
+		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, &EntryInfo{})
 		components := strings.Split(base, "/")
 		own := components[len(components)-1]
 		if episodeToken.MatchString(own) || absoluteEpisode.MatchString(own) {
@@ -131,7 +130,7 @@ func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
 			Files:        []seadex.File{{Name: name1}, {Name: name2}},
 		}
 		meta := EntryInfo{Title: title, Year: year, Season: season, SeasonKnown: seasonKnown, IsMovie: isMovie}
-		got := synthesizeTitle(tor, meta)
+		got := synthesizeTitle(tor, &meta)
 		if got != strings.TrimSpace(got) {
 			t.Errorf("synthesizeTitle(title %q) = %q, not trimmed", title, got)
 		}
@@ -142,27 +141,13 @@ func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
 }
 
 // FuzzCorrectSeasonOnlyTitle_everySeasonClaimIsCorrectable pins the pairing
-// journal.go's titleAudit.served depends on, over arbitrary tracker-supplied
-// titles: when packFromTitle reads a whole-season claim, correctSeasonOnlyTitle
-// must be able to rewrite that claim away, and the rewritten title must no
-// longer read as a season pack. When the two disagree, served() reports the
-// disagreement and then serves the false FullSeason claim unchanged - Sonarr
-// ranks such a title above the season's loose episodes, grabs it, and treats the
-// season as covered, so the real episodes are silently suppressed. The refusal
-// contract is the other half: a correction that cannot be applied must return
-// the title byte-for-byte, never a partial rewrite.
-//
-// The domain is the TRIMMED title, which is what production supplies (the
-// harvest caches strings.TrimSpace of the Prowlarr item title): packFromTitle
-// trims before reading while correctSeasonOnlyTitle matches the raw string, so
-// an untrimmed value is outside the contract the two share.
-//
-// The corrected title is asserted NOT to read as a pack, deliberately without
-// also demanding that it read as a KNOWN single episode: a corrected token can
-// land in text the parser declines to read at all ("0 S001080p" corrects to
-// "0 S00E071080p", which packFromTitle answers unknown), and an unknown title
-// is exactly what packVerdict routes to the file census - it carries no false
-// FullSeason claim, which is the whole defect this target exists to catch.
+// journal.go's titleAudit.served depends on, over arbitrary tracker-supplied titles:
+// when packFromTitle reads a whole-season claim, correctSeasonOnlyTitle must be able to
+// rewrite it away and the result must no longer read as a pack, or served() serves the
+// false FullSeason claim and Sonarr suppresses that season's real episodes. A refusal
+// must return the title byte-for-byte. The domain is the TRIMMED title production
+// supplies. The corrected title is asserted only NOT to read as a pack: a corrected
+// token can land in text the parser declines to read at all, which carries no claim.
 func FuzzCorrectSeasonOnlyTitle_everySeasonClaimIsCorrectable(f *testing.F) {
 	f.Add("Show - S01 [1080p][x265]-GRP", "S01E07")
 	f.Add("Show Season 2", "- 07")

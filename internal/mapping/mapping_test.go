@@ -1,13 +1,19 @@
 package mapping
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/slogx/capture"
@@ -45,6 +51,134 @@ func TestRecord_HasMappedSeason(t *testing.T) {
 		if got := (&Record{SeasonTvdb: season}).HasMappedSeason(); got != want {
 			t.Errorf("Record{SeasonTvdb: %d}.HasMappedSeason() = %v, want %v", season, got, want)
 		}
+	}
+}
+
+// TestRecord_SeasonPresence pins the three-valued season kind: the ZERO value
+// reads unknown rather than absent (the one state a Record persisted before the
+// field existed can carry, and reading it as absent would strand every
+// mapped-zero special for a 304 window), an unrecognized string reads unknown
+// too rather than failing the record, and the two named spellings survive.
+func TestRecord_SeasonPresence(t *testing.T) {
+	tests := map[SeasonKind]SeasonKind{
+		"":            SeasonUnknown,
+		SeasonPresent: SeasonPresent,
+		SeasonAbsent:  SeasonAbsent,
+		"mapped":      SeasonUnknown,
+		"PRESENT":     SeasonUnknown,
+	}
+	for stored, want := range tests {
+		if got := (&Record{SeasonKind: stored}).SeasonPresence(); got != want {
+			t.Errorf("Record{SeasonKind: %q}.SeasonPresence() = %q, want %q", stored, got, want)
+		}
+	}
+}
+
+// TestNewIndex_canonicalizesSeasonKind pins the kind's normalization at the
+// INDEX boundary, which is what lets the scope dispatch read the field directly:
+// buildIndex canonicalizes every record on both the Fribb and the persisted-cache
+// path, so an unrecognized string can never reach a consumer as a fourth state,
+// while a record's real kind round-trips untouched.
+func TestNewIndex_canonicalizesSeasonKind(t *testing.T) {
+	idx := NewIndex([]Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100, SeasonKind: "mapped-positive", SeasonTvdb: 2},
+		{AniListID: 2, Type: "TV", TvdbID: 200, SeasonKind: SeasonPresent},
+		{AniListID: 3, Type: "OVA", TvdbID: 300, SeasonKind: SeasonAbsent},
+		{AniListID: 4, Type: "TV", TvdbID: 400},
+	})
+	want := map[int]SeasonKind{1: SeasonUnknown, 2: SeasonPresent, 3: SeasonAbsent, 4: SeasonUnknown}
+	for id, kind := range want {
+		rec, ok := idx.Lookup(id)
+		if !ok {
+			t.Fatalf("Lookup(%d) missing", id)
+		}
+		if rec.SeasonKind != kind {
+			t.Errorf("Lookup(%d).SeasonKind = %q, want %q", id, rec.SeasonKind, kind)
+		}
+	}
+	// The garbage kind normalizes without touching the season NUMBER: the pair
+	// (unknown, positive season) is legitimate and takes the union arm.
+	if rec, _ := idx.Lookup(1); rec.SeasonTvdb != 2 {
+		t.Errorf("Lookup(1).SeasonTvdb = %d, want 2 (normalizing the kind must not clamp the season)", rec.SeasonTvdb)
+	}
+}
+
+// TestRecord_seasonKindRoundTrips pins the persisted json key: it is additive
+// and omitempty, so an unknown kind writes nothing while the two named spellings
+// survive a Cache write and read.
+func TestRecord_seasonKindRoundTrips(t *testing.T) {
+	for _, kind := range []SeasonKind{SeasonUnknown, SeasonPresent, SeasonAbsent} {
+		encoded, err := json.Marshal(Record{AniListID: 7, Type: "TV", SeasonKind: kind})
+		if err != nil {
+			t.Fatalf("Marshal(%q) error: %v", kind, err)
+		}
+		if kind == SeasonUnknown && strings.Contains(string(encoded), "season_kind") {
+			t.Errorf("Marshal(unknown) = %s, want no season_kind key (omitempty)", encoded)
+		}
+		var back Record
+		if err := json.Unmarshal(encoded, &back); err != nil {
+			t.Fatalf("Unmarshal(%s) error: %v", encoded, err)
+		}
+		if back.SeasonKind != kind {
+			t.Errorf("round trip of %q = %q", kind, back.SeasonKind)
+		}
+	}
+}
+
+// TestParseOverrides_seasonKind pins the override door season-kind needs: without
+// the key an operator cannot place an entry at all, since a hand-written override
+// would decode to unknown forever. A mapped zero is what says "this
+// title is filed under its parent's specials", and an unrecognized value reads
+// unknown while still counting as a RECOGNIZED key.
+func TestParseOverrides_seasonKind(t *testing.T) {
+	set, err := parseOverrides([]byte(`[
+		{"anilist_id":5,"type":"tv","tvdb_id":100,"season_kind":"present","season_tvdb":0},
+		{"anilist_id":6,"type":"tv","tvdb_id":200,"season_kind":"absent"},
+		{"anilist_id":7,"type":"tv","tvdb_id":300,"season_kind":"maybe"}
+	]`))
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(set.records) != 3 {
+		t.Fatalf("records = %d, want 3", len(set.records))
+	}
+	want := []SeasonKind{SeasonPresent, SeasonAbsent, SeasonUnknown}
+	for i, kind := range want {
+		if set.records[i].SeasonKind != kind {
+			t.Errorf("records[%d].SeasonKind = %q, want %q", i, set.records[i].SeasonKind, kind)
+		}
+	}
+	if set.records[0].SeasonTvdb != 0 {
+		t.Errorf("records[0].SeasonTvdb = %d, want 0 (a mapped zero is the whole point of the key)", set.records[0].SeasonTvdb)
+	}
+	if set.unknown != 0 {
+		t.Errorf("unknown keys = %d, want none (season_kind is canonical; an odd VALUE is not an odd KEY)", set.unknown)
+	}
+}
+
+// TestParseOverrides_anidbID pins the override door for the mapping-list join
+// key: an operator names WHICH Anime-Lists node an entry is (the facts stay in
+// the list), the key survives canonicalize, a negative value clamps to absent,
+// and the key is recognized rather than counted unknown.
+func TestParseOverrides_anidbID(t *testing.T) {
+	set, err := parseOverrides([]byte(`[
+		{"anilist_id":5,"type":"movie","anidb_id":12276},
+		{"anilist_id":6,"type":"tv","tvdb_id":200,"anidb_id":-3}
+	]`))
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(set.records) != 2 {
+		t.Fatalf("records = %d, want 2", len(set.records))
+	}
+	if got := set.records[0].AniDBID; got != 12276 {
+		t.Errorf("records[0].AniDBID = %d, want 12276", got)
+	}
+	if got := set.records[1].AniDBID; got != 0 {
+		t.Errorf("records[1].AniDBID = %d, want 0 (a negative id clamps to absent)", got)
+	}
+	if set.unknown != 0 {
+		t.Errorf("unknown keys = %d, want none (anidb_id is canonical)", set.unknown)
 	}
 }
 
@@ -119,6 +253,79 @@ func TestIndex_nilSafe(t *testing.T) {
 	idx.ForEachRecord(func(Record) { called = true })
 	if called {
 		t.Error("nil Index ForEachRecord invoked fn")
+	}
+	if _, ok := idx.MappingFor(&Record{AniDBID: 1}); ok {
+		t.Error("nil Index MappingFor returned ok=true")
+	}
+}
+
+// TestIndex_MappingFor pins the one reader of the Anime-Lists join: a record with
+// no AniDB id never joins (0 is absent, not a key), an id the list lacks is
+// false, a known id returns the stored value, and the served map is the one
+// handed to the index rather than anything derived from Record.
+func TestIndex_MappingFor(t *testing.T) {
+	want := Mapping{SpecialEpisode: 8, Seasons: []SeasonRange{{Season: 1, First: 1, Last: 13}}}
+	idx := NewIndexWithMappings(
+		[]Record{{AniListID: 1, Type: "MOVIE", AniDBID: 12276}, {AniListID: 2, Type: "TV", AniDBID: 999}, {AniListID: 3, Type: "TV"}},
+		map[int]Mapping{12276: want, 0: {SpecialEpisode: 99}},
+	)
+	tests := []struct {
+		name    string
+		rec     *Record
+		want    Mapping
+		wantHit bool
+	}{
+		{name: "nil_record", rec: nil},
+		{name: "no_anidb_id_never_joins_the_zero_key", rec: &Record{AniListID: 3}},
+		{name: "id_the_list_lacks", rec: &Record{AniListID: 2, AniDBID: 999}},
+		{name: "known_id", rec: &Record{AniListID: 1, AniDBID: 12276}, want: want, wantHit: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := idx.MappingFor(tc.rec)
+			if ok != tc.wantHit {
+				t.Fatalf("MappingFor(%+v) ok = %v, want %v", tc.rec, ok, tc.wantHit)
+			}
+			if got.SpecialEpisode != tc.want.SpecialEpisode || !slices.Equal(got.Seasons, tc.want.Seasons) {
+				t.Errorf("MappingFor(%+v) = %+v, want %+v", tc.rec, got, tc.want)
+			}
+		})
+	}
+	if _, ok := NewIndex([]Record{{AniListID: 1, AniDBID: 12276}}).MappingFor(&Record{AniDBID: 12276}); ok {
+		t.Error("NewIndex (no list) MappingFor returned ok=true, want false")
+	}
+}
+
+// TestLoader_Load_overrideAniDBIDJoinsTheSameList pins the override rule: an
+// override that names an anidb_id joins the SAME persisted list the Fribb
+// records join, so the operator supplies the key and never the facts.
+func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
+	dir := t.TempDir()
+	overrides := filepath.Join(dir, "overrides.json")
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":42,"type":"movie","tmdb_movies":[7],"anidb_id":12276}]`), 0o600); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   []Record{{AniListID: 42, Type: "TV", TvdbID: 100}},
+		Mappings:  map[int]Mapping{12276: {SpecialEpisode: 8}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, WithOverridesPath(overrides), WithLogger(discardLogger()))
+	_, idx, err := l.Load(t.Context(), prev)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	rec, ok := idx.Lookup(42)
+	if !ok || rec.AniDBID != 12276 || !rec.IsMovie() {
+		t.Fatalf("Lookup(42) = %+v ok=%v, want the override record carrying anidb_id 12276", rec, ok)
+	}
+	m, ok := idx.MappingFor(&rec)
+	if !ok || m.SpecialEpisode != 8 {
+		t.Errorf("MappingFor(override) = %+v ok=%v, want the persisted list's episode 8", m, ok)
 	}
 }
 
@@ -263,10 +470,10 @@ func TestParseOverrides_duplicateIDKeepsLastRecord(t *testing.T) {
 }
 
 // TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream pins the
-// memory-amplification regression (a valid compact array of empty objects
-// fits under maxOverrideBytes but used to be materialized whole three times
-// before every row was discarded): a large all-empty-object array parses to
-// an EMPTY effective overlay with the exact skipped count, allocating no
+// memory-amplification guard: a valid compact array of empty objects fits under
+// maxOverrideBytes, so a parser materializing it whole allocates the array three
+// times over before discarding every row. A large all-empty-object array must
+// parse to an EMPTY effective overlay with the exact skipped count, allocating no
 // []Record growth per transport row.
 func TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream(t *testing.T) {
 	const rows = 100_000
@@ -326,11 +533,105 @@ func TestRecord_RoutedIDsRoutesToTheSelectedArrArm(t *testing.T) {
 	}
 }
 
-// TestBuildIndexCanonicalizesRecords pins the boundary that now OWNS the
-// id-usability rule (h-f25): the accessors no longer filter on read, so a record
-// reaching buildIndex through plain encoding/json - the persisted mapping cache
-// replayed on the 304 and stale-on-error paths - must be canonicalized on
-// insertion, which is what makes RoutedIDs' presence check sound.
+// TestIndex_SiblingSeasons pins the per-tvdb summary the whole-series aggregate
+// consumes. "A SIBLING maps this season" has to be exact rather than "any record
+// maps it", which is why the accumulator counts holders: a record must not report
+// its OWN season back when it is that season's only holder, but must when a
+// cour-split sibling shares it (Fire Force season 3 spans two AniList entries in
+// one TVDB season).
+func TestIndex_SiblingSeasons(t *testing.T) {
+	idx := NewIndex([]Record{
+		// Gintama's shape: one seasonless entry plus season-scoped siblings.
+		{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: SeasonAbsent},
+		{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 5},
+		{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 6},
+		// A cour split: two entries on one season.
+		{AniListID: 200, Type: "TV", TvdbID: 12345, SeasonKind: SeasonPresent, SeasonTvdb: 3},
+		{AniListID: 201, Type: "TV", TvdbID: 12345, SeasonKind: SeasonPresent, SeasonTvdb: 3},
+		// A sole holder of its season, on its own tvdb id.
+		{AniListID: 300, Type: "TV", TvdbID: 6789, SeasonKind: SeasonPresent, SeasonTvdb: 1},
+		// No tvdb id at all.
+		{AniListID: 400, Type: "MOVIE", TmdbMovies: []int{7}},
+	})
+	tests := []struct {
+		name string
+		id   int
+		want []int
+	}{
+		{name: "a seasonless record reports every sibling season", id: 918, want: []int{5, 6}},
+		{name: "a season-scoped record does not report its own sole season", id: 100, want: []int{6}},
+		{name: "a cour-split record DOES report its shared season", id: 200, want: []int{3}},
+		{name: "a sole holder on its own tvdb id reports nothing", id: 300},
+		{name: "a record with no tvdb id reports nil", id: 400},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, ok := idx.Lookup(tt.id)
+			if !ok {
+				t.Fatalf("Lookup(%d) missing", tt.id)
+			}
+			if got := idx.SiblingSeasons(&rec); !slices.Equal(got, tt.want) {
+				t.Errorf("SiblingSeasons(%d) = %v, want %v", tt.id, got, tt.want)
+			}
+		})
+	}
+	var nilIndex *Index
+	if got := nilIndex.SiblingSeasons(&Record{TvdbID: 1}); got != nil {
+		t.Errorf("nil index SiblingSeasons = %v, want nil", got)
+	}
+}
+
+// TestRecord_AllIDsDiffersFromRoutedIDsOnlyByTheTypeGate pins the whole type
+// gate: AllIDs and RoutedIDs differ EXACTLY on a MOVIE record's TVDB id and a
+// non-MOVIE record's movie/IMDb lists, and HasArrIdentifier is byte-identical
+// for every record, because widening the routed accessor would move the AniList
+// fallback's gate for 38 entries. The fixture is drawn from the live shapes: a
+// both-arr film, a season-scoped series, a seasonless OVA and an id-less row.
+func TestRecord_AllIDsDiffersFromRoutedIDsOnlyByTheTypeGate(t *testing.T) {
+	fixture := []Record{
+		{Type: "MOVIE", AniListID: 11577, TvdbID: 78964, SeasonTvdb: 0, TmdbMovies: []int{5528}, IMDbIDs: []string{"tt0169858"}},
+		{Type: "MOVIE", AniListID: 21519, TvdbID: 296666, IMDbIDs: []string{"tt5311514"}},
+		{Type: "TV", AniListID: 154587, TvdbID: 424536, SeasonTvdb: 1},
+		{Type: "OVA", AniListID: 820, TvdbID: 78964},
+		{Type: "TV", AniListID: 1, IMDbIDs: []string{"tt0000001"}},
+		{Type: "", AniListID: 2},
+	}
+	for i := range fixture {
+		rec := &fixture[i]
+		routedTVDB, routedTMDB, routedIMDb := rec.RoutedIDs()
+		allTVDB, allTMDB, allIMDb := rec.AllIDs()
+		wantTVDB, wantTMDB, wantIMDb := rec.TvdbID, rec.TmdbMovies, rec.IMDbIDs
+		if allTVDB != wantTVDB || !slices.Equal(allTMDB, wantTMDB) || !slices.Equal(allIMDb, wantIMDb) {
+			t.Errorf("record %d AllIDs() = (%d, %v, %v), want every id it carries (%d, %v, %v)",
+				rec.AniListID, allTVDB, allTMDB, allIMDb, wantTVDB, wantTMDB, wantIMDb)
+		}
+		if rec.IsMovie() {
+			if routedTVDB != 0 || allTVDB != rec.TvdbID {
+				t.Errorf("movie %d: RoutedIDs tvdb = %d (want 0, the discarded id), AllIDs tvdb = %d (want %d)",
+					rec.AniListID, routedTVDB, allTVDB, rec.TvdbID)
+			}
+			continue
+		}
+		if len(routedTMDB) != 0 || len(routedIMDb) != 0 {
+			t.Errorf("series %d: RoutedIDs returned movie ids (%v, %v), want none", rec.AniListID, routedTMDB, routedIMDb)
+		}
+	}
+	// The predicate five consumers share must not move: it is derived from
+	// RoutedIDs, which this step deliberately leaves alone.
+	want := []bool{true, true, true, true, false, false}
+	for i := range fixture {
+		if got := fixture[i].HasArrIdentifier(); got != want[i] {
+			t.Errorf("record %d HasArrIdentifier() = %v, want %v (AllIDs must not widen the routing predicate)",
+				fixture[i].AniListID, got, want[i])
+		}
+	}
+}
+
+// TestBuildIndexCanonicalizesRecords pins the boundary that OWNS the id-usability
+// rule: the accessors do not filter on read, so a record reaching buildIndex
+// through plain encoding/json - the persisted mapping cache replayed on the 304
+// and stale-on-error paths - must be canonicalized on insertion, which is what
+// makes RoutedIDs' presence check sound.
 func TestBuildIndexCanonicalizesRecords(t *testing.T) {
 	idx := NewIndex([]Record{{
 		AniListID:  7,
@@ -392,15 +693,14 @@ func overIdentifierBudgetFribbBody() []byte {
 	return []byte(b.String())
 }
 
-// TestAcceptRefresh_identifierBudgetFailsClosed pins the fail-closed contract
-// of the aggregate identifier budget across the whole decode-to-acceptance
-// path, which the counter-level fribbDecodeCounts.add test cannot reach: a
-// body that trips the budget is refused WHOLE (the truncated prefix is never
-// published) with the errIdentifierBudgetExceeded sentinel, and acceptRefresh
-// routes that sentinel through rejectRefresh - a first boot publishes no
-// index, a usable previous cache is returned stale rather than replaced, and
-// the persisted rejection streak advances toward the scout's escalation
-// threshold instead of staying frozen as a transient parse failure would.
+// TestAcceptRefresh_identifierBudgetFailsClosed pins the fail-closed contract of
+// the aggregate identifier budget across the whole decode-to-acceptance path,
+// which the counter-level fribbDecodeCounts.add test cannot reach: a body that
+// trips the budget is refused WHOLE (the truncated prefix is never published)
+// with errIdentifierBudgetExceeded, and acceptRefresh routes that sentinel
+// through rejectRefresh - a first boot publishes no index, a usable previous
+// cache is returned stale rather than replaced, and the persisted rejection
+// streak advances instead of staying frozen as a transient parse failure would.
 func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 	body := overIdentifierBudgetFribbBody()
 
@@ -456,12 +756,11 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 // TestAcceptRefresh_staleReasonClassVocabulary pins stale_reason as the
 // fixed-cardinality degradation CLASS the operator queries in Loki (the
 // discriminator StaleMapError deliberately keeps live counts out of, so the
-// attribute stays equality-queryable). Five of the classes acceptRefresh can
-// emit have no assertion anywhere - only "refresh failed", "refresh exceeded
-// size cap" and the shrunk form are pinned - so a swapped or merged reason
-// string would silently file a never-self-heals refusal (record cap,
-// identifier budget, validation floor, moved schema) under the transient
-// vocabulary, and the escalation runbook keys on exactly that distinction.
+// attribute stays equality-queryable). Five of the classes acceptRefresh can emit
+// have no assertion anywhere, so a swapped or merged reason string would silently
+// file a never-self-heals refusal (record cap, identifier budget, validation
+// floor, moved schema) under the transient vocabulary, and the escalation runbook
+// keys on exactly that distinction.
 func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
 	var capBody strings.Builder
 	capBody.WriteByte('[')
@@ -508,24 +807,13 @@ const approachingSizeCapMessage = "mapping: Fribb body approaching the download 
 	"a body past it refuses every refresh and freezes the map stale"
 
 // TestAcceptRefresh_approachingDownloadSizeCapWarns pins the operator's only
-// advance notice before maxMapBytes becomes a permanent refusal - the third
-// member of a family whose other two are already pinned
-// (TestParseFribb_approachingRecordCapWarns and
-// TestParseFribb_approachingIdentifierBudgetWarns). A body past the download
-// cap grades PERSISTENT (isPersistentRefreshFailure over
-// *httpx.ResponseTooLargeError), so every later cycle re-downloads the
-// multi-MB body, re-refuses it, and the map stays frozen stale while the
-// persisted rejection streak escalates to ERROR - with no signal at all while
-// refreshes were still succeeding.
-//
-// At exactly the warning threshold the WARN fires once (the shared guard is
-// inclusive) and
-// carries the body size and the cap; one byte below it stays silent. It drives
-// acceptRefresh directly, like the identifier-budget sibling, because the
-// threshold arithmetic is what is under test rather than the transport that
-// delivers the body - and the body's CONTENT is deliberately irrelevant: the
-// guard reads len(res.Body) before the parse, so the refresh is refused either
-// way and the usable stale cache is kept.
+// advance notice before maxMapBytes becomes a permanent refusal. A body past the
+// download cap grades PERSISTENT (isPersistentRefreshFailure over
+// *httpx.ResponseTooLargeError), so every later cycle re-downloads the multi-MB
+// body, re-refuses it, and the map stays frozen stale while the persisted
+// rejection streak escalates to ERROR - with no signal at all while refreshes were
+// still succeeding. At exactly the threshold the WARN fires once (the shared guard
+// is inclusive); one byte below it stays silent.
 func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
 	// The threshold is hardcoded rather than recomputed from the shared fraction:
 	// a fixture derived from the expression under test moves with it, and this

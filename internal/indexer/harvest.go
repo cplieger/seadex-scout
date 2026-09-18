@@ -230,7 +230,7 @@ func (h *harvester) processHarvestGroup(ctx context.Context, g harvestGroup, r *
 		return true
 	}
 	before, beforeMatched := r.stats.queries, r.stats.matched
-	outcome, refused := h.harvestShow(ctx, u, g, r.infoFor(g.alID), r)
+	outcome, refused := h.harvestShow(ctx, u, g, r.infoFor.ref(g.alID), r)
 	// A show whose every candidate result was refused for contradictory identity
 	// signals answered cleanly but resolved nothing: it is a no-progress show for the
 	// fruitless backstop, even though its query succeeded.
@@ -447,12 +447,12 @@ const consecutiveRejectedLatch = 3
 // each of those resets the other's counter (deliberately - see
 // updateHarvestScopeState), so an upstream ALTERNATING between a garbled 2xx body
 // and a request rejection trips neither of them however long it runs, and the
-// full harvestTimeBudget burns with zero title progress every rebuild (l-f91).
+// full harvestTimeBudget burns with zero title progress every rebuild.
 const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 
 // harvestShow runs one show's query against its tracker's upstream: exactly ONE query
 // per title candidate, so there is no per-show resume state and nothing to checkpoint.
-func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun) (outcome harvestOutcome, refused bool) {
+func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta *EntryInfo, r *harvestRun) (outcome harvestOutcome, refused bool) {
 	candidates := harvestTitleCandidates(meta.Title)
 	var st harvestShowProgress
 	for _, title := range candidates {
@@ -685,7 +685,7 @@ func harvestable(it *journalItem, titles map[string]string, infoFor EntryInfoFun
 
 // harvestParams builds one Torznab query for a show on a tracker, from ONE of the
 // show's title candidates (harvestTitleCandidates; harvestShow walks them in order).
-func harvestParams(meta EntryInfo, scope, title string) url.Values {
+func harvestParams(meta *EntryInfo, scope, title string) url.Values {
 	q := url.Values{"t": {"search"}, "q": {title}}
 	if scope == upstreamNyaa && !meta.IsMovie && meta.SeasonKnown && meta.Season > 0 {
 		q.Set("t", "tvsearch")
@@ -756,7 +756,7 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 	// Collect every candidate title per key BEFORE choosing: AnimeBytes lists one
 	// torrent three times (EN / JP / Romaji aliases, distinct ?nh= GUIDs, the SAME
 	// torrent id), so all three resolve to one journal key and the choice among them is
-	// a policy, not an accident of Prowlarr's ordering (l-f142).
+	// a policy, not an accident of Prowlarr's ordering.
 	candidates := make(map[string][]string)
 	order := make([]string, 0, len(results))
 	for i := range results {

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -209,8 +210,8 @@ func TestTrackerKey(t *testing.T) {
 
 func TestMarkAndDedupe(t *testing.T) {
 	set := &curation{
-		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"nyaa:1143533": false},
+		byHash: bestVotes(map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true}),
+		byKey:  bestVotes(map[string]bool{"nyaa:1143533": false}),
 	}
 	raw := []item{
 		{Title: "best by hash", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
@@ -239,8 +240,8 @@ func TestMarkAndDedupe(t *testing.T) {
 func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 	t.Run("best hash against an alt or uncurated key", func(t *testing.T) {
 		set := &curation{
-			byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-			byKey:  map[string]bool{"nyaa:1143533": false},
+			byHash: bestVotes(map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true}),
+			byKey:  bestVotes(map[string]bool{"nyaa:1143533": false}),
 		}
 		raw := []item{
 			{
@@ -266,8 +267,8 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 	// coincidence must not admit it.
 	t.Run("two curated best ids on one item", func(t *testing.T) {
 		bothBest := &curation{
-			byHash: map[string]bool{},
-			byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+			byHash: bestVotes(map[string]bool{}),
+			byKey:  bestVotes(map[string]bool{"nyaa:100": true, "nyaa:200": true}),
 		}
 		conflicting := []item{{
 			Title:   "two curated best ids",
@@ -292,8 +293,8 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 	hashA := "abcdef1234567890abcdef1234567890abcdef12"
 	hashB := "0123456789012345678901234567890123456789"
 	set := &curation{
-		byHash: map[string]bool{hashA: true, hashB: true},
-		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		byHash: bestVotes(map[string]bool{hashA: true, hashB: true}),
+		byKey:  bestVotes(map[string]bool{"nyaa:100": true, "nyaa:200": true}),
 		byPair: map[string]bool{
 			pairKey(hashA, "nyaa:100"): true,
 			pairKey(hashB, "nyaa:200"): true,
@@ -362,8 +363,8 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 // prove, even against a snapshot whose pair relation is empty.
 func TestMarkAndDedupeKeyOnlyABNeedsNoPair(t *testing.T) {
 	set := &curation{
-		byHash: map[string]bool{},
-		byKey:  map[string]bool{"ab:300": true},
+		byHash: bestVotes(map[string]bool{}),
+		byKey:  bestVotes(map[string]bool{"ab:300": true}),
 		byPair: map[string]bool{},
 	}
 	raw := []item{{
@@ -389,8 +390,8 @@ func TestMarkAndDedupeKeyOnlyABNeedsNoPair(t *testing.T) {
 // cannot match under /ab even when its hash is curated.
 func TestMarkAndDedupeRejectsCrossScopeKey(t *testing.T) {
 	set := &curation{
-		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"nyaa:1143533": false, "ab:1143533": false},
+		byHash: bestVotes(map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true}),
+		byKey:  bestVotes(map[string]bool{"nyaa:1143533": false, "ab:1143533": false}),
 	}
 	raw := []item{
 		{Title: "nyaa key under ab scope", InfoURL: "https://nyaa.si/view/1143533", GUID: "g1"},
@@ -412,8 +413,8 @@ func TestMarkAndDedupeRejectsCrossScopeKey(t *testing.T) {
 // drop is an ordinary no-match, not an identity conflict.
 func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 	set := &curation{
-		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{},
+		byHash: bestVotes(map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true}),
+		byKey:  bestVotes(map[string]bool{}),
 	}
 	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
 	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
@@ -426,7 +427,7 @@ func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 }
 
 // TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey pins the hash-miss leg
-// lookup deliberately does NOT veto on (l-f30): a SeaDex record with no usable
+// lookup deliberately does NOT veto on: a SeaDex record with no usable
 // info hash registers only its tracker key, while Prowlarr's Nyaa results
 // always carry the real hash - so the curated release arrives with a hash the
 // set has never seen beside its own curated page URL. Reading that miss as
@@ -435,8 +436,8 @@ func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 // cross-torrent case below re-checks.
 func TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey(t *testing.T) {
 	set := &curation{
-		byHash: map[string]bool{},
-		byKey:  map[string]bool{"nyaa:1143533": true},
+		byHash: bestVotes(map[string]bool{}),
+		byKey:  bestVotes(map[string]bool{"nyaa:1143533": true}),
 		byPair: map[string]bool{},
 	}
 	raw := []item{{
@@ -466,8 +467,8 @@ func TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey(t *testing.T) {
 func TestMarkAndDedupeCountsIdentityConflicts(t *testing.T) {
 	hashA := "abcdef1234567890abcdef1234567890abcdef12"
 	set := &curation{
-		byHash: map[string]bool{hashA: true},
-		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		byHash: bestVotes(map[string]bool{hashA: true}),
+		byKey:  bestVotes(map[string]bool{"nyaa:100": true, "nyaa:200": true}),
 		byPair: map[string]bool{pairKey(hashA, "nyaa:100"): true},
 	}
 	raw := []item{
@@ -483,6 +484,208 @@ func TestMarkAndDedupeCountsIdentityConflicts(t *testing.T) {
 	}
 	if conflicts != 1 {
 		t.Errorf("identity conflicts = %d, want 1 (only the contradicted item counts)", conflicts)
+	}
+}
+
+// TestMarkAndDedupeStampsTheAgreedTvdbID is the search-render fold across an
+// item's COMBINED identity signals, in both directions. A Prowlarr result can
+// carry a hash AND a tracker key, and lookup requires every accepted signal to
+// agree, so the two per-signal folds are combined.
+//
+// A signal whose own holders contradicted each other must VETO the attribute
+// rather than abstain beside an agreeing sibling, which is what a conflict
+// collapsed to a bare zero would do. The absent-holder cases pin the other half.
+func TestMarkAndDedupeStampsTheAgreedTvdbID(t *testing.T) {
+	hash := strings.Repeat("a", 40)
+	const key = "nyaa:100"
+	const idA, idB = 79525, 12345
+	dualSignal := []item{{
+		Title: "hash and key from one torrent", InfoHash: hash, GUID: "https://nyaa.si/view/100",
+		InfoURL: "https://nyaa.si/view/100",
+	}}
+
+	tests := map[string]struct {
+		desc    string
+		hashSig curatedSignal
+		keySig  curatedSignal
+		wantID  int
+	}{
+		"both signals agree": {
+			desc:    "one id from every holder of both signals",
+			hashSig: signalWithID(true, idA), keySig: signalWithID(true, idA), wantID: idA,
+		},
+		"the key fold has a disagreeing holder": {
+			desc:    "the key's own holders contradict each other, so the agreeing hash must not override them",
+			hashSig: signalWithID(true, idA), keySig: signalWithID(true, idA, idB), wantID: 0,
+		},
+		"the hash fold has a disagreeing holder": {
+			desc:    "the mirror, which is the shape the RSS journal's own mirror fixture renders",
+			hashSig: signalWithID(true, idA, idB), keySig: signalWithID(true, idA), wantID: 0,
+		},
+		"the two signals hold different ids": {
+			desc:    "each signal agrees internally and they disagree with each other",
+			hashSig: signalWithID(true, idA), keySig: signalWithID(true, idB), wantID: 0,
+		},
+		"the hash holder carries no id": {
+			desc:    "absence abstains rather than vetoing",
+			hashSig: signalWithID(true), keySig: signalWithID(true, idA), wantID: idA,
+		},
+		"the key holder carries no id": {
+			desc:    "abstention is order-independent across signals",
+			hashSig: signalWithID(true, idA), keySig: signalWithID(true), wantID: idA,
+		},
+		"no holder carries one": {
+			desc:    "an entry with no TVDB id renders no attribute",
+			hashSig: signalWithID(true), keySig: signalWithID(true), wantID: 0,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			set := &curation{
+				byHash: map[string]curatedSignal{hash: tc.hashSig},
+				byKey:  map[string]curatedSignal{key: tc.keySig},
+				byPair: map[string]bool{pairKey(hash, key): true},
+			}
+			out, conflicts := markAndDedupe(dualSignal, set, upstreamNyaa)
+			if len(out) != 1 {
+				t.Fatalf("got %d items, want the 1 curated result (%s): a contested id vetoes the ATTRIBUTE, never the match", len(out), tc.desc)
+			}
+			if conflicts != 0 {
+				t.Errorf("identity conflicts = %d, want 0: the best/alt values agree, so this is no identity contradiction", conflicts)
+			}
+			if out[0].TvdbID != tc.wantID {
+				t.Errorf("TvdbID = %d, want %d (%s)", out[0].TvdbID, tc.wantID, tc.desc)
+			}
+		})
+	}
+}
+
+// signalWithTwin is a hand-written projected signal carrying one twin title per
+// holder, for the search-render fixtures about the film twin.
+func signalWithTwin(isBest bool, titles ...string) curatedSignal {
+	sig := curatedSignal{isBest: isBest, vote: tvdbVote{id: 79525}}
+	for _, title := range titles {
+		sig.twin.add(title)
+	}
+	return sig
+}
+
+// TestMarkAndDedupeAppendsTheFilmTwin is the search-side twin across an item's
+// COMBINED identity signals: a curated result whose holders agree on a twin
+// title is followed by a second item under that title, Anime only, whose GUID
+// keys to the same tracker identity and whose tvdb id is the original's. The
+// original keeps Prowlarr's own categories untouched. A veto on either signal,
+// or a disagreement between them, yields the one item alone - never a dropped
+// match.
+func TestMarkAndDedupeAppendsTheFilmTwin(t *testing.T) {
+	hash := strings.Repeat("a", 40)
+	const key = "nyaa:100"
+	const titleA, titleB = "Minami-ke S00E02 1080p [G]", "Minami-ke S00E03 1080p [G]"
+	dualSignal := []item{{
+		Title: "[G] Minami-ke Special [1080p]", InfoHash: hash, GUID: "https://nyaa.si/view/100",
+		InfoURL: "https://nyaa.si/view/100", Categories: []int{catMovies, catAnime},
+	}}
+
+	tests := map[string]struct {
+		desc      string
+		hashSig   curatedSignal
+		keySig    curatedSignal
+		wantTitle string
+	}{
+		"both signals agree": {
+			desc:    "one title from every holder of both signals",
+			hashSig: signalWithTwin(true, titleA), keySig: signalWithTwin(true, titleA), wantTitle: titleA,
+		},
+		"the key holder carries none": {
+			desc:    "absence abstains across signals",
+			hashSig: signalWithTwin(true, titleA), keySig: signalWithTwin(true), wantTitle: titleA,
+		},
+		"the key fold has a disagreeing holder": {
+			desc:    "the key's own holders contradict each other, so the agreeing hash must not override them",
+			hashSig: signalWithTwin(true, titleA), keySig: signalWithTwin(true, titleA, titleB),
+		},
+		"the two signals hold different titles": {
+			desc:    "each signal agrees internally and they disagree with each other",
+			hashSig: signalWithTwin(true, titleA), keySig: signalWithTwin(true, titleB),
+		},
+		"no holder carries one": {
+			desc:    "a release with no twin title serves alone",
+			hashSig: signalWithTwin(true), keySig: signalWithTwin(true),
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			set := &curation{
+				byHash: map[string]curatedSignal{hash: tc.hashSig},
+				byKey:  map[string]curatedSignal{key: tc.keySig},
+				byPair: map[string]bool{pairKey(hash, key): true},
+			}
+			out, conflicts := markAndDedupe(dualSignal, set, upstreamNyaa)
+			if conflicts != 0 {
+				t.Errorf("identity conflicts = %d, want 0: a contested twin vetoes the TWIN, never the match", conflicts)
+			}
+			if len(out) == 0 {
+				t.Fatalf("got no items, want the curated result (%s)", tc.desc)
+			}
+			orig := out[0]
+			if !slices.Equal(orig.Categories, []int{catMovies, catAnime}) || orig.Title != dualSignal[0].Title {
+				t.Errorf("original = %q %v, want Prowlarr's own title and categories untouched (%s)", orig.Title, orig.Categories, tc.desc)
+			}
+			if tc.wantTitle == "" {
+				if len(out) != 1 {
+					t.Errorf("got %d items, want the 1 curated result alone (%s)", len(out), tc.desc)
+				}
+				return
+			}
+			if len(out) != 2 {
+				t.Fatalf("got %d items, want the curated result plus its twin (%s)", len(out), tc.desc)
+			}
+			twin := out[1]
+			if twin.Title != tc.wantTitle {
+				t.Errorf("twin Title = %q, want %q", twin.Title, tc.wantTitle)
+			}
+			if twin.GUID == orig.GUID || trackerKeyFromURL(twin.GUID) != key {
+				t.Errorf("twin GUID = %q, want a distinct GUID keying to %q (original %q)", twin.GUID, key, orig.GUID)
+			}
+			if !slices.Equal(twin.Categories, []int{catAnime}) {
+				t.Errorf("twin Categories = %v, want [%d]", twin.Categories, catAnime)
+			}
+			if twin.TvdbID != orig.TvdbID || twin.TvdbID != 79525 {
+				t.Errorf("twin TvdbID = %d, want the original's %d", twin.TvdbID, orig.TvdbID)
+			}
+			if twin.DownloadVolumeFactor != orig.DownloadVolumeFactor || twin.InfoHash != orig.InfoHash {
+				t.Errorf("twin marker/hash = %q/%q, want the original's %q/%q inherited",
+					twin.DownloadVolumeFactor, twin.InfoHash, orig.DownloadVolumeFactor, orig.InfoHash)
+			}
+		})
+	}
+}
+
+// TestSearchRenderAgreesWithTheMirrorIdentityRSSRender is the SEARCH half of the
+// RSS journal's mirror fixture (TestBothPassKindsRenderTheMirrorIdentityIdentically),
+// and together they pin that the two render paths agree.
+//
+// The ownership fact is the mirror shape: one holder contributes the tracker key,
+// the hash and one TVDB id; a second contributes only the bare hash with another.
+// Built through projectCuration rather than hand-written signals, so the fixture
+// exercises the same fold a loaded snapshot does.
+func TestSearchRenderAgreesWithTheMirrorIdentityRSSRender(t *testing.T) {
+	mirrorHash := strings.Repeat("e", 40)
+	set := projectCuration(mergeOwners(
+		ownsBy(2001, ownedRelease{Key: "nyaa:777", Hash: mirrorHash, TvdbID: 79525, IsBest: true}),
+		ownsBy(2002, ownedRelease{Hash: mirrorHash, TvdbID: 123456, IsBest: true}),
+	))
+	raw := []item{{
+		Title: "Mirror Show S01", InfoHash: mirrorHash,
+		InfoURL: "https://nyaa.si/view/777", GUID: "https://nyaa.si/view/777",
+	}}
+	out, _ := markAndDedupe(raw, &set, upstreamNyaa)
+	if len(out) != 1 {
+		t.Fatalf("got %d items, want the 1 curated result: the holders agree on the best vote, so nothing drops the match", len(out))
+	}
+	if out[0].TvdbID != 0 {
+		t.Errorf("TvdbID = %d, want 0: the RSS render of this identity emits none, and the two paths must not disagree",
+			out[0].TvdbID)
 	}
 }
 
@@ -717,18 +920,14 @@ func TestConsumerWarningsStayIndependent(t *testing.T) {
 	}
 }
 
-// TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty pins the startup window of
-// the cache's reload clock: until its first load resolves, nothing is installed
-// and the empty in-memory snapshot is indistinguishable from a fresh install, so
-// every request must answer the snapshot-unavailable Torznab fault rather than a
-// successful empty feed the arr would record as a clean no-match. It must answer
-// IMMEDIATELY - the request path performs no load and waits on nothing, which is
-// what a wedged /config mount used to be able to break - and serve normally once
-// the load resolves.
-//
-// The unresolved state is set directly rather than simulated with a wedged
-// filesystem: the loader owns the load, so there is nothing on the request path
-// left to block on, and this state machine is exactly what the fault reads.
+// TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty pins the startup window of the
+// cache's reload clock: until its first load resolves, nothing is installed and the
+// empty in-memory snapshot is indistinguishable from a fresh install, so every request
+// must answer the snapshot-unavailable Torznab fault rather than a successful empty feed
+// the arr would record as a clean no-match. It must answer IMMEDIATELY - the request
+// path performs no load and waits on nothing, which is what a wedged /config mount used
+// to break - and serve normally once the load resolves. The unresolved state is set
+// directly, since the loader owns the load and this state machine is what the fault reads.
 func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
@@ -901,7 +1100,7 @@ func TestAnimeBytesMatching(t *testing.T) {
 	}
 
 	// End to end: an AB item (no info hash) matches the SeaDex set by tracker key.
-	set := &curation{byHash: map[string]bool{}, byKey: map[string]bool{"ab:1167293": true}}
+	set := &curation{byHash: bestVotes(map[string]bool{}), byKey: bestVotes(map[string]bool{"ab:1167293": true})}
 	raw := []item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
 	out, _ := markAndDedupe(raw, set, upstreamAB)
 	if len(out) != 1 || out[0].DownloadVolumeFactor != dvfBest {
@@ -981,7 +1180,7 @@ func TestUpstreamForScope(t *testing.T) {
 
 // TestScopeFromHost pins the Host-fallback routing table. Since the gate reads
 // webhttp.CanonicalHost (the shared strict authority parser) rather than
-// splitting the raw Host on its first dot (l-f25), a bare tracker host carrying
+// splitting the raw Host on its first dot, a bare tracker host carrying
 // a port routes correctly and malformed authorities no longer route at all.
 func TestScopeFromHost(t *testing.T) {
 	tests := []struct{ host, want string }{
@@ -1124,7 +1323,7 @@ func TestDerivedTitle(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := derivedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group}, EntryInfo{})
+			got := derivedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group}, &EntryInfo{})
 			if got != tc.want {
 				t.Errorf("derivedTitle = %q, want %q", got, tc.want)
 			}
@@ -1159,15 +1358,14 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 	}
 }
 
-// TestServeUnconfiguredABServesNoPasskeyItems pins the README's per-tracker
-// off switch on the serve path: with ab_torznab_url EMPTY and ab_passkey still
-// set, an /ab empty-q request (the periodic RSS check) must serve NO
-// passkey-bearing items - even against a stale on-disk snapshot persisted
-// while AnimeBytes was still configured - and must answer with the same empty
-// feed shape as a tracker with no data, never the missing-passkey nudge (that
-// nudge is for a CONFIGURED tracker). The configured sibling subtest proves
-// the same snapshot serves normally once ab_torznab_url is set, so the gate
-// cannot dark-launch an always-off AB feed.
+// TestServeUnconfiguredABServesNoPasskeyItems pins the README's per-tracker off switch
+// on the serve path: with ab_torznab_url EMPTY and ab_passkey still set, an /ab empty-q
+// request (the periodic RSS check) must serve NO passkey-bearing items - even against a
+// stale on-disk snapshot persisted while AnimeBytes was still configured - and must
+// answer with the same empty feed shape as a tracker with no data, never the
+// missing-passkey nudge (that nudge is for a CONFIGURED tracker). The configured sibling
+// subtest proves the same snapshot serves normally once ab_torznab_url is set, so the
+// gate cannot dark-launch an always-off AB feed.
 func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	// A stale snapshot written before the operator blanked ab_torznab_url: its
 	// AB feed carries a credential-bearing download link.
@@ -1335,9 +1533,8 @@ func TestFilterByCatsAppliesTorznabCategorySemantics(t *testing.T) {
 }
 
 // TestFilterByCatsMatchesAnyTorznabParent pins the GENERALIZED parent-category
-// rule beyond the old Anime-under-TV special case: a Movies/HD 2040
-// subcategory item satisfies its 2000 Movies parent while staying excluded
-// from the unrelated TV parent, so a regression back to a hard-coded
+// rule: a Movies/HD 2040 subcategory item satisfies its 2000 Movies parent while
+// staying excluded from the unrelated TV parent, so a regression to a hard-coded
 // anime-to-TV mapping fails here.
 func TestFilterByCatsMatchesAnyTorznabParent(t *testing.T) {
 	items := []item{{Title: "movie subcategory", Categories: []int{2040}}}
@@ -1440,15 +1637,14 @@ func TestValidInfoHash(t *testing.T) {
 	}
 }
 
-// TestApplyPaging pins the synthesized feed's Torznab paging contract (t=caps
-// advertises limit/offset with default=defaultCapsLimit): limit trims the
-// window, offset advances it, an offset past the end yields an empty page, a
-// missing or invalid limit falls back to the advertised default (which leaves
-// a feed smaller than the default untouched and trims a larger one), and the
-// offset is applied before the limit. The substitution is silent to the
-// client, so the Debug line is the only signal a misconfigured limit was
-// ignored: each case also pins that it fires for a present-but-unusable value
-// and stays quiet for an absent one.
+// TestApplyPaging pins the synthesized feed's Torznab paging contract (t=caps advertises
+// limit/offset with default=defaultCapsLimit): limit trims the window, offset advances
+// it, an offset past the end yields an empty page, a missing or invalid limit falls back
+// to the advertised default (leaving a feed smaller than the default untouched and
+// trimming a larger one), and the offset is applied before the limit. The substitution
+// is silent to the client, so the Debug line is the only signal a misconfigured limit
+// was ignored: each case pins that it fires for a present-but-unusable value and stays
+// quiet for an absent one.
 func TestApplyPaging(t *testing.T) {
 	feed := []item{{GUID: "a"}, {GUID: "b"}, {GUID: "c"}}
 	big := make([]item, defaultCapsLimit+3)
@@ -1665,15 +1861,67 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 	}
 }
 
-// TestNewCopiesConfig pins New's defensive Config snapshot, the invariant the
-// unlocked per-request config reads rest on (server.go's feed_api_key /
-// ab_torznab_url gates, query.go's per-scope upstream checks, reload.go's AB
-// passkey rebuild all read the narrowed ix.apiKey / ix.enablement values with
-// no lock, safe only because they are by-value copies taken once in New). A caller that reuses or clears its Config
-// after construction must therefore change nothing the server serves: the
-// construction-time feed key still authorizes, and a CONFIGURED AnimeBytes
-// tracker still answers the missing-passkey nudge rather than the
-// unconfigured-tracker empty feed.
+// twinBearingStoredItem is a journaled film on a Sonarr series with every wire
+// field populated, so an expansion that drops or rewrites any inherited field is
+// visible to a whole-struct comparison.
+func twinBearingStoredItem() journalItem {
+	return journalItem{
+		PubDate: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
+		Title:   "Lelouch of the Resurrection 1080p [G]", GUID: "https://nyaa.si/view/2133634",
+		InfoURL: "https://releases.moe/21519", DownloadURL: "https://nyaa.si/download/2133634.torrent",
+		InfoHash: strings.Repeat("c", 40), DownloadVolumeFactor: dvfBest,
+		Categories: []int{catMovies}, Size: 7, Seeders: 3, Leechers: 1, TvdbID: 79525,
+		SonarrTitle: "Code Geass S00E04 1080p [G]", SonarrGUID: "https://nyaa.si/view/2133634#sonarr",
+		Key: "nyaa:2133634", AniListID: 21519,
+	}
+}
+
+// TestFeedForExpandsAFilmTwinIntoTwoWireItems pins the render-time expansion of
+// ONE stored record: the original wire item is served byte-for-byte as stored,
+// and the twin beside it differs in exactly Title, GUID and Categories (Anime
+// only) with its own two twin fields blank, inheriting everything else - the
+// tvdb id above all, since Sonarr resolves the series from it. A stored item
+// with no twin title expands to itself alone.
+func TestFeedForExpandsAFilmTwinIntoTwoWireItems(t *testing.T) {
+	stored := twinBearingStoredItem()
+	plain := twinBearingStoredItem()
+	plain.SonarrTitle, plain.SonarrGUID = "", ""
+	plain.GUID, plain.Key = "https://nyaa.si/view/99", "nyaa:99"
+
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
+	ix.cache.mu.Lock()
+	ix.cache.snap.NyaaFeed = []journalItem{stored, plain}
+	ix.cache.mu.Unlock()
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 3 {
+		t.Fatalf("feedFor = %d items, want 3 (the twin-bearing record expands to two, the plain one to itself)", len(got))
+	}
+	if !reflect.DeepEqual(got[0], stored.item) {
+		t.Errorf("original served = %+v, want the stored item unchanged %+v", got[0], stored.item)
+	}
+	want := stored.item
+	want.Title, want.GUID, want.Categories = stored.SonarrTitle, stored.SonarrGUID, []int{catAnime}
+	want.SonarrTitle, want.SonarrGUID = "", ""
+	if !reflect.DeepEqual(got[1], want) {
+		t.Errorf("twin served = %+v, want the original with exactly Title, GUID, Categories replaced and the twin fields blank %+v", got[1], want)
+	}
+	if got[1].TvdbID != got[0].TvdbID {
+		t.Errorf("twin TvdbID = %d, want the original's %d", got[1].TvdbID, got[0].TvdbID)
+	}
+	if !reflect.DeepEqual(got[2], plain.item) {
+		t.Errorf("plain item served = %+v, want itself alone %+v", got[2], plain.item)
+	}
+}
+
+// TestNewCopiesConfig pins New's defensive Config snapshot, the invariant the unlocked
+// per-request config reads rest on (server.go's feed_api_key / ab_torznab_url gates,
+// query.go's per-scope upstream checks and reload.go's AB passkey rebuild all read the
+// narrowed ix.apiKey / ix.enablement values with no lock, safe only because they are
+// by-value copies taken once in New). A caller that reuses or clears its Config after
+// construction must therefore change nothing the server serves: the construction-time
+// feed key still authorizes, and a CONFIGURED AnimeBytes tracker still answers the
+// missing-passkey nudge rather than the unconfigured-tracker empty feed.
 func TestNewCopiesConfig(t *testing.T) {
 	cfg := &Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}
 	ix := New(cfg, nil, nil)
@@ -1744,15 +1992,14 @@ func TestRejectionLinesNameTheClientIP(t *testing.T) {
 	}
 }
 
-// TestDisabledTrackerFeedIsNotGatedBySnapshotState pins the off switch against
-// the snapshot state machine: an empty per-tracker Torznab URL is that tracker's
-// documented off switch, and its RSS answer is the plain empty feed - so it must
-// hold even while nothing has ever loaded (here a malformed first snapshot, the
-// startup-fault state). Answering the snapshot-unavailable Torznab error there
-// would fail an operator's Prowlarr save-test for a tracker they deliberately
-// turned off, on a fault that has nothing to do with it. An ENABLED tracker still
-// gets the fault, which is the assertion that keeps this from reading as "the
-// gate was simply removed".
+// TestDisabledTrackerFeedIsNotGatedBySnapshotState pins the off switch against the
+// snapshot state machine: an empty per-tracker Torznab URL is that tracker's documented
+// off switch, and its RSS answer is the plain empty feed - so it must hold even while
+// nothing has ever loaded (here a malformed first snapshot, the startup-fault state).
+// Answering the snapshot-unavailable Torznab error there would fail an operator's
+// Prowlarr save-test for a tracker they deliberately turned off, on a fault that has
+// nothing to do with it. An ENABLED tracker still gets the fault, which keeps this from
+// reading as "the gate was simply removed".
 func TestDisabledTrackerFeedIsNotGatedBySnapshotState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {

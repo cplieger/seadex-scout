@@ -22,29 +22,44 @@ const (
 )
 
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
-// tracker key, each mapping to whether SeaDex marks that release best. byPair
+// tracker key, each mapping to what every owner of that signal agreed on. byPair
 // records which hash/key combinations were observed on the SAME SeaDex torrent, so
 // lookup can prove an item's two identity signals name one release. A nil byPair
 // is a legacy snapshot; lookup then FAILS CLOSED for items carrying both signals
 // while single-signal matching keeps working.
 type curation struct {
-	byHash map[string]bool
-	byKey  map[string]bool
+	byHash map[string]curatedSignal
+	byKey  map[string]curatedSignal
 	byPair map[string]bool
+}
+
+// curatedSignal is what one identity signal's owners agreed on, folded at build
+// time: whether any of them marks the release best, and the tvdb id and film twin
+// title they agree on, each as a THREE-state vote. A vote must carry
+// "contradicted" as its own state, because a bare zero conflates it with "no
+// owner supplied one" and then reads as abstention at the cross-signal fold,
+// where an agreeing sibling signal would override the contradiction.
+type curatedSignal struct {
+	twin   twinVote
+	vote   tvdbVote
+	isBest bool
 }
 
 // pairKey joins a validated info hash and a tracker key into the byPair relation
 // key. keyenc.Join is the app's ONE home for a composite key no field's content
 // can forge, and escaping is element-wise, so two distinct hash/key pairs cannot
-// collide whatever either component carries - where the old bare-'|' join was
-// sound only while both producers' alphabets held. The relation is derived in
+// collide whatever either component carries, where a bare-'|' join would be sound
+// only while both producers' alphabets held. The relation is derived in
 // memory on every load and never persisted, so the encoding is free to change.
 func pairKey(hash, key string) string { return keyenc.Join(hash, key) }
 
-// curationMatch accumulates the best/alt agreement state across an item's identity
+// curationMatch accumulates the agreement state across an item's identity
 // signals: accept admits a signal only when it resolves to a curated entry that
-// agrees with every previously accepted one. Bookkeeping only; lookup owns policy.
+// agrees with every previously accepted one, and folds that signal's tvdb and
+// twin votes into the item's. Bookkeeping only; lookup owns policy.
 type curationMatch struct {
+	twin    twinVote
+	vote    tvdbVote
 	isBest  bool
 	matched bool
 }
@@ -52,51 +67,71 @@ type curationMatch struct {
 // accept records one identity signal's curation result, reporting whether the
 // signal keeps the item alive: a signal that missed the curation set or
 // contradicts an earlier signal's best/alt value rejects it.
-func (m *curationMatch) accept(candidate, ok bool) bool {
-	if !ok || (m.matched && candidate != m.isBest) {
+//
+// Both votes are MERGED, conflict bit included, so a signal whose own holders
+// disagreed vetoes the attribute instead of abstaining beside an agreeing sibling.
+func (m *curationMatch) accept(sig curatedSignal, ok bool) bool {
+	if !ok || (m.matched && sig.isBest != m.isBest) {
 		return false
 	}
-	m.isBest, m.matched = candidate, true
+	m.isBest, m.matched = sig.isBest, true
+	m.vote.merge(sig.vote)
+	m.twin.merge(sig.twin)
 	return true
 }
 
+// curationVerdict is lookup's answer for one search result: whether the release
+// is curated at all, whether it is the best one, whether it was rejected by an
+// identity CONTRADICTION rather than by not being curated, and the two facts every
+// holder of every accepted signal agrees on - the TVDB id (0 when none supplied
+// one or they disagreed) and the film twin title ("" likewise).
+type curationVerdict struct {
+	sonarrTitle string
+	tvdbID      int
+	isBest      bool
+	matched     bool
+	conflict    bool
+}
+
 // lookup reports whether a release (by its info hash and page URLs) is SeaDex-
-// curated, and if so whether it is the best release. Every identity signal the item
-// carries that the curation set KNOWS must agree with the others on the best/alt
-// value. An item carrying BOTH a curated hash and a curated tracker key must
-// additionally prove the exact pair was observed on a single SeaDex torrent
-// (byPair): agreement alone would still admit torrent A's hash cross-wired with
-// torrent B's key whenever both are best. scope binds tracker identity, so a
-// swapped upstream cannot pass /ab an accepted Nyaa key.
-func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched, conflict bool) {
+// curated, as a curationVerdict. Every identity signal the curation set KNOWS
+// must agree with the others on best/alt, and an item carrying BOTH a curated
+// hash and a curated tracker key must also prove the pair was observed on one
+// SeaDex torrent (byPair), or A's hash cross-wired with B's key would pass
+// whenever both are best. A rejection yields the zero verdict plus the conflict
+// flag it earned.
+func (c *curation) lookup(scope, hash, infoURL, guid string) curationVerdict {
 	var match curationMatch
 
 	// curatedHash is the hash only once the set has vouched for it; an unknown hash
 	// leaves it empty so the pair relation below has no phantom signal to prove.
 	var curatedHash string
 	if h := validInfoHash(hash); h != "" {
-		if b, ok := c.byHash[h]; ok {
-			if !match.accept(b, true) {
-				return false, false, match.matched
+		if sig, ok := c.byHash[h]; ok {
+			if !match.accept(sig, true) {
+				return curationVerdict{conflict: match.matched}
 			}
 			curatedHash = h
 		}
 	}
 	key, ok, keyConflict := c.acceptScopedKeys(scope, []string{infoURL, guid}, &match)
 	if !ok {
-		return false, false, match.matched || keyConflict
+		return curationVerdict{conflict: match.matched || keyConflict}
 	}
 	// AnimeBytes exposes no info hash in Torznab, so a scoped tracker key is
 	// mandatory there; Nyaa may still match a hash-only item.
 	if scope == upstreamAB && key == "" {
-		return false, false, match.matched
+		return curationVerdict{conflict: match.matched}
 	}
 	// Both signals present and individually curated: the persisted pair
 	// relation must prove they belong to one release.
 	if !c.acceptsObservedPair(curatedHash, key) {
-		return false, false, match.matched
+		return curationVerdict{conflict: match.matched}
 	}
-	return match.isBest, match.matched, false
+	return curationVerdict{
+		isBest: match.isBest, matched: match.matched,
+		tvdbID: match.vote.resolve(), sonarrTitle: match.twin.resolve(),
+	}
 }
 
 // acceptsObservedPair applies lookup's dual-signal relation check: an item carrying
@@ -139,8 +174,8 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 			return identity, false, true
 		}
 		identity = k
-		b, curated := c.byKey[k]
-		if !m.accept(b, curated) {
+		sig, curated := c.byKey[k]
+		if !m.accept(sig, curated) {
 			return identity, false, false
 		}
 	}
@@ -326,10 +361,14 @@ func (ix *Indexer) feedFor(scope string) []item {
 	feed := ix.cache.feed(scope)
 	// The serve boundary speaks the WIRE vocabulary only: strip the journal
 	// bookkeeping by projecting each record onto its embedded item, so the render
-	// path cannot depend on persisted-only fields.
-	items := make([]item, len(feed))
+	// path cannot depend on persisted-only fields. A stored item carrying a film
+	// twin expands into two wire items here; the journal holds one record.
+	items := make([]item, 0, len(feed))
 	for i := range feed {
-		items[i] = feed[i].item
+		items = append(items, feed[i].item)
+		if feed[i].SonarrTitle != "" {
+			items = append(items, sonarrTwin(&feed[i].item))
+		}
 	}
 	return items
 }
@@ -385,33 +424,42 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 	return items, fetched, false
 }
 
-// markAndDedupe keeps the curated releases, stamps each with the best/alt marker,
-// and drops intra-upstream duplicates by guid (a torrent listed under several title
-// aliases carries distinct guids and is deliberately kept). It also reports how many
-// items were dropped by an identity CONTRADICTION rather than by not being curated,
-// so that class is visible in the per-request line instead of reading as no-match.
+// markAndDedupe keeps the curated releases, stamps each with the best/alt marker
+// and the TVDB id its owners agree on, drops intra-upstream duplicates by guid (a
+// torrent listed under several title aliases carries distinct guids and is
+// deliberately kept), and follows a film whose owners agree on a twin title with
+// its search twin. It also reports how many items were dropped by an identity
+// CONTRADICTION rather than by not being curated, so that class is visible in the
+// per-request line instead of reading as no-match.
 func markAndDedupe(raw []item, set *curation, scope string) (out []item, conflicts int) {
 	seen := make(map[string]struct{}, len(raw))
 	out = make([]item, 0, len(raw))
 	for i := range raw {
 		it := raw[i]
-		isBest, matched, conflict := set.lookup(scope, it.InfoHash, it.InfoURL, it.GUID)
-		if !matched {
-			if conflict {
+		verdict := set.lookup(scope, it.InfoHash, it.InfoURL, it.GUID)
+		if !verdict.matched {
+			if verdict.conflict {
 				conflicts++
 			}
 			continue
 		}
 		it.DownloadVolumeFactor = dvfAlt
-		if isBest {
+		if verdict.isBest {
 			it.DownloadVolumeFactor = dvfBest
 		}
+		// The id rides beside the marker: a proxied result is the only path that
+		// reaches a curation older than the 14-day journal, which is exactly what a
+		// Wanted -> Cutoff Unmet search walks.
+		it.TvdbID = verdict.tvdbID
 		id := it.guid()
 		if _, dup := seen[id]; dup {
 			continue
 		}
 		seen[id] = struct{}{}
 		out = append(out, it)
+		if verdict.sonarrTitle != "" {
+			out = append(out, searchTwin(&it, verdict.sonarrTitle))
+		}
 	}
 	return out, conflicts
 }

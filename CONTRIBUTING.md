@@ -68,7 +68,11 @@ direction (leaves have no internal imports):
   torrents relation expanded), over `httpx`, bounded and polite.
 - `internal/mapping`: the Fribb anime-lists loader (conditional GET + cache) and
   the local overrides overlay, indexed by AniList ID. `fribb.go` decodes the
-  upstream JSON resiliently (per-record, tolerant of shape variance).
+  upstream JSON resiliently (per-record, tolerant of shape variance). A second
+  loader (`mappinglist.go`, `animelist.go`) fetches the Anime-Lists
+  `anime-list-master.xml` on its own validators and decodes its mapping-list
+  under an `xmlx` budget into per-AniDB-id season ranges and film episodes,
+  reachable through `Index.MappingFor`.
 - `internal/anilist`: the AniList GraphQL fallback client with a header-adaptive
   throttle (spacing + `X-RateLimit` backoff + `Retry-After`).
 - `internal/library`: the arrapi walk (Sonarr series + episodes, Radarr movies),

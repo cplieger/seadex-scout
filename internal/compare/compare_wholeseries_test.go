@@ -113,3 +113,24 @@ func TestCompareWholeSeries(t *testing.T) {
 		})
 	}
 }
+
+// TestCompareWholeSeriesDropsSiblingMappedSeasons is Gintama's live shape on the
+// findings path: a seasonless entry whose siblings map seasons 5-8 and 10 has
+// only its own S1-S4 left in the aggregate, all of them its SeaDex best, so the
+// daemon goes silent where it emitted a false have_unlisted and a false
+// mixed_group_manual before. Without the sibling summary the same match reports.
+func TestCompareWholeSeriesDropsSiblingMappedSeasons(t *testing.T) {
+	seasons := map[int][]string{1: {"cbt"}, 2: {"cbt"}, 3: {"cbt"}, 4: {"cbt"}, 5: {"kh"}, 6: {"kh"}, 7: {"kh"}, 8: {"kh"}, 10: {"kh"}}
+	entry := bestEntry(918, "CBT")
+
+	m := wholeSeriesMatch(seasons, entry)
+	m.SiblingSeasons = []int{5, 6, 7, 8, 10}
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Errorf("findings = %+v, want none (every season of the entry's own carries its best group)", got)
+	}
+
+	contaminated := wholeSeriesMatch(seasons, entry)
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{contaminated}); len(got) != 1 {
+		t.Fatalf("findings without the sibling summary = %+v, want 1 (the contaminated verdict this fix removes)", got)
+	}
+}

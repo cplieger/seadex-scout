@@ -40,10 +40,11 @@ func TestRenderJournalItemOrderInvariantFoldProperty(t *testing.T) {
 		}
 		infoFor := func(alID int) EntryInfo { return EntryInfo{IsMovie: movie[alID]} }
 
-		it, ok, noPasskey := w.renderJournalItem("nyaa:77", refs, infoFor)
-		if !ok || noPasskey {
-			rt.Fatalf("renderJournalItem = (ok=%v, noPasskey=%v), want (true, false)", ok, noPasskey)
+		rendered, ok := w.renderJournalItem("nyaa:77", refs, nil, infoFor)
+		if !ok || rendered.noPasskey {
+			rt.Fatalf("renderJournalItem = (ok=%v, noPasskey=%v), want (true, false)", ok, rendered.noPasskey)
 		}
+		it := rendered.item
 
 		wantDVF := dvfAlt
 		if slices.Contains(best, true) {
@@ -71,10 +72,11 @@ func TestRenderJournalItemOrderInvariantFoldProperty(t *testing.T) {
 		}
 
 		perm := rapid.Permutation(refs).Draw(rt, "perm")
-		it2, ok2, _ := w.renderJournalItem("nyaa:77", perm, infoFor)
+		permuted, ok2 := w.renderJournalItem("nyaa:77", perm, nil, infoFor)
 		if !ok2 {
 			rt.Fatalf("permuted renderJournalItem not rendered")
 		}
+		it2 := permuted.item
 		catsOf := func(c []int) []int { c = slices.Clone(c); slices.Sort(c); return c }
 		if it2.Title != it.Title || it2.GUID != it.GUID || it2.InfoURL != it.InfoURL ||
 			it2.DownloadURL != it.DownloadURL || it2.Size != it.Size ||
@@ -85,16 +87,14 @@ func TestRenderJournalItemOrderInvariantFoldProperty(t *testing.T) {
 	})
 }
 
-// TestRebuildNeverRebroadcastsProperty is a model-based property over the
-// journal's novelty ledger across arbitrary rebuild sequences: for a fixed
-// pool of distinct Nyaa torrents, each rebuild curating a random subset, the
-// COMPLETE feed must equal the external membership-and-FirstSeen model - the
-// set of keys first curated after the round-0 fresh-install baseline, each
-// stamped with the rebuild time it first appeared. One post-baseline
-// introduction is forced every run, so an implementation that journals
-// nothing (or re-broadcasts the baseline, mutates FirstSeen, or duplicates a
-// key) fails the property; the model is a plain map, never a
-// reimplementation of the ledger.
+// TestRebuildNeverRebroadcastsProperty is a model-based property over the journal's
+// novelty ledger across arbitrary rebuild sequences: for a fixed pool of distinct Nyaa
+// torrents, each rebuild curating a random subset, the COMPLETE feed must equal the
+// external membership-and-FirstSeen model - the keys first curated after the round-0
+// fresh-install baseline, each stamped with the rebuild time it first appeared. One
+// post-baseline introduction is forced every run, so an implementation that journals
+// nothing (or re-broadcasts the baseline, mutates FirstSeen, or duplicates a key) fails
+// the property; the model is a plain map, never a reimplementation of the ledger.
 func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		path := filepath.Join(t.TempDir(), "feed.json")

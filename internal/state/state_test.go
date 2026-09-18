@@ -656,18 +656,13 @@ func TestStorePartialWalkStreakPersistsUnderStableWireKey(t *testing.T) {
 	}
 }
 
-// TestStoreSaveEnvelopeNestedShape pins the wire shape of the persisted
-// members other packages own (match.Memo, library.Snapshot).
-// Their json tags define state.json's schema while SchemaVersion, the
-// discriminator that governs a rename, lives here - so a tag moved on the
-// domain side must fail in this package rather than silently zero-load out of
-// every existing state file at the next deploy. mapping.Cache's validator keys
-// are already pinned by the raw fixture in
-// TestStoreLoadReadsPersistedValidatorsAndPartialWalk. If this test fails
-// because a member was renamed or moved deliberately, bump SchemaVersion in
-// the same commit (see its doc) and update the expectations below. The
-// assertions are on the KEY SET only, never the values, so ordinary value
-// changes do not churn them.
+// TestStoreSaveEnvelopeNestedShape pins the wire shape of the persisted members other
+// packages own (match.Memo, library.Snapshot). Their json tags define state.json's schema
+// while SchemaVersion, the discriminator that governs a rename, lives here - so a tag moved
+// on the domain side must fail in this package rather than silently zero-load out of every
+// existing state file at the next deploy. A deliberate rename means bumping SchemaVersion
+// in the same commit (see its doc) and updating the expectations below. The assertions are
+// on the KEY SET only, never the values, so ordinary value changes do not churn them.
 func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
@@ -777,19 +772,14 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	}
 }
 
-// TestStoreLoadIgnoresRetiredScalarShrunkWalks pins the one compatibility
-// property the per-arr shrink streak's field RENAME rests on: a state.json
-// written by a build that persisted the retired scalar `shrunk_walks` must load
-// CLEANLY - the unknown key is ignored, the file is not quarantined, and every
-// other member (the expensive AniList memo above all) survives.
-//
-// It is pinned because the alternative shape was a trap. Re-typing the existing
-// key from int to object would have made json.Unmarshal fail on such a file,
-// and decode treats an unmarshal failure as corruption: the operator's state
-// would be renamed aside and the memo rebuilt over a measured ~25-minute cold
-// reconcile. Losing the streak instead is the cheap half of that trade (a
-// transient counter, at most one extra cycle of tolerance), and the app's
-// no-rollback-no-migration decision covers exactly it.
+// TestStoreLoadIgnoresRetiredScalarShrunkWalks pins the one compatibility property the
+// per-arr shrink streak's field RENAME rests on: a state.json written by a build that
+// persisted the retired scalar `shrunk_walks` must load CLEANLY - the unknown key is
+// ignored, the file is not quarantined, and every other member (the expensive AniList memo
+// above all) survives. Re-typing the existing key from int to object instead makes
+// json.Unmarshal fail on such a file, and decode treats an unmarshal failure as corruption:
+// the operator's state is renamed aside and the memo rebuilt over a measured ~25-minute
+// cold reconcile. Losing the streak is the cheap half of that trade.
 func TestStoreLoadIgnoresRetiredScalarShrunkWalks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	legacy := `{"version":1,"shrunk_walks":4,"seadex_failures":2,"anilist_memo":{"entries":{"154587":{"titles":["Frieren"],"format":"TV","year":2023}}}}`
@@ -815,19 +805,14 @@ func TestStoreLoadIgnoresRetiredScalarShrunkWalks(t *testing.T) {
 	}
 }
 
-// TestStoreLoadIgnoresRetiredLibraryFilteredEmpty is the same compatibility
-// property one level down, for the emptied-arr list that replaced the persisted
-// `library.filtered_empty` boolean. The retired key rides State.Library, so a
-// deployed state.json carries it nested; the new list is a SEPARATE key
-// (`filtered_empty_arrs`) precisely so this file still decodes.
-//
-// Re-typing the boolean in place would have been a data-loss bug rather than a
-// shape change: json.Unmarshal ignores an unknown key but returns an error on a
-// TYPE mismatch, and decode routes an unmarshal error into maybeQuarantine,
-// which renames the live state.json aside and cold-starts. That would have cost
-// the operator the AniList memo (a measured ~25-minute cold reconcile) on the
-// first boot of the new image. Losing the flag is free by comparison: it is
-// re-derived by the very next walk.
+// TestStoreLoadIgnoresRetiredLibraryFilteredEmpty is the same compatibility property one
+// level down, for the emptied-arr list that replaced the persisted `library.filtered_empty`
+// boolean. The retired key rides State.Library, so a deployed state.json carries it nested;
+// the new list is a SEPARATE key (`filtered_empty_arrs`) precisely so this file still
+// decodes. Re-typing the boolean in place is data loss rather than a shape change:
+// json.Unmarshal ignores an unknown key but errors on a TYPE mismatch, and decode routes
+// that into maybeQuarantine, which renames the live state.json aside and cold-starts,
+// costing the operator the AniList memo. The flag is re-derived by the very next walk.
 func TestStoreLoadIgnoresRetiredLibraryFilteredEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	legacy := `{"version":1,"library":{"taken_at":"2026-07-01T00:00:00Z","filtered_empty":true,"partial":true,` +
@@ -855,6 +840,88 @@ func TestStoreLoadIgnoresRetiredLibraryFilteredEmpty(t *testing.T) {
 	}
 	if len(got.Memo.Entries) != 1 {
 		t.Errorf("memo entries = %d, want 1 (the memo is the member a quarantine would cost ~25 minutes to rebuild)", len(got.Memo.Entries))
+	}
+}
+
+// TestStoreLoadAcceptsMappingRecordsWithoutSeasonKind is the same compatibility
+// property for the season-kind field's ADDITION rather than a retirement: every
+// deployed state.json carries mapping records written before the key existed, and
+// a 304 window can leave them that way for a week.
+//
+// The property the dispatch depends on is the last assertion: an absent key reads
+// UNKNOWN, not absent. Reading it as absent would send every mapped-zero special
+// to a whole-series comparison for that window.
+func TestStoreLoadAcceptsMappingRecordsWithoutSeasonKind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{"version":1,"mapping":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"abc\"",` +
+		`"records":[{"type":"TV","imdb_ids":["tt001"],"anilist_id":104461,"tvdb_id":344974},` +
+		`{"type":"MOVIE","anilist_id":11577,"tvdb_id":78964,"season_tvdb":0}]},` +
+		`"anilist_memo":{"entries":{"154587":{"titles":["Frieren"],"format":"TV","year":2023}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	got, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load of a file whose mapping records predate season_kind returned error: %v (an additive key must never quarantine)", err)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("quarantine stat = %v, want not exist (an additive key is not corruption)", statErr)
+	}
+	if got.Mapping.ETag != `W/"abc"` {
+		t.Errorf("Mapping.ETag = %q, want the persisted validator (the sibling members are unaffected)", got.Mapping.ETag)
+	}
+	if len(got.Mapping.Records) != 2 {
+		t.Fatalf("Mapping.Records = %+v, want the two persisted records", got.Mapping.Records)
+	}
+	if len(got.Memo.Entries) != 1 {
+		t.Errorf("memo entries = %d, want 1 (the memo is the member a quarantine would cost ~25 minutes to rebuild)", len(got.Memo.Entries))
+	}
+	for _, rec := range got.Mapping.Records {
+		if got := rec.SeasonPresence(); got != mapping.SeasonUnknown {
+			t.Errorf("record %d SeasonPresence() = %q, want %q", rec.AniListID, got, mapping.SeasonUnknown)
+		}
+	}
+}
+
+// TestStoreLoadAcceptsMappingRecordsWithoutAniDBID is the same additive-key
+// property for the Anime-Lists join key: a state.json whose records predate
+// anidb_id loads with 0 (absent), no error, no quarantine, siblings intact. The
+// mapping-list sibling fields on the cache are absent too and read as their zero
+// values, so the first refresh after the upgrade populates them.
+func TestStoreLoadAcceptsMappingRecordsWithoutAniDBID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{"version":1,"mapping":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"abc\"",` +
+		`"records":[{"type":"TV","anilist_id":104461,"tvdb_id":344974,"season_kind":"present","season_tvdb":1},` +
+		`{"type":"MOVIE","anilist_id":11577,"tvdb_id":78964,"season_kind":"present"}]},` +
+		`"anilist_memo":{"entries":{"154587":{"titles":["Frieren"],"format":"TV","year":2023}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	got, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load of a file whose mapping records predate anidb_id returned error: %v (an additive key must never quarantine)", err)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("quarantine stat = %v, want not exist (an additive key is not corruption)", statErr)
+	}
+	if got.Mapping.ETag != `W/"abc"` {
+		t.Errorf("Mapping.ETag = %q, want the persisted validator (the sibling members are unaffected)", got.Mapping.ETag)
+	}
+	if len(got.Mapping.Records) != 2 {
+		t.Fatalf("Mapping.Records = %+v, want the two persisted records", got.Mapping.Records)
+	}
+	if len(got.Memo.Entries) != 1 {
+		t.Errorf("memo entries = %d, want 1", len(got.Memo.Entries))
+	}
+	for _, rec := range got.Mapping.Records {
+		if rec.AniDBID != 0 {
+			t.Errorf("record %d AniDBID = %d, want 0 (absent key reads absent)", rec.AniListID, rec.AniDBID)
+		}
+	}
+	if len(got.Mapping.Mappings) != 0 || got.Mapping.MappingsETag != "" || !got.Mapping.MappingsFetchedAt.IsZero() {
+		t.Errorf("mapping-list fields on a legacy cache = (%d, %q, %v), want all zero", len(got.Mapping.Mappings), got.Mapping.MappingsETag, got.Mapping.MappingsFetchedAt)
 	}
 }
 
@@ -1276,17 +1343,12 @@ func TestStoreLoadReapsStaleTempsAndReadOnlySkips(t *testing.T) {
 	})
 }
 
-// TestStoreLoadNonDirectoryStateDirSurfacesAsReadError pins Load's handling of
-// a state directory that is not a directory at all (the "directory" is a
-// regular file, a root-safe injection): the confined open fails, so Load
-// reports it as a classified read error rather than a cold start, and the
-// stale-temp sweep - which now runs THROUGH that root - never runs at all.
-//
-// It no longer asserts a cleanup-failure WARN: the ambient sweep this test was
-// written against ran BEFORE the root was opened and could fail its own readdir
-// on a non-directory. The sweep is now pinned to the same root the
-// read/classify/preserve decision uses, so an unopenable state directory leaves
-// nothing for it to attempt and there is no maintenance failure to report.
+// TestStoreLoadNonDirectoryStateDirSurfacesAsReadError pins Load's handling of a state
+// directory that is not a directory at all (the "directory" is a regular file, a root-safe
+// injection): the confined open fails, so Load reports it as a classified read error rather
+// than a cold start, and the stale-temp sweep never runs at all. No cleanup-failure WARN is
+// asserted: the sweep runs THROUGH the same root the read/classify/preserve decision uses,
+// so an unopenable state directory leaves it nothing to attempt.
 func TestStoreLoadNonDirectoryStateDirSurfacesAsReadError(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
@@ -1555,11 +1617,9 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	t.Run("a state exactly at the threshold warns", func(t *testing.T) {
 		// encodeState truncates the encoder's newline away and the staged count
 		// re-syncs with it, so the guard reads exactly the marshalled length.
-		// The threshold is the point the warning STARTS, not the last silent
-		// byte, and only this row can say which side of it the equal case falls
-		// on. It used to assert silence here while the mapping loader's twin
-		// asserted a warning at its own threshold; one shared predicate now
-		// answers for both, inclusively.
+		// The threshold is the point the warning STARTS, not the last silent byte, and only
+		// this row can say which side of it the equal case falls on. One shared predicate
+		// answers here and at the mapping loader's twin threshold, inclusively.
 		logger, recorder := capture.New()
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
 		if err := store.Save(t.Context(), sized(warnThresholdBytes)); err != nil {
@@ -1620,16 +1680,14 @@ func TestStoreLoadStaysQuietOnAHealthyRead(t *testing.T) {
 	}
 }
 
-// TestStoreLoadRefusesStatePathEscapingItsDirectory pins readState's
-// confinement contract: the state file is opened through an os.Root rooted at
-// its parent directory, so a state path that resolves OUTSIDE that directory
-// (a symlink planted at /config/state.json) is a read error Load classifies,
-// never a silent load of foreign bytes as the library snapshot, mapping cache,
-// AniList memo and degradation streaks. The escaping path is a
-// DETERMINISTIC failure (no retry makes a foreign inode readable), so Load
-// classifies it as corruption: the link itself is quarantined, its target is
-// left untouched, and Save resumes on the fresh regular file rather than being
-// blocked forever by the recoverable-fault gate.
+// TestStoreLoadRefusesStatePathEscapingItsDirectory pins readState's confinement contract:
+// the state file is opened through an os.Root rooted at its parent directory, so a state
+// path resolving OUTSIDE that directory (a symlink planted at /config/state.json) is a read
+// error Load classifies, never a silent load of foreign bytes as the snapshot, mapping
+// cache, memo and streaks. The escaping path is a DETERMINISTIC failure (no retry makes a
+// foreign inode readable), so Load classifies it as corruption: the link is quarantined,
+// its target untouched, and Save resumes on the fresh regular file rather than staying
+// blocked by the recoverable-fault gate.
 func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
 	const foreign = `{"seadex_failures":9}`
 	target := filepath.Join(t.TempDir(), "foreign.json")

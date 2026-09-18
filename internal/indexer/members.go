@@ -107,9 +107,19 @@ func (s passScope) String() string {
 // recomputable exactly, so a best-to-alt demotion is representable from a window
 // and the shared-torrent case (4.4% of torrents have several entries) is solved.
 type ownedRelease struct {
-	Key    string `json:"key,omitempty"`
-	Hash   string `json:"hash,omitempty"`
-	IsBest bool   `json:"best,omitempty"`
+	Key  string `json:"key,omitempty"`
+	Hash string `json:"hash,omitempty"`
+	// SonarrTitle is the film twin title THIS owner gives the release (twinTitle),
+	// "" when the owner is not a film offered to a Sonarr series with a named
+	// special episode. At rest for the same reason TvdbID is: the search render
+	// and a tick's unevaluated-owner carry both read it here. Re-derived every
+	// pass, so nothing accumulates.
+	SonarrTitle string `json:"sonarr_title,omitempty"`
+	// TvdbID is the owning entry's TVDB id, 0 when it has none. It is the SEARCH
+	// render's carrier and has to be at rest: the server is a pure snapshot reader
+	// with no mapping access. Re-derived every pass, so nothing accumulates.
+	TvdbID int  `json:"tvdb_id,omitempty"`
+	IsBest bool `json:"best,omitempty"`
 }
 
 // ownerKey is an AniList entry id in its persisted map-key form: JSON object keys
@@ -117,24 +127,25 @@ type ownedRelease struct {
 func ownerKey(alID int) string { return strconv.Itoa(alID) }
 
 // projectCuration derives the three search maps from the owner-keyed ownership
-// fact: persist the fact, derive the projection, so the maps can never drift
-// from it or be tampered with independently. The isBest fold is an OR across
-// every owner, recomputed from the votes rather than accumulated
-// destructively, which is what makes a demotion expressible. All three maps
+// fact: persist the fact, derive the projection, so the maps can never drift from
+// it or be tampered with independently. Both folds on an identity signal are
+// recomputed from every owner's vote rather than accumulated destructively, which
+// is what makes a best-to-alt demotion expressible and what puts holders-agree on
+// the tvdb id here, where several owners collapse into one signal. All three maps
 // are always allocated, so byPair is never absent.
 func projectCuration(owners map[string][]ownedRelease) curation {
 	set := curation{
-		byHash: make(map[string]bool, len(owners)),
-		byKey:  make(map[string]bool, len(owners)),
+		byHash: make(map[string]curatedSignal, len(owners)),
+		byKey:  make(map[string]curatedSignal, len(owners)),
 		byPair: make(map[string]bool, len(owners)),
 	}
 	for _, releases := range owners {
 		for _, r := range releases {
 			if r.Hash != "" {
-				set.byHash[r.Hash] = set.byHash[r.Hash] || r.IsBest
+				set.byHash[r.Hash] = foldOwnerIntoSignal(set.byHash[r.Hash], r)
 			}
 			if r.Key != "" {
-				set.byKey[r.Key] = set.byKey[r.Key] || r.IsBest
+				set.byKey[r.Key] = foldOwnerIntoSignal(set.byKey[r.Key], r)
 			}
 			if r.Hash != "" && r.Key != "" {
 				set.byPair[pairKey(r.Hash, r.Key)] = true
@@ -142,6 +153,18 @@ func projectCuration(owners map[string][]ownedRelease) curation {
 		}
 	}
 	return set
+}
+
+// foldOwnerIntoSignal folds one owner's stored contribution into the accumulated
+// verdict for one identity signal: best-wins on the vote, and holders-agree on the
+// tvdb id and the film twin title through the same three-state folds the RSS
+// render uses (tvdbVote, twinVote), so the two render paths cannot disagree about
+// a contested id or title.
+func foldOwnerIntoSignal(acc curatedSignal, r ownedRelease) curatedSignal {
+	acc.isBest = acc.isBest || r.IsBest
+	acc.vote.add(r.TvdbID)
+	acc.twin.add(r.SonarrTitle)
+	return acc
 }
 
 // upsertOwners applies the PRESENT-fact rule to one pass's evaluation: every entry

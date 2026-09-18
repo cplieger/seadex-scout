@@ -44,15 +44,14 @@ func TestStaleMapError_UnwrapExposesCause(t *testing.T) {
 	}
 }
 
-// TestStaleMapError_LogAttrs pins the structured degradation pairs the scout
-// cycle appends to its degraded-cycle log line (scout.go consumes LogAttrs via
+// TestStaleMapError_LogAttrs pins the structured degradation pairs the scout cycle
+// appends to its degraded-cycle log line (scout.go consumes LogAttrs via
 // errors.AsType): key order and value types must stay queryable in Loki.
 //
 // stale_consecutive_rejections is deliberately NOT here. The streak has one
 // carrier, mapping.Cache.RejectedRefreshes, which is what the scout escalates on
-// and appends itself; this type used to hold a second copy that read 0 for a
-// transient fetch or parse failure, so a caller preferring these attrs could log
-// a zero streak in the very line an escalation fired on a nonzero one.
+// and appends itself; a second copy here would read 0 for a transient fetch or
+// parse failure and log a zero streak in a line an escalation fired on.
 func TestStaleMapError_LogAttrs(t *testing.T) {
 	e := &StaleMapError{msg: "refresh failed", age: 90 * time.Second, records: 7}
 	got := e.LogAttrs()
@@ -122,7 +121,7 @@ func TestStaleOrFail_recordsReportIndexedCount(t *testing.T) {
 	if !ok {
 		t.Fatalf("staleOrFail error = %v, want a *StaleMapError over a usable cache", err)
 	}
-	if got := buildIndex(next.Records).Len(); got != 1 {
+	if got := buildIndex(next.Records, nil).Len(); got != 1 {
 		t.Errorf("returned stale map indexes %d records, want 1", got)
 	}
 	if stale.records != 1 {

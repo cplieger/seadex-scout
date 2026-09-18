@@ -9,12 +9,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -141,7 +143,7 @@ func TestTorznabErrorResponder(t *testing.T) {
 // a basic search, and the forwarded limit is always the decoder's own window
 // (maxItems) rather than the client's - the client's limit counts CURATED
 // items, so forwarding it truncated the upstream page before curation ran and
-// hid a curated release sitting past the arr's page size (h-f12).
+// hid a curated release sitting past the arr's page size.
 func TestUpstreamParams(t *testing.T) {
 	in := url.Values{
 		"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "limit": {"50"},
@@ -233,15 +235,13 @@ func TestServeTotalUpstreamFailureRendersTorznabError(t *testing.T) {
 	}
 }
 
-// TestServeStartupSnapshotFailureRendersTorznabError pins the startup
-// false-empty gate: a daemon starting over a malformed feed snapshot (before
-// any snapshot has ever loaded) holds a zero-value in-memory snapshot that is
-// a local fault, not a fresh install - so a search must NOT contact Prowlarr
-// (it would filter every result against nil curation maps) and both request
-// kinds must answer a Torznab <error> (code 900) rather than an empty 200
-// feed the arr would record as a clean no-match. The WARN is bounded to one
-// per onset, and a subsequently written valid snapshot restores normal
-// serving.
+// TestServeStartupSnapshotFailureRendersTorznabError pins the startup false-empty gate:
+// a daemon starting over a malformed feed snapshot (before any snapshot has ever loaded)
+// holds a zero-value in-memory snapshot that is a local fault, not a fresh install - so a
+// search must NOT contact Prowlarr (it would filter every result against nil curation
+// maps) and both request kinds must answer a Torznab <error> (code 900) rather than an
+// empty 200 feed the arr would record as a clean no-match. The WARN is bounded to one per
+// onset, and a subsequently written valid snapshot restores normal serving.
 func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 	upstreamCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -298,6 +298,142 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 	}
 }
 
+// TestServeStampsTheTvdbIDOnBothRenderPaths walks the attribute end to end over
+// the whole chain the search side needs: an EntryInfo's TVDB id, recorded in the
+// persisted ownership fact, projected back into the curation index at load,
+// stamped on a proxied Prowlarr result, rendered as a torznab:attr.
+//
+// The SEARCH leg is the one that matters: it is the only path reaching a curation
+// older than the 14-day journal. The RSS leg is asserted beside it on the same
+// server, pinning the two render paths to one answer for one release.
+func TestServeStampsTheTvdbIDOnBothRenderPaths(t *testing.T) {
+	const hash = "ABCDEF1234567890abcdef1234567890abcdef12"
+	entries := []seadex.Entry{{
+		AniListID: 123,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567", InfoHash: hash, IsBest: true,
+			Files: []seadex.File{{Length: 100, Name: "Some Anime - S01E01 (1080p) [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	info := func(int) EntryInfo {
+		return EntryInfo{Title: "Some Anime", TvdbID: 79525, Target: TargetSonarr}
+	}
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		// The fixture's download link has to sit on this mock's own origin, or the
+		// search path's origin filter drops the item before curation runs.
+		_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	ix := warmedIndexer(&Config{
+		APIKey: "k", SnapshotPath: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk",
+	}, nil, srv.Client())
+
+	const wantAttr = `<torznab:attr name="tvdbid" value="79525"/>`
+	for name, target := range map[string]string{
+		"proxied search":        "/nyaa?t=tvsearch&q=Some+Anime&apikey=k",
+		"synthesized RSS check": "/nyaa?apikey=k",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			ix.serve(rec, httptest.NewRequest(http.MethodGet, target, nil))
+			body := rec.Body.String()
+			if !strings.Contains(body, "<item>") {
+				t.Fatalf("no item served, so the attribute assertion would pass vacuously:\n%s", body)
+			}
+			if !strings.Contains(body, wantAttr) {
+				t.Errorf("served response is missing %s:\n%s", wantAttr, body)
+			}
+		})
+	}
+}
+
+// TestServeEmitsTheFilmTwinOnBothRenderPaths walks the film twin end to end over
+// both render paths from ONE persisted record: a film on a Sonarr series whose
+// mapping names special episode 4 is journaled once, then the RSS check serves
+// the original under Movies only beside its "<Series> S00E04" twin under Anime,
+// and the proxied search serves Prowlarr's own result untouched beside the same
+// twin derived from the result's GUID. Both twins carry the series' tvdb id.
+func TestServeEmitsTheFilmTwinOnBothRenderPaths(t *testing.T) {
+	const hash = "ABCDEF1234567890abcdef1234567890abcdef12"
+	const twinTitle = "Code Geass S00E04 1080p [PMR]"
+	entries := []seadex.Entry{{
+		AniListID: 21519,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567", InfoHash: hash, IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 100, Name: "Lelouch of the Resurrection (1080p) [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	info := func(int) EntryInfo {
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"}
+	}
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 1 {
+		t.Fatalf("journal = %d rows, want the one record both paths expand from", len(snap.NyaaFeed))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+	ix := warmedIndexer(&Config{
+		APIKey: "k", SnapshotPath: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk",
+	}, nil, srv.Client())
+
+	const wantAttr = `<torznab:attr name="tvdbid" value="79525"/>`
+	tests := map[string]struct {
+		target        string
+		wantOrigTitle string
+		wantOrigCats  []int
+	}{
+		"synthesized RSS check": {
+			target: "/nyaa?apikey=k", wantOrigTitle: "Lelouch of the Resurrection 1080p [PMR]", wantOrigCats: []int{catMovies},
+		},
+		"proxied search": {
+			target: "/nyaa?t=tvsearch&q=Code+Geass&apikey=k", wantOrigTitle: "[Group] Some Anime S01 [1080p]", wantOrigCats: []int{catAnime},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			ix.serve(rec, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			body := rec.Body.String()
+			items, err := parseTorznab([]byte(body))
+			if err != nil {
+				t.Fatalf("parseTorznab(served body): %v\n%s", err, body)
+			}
+			if len(items) != 2 {
+				t.Fatalf("served %d items, want the release plus its twin:\n%s", len(items), body)
+			}
+			orig, twin := items[0], items[1]
+			if orig.Title != tc.wantOrigTitle || !slices.Equal(orig.Categories, tc.wantOrigCats) {
+				t.Errorf("original = %q %v, want %q %v", orig.Title, orig.Categories, tc.wantOrigTitle, tc.wantOrigCats)
+			}
+			if twin.Title != twinTitle || !slices.Equal(twin.Categories, []int{catAnime}) {
+				t.Errorf("twin = %q %v, want %q [%d]", twin.Title, twin.Categories, twinTitle, catAnime)
+			}
+			if twin.GUID != "https://nyaa.si/view/1234567#sonarr" || twin.GUID == orig.GUID {
+				t.Errorf("twin GUID = %q, want the fragment form of the original %q", twin.GUID, orig.GUID)
+			}
+			if got := strings.Count(body, wantAttr); got != 2 {
+				t.Errorf("served %d tvdbid attrs, want one per item:\n%s", got, body)
+			}
+		})
+	}
+}
+
 // TestQuerySkipsPerEpisodeQuery pins the skip path through query itself: a
 // per-episode basic search returns nothing WITHOUT being marked answered, so
 // the request log reads as a deliberate skip rather than a no-match.
@@ -329,14 +465,11 @@ func seedNyaaFeed(t *testing.T, ix *Indexer, n int) {
 // TestQueryCapsResults pins the maxItems safety bound at its boundary, in both
 // directions: a synthesized feed larger than the cap is truncated - even when the
 // request's explicit limit exceeds it - so a rendered response can never grow
-// unboundedly, while a feed standing exactly ON the cap is served whole and
-// SILENTLY. (A limit-less request is trimmed to defaultCapsLimit before this cap
-// can bite; see TestQueryFeedDefaultLimit.)
-//
-// The WARN is the operator's only way to tell a short feed from a short
-// catalogue, so it has to fire exactly when something was actually withheld. A
-// line on a feed that lost nothing would report a truncation on every full
-// journal and teach an operator to ignore the one that matters.
+// unboundedly, while a feed standing exactly ON the cap is served whole and SILENTLY. (A
+// limit-less request is trimmed to defaultCapsLimit first; see TestQueryFeedDefaultLimit.)
+// The WARN is the operator's only way to tell a short feed from a short catalogue, so a
+// line on a feed that lost nothing would report a truncation on every full journal and
+// teach an operator to ignore the one that matters.
 func TestQueryCapsResults(t *testing.T) {
 	const warnMsg = "feed trimmed to the rendered-item cap"
 	tests := map[string]struct {
@@ -436,15 +569,14 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	}
 }
 
-// TestReloadKeepsFeedOnNonRegularSnapshotPath pins openSnapshot's regular-file
-// gate: a snapshot path replaced by anything that is not a regular file (here a
-// directory - the root-safe stand-in for the FIFO, socket, and device forms) is
-// refused BEFORE the bounded read decodes it, warned about once, and leaves the
-// live feed serving. The gate is what rejects a FIFO at the path (whose open
-// returns immediately thanks to O_NONBLOCK - the arm
-// TestReloadRefusesFifoSnapshotPathWithoutBlocking pins) instead of blocking
-// past the warm-load timeout, which would leave the daemon binding neither the
-// Torznab listener nor the compare loop.
+// TestReloadKeepsFeedOnNonRegularSnapshotPath pins openSnapshot's regular-file gate: a
+// snapshot path replaced by anything that is not a regular file (here a directory - the
+// root-safe stand-in for the FIFO, socket and device forms) is refused BEFORE the bounded
+// read decodes it, warned about once, and leaves the live feed serving. The gate is what
+// rejects a FIFO at the path (whose open returns immediately thanks to O_NONBLOCK - the
+// arm TestReloadRefusesFifoSnapshotPathWithoutBlocking pins) instead of blocking past the
+// warm-load timeout, which would leave the daemon binding neither the Torznab listener
+// nor the compare loop.
 func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
@@ -799,20 +931,14 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 	}
 }
 
-// TestServeNeverLogsTheFeedAPIKey pins the log-hygiene contract server.go
-// states in three places (logParam's doc, and chain's notes on the access
-// logger and on serve's own domain line): feed_api_key arrives as a QUERY
-// parameter, so a line that logged the query string - or a future domain attr
-// carrying it - would persist the operator's feed secret into Loki, where it
-// is durable and readable by anyone with log access while the endpoint itself
-// is only apikey-gated. Every request kind that logs is exercised (authorized
-// caps, authorized RSS, unscoped 404, bad-key 401) through the SERVED
-// middleware chain, so the access line is covered alongside the domain lines;
-// the wrong-key value embeds the real key, so leaking either value fails.
-// The property rests on webhttp's RequestLogger recording r.URL.Path only and
-// on serve's whitelist of logged params; webhttp is Renovate-bumped, so a
-// library change could start recording the query string - which is why this is
-// asserted here rather than only stated in a comment.
+// TestServeNeverLogsTheFeedAPIKey pins the log-hygiene contract server.go states in
+// three places (logParam's doc, and chain's notes on the access logger and on serve's own
+// domain line): feed_api_key arrives as a QUERY parameter, so a line that logged the
+// query string - or a future domain attr carrying it - would persist the operator's feed
+// secret into Loki, durable and readable by anyone with log access. Every request kind
+// that logs is exercised (authorized caps, authorized RSS, unscoped 404, bad-key 401)
+// through the SERVED chain, and the wrong-key value embeds the real key. The property
+// rests on webhttp's RequestLogger recording r.URL.Path only, and webhttp is bumped.
 func TestServeNeverLogsTheFeedAPIKey(t *testing.T) {
 	const feedKey = "feed-key-not-a-secret"
 	log, rec := capture.New()
@@ -867,16 +993,14 @@ func TestServeAppliesLogParamToRequestControlledValues(t *testing.T) {
 	}
 }
 
-// TestServeSummaryLineReportsTheUpstreamFilterLadder pins the ATTRIBUTE
-// semantics of serve's one INFO line per request - the feed's only per-request
-// diagnostic - on the search path, the one path where the three counts differ.
-// A mock Prowlarr returns two items, one of which carries an off-origin
-// download URL, against an empty curation set: upstream_fetched is the raw page
-// count, upstream the origin-filter survivors, curated the post-curation
-// result, and returned what was actually rendered. The gap between the first
-// two is the only standing signal that the origin filter is dropping items
-// (its own WARN fires once per onset), so an operator reads this line to tell
-// "the tracker returned nothing" from "everything was dropped".
+// TestServeSummaryLineReportsTheUpstreamFilterLadder pins the ATTRIBUTE semantics of
+// serve's one INFO line per request - the feed's only per-request diagnostic - on the
+// search path, the one path where the three counts differ. A mock Prowlarr returns two
+// items, one carrying an off-origin download URL, against an empty curation set:
+// upstream_fetched is the raw page count, upstream the origin-filter survivors, curated
+// the post-curation result, and returned what was rendered. The gap between the first two
+// is the only standing signal that the origin filter is dropping items, so an operator
+// reads it to tell "the tracker returned nothing" from "everything was dropped".
 func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
 	const feed = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
@@ -942,7 +1066,7 @@ func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
 // (CWE-532), which is why the WARN carries no attributes at all. And the gate
 // stays scoped to an ENABLED tracker: with ab_torznab_url blank (the README's
 // off switch) nothing is served for /ab, so warning there would be exactly the
-// parked-credential noise l-f13 removed.
+// parked-credential noise config's INFO policy exists to avoid.
 func TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt(t *testing.T) {
 	orig := listenAddr
 	listenAddr = "127.0.0.1:0"

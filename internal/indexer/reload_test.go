@@ -224,16 +224,14 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	}
 }
 
-// TestReloadReassertsFailedStateWhenMalformedSnapshotReappears pins the
-// pre-load state machine across a disappear/reappear of the SAME malformed
-// snapshot inode (an unmount/remount, a rename away and back): startup over
-// malformed bytes answers requests with a Torznab error; the file going
-// missing restores fresh-install semantics (an empty feed is intentional, not
-// an error); but when the identical bad inode returns, the memo-hit arm must
-// re-assert the snapshot-unavailable state - NOT treat the bad snapshot as a
-// valid fresh install and serve false-empty success (searches filtering every
-// Prowlarr result against nil curation maps) indefinitely - and it must do so
-// without rereading the unchanged file (no repeated malformed WARN).
+// TestReloadReassertsFailedStateWhenMalformedSnapshotReappears pins the pre-load
+// state machine across a disappear/reappear of the SAME malformed snapshot inode (an
+// unmount/remount, a rename away and back): startup over malformed bytes answers
+// requests with a Torznab error; the file going missing restores fresh-install
+// semantics (an empty feed is intentional, not an error); but when the identical bad
+// inode returns, the memo-hit arm must re-assert the snapshot-unavailable state
+// rather than serve false-empty success (searches filtering every Prowlarr result
+// against nil curation maps), and without rereading the unchanged file.
 func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.json")
@@ -328,16 +326,14 @@ func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 	}
 }
 
-// TestReloadDropsOversizedItemOnReload pins readSnapshot's persisted-item limit
-// gate: a snapshot whose curation maps are valid but whose feed carries an item
-// past maxPersistedFieldBytes installs WITHOUT that item, warning once per
-// affected tracker feed. The over-limit item never reaches renderFeed either
-// way, but the rest of the snapshot is kept: rejecting the document wholesale
-// discarded the curation maps with it, and on a cold start left every request -
-// search and RSS alike - answering a Torznab error until a rebuild (an external
-// `poll`, in resident-idle mode) wrote a clean file (l-f45). The WARN still
-// fires exactly once across two reloads, because the installed identity makes
-// the second reload a no-op.
+// TestReloadDropsOversizedItemOnReload pins readSnapshot's persisted-item limit gate:
+// a snapshot whose curation maps are valid but whose feed carries an item past
+// maxPersistedFieldBytes installs WITHOUT that item, warning once per affected tracker
+// feed. The over-limit item never reaches renderFeed either way, but the rest of the
+// snapshot is kept: rejecting the document wholesale discards the curation maps with
+// it, and on a cold start leaves every request answering a Torznab error until a
+// rebuild writes a clean file. The WARN fires exactly once across two reloads, because
+// the installed identity makes the second reload a no-op.
 func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
@@ -377,18 +373,13 @@ func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	}
 }
 
-// TestReloadKeepsFeedOnAnUnidentifiableSnapshot replaces the pre-journal-schema
-// gate this file used to carry, and it is the twin of
-// TestReloadReBaselinesAnUnsupportedSchemaVersion: a version SKEW and CORRUPTION
-// get opposite treatment, and the difference is whether the document identifies
-// itself.
-//
-// A file carrying no version at all - a retired pre-version snapshot, a truncated
-// write, `{}` - is unidentifiable, so the reader keeps its last-good feed rather
-// than installing an empty one. That is a strictly better posture than the retired
-// gate's: the old pre-journal arm INSTALLED the legacy snapshot's curation maps
-// while dropping its feeds, which meant an upgrade served a search index written
-// by another schema.
+// TestReloadKeepsFeedOnAnUnidentifiableSnapshot is the twin of
+// TestReloadReBaselinesAnUnsupportedSchemaVersion: a version SKEW and CORRUPTION get
+// opposite treatment, and the difference is whether the document identifies itself.
+// A file carrying no version at all - a truncated write, `{}` - is unidentifiable, so
+// the reader keeps its last-good feed rather than installing an empty one. Installing
+// such a document's curation maps while dropping its feeds would serve a search index
+// written by another schema.
 func TestReloadKeepsFeedOnAnUnidentifiableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
@@ -492,14 +483,13 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 }
 
 // TestReloadDropsForeignHostSnapshotGUIDs pins the load-boundary trust gate
-// (downloadTarget's tracker-ownership check): a tampered but
-// structurally valid feed.json cannot
-// mint an apex-tracker download URL from a foreign or independent-subdomain
-// GUID - trackerID's shape-only extraction would otherwise read the numeric
-// id out of https://evil.example/view/123 or sukebei.nyaa.si/view/123 - so
-// only items whose GUID passes the same trackerOwnForm gate writer-side
-// journal admission applies survive the reload, with their served URLs
-// derived on the expected apex tracker.
+// (downloadTarget's tracker-ownership check): a tampered but structurally valid
+// feed.json cannot mint an apex-tracker download URL from a foreign or
+// independent-subdomain GUID - trackerID's shape-only extraction would otherwise read
+// the numeric id out of https://evil.example/view/123 or sukebei.nyaa.si/view/123 -
+// so only items whose GUID passes the same trackerOwnForm gate writer-side journal
+// admission applies survive the reload, with their served URLs derived on the
+// expected apex tracker.
 func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 	tests := map[string]struct {
 		scope     string
@@ -661,7 +651,7 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	}
 	// Per-tracker attribution: one line per affected feed, each naming its
 	// tracker. Both journals were tampered with here, and a single summed line
-	// would leave the operator unable to tell which (l-f176 / d-u8c3-1).
+	// would leave the operator unable to tell which.
 	const msg = "indexer feed snapshot: non-SeaDex info URLs blanked"
 	if count := rec.Count(msg); count != 2 {
 		t.Errorf("blanked-InfoURL warnings = %d, want 2 (one per affected tracker feed): %v", count, rec.Messages())
@@ -673,7 +663,7 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	}
 }
 
-// TestSanitizeSnapshotInfoURLsStoresVouchedSpelling pins the h-f8 half of the
+// TestSanitizeSnapshotInfoURLsStoresVouchedSpelling pins the classify-once half of the
 // load-boundary gate: the value that SURVIVES sanitization is the spelling the
 // gate vouched (urlform's WHATWG-preprocessed reading), not the persisted
 // original. An edge-padded value is vouched on the browser's reading of it, so
@@ -736,7 +726,7 @@ func TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs(t *testing.T) {
 		"unparseable URL rejected":             {"https://releases.moe/%zz", false},
 		"scheme-relative rejected":             {"//releases.moe/154587", false},
 		"ftp scheme rejected":                  {"ftp://releases.moe/154587", false},
-		// The urlform adoption (l-f114): host evidence is matched under an
+		// The urlform adoption: host evidence is matched under an
 		// ASCII-only fold behind IsASCIIHost, so a homograph cannot fold into
 		// the allowlisted name - the old strings.EqualFold was the full-Unicode
 		// simple fold, safe here only incidentally (UTS46 happens to map U+017F
@@ -904,15 +894,13 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 	}
 }
 
-// TestReloadRebuildsABDownloadURLsFromCurrentPasskey pins the credential
-// policy for the persisted AB feed: FeedWriter persists AB items GUID-only
-// (no passkey-bearing download URL lands in feed.json), so the reload MUST
-// derive every AB download URL from the item's non-secret tracker page URL
-// (GUID) and the CURRENT passkey or the feed has no grabbable links at all.
-// The same derivation makes an ab_passkey rotation take effect on the next
-// load, never serves a legacy snapshot's persisted credential verbatim, drops
-// an item whose URL cannot be derived, and clears the AB feed entirely when
-// no passkey is configured.
+// TestReloadRebuildsABDownloadURLsFromCurrentPasskey pins the credential policy for
+// the persisted AB feed: FeedWriter persists AB items GUID-only (no passkey-bearing
+// download URL lands in feed.json), so the reload MUST derive every AB download URL
+// from the item's non-secret tracker page URL (GUID) and the CURRENT passkey or the
+// feed has no grabbable links at all. The same derivation makes an ab_passkey rotation
+// take effect on the next load, never serves a persisted credential verbatim, drops
+// an item whose URL cannot be derived, and clears the AB feed when no passkey is set.
 func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 154587,
@@ -1119,15 +1107,14 @@ func TestConcurrentReadersAgainstAnInstallingLoader(t *testing.T) {
 	}
 }
 
-// TestReloadInstallsOlderMtimeSnapshot pins reload's inequality freshness
-// guard: an on-disk snapshot whose mtime is OLDER than the loaded copy's still
-// installs. A /config volume restored from backup, or a file replaced by an
-// atomic rename preserving an older mtime, is the current truth on disk; the
-// former strictly-After guard never installed it and wedged the server on the
-// stale in-memory snapshot until restart. Any mtime CHANGE reloads; only
-// equality skips (TestReloadSkipsUnchangedMtime). Driven single-threaded: the
-// pre-install holds the write lock exactly as a real cycle would, and the lone
-// reload runs after it, so there is no shared-state access outside the lock.
+// TestReloadInstallsOlderMtimeSnapshot pins reload's inequality freshness guard: an
+// on-disk snapshot whose mtime is OLDER than the loaded copy's still installs. A
+// /config volume restored from backup, or a file replaced by an atomic rename
+// preserving an older mtime, is the current truth on disk, and a strictly-After guard
+// wedges the server on the stale in-memory snapshot until restart. Any mtime CHANGE
+// reloads; only equality skips (TestReloadSkipsUnchangedMtime). Driven
+// single-threaded: the pre-install holds the write lock exactly as a real cycle would,
+// so there is no shared-state access outside the lock.
 func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -1242,7 +1229,7 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 }
 
 // TestReloadRebasesFutureSnapshotTimestamps pins that the reader applies the
-// same clock-skew correction the writer's carry path does (h-f15): a persisted
+// same clock-skew correction the writer's carry path does: a persisted
 // FirstSeen ahead of the wall clock (a snapshot restored from a future-skewed
 // host, a hand-edited year-9999 value) must be rebased to load time on BOTH the
 // journal timestamp and the derived PubDate the served <pubDate> renders, so an
@@ -1289,7 +1276,7 @@ func TestReloadRebasesFutureSnapshotTimestamps(t *testing.T) {
 }
 
 // TestReloadMemoizesOversizedSnapshotFile pins that an over-cap snapshot file is
-// memoized like malformed bytes (l-f26): persist enforces the same maxFeedBytes
+// memoized like malformed bytes: persist enforces the same maxFeedBytes
 // cap, so an oversized file is external corruption that never shrinks on its
 // own, and re-reading it on every request would repeat the open/size-check
 // churn (the reload gate coalesces only overlapping calls). The last-good feed
@@ -1338,26 +1325,14 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 	}
 }
 
-// TestReloadReBaselinesAnUnsupportedSchemaVersion replaces the two transitional
-// schema diagnostics this file used to carry, both of which the version envelope
-// makes unreachable.
-//
-// The pre-relation one is worth recording because it is the argument for deriving
-// the search index rather than persisting it: a released binary wrote no by_pair
-// key, so the first start after the relation shipped loaded a nil map, lookup's
-// dual-signal arm failed closed, and EVERY Nyaa search answered an empty 200 feed
-// - indistinguishable to an arr from "SeaDex curates nothing for this show", with
-// only curated=0 on the request line as evidence (l-f170). The relation is now
-// projected from the ownership fact (projectCuration), so it cannot be absent
-// while the fact is present, and that whole upgrade window no longer exists.
-//
-// What remains is ONE arm: a snapshot at a version this binary does not read is
-// re-baselined, not refused. Re-baselining is right because feed.json is a
-// materialized view - the cost is one empty-RSS window, which is the intended
-// fresh-install behaviour - while reading it would risk misinterpreting exactly
-// the members that cannot be re-derived (the permanent publication log, the
-// journals' FirstSeen and harvested titles). Refusing would be worse still: the
-// cache would answer a Torznab error for every request including a search.
+// TestReloadReBaselinesAnUnsupportedSchemaVersion pins the one schema arm the
+// version envelope leaves reachable: a snapshot at a version this binary does not
+// read is re-baselined, not refused. Re-baselining is right because feed.json is a
+// materialized view - the cost is one empty-RSS window, the intended fresh-install
+// behaviour - while reading it would risk misinterpreting exactly the members that
+// cannot be re-derived (the permanent publication log, the journals' FirstSeen and
+// harvested titles). Refusing would be worse still: the cache would answer a Torznab
+// error for every request including a search.
 func TestReloadReBaselinesAnUnsupportedSchemaVersion(t *testing.T) {
 	const msg = "indexer feed snapshot has an unsupported schema version"
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
@@ -1406,7 +1381,7 @@ func TestReloadReBaselinesAnUnsupportedSchemaVersion(t *testing.T) {
 			t.Errorf("current-schema snapshot wrongly reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 		}
 		set := ix.cache.curation()
-		if !set.byKey["nyaa:42"] || !set.byHash[hash] {
+		if !set.byKey["nyaa:42"].isBest || !set.byHash[hash].isBest {
 			t.Errorf("curation = %+v, want the ownership fact projected", set)
 		}
 		if !set.byPair[pairKey(hash, "nyaa:42")] {
@@ -1416,14 +1391,13 @@ func TestReloadReBaselinesAnUnsupportedSchemaVersion(t *testing.T) {
 }
 
 // TestReloadBlanksOutOfVocabularyDownloadVolumeFactor pins the second half of
-// normalizeSnapshotItems (validMarker): a persisted DownloadVolumeFactor that
-// is not one of the two markers the feed emits must be blanked at load, while
-// the item itself is kept. writeItem renders any non-empty value as the
-// downloadvolumefactor attr - the arr's freeleech accounting input - so a
-// hand-edited or tampered feed.json carrying "0" would otherwise present a
-// curated release to Sonarr/Radarr as fully freeleech; blanking falls back to
-// the normal-item (factor 1) shape. The in-vocabulary marker on the sibling
-// item proves the gate is a filter, not a blanket clear.
+// normalizeSnapshotItems (validMarker): a persisted DownloadVolumeFactor that is not
+// one of the two markers the feed emits must be blanked at load, while the item itself
+// is kept. writeItem renders any non-empty value as the downloadvolumefactor attr -
+// the arr's freeleech accounting input - so a tampered feed.json carrying "0" would
+// present a curated release to Sonarr/Radarr as fully freeleech; blanking falls back
+// to the normal-item (factor 1) shape. The in-vocabulary marker on the sibling item
+// proves the gate is a filter, not a blanket clear.
 func TestReloadBlanksOutOfVocabularyDownloadVolumeFactor(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
@@ -1542,15 +1516,14 @@ func TestPublishedSnapshotServesWhileTheFirstLoadIsStillRunning(t *testing.T) {
 	}
 }
 
-// TestStalledLaterLoadWarnsOnce pins the loader's liveness observable on every
-// load, not just the first. Only the initial refresh is watched by
-// awaitFirstLoad; a later ticker arm runs synchronously on the sole loader
-// goroutine, so an open/stat/read that wedges AFTER startup means the ticker
-// never arms again and every later feed.json generation is ignored for the life
-// of the process - in resident-idle / external-poll mode, that is every generation
-// there is. noteStatFault cannot report it because the blocked syscall never
-// returns, so the watchdog's single bounded WARN is the only signal the operator
-// can get.
+// TestStalledLaterLoadWarnsOnce pins the loader's liveness observable on every load,
+// not just the first. Only the initial refresh is watched by awaitFirstLoad; a later
+// ticker arm runs synchronously on the sole loader goroutine, so an open/stat/read
+// that wedges AFTER startup means the ticker never arms again and every later
+// feed.json generation is ignored for the life of the process - in resident-idle mode
+// that is every generation there is. noteStatFault cannot report it because the
+// blocked syscall never returns, so the watchdog's single bounded WARN is the only
+// signal the operator can get.
 func TestStalledLaterLoadWarnsOnce(t *testing.T) {
 	const stallWARN = "indexer feed snapshot reload still running"
 	prevTimeout := warmLoadTimeout
@@ -1607,20 +1580,14 @@ func TestStalledLaterLoadWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestAnOlderLoadCannotOverwriteANewerPublish pins the install ORDER between the
-// two producers. A loader that opened generation N-1 and finishes after the
-// compare cycle persisted and published generation N must not install its bytes
-// over N: until the next tick, RSS and search would serve stale feed AND stale
-// curation data, so an arr asking in that window could miss a newly curated
-// release or accept one the completed pass removed - against the handoff contract
-// that a completed pass is servable immediately.
-//
-// Identity inequality cannot refuse it (N-1 differs from N, which is exactly why
-// the old code accepted it) and neither can the mtime (an older restored
-// timestamp is a legitimate reload), so the order is the cache's own install
-// sequence. The interleaving is built with the load gate rather than hoped for:
-// the loader is held INSIDE its load, having already recorded the position it
-// derives from.
+// TestAnOlderLoadCannotOverwriteANewerPublish pins the install ORDER between the two
+// producers. A loader that opened generation N-1 and finishes after the compare cycle
+// persisted and published generation N must not install its bytes over N: until the
+// next tick, RSS and search would serve stale feed AND stale curation data, against
+// the handoff contract that a completed pass is servable immediately. Identity
+// inequality cannot refuse it (N-1 differs from N) and neither can the mtime (an older
+// restored timestamp is a legitimate reload), so the order is the cache's own install
+// sequence. The interleaving is built with the load gate rather than hoped for.
 func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
@@ -1654,21 +1621,14 @@ func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 	}
 }
 
-// TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves pins the fresh-install
-// arm of the readiness state machine, with the reload clock actually STARTED -
-// the one configuration in which a resolved first load is observable at all.
-// An absent snapshot is the intentional fresh-install state (a first boot, or a
-// resident-idle daemon before its first `poll`), so once the loader's first pass
-// has resolved, requests must serve the empty feed rather than the
-// snapshot-unavailable Torznab error.
-//
-// Every other test in the suite either warms the cache synchronously (leaving
-// the clock unstarted, so readiness short-circuits before it consults the
-// loader) or holds the first load unresolved to assert the fault. So the
-// resolved-and-nothing-installed arm carries no assertion today: inverting it
-// answers a Torznab error to every search and RSS check on a fresh install,
-// failing the operator's Prowlarr save-test on a working deployment, with the
-// whole suite still green.
+// TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves pins the fresh-install arm
+// of the readiness state machine, with the reload clock actually STARTED - the one
+// configuration in which a resolved first load is observable. An absent snapshot is
+// the intentional fresh-install state (a first boot, or a resident-idle daemon before
+// its first `poll`), so once the first pass resolves, requests must serve the empty
+// feed rather than the snapshot-unavailable Torznab error. Every other test warms the
+// cache synchronously or holds the first load unresolved, so inverting this arm fails
+// an operator's Prowlarr save-test with the whole suite still green.
 func TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves(t *testing.T) {
 	ctx := t.Context()
 	ix := New(&Config{

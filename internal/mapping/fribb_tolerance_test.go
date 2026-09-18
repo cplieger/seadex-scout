@@ -93,22 +93,30 @@ func TestParseFribb_fractionalAndNegativeIDsAbsent(t *testing.T) {
 	}
 }
 
-// TestParseFribb_oddSeasonShapesSurvive pins the season tolerance boundary:
-// an odd upstream season shape (a bare number, a float or quoted interior, a
-// garbage string) zeroes or best-effort-decodes the field instead of failing
-// json.Unmarshal for the whole record - the record survives, and SeasonTvdb 0
-// falls back to whole-series/season-0 scoping.
+// TestParseFribb_oddSeasonShapesSurvive pins the season tolerance boundary AND
+// the presence bound with it: an odd upstream season shape zeroes the number
+// instead of failing json.Unmarshal for the whole record, and only a tvdb member
+// that is a JSON number >= 0 reads present. Two shapes with no live rows are
+// pinned here rather than argued: a quoted "3" is not a JSON number so it reads
+// ABSENT with no season, and a non-negative fractional reads PRESENT at the
+// season flexInt collapses it to.
 func TestParseFribb_oddSeasonShapesSurvive(t *testing.T) {
 	tests := []struct {
 		name   string
 		season string
 		want   int
+		kind   SeasonKind
 	}{
-		{name: "object form decodes", season: `{"tvdb":2}`, want: 2},
-		{name: "quoted interior decodes via flexInt", season: `{"tvdb":"3"}`, want: 3},
-		{name: "float interior treated absent", season: `{"tvdb":1.5}`, want: 0},
-		{name: "bare number treated absent", season: `1`, want: 0},
-		{name: "garbage string treated absent", season: `"x"`, want: 0},
+		{name: "object form decodes present", season: `{"tvdb":2}`, want: 2, kind: SeasonPresent},
+		{name: "mapped zero is present", season: `{"tvdb":0}`, want: 0, kind: SeasonPresent},
+		{name: "quoted interior is absent", season: `{"tvdb":"3"}`, want: 0, kind: SeasonAbsent},
+		{name: "float interior is present at season zero", season: `{"tvdb":1.5}`, want: 0, kind: SeasonPresent},
+		{name: "negative interior is absent", season: `{"tvdb":-1}`, want: 0, kind: SeasonAbsent},
+		{name: "null interior is absent", season: `{"tvdb":null}`, want: 0, kind: SeasonAbsent},
+		{name: "tmdb-only object is absent", season: `{"tmdb":1}`, want: 0, kind: SeasonAbsent},
+		{name: "null season is absent", season: `null`, want: 0, kind: SeasonAbsent},
+		{name: "bare number is absent", season: `1`, want: 0, kind: SeasonAbsent},
+		{name: "garbage string is absent", season: `"x"`, want: 0, kind: SeasonAbsent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,7 +131,27 @@ func TestParseFribb_oddSeasonShapesSurvive(t *testing.T) {
 			if records[0].SeasonTvdb != tc.want {
 				t.Errorf("SeasonTvdb = %d, want %d", records[0].SeasonTvdb, tc.want)
 			}
+			if records[0].SeasonKind != tc.kind {
+				t.Errorf("SeasonKind = %q, want %q", records[0].SeasonKind, tc.kind)
+			}
 		})
+	}
+}
+
+// TestParseFribb_absentSeasonKeyDecodesAbsent proves the kind is set in toRecord
+// rather than in seasonObject.UnmarshalJSON: encoding/json never calls an
+// UnmarshalJSON for a key the object does not carry, and 31,889 of the live
+// map's 39,304 records carry no season key at all.
+func TestParseFribb_absentSeasonKeyDecodesAbsent(t *testing.T) {
+	records, err := parseFribb([]byte(`[{"anilist_id":820,"type":"ova","tvdb_id":78964}]`), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("parseFribb kept %d records, want 1", len(records))
+	}
+	if got := records[0].SeasonKind; got != SeasonAbsent {
+		t.Errorf("record with no season key: SeasonKind = %q, want %q", got, SeasonAbsent)
 	}
 }
 
@@ -173,8 +201,8 @@ func TestSeasonObject_malformedObjectTolerated(t *testing.T) {
 	if err := o.UnmarshalJSON([]byte(`{"tvdb":`)); err != nil {
 		t.Fatalf("UnmarshalJSON(malformed object) error: %v", err)
 	}
-	if o.tvdbOrZero() != 0 {
-		t.Errorf("seasonObject(malformed object).tvdbOrZero() = %d, want 0", o.tvdbOrZero())
+	if season, present := o.season(); season != 0 || present {
+		t.Errorf("seasonObject(malformed object).season() = %d, %v, want 0, false", season, present)
 	}
 }
 
@@ -235,11 +263,17 @@ func TestTolerantDecoders_resetOnReuse(t *testing.T) {
 	}
 
 	var o seasonObject
-	if err := o.UnmarshalJSON([]byte(`{"tvdb":3}`)); err != nil || o.tvdbOrZero() != 3 {
-		t.Fatalf("seasonObject first decode = %+v, %v, want tvdb 3, nil", o, err)
+	if err := o.UnmarshalJSON([]byte(`{"tvdb":3}`)); err != nil {
+		t.Fatalf("seasonObject first decode error = %v, want nil", err)
 	}
-	if err := o.UnmarshalJSON([]byte(`4`)); err != nil || o.tvdbOrZero() != 0 {
-		t.Errorf("seasonObject reused with odd value = %+v, %v, want reset to zero, nil", o, err)
+	if season, present := o.season(); season != 3 || !present {
+		t.Fatalf("seasonObject first decode = %d, %v, want 3, true", season, present)
+	}
+	if err := o.UnmarshalJSON([]byte(`4`)); err != nil {
+		t.Fatalf("seasonObject reused with odd value error = %v, want nil", err)
+	}
+	if season, present := o.season(); season != 0 || present {
+		t.Errorf("seasonObject reused with odd value = %d, %v, want reset to 0, false", season, present)
 	}
 }
 

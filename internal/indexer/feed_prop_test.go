@@ -34,7 +34,7 @@ func TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testin
 		secondName := fmt.Sprintf("%s - S%02dE%02d [Grp].mkv", title, season, second)
 
 		single := &seadex.Torrent{Files: []seadex.File{{Name: firstName}}}
-		if got, want := derivedTitle(single, EntryInfo{}), firstName[:len(firstName)-len(".mkv")]; got != want {
+		if got, want := derivedTitle(single, &EntryInfo{}), firstName[:len(firstName)-len(".mkv")]; got != want {
 			t.Fatalf("derivedTitle(single episode) = %q, want %q", got, want)
 		}
 
@@ -42,23 +42,20 @@ func TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testin
 		if got := coveredEpisodes(pack.Files); got != 2 {
 			t.Fatalf("coveredEpisodes(pack) = %d, want 2", got)
 		}
-		if got, want := derivedTitle(pack, EntryInfo{}), fmt.Sprintf("%s - S%02d [Grp]", title, season); got != want {
+		if got, want := derivedTitle(pack, &EntryInfo{}), fmt.Sprintf("%s - S%02d [Grp]", title, season); got != want {
 			t.Fatalf("derivedTitle(pack) = %q, want %q", got, want)
 		}
 	})
 }
 
 // TestLastSubmatchIndex_isFindAllsLastMatchProperty pins the equivalence the
-// memory-bounded replay in lastSubmatchIndex claims: for the two patterns the
-// title synthesis actually scans with, it must return exactly what
-// FindAllStringSubmatchIndex's LAST element would be (and nil when there is no
-// match). Every season/episode decision in this file - the pack collapse, the
-// single-episode marker, the cour-local season relabel, the per-file season
-// tally - reads its span offsets from that return, so an off-by-one in the
-// offset rebase or a lost last-match progression silently serves a mangled or
-// wrong-episode title instead of failing. A name assembled from repeated
-// marker-shaped pieces is what makes the property discriminating: with a
-// single match the offset rebase is a no-op.
+// memory-bounded replay in lastSubmatchIndex claims: for the two patterns the title
+// synthesis actually scans with, it must return exactly what
+// FindAllStringSubmatchIndex's LAST element would be, and nil when there is no match.
+// Every season/episode decision in this file reads its span offsets from that return, so
+// an off-by-one in the offset rebase or a lost last-match progression silently serves a
+// mangled or wrong-episode title. A name assembled from repeated marker-shaped pieces is
+// what makes the property discriminating: with one match the rebase is a no-op.
 func TestLastSubmatchIndex_isFindAllsLastMatchProperty(t *testing.T) {
 	piece := rapid.SampledFrom([]string{
 		"Show", " - ", "_", ".", "-", " ", "1080p", "v2", "NCED",

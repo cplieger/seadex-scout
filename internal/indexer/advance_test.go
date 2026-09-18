@@ -14,18 +14,14 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// advanceFixture is the seed snapshot the Advance tests start from: a
-// current-schema snapshot (so loadPrevious does not baseline) carrying a
-// POPULATED per-entry curation ownership fact, one already-published journal
-// item, a harvested title and a harvest cursor.
-//
-// Every member is non-empty on purpose. The window pass must not act on absence
-// from its own input, and a fixture whose ownership fact were empty could not
-// tell a correct carry-through from a blanking.
-//
-// The ownership is attributed to THREE different AniList entries, because that
-// is what the upsert rule is about: a window that evaluates entry 7 must replace
-// entry 7's contribution and leave entries 8 and 9 alone.
+// advanceFixture is the seed snapshot the Advance tests start from: a current-schema
+// snapshot (so loadPrevious does not baseline) carrying a POPULATED per-entry curation
+// ownership fact, one already-published journal item, a harvested title and a harvest
+// cursor. Every member is non-empty on purpose - the window pass must not act on
+// absence from its own input, and a fixture whose ownership fact were empty could not
+// tell a correct carry-through from a blanking. The ownership is attributed to THREE
+// different AniList entries, because a window that evaluates entry 7 must replace entry
+// 7's contribution and leave entries 8 and 9 alone.
 func advanceFixture(firstSeen time.Time) *snapshot {
 	return &snapshot{
 		Version: currentFeedVersion,
@@ -77,23 +73,14 @@ func advanceTestWriter(path string, now time.Time) *FeedWriter {
 	return w
 }
 
-// TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest is the most
-// load-bearing assertion in this file, and it INVERTS what it used to assert.
-//
-// It used to demand that a window leave the search curation index byte-identical,
-// because the index was a persisted whole-catalogue map whose only write was a
-// wholesale replacement - so a window touching it would have shrunk ~8700
-// identities to a handful. The index is now a PROJECTION of a per-entry
-// ownership fact, and the fact is written by upsert-what-you-evaluated at either
-// scope. So the correct contract is a SUPERSET one:
-//
-//   - the entries this window evaluated have their contribution replaced, so a
-//     release curated this tick is searchable within one tick instead of within
-//     one reconcile interval (which is what made a proxied search answer
-//     empty-and-no-fault, indistinguishable to an arr from "SeaDex curates
-//     nothing for this show");
-//   - every entry the window did NOT evaluate keeps its stored contribution
-//     exactly, because absence from a window is not evidence.
+// TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest pins the SUPERSET contract
+// the search curation index has as a PROJECTION of a per-entry ownership fact written
+// by upsert-what-you-evaluated at either scope: the entries this window evaluated have
+// their contribution replaced, so a release curated this tick is searchable within one
+// tick rather than one reconcile interval (an empty proxied search is indistinguishable
+// to an arr from "SeaDex curates nothing for this show"), and every entry the window
+// did NOT evaluate keeps its stored contribution exactly, because absence from a window
+// is not evidence.
 func TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -154,19 +141,14 @@ func TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest(t *testing.T) {
 	}
 }
 
-// TestAdvanceRefusesSearchAdmissionUnderATagPolicy closes the one genuine
-// regression risk in windowing the search index.
-//
-// The catalogue pass filters catalogue-wide (splitCurationWarned closing over
-// shared info hashes) BEFORE building the index; a window closes only over
-// itself, so a warned identity reachable only through an entry OUTSIDE the window
-// is invisible to it. Admitting window keys on that evidence would mark a release
-// the operator explicitly excluded as curated for up to one reconcile interval.
-//
-// The gate is complete rather than mitigating: with any tag exclusion configured
-// the window writes NO ownership at all (the reconcile stays the only writer of
-// it, which is exactly the pre-rewrite behaviour), and with the default empty
-// policy nothing is warned anywhere so the window admits freely.
+// TestAdvanceRefusesSearchAdmissionUnderATagPolicy closes the one genuine regression
+// risk in windowing the search index. The catalogue pass filters catalogue-wide
+// (splitCurationWarned closing over shared info hashes) BEFORE building the index; a
+// window closes only over itself, so a warned identity reachable only through an entry
+// OUTSIDE the window is invisible to it, and admitting window keys on that evidence
+// marks a release the operator explicitly excluded as curated for up to one reconcile
+// interval. The gate is complete rather than mitigating: with any tag exclusion
+// configured the window writes NO ownership at all.
 func TestAdvanceRefusesSearchAdmissionUnderATagPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -227,18 +209,14 @@ func TestAdvancePreservesTitlesAndHarvestCursorVerbatim(t *testing.T) {
 	}
 }
 
-// TestAdvanceJournalsNewExpiresOldAndNeverReadmits pins Advance's three
-// journal transitions in one pass, because they are one decision: what the
-// window may change.
-//
-//   - a genuinely new torrent (absent from the publication log) is admitted,
-//     stamped now, and its identity recorded;
-//   - a torrent already in the ledger is NOT re-admitted, however the window
-//     presents it - the ledger is never pruned, so a re-admission would
-//     re-broadcast an old release as new on every tick;
-//   - a carried item past feedJournalMaxAge leaves, so the journal stays a
-//     recent-additions window rather than growing without bound between
-//     reconciles.
+// TestAdvanceJournalsNewExpiresOldAndNeverReadmits pins Advance's three journal
+// transitions in one pass, because they are one decision: what the window may change.
+// A genuinely new torrent (absent from the publication log) is admitted, stamped now,
+// and its identity recorded; a torrent already in the ledger is NOT re-admitted however
+// the window presents it, since the never-pruned ledger would re-broadcast an old
+// release as new on every tick; and a carried item past feedJournalMaxAge leaves, so
+// the journal stays a recent-additions window rather than growing without bound between
+// reconciles.
 func TestAdvanceJournalsNewExpiresOldAndNeverReadmits(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -307,15 +285,11 @@ func TestAdvanceJournalsNewExpiresOldAndNeverReadmits(t *testing.T) {
 	}
 }
 
-// TestAdvanceLeavesBothFeedsSortedNewestFirst pins the sort, on BOTH feeds,
-// because dropping it is silent and total.
-//
-// The reader serves the persisted order with no sort of its own, and an arr
-// walking an RSS feed stops at the first item older than its last sync - so a
-// newly admitted item appended at the TAIL, behind older carried items, is
-// simply never reached. The feed would look correct in every count assertion
-// and deliver nothing, which is the exact freshness this whole path exists to
-// provide.
+// TestAdvanceLeavesBothFeedsSortedNewestFirst pins the sort, on BOTH feeds, for
+// the reason the sortFeed call site in pass.go carries. Dropping it is silent
+// and total: a newly admitted item appended at the TAIL, behind older carried
+// items, is never reached, so the feed looks correct in every count assertion
+// and delivers nothing.
 func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -383,15 +357,13 @@ func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 	}
 }
 
-// TestAdvanceDefersOverUnusableSnapshot pins the recovery boundary: a missing
-// or malformed snapshot is the FULL pass's problem, and Advance must return nil
-// while changing nothing.
-//
-// Baselining from a window would be the damaging alternative. The baseline path
-// records "everything currently curated" in the publication log, and that ledger is
-// never pruned - so from a window it would burn the window's identities as
-// already-served (they could then never appear on RSS) and discard the entire
-// journal in the same write.
+// TestAdvanceDefersOverUnusableSnapshot pins the recovery boundary: a missing or
+// malformed snapshot is the FULL pass's problem, and Advance must return nil while
+// changing nothing. Baselining from a window would be the damaging alternative - the
+// baseline path records "everything currently curated" in the publication log, and that
+// ledger is never pruned, so from a window it would burn the window's identities as
+// already-served (they could then never appear on RSS) and discard the entire journal
+// in the same write.
 func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 	window := []seadex.Entry{nyaaEntry(8, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
 	tests := map[string]struct {
@@ -462,15 +434,13 @@ func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 	}
 }
 
-// TestAdvanceHonoursExcludeTags pins the operator's tag policy on the growth
-// path, in BOTH of its consequences.
-//
-// The feed one is obvious: an excluded release must not be journaled, or it is
-// servable to the arrs for up to a full reconcile interval. The ledger one is
-// the reason this test is not just a count assertion - folding an excluded
-// identity into the never-pruned publication log would make the exclusion
-// PERMANENT, so an operator who later removed the tag from filters.exclude_tags
-// could never get that release back on RSS.
+// TestAdvanceHonoursExcludeTags pins the operator's tag policy on the growth path, in
+// BOTH of its consequences. The feed one is obvious: an excluded release must not be
+// journaled, or it is servable to the arrs for up to a full reconcile interval. The
+// ledger one is why this is not just a count assertion - folding an excluded identity
+// into the never-pruned publication log would make the exclusion PERMANENT, so an
+// operator who later removed the tag from filters.exclude_tags could never get that
+// release back on RSS.
 func TestAdvanceHonoursExcludeTags(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -502,17 +472,13 @@ func TestAdvanceHonoursExcludeTags(t *testing.T) {
 }
 
 // TestAdvanceExcludesAWarnedIdentityWithinTheWindow pins the identity CLOSURE at
-// window scope, which the direct per-torrent filter alone does not give.
-//
-// SeaDex routinely lists one release on two trackers with a shared info hash and
-// the warning tag on one occurrence only. Filtering torrent by torrent admits the
-// untagged twin, journals it, and records its identity in the never-pruned seen
-// ledger - after which the next full pass (whose graph DOES propagate the
-// exclusion) retracts it from the feed and can never re-admit it. That is a
-// permanent omission, which the feed's non-filtering stance exists to rule out.
-//
-// The full pass still owns the exclusion that is only reachable through an entry
-// outside the window; this pins the half a window can compute.
+// window scope, which the direct per-torrent filter alone does not give. SeaDex
+// routinely lists one release on two trackers with a shared info hash and the warning
+// tag on one occurrence only. Filtering torrent by torrent admits the untagged twin,
+// journals it, and records its identity in the never-pruned seen ledger - after which
+// the next full pass (whose graph DOES propagate the exclusion) retracts it and can
+// never re-admit it, a permanent omission the feed's non-filtering stance rules out.
+// The full pass still owns the exclusion only reachable outside the window.
 func TestAdvanceExcludesAWarnedIdentityWithinTheWindow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -547,18 +513,14 @@ func TestAdvanceExcludesAWarnedIdentityWithinTheWindow(t *testing.T) {
 	}
 }
 
-// TestAdvanceDoesNotRerenderCarriedItems pins the deliberate LIMIT of Advance,
-// which is as much a contract as its capabilities.
-//
-// A carried item's stored form is left exactly as persisted, even when the
-// window carries the same torrent and a re-render would produce a different
-// title. That is why the docstring calls out that a title corrected upstream
-// keeps its old form until the next full pass: re-rendering from a window is
-// unsound in the general case (the render folds every entry a torrent is
-// attached to, and a window sees only some of them), so the full pass owns it.
-//
-// Without this test the "carry" path would be free to drift into a partial
-// re-render, which reads as an improvement and is actually a correctness loss.
+// TestAdvanceDoesNotRerenderCarriedItems pins the deliberate LIMIT of Advance, which
+// is as much a contract as its capabilities. A carried item's stored form is left
+// exactly as persisted, even when the window carries the same torrent and a re-render
+// would produce a different title, so a title corrected upstream keeps its old form
+// until the next full pass: re-rendering from a window is unsound in the general case
+// (the render folds every entry a torrent is attached to, and a window sees only some
+// of them). Without this test the carry path is free to drift into a partial re-render,
+// which reads as an improvement and is a correctness loss.
 func TestAdvanceDoesNotRerenderCarriedItems(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
@@ -673,6 +635,137 @@ func TestAdvanceRebasesFutureFirstSeen(t *testing.T) {
 	t.Errorf("nyaa:42 was dropped rather than rebased: %v", feedKeys(snap.NyaaFeed))
 }
 
+// TestBothPassKindsRenderTheMirrorIdentityIdentically fails when the RSS fold
+// reads anything narrower than the UNION of the item's journal key and its bare
+// info hash: a reconcile and a tick then render different items for one release.
+//
+// Four gates keep the fixture from going vacuous. The key holder must carry the
+// hash, the holders must agree on the best vote, and the hash must be valid
+// 40-hex, or the result is dropped before any id is stamped. The fourth is pass
+// ORDER: a window carries a journaled key verbatim, so each pass journals it first.
+func TestBothPassKindsRenderTheMirrorIdentityIdentically(t *testing.T) {
+	mirrorHash := strings.Repeat("e", 40)
+	const keyHolderID, hashHolderID = 2001, 2002
+	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+
+	// The key holder is a series with one tvdb id; the hash-only holder is a film
+	// on Radarr with another, so the two disagree on the id AND contribute
+	// different categories.
+	info := func(alID int) EntryInfo {
+		switch alID {
+		case keyHolderID:
+			return EntryInfo{Title: "Mirror Show", TvdbID: 79525, Target: TargetSonarr}
+		case hashHolderID:
+			return EntryInfo{Title: "Mirror Film", IsMovie: true, TvdbID: 123456, Target: TargetRadarr}
+		}
+		return EntryInfo{}
+	}
+	keyHolder := nyaaEntry(keyHolderID, 777, true, "Mirror Show - S01E01 (1080p) [G].mkv")
+	keyHolder.Torrents[0].InfoHash = mirrorHash
+	hashOnly := seadex.Entry{AniListID: hashHolderID, Torrents: []seadex.Torrent{{
+		Tracker: "AnimeTosho", URL: "https://animetosho.org/view/9", InfoHash: mirrorHash, IsBest: true,
+		Files: []seadex.File{{Length: 7, Name: "Mirror Film (1080p) [Other].mkv"}},
+	}}}
+	// Prior state: neither the item's key nor its scope-namespaced hash is in the
+	// publication log, so each pass journals it as new; the hash-only holder IS in
+	// the ownership fact, which is the only record a window has of an owner it did
+	// not evaluate.
+	prior := func() *snapshot {
+		return &snapshot{
+			Published: map[string]bool{},
+			Owners:    ownsBy(hashHolderID, ownedRelease{Hash: mirrorHash, IsBest: true}),
+			NyaaFeed:  []journalItem{},
+			ABFeed:    []journalItem{},
+		}
+	}
+
+	reconcilePath := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, reconcilePath, prior())
+	if err := advanceTestWriter(reconcilePath, now).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	tickPath := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, tickPath, prior())
+	if err := advanceTestWriter(tickPath, now).Advance(t.Context(), []seadex.Entry{keyHolder}, info); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+
+	reconciled := journalItemForKey(t, readSnapshotFile(t, reconcilePath).NyaaFeed, "nyaa:777")
+	ticked := journalItemForKey(t, readSnapshotFile(t, tickPath).NyaaFeed, "nyaa:777")
+	if reconciled.TvdbID != 0 {
+		t.Errorf("reconcile TvdbID = %d, want 0: the two holders of this identity disagree, and a disagreement vetoes",
+			reconciled.TvdbID)
+	}
+	if ticked.TvdbID != 0 {
+		t.Errorf("tick TvdbID = %d, want 0: the carried owner disagrees with the occurrence the window holds",
+			ticked.TvdbID)
+	}
+	if !reflect.DeepEqual(reconciled, ticked) {
+		t.Errorf("the two pass kinds render different items for one release identity:\n reconcile %+v\n      tick %+v",
+			reconciled, ticked)
+	}
+}
+
+// TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote is holders-agree on the
+// film twin across the two records a window pass holds: the occurrence in the
+// window and an unevaluated owner's stored SonarrTitle. An agreeing prior yields
+// the twin and the MOVIE holder's Anime drop; a disagreeing one vetoes the twin
+// and the release serves under both categories.
+//
+// The fixture is only live while the window holder itself produces a twin title
+// and the prior owner's record names the item's journal KEY.
+func TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote(t *testing.T) {
+	const windowHolderID, priorHolderID = 3001, 3002
+	const windowTitle = "Minami-ke S00E02 1080p [G]"
+	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	tests := map[string]struct {
+		priorTitle string
+		wantTitle  string
+		wantCats   []int
+	}{
+		"prior owner agrees": {
+			priorTitle: windowTitle, wantTitle: windowTitle, wantCats: []int{catMovies},
+		},
+		"prior owner disagrees": {
+			priorTitle: "Minami-ke S00E03 1080p [G]", wantTitle: "", wantCats: []int{catMovies, catAnime},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			writeSnapshotFile(t, path, &snapshot{
+				Published: map[string]bool{},
+				Owners:    ownsBy(priorHolderID, ownedRelease{Key: "nyaa:777", SonarrTitle: tc.priorTitle, IsBest: true}),
+				NyaaFeed:  []journalItem{},
+				ABFeed:    []journalItem{},
+			})
+			window := nyaaEntry(windowHolderID, 777, true, "Minami-ke Special (1080p) [G].mkv")
+			window.Torrents[0].ReleaseGroup = "G"
+			info := func(int) EntryInfo {
+				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, Target: TargetSonarr, TvdbID: 80000, SpecialEpisode: 2, SeriesTitle: "Minami-ke"}
+			}
+			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{window}, info); err != nil {
+				t.Fatalf("Advance: %v", err)
+			}
+
+			it := journalItemForKey(t, readSnapshotFile(t, path).NyaaFeed, "nyaa:777")
+			if it.SonarrTitle != tc.wantTitle {
+				t.Errorf("tick SonarrTitle = %q, want %q (prior owner stored %q)", it.SonarrTitle, tc.wantTitle, tc.priorTitle)
+			}
+			wantGUID := ""
+			if tc.wantTitle != "" {
+				wantGUID = twinGUID(it.GUID)
+			}
+			if it.SonarrGUID != wantGUID {
+				t.Errorf("tick SonarrGUID = %q, want %q", it.SonarrGUID, wantGUID)
+			}
+			if !slices.Equal(it.Categories, tc.wantCats) {
+				t.Errorf("tick Categories = %v, want %v", it.Categories, tc.wantCats)
+			}
+		})
+	}
+}
+
 // feedKeys lists a feed's journal keys in persisted order.
 func feedKeys(feed []journalItem) []string {
 	keys := make([]string, 0, len(feed))
@@ -683,22 +776,13 @@ func feedKeys(feed []journalItem) []string {
 }
 
 // TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity pins the resolution of a
-// genuine DISAGREEMENT between the two passes, and it inverts what the tick used
-// to do.
-//
-// The tick applied the GUID-identity gate to every carried item and DROPPED on
-// failure, while the catalogue pass routed a still-curated item with an unproven
-// GUID to a fresh render that SELF-HEALS the GUID. Under a never-pruned
-// publication log the tick's verdict was the irreversible one, so a tick
-// permanently discarded an item the reconcile would have repaired - reachable
-// from a legacy, hand-edited or corrupt GUID.
-//
-// Only the reconcile holds the evidence to repair it (a fresh render needs every
-// occurrence of the key), so the sound window verdict is to leave it alone. That
-// costs nothing at the serve surface: the reader applies the same GUID-to-Key
-// invariant when it rebuilds download links, so an item with an unproven GUID is
-// not served whatever the file holds - and the reconcile decides within one
-// reconcile interval.
+// genuine DISAGREEMENT between the two passes. Applying the GUID-identity gate to
+// every carried item and DROPPING on failure makes the tick's verdict irreversible
+// under a never-pruned publication log, so a tick permanently discards an item the
+// reconcile would have repaired by a fresh render that self-heals the GUID. Only the
+// reconcile holds that evidence (a fresh render needs every occurrence of the key),
+// and leaving it alone costs nothing at the serve surface: the reader applies the same
+// GUID-to-Key invariant when it rebuilds download links.
 func TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
 	for name, guid := range map[string]string{
 		"a GUID naming another torrent id": "https://nyaa.si/view/9999",
@@ -739,22 +823,14 @@ func TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
 	}
 }
 
-// TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes pins the half of a
-// window's render that its own evidence cannot supply.
-//
-// A window holds the occurrences of the entries a curator happened to touch,
-// never a journal key's whole owner set (~4.4% of curated torrents are attached
-// to several entries), so its render is authorized only as PARTIAL and is
-// completed by carrying the stored votes of the owners it did NOT evaluate. Both
-// carried votes are additive - best-wins on the download-volume-factor marker and
-// a category union - and both are load-bearing at the serve surface: a release
-// SeaDex marks best would otherwise be published to the arrs as an alt for a whole
-// reconcile interval, and a film owned only by an unevaluated entry would never
-// reach Radarr's RSS view.
-//
-// The four cases are the identity relation that decides which stored release
-// counts, plus the rule that a vote this pass REPLACED is never carried on top of
-// its own fresh evidence.
+// TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes pins the half of a window's
+// render that its own evidence cannot supply. A window holds the occurrences of the
+// entries a curator happened to touch, never a journal key's whole owner set (~4.4% of
+// curated torrents are attached to several entries), so its render is authorized only
+// as PARTIAL and is completed by carrying the stored votes of the owners it did NOT
+// evaluate: best-wins on the download-volume-factor marker and a category union. Both
+// are load-bearing - a best release would otherwise publish as an alt for a whole
+// reconcile interval, and a film owned only by an unevaluated entry never reaches Radarr.
 func TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes(t *testing.T) {
 	// A 40-hex info hash the window's own occurrence carries, so the stored
 	// hash-side identity test has something to match.

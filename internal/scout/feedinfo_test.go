@@ -1,9 +1,11 @@
 package scout
 
 import (
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -79,7 +81,7 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	}
 
 	// Unmapped id whose memo DOES carry the AniList format: the typing comes
-	// from it (l-f70). Without this the app knew an entry was a movie and still
+	// from it. Without this the app knew an entry was a movie and still
 	// routed its feed item to Anime/5070, so Radarr - which filters on
 	// Movies/2000 - never saw that movie in the RSS feed at all.
 	if film := info(8); film.Title != "Memo Only Film" || !film.IsMovie || film.SeasonKnown {
@@ -94,7 +96,7 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	// A MAPPED record whose Fribb `type` is empty carries no typing either, so
 	// the memo's format types it: without this the app knew the entry was a
 	// movie and still published it under Anime/5070, where Radarr never sees
-	// it (the l-f70 symptom, left open for the mapped-but-untyped shape).
+	// it, which is the mapped-but-untyped shape.
 	if untyped := info(20); untyped.Title != "Untyped Film" || !untyped.IsMovie || untyped.SeasonKnown {
 		t.Errorf("info(20) = %+v, want the memo title typed as a movie", untyped)
 	}
@@ -217,18 +219,13 @@ func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
 	}
 }
 
-// TestResolvedSeason pins the Fribb season-semantics rule at its one home for
-// the feed (l-f4): a positive TVDB season wins, a Fribb-typed special with no
-// positive season resolves to the specials bucket (a MAPPED season zero, which
-// the feed must be able to tell apart from an absent season), and anything else
-// - an absolute-numbered run, a title-only match, an untyped record - resolves
-// nothing. The precedence row matters most: a record that is BOTH typed special
-// and carries a positive season keeps the positive season, because that is the
-// season the arr files it under.
-//
-// The indexer used to re-derive this from raw Fribb fields projected into
-// EntryInfo, which is why it lives here now: that package imports neither
-// align nor mapping, so it cannot read Fribb semantics at all.
+// TestResolvedSeason pins the Fribb season-semantics rule at its one home for the
+// feed: a positive TVDB season wins, a Fribb-typed special with no positive season
+// resolves to the specials bucket (a MAPPED season zero, which the feed must tell
+// apart from an absent season), and anything else - an absolute-numbered run, a
+// title-only match, an untyped record - resolves nothing. The precedence row matters
+// most: a record that is BOTH typed special and carries a positive season keeps the
+// positive season, because that is the season the arr files it under.
 func TestResolvedSeason(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -275,7 +272,7 @@ func TestFeedEntryInfoArrTitleWinsOverMemo(t *testing.T) {
 }
 
 // TestFeedEntryInfoFribbTypingWinsOverMemoFormat pins the documented gate on
-// the memo-format tier (l-f70): it applies ONLY when Fribb had nothing to say.
+// the memo-format tier: it applies ONLY when Fribb had nothing to say.
 // A mapped record's own typing and resolved season must survive a memo entry
 // carrying a contradicting AniList format, or a mapped series would route to
 // Movies/2000 and lose its season - Sonarr filters on Anime/5070, so it would
@@ -298,16 +295,14 @@ func TestFeedEntryInfoFribbTypingWinsOverMemoFormat(t *testing.T) {
 	}
 }
 
-// TestFeedEntryInfoLibraryHitKeepsSeriesTyping pins the precedence between
-// the library-hit early return and the memo-format typing tier: an UNTYPED
-// Fribb record (the tolerant decoder's shape, and an override omitting
-// `type`) still routes a positive TVDB id through RoutedIDs' series arm, so
-// it can HIT a Sonarr item - and that hit is the stronger typing evidence,
-// whatever format the memo carries. Re-typing such an entry from a memoized
-// MOVIE format would publish a show that is in Sonarr under Movies/2000,
-// where Sonarr (which filters on Anime/5070) never sees it - the inverse of
-// the l-f70 symptom. Every existing memo-format row has no library hit, so
-// hoisting applyMemoTyping above the early return passes all of them.
+// TestFeedEntryInfoLibraryHitKeepsSeriesTyping pins the precedence between the
+// library-hit early return and the memo-format typing tier: an UNTYPED Fribb record
+// still routes a positive TVDB id through RoutedIDs' series arm, so it can HIT a
+// Sonarr item, and that hit is the stronger typing evidence whatever format the memo
+// carries. Re-typing such an entry from a memoized MOVIE format would publish a show
+// that is in Sonarr under Movies/2000, where Sonarr (which filters on Anime/5070)
+// never sees it. No other row can catch a hoist of applyMemoTyping above the early
+// return: they all lack a library hit.
 func TestFeedEntryInfoLibraryHitKeepsSeriesTyping(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 30, TvdbID: 555, SeasonTvdb: 2}})
 	lib := &library.Snapshot{Items: []library.Item{
@@ -348,5 +343,122 @@ func TestFeedEntryInfoRoutedUntypedRecordIgnoresMemoMovieFormat(t *testing.T) {
 	}
 	if got.Title != "Memo Film Title" || got.Year != 2019 {
 		t.Errorf("info(31) = %+v, want the memo title tier to still supply the title", got)
+	}
+}
+
+// TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle pins the guarantee the
+// widened FindByID would otherwise void. FindByID resolves a MOVIE record to
+// the Sonarr series TVDB files the film under as a season-0 special, and
+// feedEntryInfo's first title tier IS FindByID - so without the gate all 50
+// such entries would be served under the PARENT SERIES' title, which is a
+// different work and one Radarr can never match. The film keeps its own
+// SeaDex-derived name and still reports the Sonarr target and the tvdb id.
+func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "MOVIE", TvdbID: 79525, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 2, Type: "MOVIE", TvdbID: 79525, TmdbMovies: []int{5528}, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 3, Type: "TV", TvdbID: 79525, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+		{AniListID: 4, Type: "MOVIE", TmdbMovies: []int{999}},
+	})
+	lib := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 79525, Title: "Code Geass", Year: 2006},
+		{Arr: library.ArrRadarr, ArrID: 11, TmdbID: 5528, Title: "Lelouch of the Resurrection", Year: 2019},
+	}}
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{"Lelouch of the Resurrection"}, Year: 2019, Format: "MOVIE"},
+	}}
+	info := feedEntryInfo(idx, lib, memo)
+
+	film := info(1)
+	if film.Title != "Lelouch of the Resurrection" {
+		t.Errorf("info(1).Title = %q, want the film's own name (never the parent series')", film.Title)
+	}
+	if film.Target != indexer.TargetSonarr {
+		t.Errorf("info(1).Target = %v, want %v (the film's media is owned in Sonarr)", film.Target, indexer.TargetSonarr)
+	}
+	if film.TvdbID != 79525 {
+		t.Errorf("info(1).TvdbID = %d, want 79525 (the id that makes the offer consumable)", film.TvdbID)
+	}
+	if !film.IsMovie {
+		t.Error("info(1).IsMovie = false, want true")
+	}
+
+	radarr := info(2)
+	if radarr.Title != "Lelouch of the Resurrection" || radarr.Target != indexer.TargetRadarr {
+		t.Errorf("info(2) = %+v, want the Radarr item's own title and the Radarr target", radarr)
+	}
+
+	series := info(3)
+	if series.Title != "Code Geass" || series.Target != indexer.TargetSonarr {
+		t.Errorf("info(3) = %+v, want the Sonarr series' own title (the gate is for MOVIE records only)", series)
+	}
+
+	unmatched := info(4)
+	if unmatched.Target != indexer.TargetNone {
+		t.Errorf("info(4).Target = %v, want %v", unmatched.Target, indexer.TargetNone)
+	}
+	if unmatched.TvdbID != 0 {
+		t.Errorf("info(4).TvdbID = %d, want 0 (the record carries none)", unmatched.TvdbID)
+	}
+}
+
+// TestFeedEntryInfoProjectsTheMappingList pins the projection of the Anime-Lists
+// mapping-list onto the feed metadata. The special episode is stamped ONLY for
+// the offered class on a Sonarr series (a MOVIE record with a mapped season zero
+// resolved to a titled Sonarr item), beside the series title, while the film
+// keeps its own name; the same record on a Radarr item, a TV record with a
+// positive season (a series node carrying a specials row of its own) and an
+// untitled series all stamp nothing. The season ranges ride along for every
+// mapped record whatever its target.
+func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
+	ranges := []mapping.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
+	idx := mapping.NewIndexWithMappings([]mapping.Record{
+		{AniListID: 1, Type: "MOVIE", TvdbID: 79525, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 2, Type: "MOVIE", TvdbID: 79525, TmdbMovies: []int{5528}, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 3, Type: "TV", TvdbID: 79525, AniDBID: 7949, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+		{AniListID: 4, Type: "TV", TvdbID: 81797, AniDBID: 69, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 5, Type: "MOVIE", TvdbID: 70000, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 6, Type: "MOVIE", TvdbID: 79525, AniDBID: 9999, SeasonKind: mapping.SeasonPresent},
+	}, map[int]mapping.Mapping{
+		6008: {SpecialEpisode: 4},
+		7949: {SpecialEpisode: 1},
+		69:   {Seasons: ranges},
+	})
+	lib := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 79525, Title: "Code Geass", Year: 2006},
+		{Arr: library.ArrRadarr, ArrID: 11, TmdbID: 5528, Title: "Lelouch of the Resurrection", Year: 2019},
+		{Arr: library.ArrSonarr, ArrID: 12, TvdbID: 81797, Title: "One Piece", Year: 1999},
+		{Arr: library.ArrSonarr, ArrID: 13, TvdbID: 70000, Title: "   "},
+	}}
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{"Lelouch of the Resurrection"}, Year: 2019, Format: "MOVIE"},
+	}}
+	info := feedEntryInfo(idx, lib, memo)
+
+	film := info(1)
+	if film.SpecialEpisode != 4 || film.SeriesTitle != "Code Geass" {
+		t.Errorf("info(1) = SpecialEpisode %d SeriesTitle %q, want 4 and the Sonarr series' title", film.SpecialEpisode, film.SeriesTitle)
+	}
+	if film.Title != "Lelouch of the Resurrection" {
+		t.Errorf("info(1).Title = %q, want the film's own name kept", film.Title)
+	}
+	if radarr := info(2); radarr.SpecialEpisode != 0 || radarr.SeriesTitle != "" {
+		t.Errorf("info(2) on a Radarr item = SpecialEpisode %d SeriesTitle %q, want none (Radarr's item does not change)", radarr.SpecialEpisode, radarr.SeriesTitle)
+	}
+	if tv := info(3); tv.SpecialEpisode != 0 || tv.SeriesTitle != "" {
+		t.Errorf("info(3) positive-season TV record = SpecialEpisode %d SeriesTitle %q, want none (the offered class only)", tv.SpecialEpisode, tv.SeriesTitle)
+	}
+	if untitled := info(5); untitled.SpecialEpisode != 0 || untitled.SeriesTitle != "" {
+		t.Errorf("info(5) on a blank-titled series = SpecialEpisode %d SeriesTitle %q, want none", untitled.SpecialEpisode, untitled.SeriesTitle)
+	}
+	if unlisted := info(6); unlisted.SpecialEpisode != 0 {
+		t.Errorf("info(6) with no mapping = SpecialEpisode %d, want 0", unlisted.SpecialEpisode)
+	}
+	want := []indexer.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
+	if run := info(4); !slices.Equal(run.Seasons, want) {
+		t.Errorf("info(4).Seasons = %+v, want %+v", run.Seasons, want)
+	}
+	if film.Seasons != nil {
+		t.Errorf("info(1).Seasons = %+v, want nil (the list names no ranges for a film)", film.Seasons)
 	}
 }

@@ -13,18 +13,14 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// TestEverySnapshotMemberIsInTheDecoderVocabulary is the TOTALITY GATE. The
-// persisted feed contract's central promise is that a member the decoder cannot
-// recognize is impossible to add, and Go cannot express that at compile time for
-// a struct field, so it is expressed here instead: this test fails the build gate
-// the moment a member is added to the snapshot struct without entering
-// allSnapshotMembers, and the moment that list names a member the struct does not
-// have.
-//
-// It walks the struct's JSON tags rather than a hand-written list on purpose. A
-// hand-written list is the thing that drifts, and drift is the exact failure the
-// vocabulary exists to prevent - the tick got five members wrong by omission
-// because nothing forced it to answer for each one.
+// TestEverySnapshotMemberIsInTheDecoderVocabulary is the TOTALITY GATE. The persisted
+// feed contract's central promise is that a member the decoder cannot recognize is
+// impossible to add, and Go cannot express that at compile time for a struct field, so it
+// is expressed here: the test fails the moment a member is added to the snapshot struct
+// without entering allSnapshotMembers, and the moment that list names a member the struct
+// does not have. It walks the struct's JSON tags rather than a hand-written list on
+// purpose - a hand-written list is the thing that drifts, and drift is the exact failure
+// the vocabulary exists to prevent.
 func TestEverySnapshotMemberIsInTheDecoderVocabulary(t *testing.T) {
 	structMembers := map[snapshotMember]struct{}{}
 	for field := range reflect.TypeFor[snapshot]().Fields() {
@@ -70,18 +66,14 @@ func TestPublicationLogIsNeverDeletable(t *testing.T) {
 	}
 }
 
-// TestPublicationLogCapRefusesTheWriteAndKeepsThePast pins the append-only rule
-// where TestPublicationLogIsNeverDeletable cannot reach it: the rule table
-// declares the log non-deletable, and the CAP path used to violate that
-// declaration directly by assigning baselinePublications(current catalogue) over
-// snap.Published at catalogue scope. That deleted every publication whose
-// release had since left SeaDex, so a release that later returned read as new
-// and was broadcast to the arrs a second time - the re-grab the permanent log
-// exists to prevent.
-//
-// The contract now: an over-cap log fails the pass at BOTH scopes, the built
-// snapshot is left untouched (so the last-good feed.json survives - run returns
-// this error before persist), and recovery is an explicit operator re-baseline.
+// TestPublicationLogCapRefusesTheWriteAndKeepsThePast pins the append-only rule where
+// TestPublicationLogIsNeverDeletable cannot reach it: the rule table declares the log
+// non-deletable, and a CAP path assigning baselinePublications(current catalogue) over
+// snap.Published at catalogue scope violates that directly - it deletes every publication
+// whose release has since left SeaDex, so a release that later returns reads as new and
+// is broadcast to the arrs a second time. The contract: an over-cap log fails the pass at
+// BOTH scopes, the built snapshot is left untouched (run returns before persist, so the
+// last-good feed.json survives), and recovery is an explicit operator re-baseline.
 func TestPublicationLogCapRefusesTheWriteAndKeepsThePast(t *testing.T) {
 	// One past publication that is NOT in any current catalogue, plus enough
 	// per-entry-valid bulk to cross the aggregate byte cap (the only cap a test
@@ -178,25 +170,136 @@ func TestPerOwnerVotesMakeADemotionRepresentable(t *testing.T) {
 		ownsBy(10, hashed(key, hash, true)),
 		ownsBy(20, hashed(key, hash, false)),
 	)
-	if !projectCuration(owners).byKey[key] {
+	if !projectCuration(owners).byKey[key].isBest {
 		t.Fatal("a best vote from ANY owner must project as best")
 	}
 	// Entry 10 demotes it. A window that evaluated entry 10 replaces exactly
 	// entry 10's contribution and leaves entry 20's alone.
 	demoted := upsertOwners(owners, ownsBy(10, hashed(key, hash, false)), scopeWindow)
 	set := projectCuration(demoted)
-	if set.byKey[key] {
+	if set.byKey[key].isBest {
 		t.Error("the release still projects as best after its only best-voting owner demoted it")
 	}
-	if !set.byKey[key] && !set.byPair[pairKey(hash, key)] {
+	if _, member := set.byKey[key]; !member && !set.byPair[pairKey(hash, key)] {
 		t.Error("the demoted release left the index entirely; a demotion changes the marker, not membership")
 	}
 }
 
-// TestProjectionAlwaysAllocatesThePairRelation: the pair relation used to be a
-// persisted map whose nil-ness was a legacy sentinel searches failed closed on,
-// which cost an upgrade window of empty Nyaa results. Deriving it from the
-// ownership fact means it can never be absent.
+// TestProjectCurationFoldsTheTvdbIDPerSignal pins holders-agree AT the fold, which
+// is where several owners of one identity signal collapse into one answer for the
+// search render: an id every holder that HAS one agrees on projects, a holder with
+// none abstains, and two holders that disagree leave the signal with no id at all.
+//
+// Driven through ownershipOf, because the id only reaches the projection if the
+// ownership fact carries it: the server is a pure snapshot reader with no mapping
+// access, so an id the pass failed to record is one no search can ever stamp.
+func TestProjectCurationFoldsTheTvdbIDPerSignal(t *testing.T) {
+	const key = "nyaa:42"
+	hash := strings.Repeat("a", 40)
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash,
+		Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}
+	tests := map[string]struct {
+		desc string
+		ids  map[int]int
+		want int
+	}{
+		"both owners agree": {
+			desc: "one id, twice",
+			ids:  map[int]int{10: 79525, 20: 79525}, want: 79525,
+		},
+		"one owner carries none": {
+			desc: "the parent-series-plus-unmapped-special shape: absence abstains",
+			ids:  map[int]int{10: 79525}, want: 79525,
+		},
+		"the owners disagree": {
+			desc: "two positive ids that differ veto the attribute for this signal",
+			ids:  map[int]int{10: 79525, 20: 12345}, want: 0,
+		},
+		"nobody carries one": {
+			desc: "nothing to stamp",
+			want: 0,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			entries := []seadex.Entry{
+				{AniListID: 10, Torrents: []seadex.Torrent{torrent}},
+				{AniListID: 20, Torrents: []seadex.Torrent{torrent}},
+			}
+			set := projectCuration(ownershipOf(entries, func(alID int) EntryInfo {
+				return EntryInfo{TvdbID: tc.ids[alID]}
+			}))
+			if got := set.byKey[key].vote.resolve(); got != tc.want {
+				t.Errorf("byKey[%q] id = %d, want %d (%s)", key, got, tc.want, tc.desc)
+			}
+			if got := set.byHash[hash].vote.resolve(); got != tc.want {
+				t.Errorf("byHash id = %d, want %d (%s): both signals of one release fold the same owners",
+					got, tc.want, tc.desc)
+			}
+		})
+	}
+}
+
+// TestProjectCurationFoldsTheTwinTitlePerSignal is holders-agree on the film twin
+// AT the search projection's fold: two owners of one release naming the same
+// twin title project it, an owner with none abstains, and two owners naming
+// different titles leave the signal with no twin at all. Driven through
+// ownershipOf, so the title reaches the projection only the way a pass records
+// it (ownedRelease.SonarrTitle).
+func TestProjectCurationFoldsTheTwinTitlePerSignal(t *testing.T) {
+	const key = "nyaa:42"
+	hash := strings.Repeat("a", 40)
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash, ReleaseGroup: "G",
+		Files: []seadex.File{{Length: 1, Name: "Minami-ke Special (1080p) [G].mkv"}},
+	}
+	tests := map[string]struct {
+		desc     string
+		episodes map[int]int
+		want     string
+	}{
+		"both owners agree": {
+			desc:     "one special episode, twice",
+			episodes: map[int]int{10: 2, 20: 2}, want: "Minami-ke S00E02 1080p [G]",
+		},
+		"one owner carries none": {
+			desc:     "absence abstains",
+			episodes: map[int]int{10: 2}, want: "Minami-ke S00E02 1080p [G]",
+		},
+		"the owners disagree": {
+			desc:     "the Minami-ke shape: two episodes veto the twin for this signal",
+			episodes: map[int]int{10: 2, 20: 3}, want: "",
+		},
+		"nobody carries one": {
+			desc: "nothing to twin",
+			want: "",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			entries := []seadex.Entry{
+				{AniListID: 10, Torrents: []seadex.Torrent{torrent}},
+				{AniListID: 20, Torrents: []seadex.Torrent{torrent}},
+			}
+			set := projectCuration(ownershipOf(entries, func(alID int) EntryInfo {
+				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, Target: TargetSonarr, SpecialEpisode: tc.episodes[alID], SeriesTitle: "Minami-ke"}
+			}))
+			if got := set.byKey[key].twin.resolve(); got != tc.want {
+				t.Errorf("byKey[%q] twin = %q, want %q (%s)", key, got, tc.want, tc.desc)
+			}
+			if got := set.byHash[hash].twin.resolve(); got != tc.want {
+				t.Errorf("byHash twin = %q, want %q (%s): both signals of one release fold the same owners",
+					got, tc.want, tc.desc)
+			}
+		})
+	}
+}
+
+// TestProjectionAlwaysAllocatesThePairRelation: a nil pair relation fails every
+// search closed, so deriving it from the ownership fact rather than persisting it
+// is what makes it impossible to be absent.
 func TestProjectionAlwaysAllocatesThePairRelation(t *testing.T) {
 	set := projectCuration(nil)
 	if set.byHash == nil || set.byKey == nil || set.byPair == nil {
@@ -300,8 +403,7 @@ func TestDecodeSnapshotReBaselinesAForeignVersion(t *testing.T) {
 }
 
 // TestDecodeSnapshotRefusesAMissingFact: the two facts are what the whole
-// contract is; a document naming neither is structurally invalid, exactly as a
-// missing curation map used to be.
+// contract is, so a document naming neither is structurally invalid.
 func TestDecodeSnapshotRefusesAMissingFact(t *testing.T) {
 	cases := map[string]string{
 		"no owners":          `{"version":2,"published":{}}`,
@@ -310,16 +412,14 @@ func TestDecodeSnapshotRefusesAMissingFact(t *testing.T) {
 	assertStructural(t, cases)
 }
 
-// TestDecodeSnapshotRefusesAnUnidentifiableDocument keeps a version SKEW and
-// CORRUPTION apart, which matters because the two get opposite treatment.
-//
-// A document carrying no version at all does not identify itself: `null`, `{}`, a
-// truncated write and a retired pre-version file are all this shape. Reporting it
-// structural is what stops the READER blanking a live feed over it - it keeps the
-// last-good snapshot - whereas the re-baseline arm installs an empty one. The
-// writer treats both as a baseline either way, so only the reader's posture
-// differs, and for the reader "I cannot identify this file" is not a reason to
-// stop serving what it already has.
+// TestDecodeSnapshotRefusesAnUnidentifiableDocument keeps a version SKEW and CORRUPTION
+// apart, which matters because the two get opposite treatment. A document carrying no
+// version at all does not identify itself: `null`, `{}`, a truncated write and a retired
+// pre-version file are all this shape. Reporting it structural is what stops the READER
+// blanking a live feed over it - it keeps the last-good snapshot - whereas the re-baseline
+// arm installs an empty one. The writer treats both as a baseline either way, so only the
+// reader's posture differs, and for the reader "I cannot identify this file" is not a
+// reason to stop serving what it already has.
 func TestDecodeSnapshotRefusesAnUnidentifiableDocument(t *testing.T) {
 	assertStructural(t, map[string]string{
 		"null document":       `null`,
@@ -345,17 +445,14 @@ func assertStructural(t *testing.T, cases map[string]string) {
 	}
 }
 
-// TestOwnershipOfUnionsDuplicateRelationRows: the contribution of entry X is
-// everything the pass evaluated for X, so two occurrences under one AniList id
-// must union rather than the second overwriting the first.
-//
-// The reachable duplicate is a repeated `trs` relation row on ONE record, which
-// is upstream data this app does not control. Two catalogue RECORDS sharing an
-// alID is deliberately NOT the case under test, because it cannot arrive:
-// seadexapi.validatePageIdentities fails the whole fetch on a repeated alID at
-// window scope exactly as at catalogue scope (see its own tests). The union is
-// still the safe fail direction for a hand-fed Advance caller, which the second
-// case below covers without claiming the client can produce it.
+// TestOwnershipOfUnionsDuplicateRelationRows: the contribution of entry X is everything
+// the pass evaluated for X, so two occurrences under one AniList id must union rather
+// than the second overwriting the first. The reachable duplicate is a repeated `trs`
+// relation row on ONE record, which is upstream data this app does not control. Two
+// catalogue RECORDS sharing an alID is deliberately NOT the case under test, because it
+// cannot arrive: seadexapi.validatePageIdentities fails the whole fetch on a repeated
+// alID at window scope exactly as at catalogue scope. The union is still the safe fail
+// direction for a hand-fed Advance caller, which the second case below covers.
 func TestOwnershipOfUnionsDuplicateRelationRows(t *testing.T) {
 	t.Parallel()
 	for name, entries := range map[string][]seadex.Entry{
@@ -373,7 +470,7 @@ func TestOwnershipOfUnionsDuplicateRelationRows(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got := ownershipOf(entries)
+			got := ownershipOf(entries, noInfo)
 			if len(got[ownerKey(5)]) != 2 {
 				t.Errorf("entry 5 owns %d releases, want 2 (both occurrences unioned): %v",
 					len(got[ownerKey(5)]), got)
@@ -410,7 +507,7 @@ func TestOwnershipOfNeedsAKeyOrAHashToOwnARelease(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := ownershipOf([]seadex.Entry{{AniListID: 9, Torrents: []seadex.Torrent{tc.torrent}}})
+			got := ownershipOf([]seadex.Entry{{AniListID: 9, Torrents: []seadex.Torrent{tc.torrent}}}, noInfo)
 			owned, present := got[ownerKey(9)]
 			if !present {
 				t.Fatalf("ownershipOf(%+v): entry 9 vanished from the evaluated set", tc.torrent)
@@ -426,7 +523,7 @@ func TestOwnershipOfNeedsAKeyOrAHashToOwnARelease(t *testing.T) {
 // nothing must still APPEAR in the evaluated set, or upsertOwners cannot clear a
 // stored contribution that is no longer curated.
 func TestOwnershipOfKeepsAnEvaluatedEntryWithNoReleases(t *testing.T) {
-	got := ownershipOf([]seadex.Entry{{AniListID: 9}})
+	got := ownershipOf([]seadex.Entry{{AniListID: 9}}, noInfo)
 	if _, present := got[ownerKey(9)]; !present {
 		t.Fatal("an entry with no curated releases vanished from the evaluated set")
 	}

@@ -25,18 +25,72 @@ import (
 // cannot drift from it.
 const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 
+// ArrTarget is the arr an entry's library item was resolved to, three-valued
+// because "not in the library" and "Radarr" are different facts. This package
+// imports neither mapping nor align, so EntryInfo is its only channel.
+type ArrTarget int
+
+const (
+	// TargetNone means no library item resolved for the entry.
+	TargetNone ArrTarget = iota
+	// TargetSonarr means the entry resolved to a Sonarr series, including a FILM
+	// TVDB files under one, which is why this is not derivable from IsMovie.
+	TargetSonarr
+	// TargetRadarr means the entry resolved to a Radarr movie.
+	TargetRadarr
+)
+
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
 // (or the AniList canonical title as fallback; empty when neither is known),
-// its release year, the season the entry maps to, and whether it is a movie.
+// its release year, the season the entry maps to, whether it is a movie, the
+// TVDB id its mapping record carries, and which arr it resolved to.
 type EntryInfo struct {
 	Title string
-	Year  int
+	// SeriesTitle is the Sonarr series a film is filed under, set only beside
+	// SpecialEpisode (a Sonarr target): the second title the film twin is
+	// labeled with, since Title keeps the film's own name.
+	SeriesTitle string
+	// Seasons are the TVDB seasons this entry's absolute-numbered episodes fall
+	// into, from the Anime-Lists mapping-list; nil when the list names none. The
+	// RANGES, never a scalar: three measured entries need 6, 8 and 2 distinct
+	// seasons across their packs, so one season per entry mislabels most of them.
+	Seasons []SeasonRange
+	Year    int
 	// Season is the season number this entry's releases belong to, and SeasonKnown
 	// reports whether one was resolved at all.
-	Season      int
+	Season int
+	// TvdbID is the series id the entry's mapping record carries, 0 when it has
+	// none. It feeds the rendered tvdbid attribute, which is what lets Sonarr
+	// resolve a series it could not parse out of the release title.
+	TvdbID int
+	// SpecialEpisode is the TVDB season-0 episode the Anime-Lists mapping-list
+	// files this film as, 0 when it names none or the entry is not an offered
+	// film on a Sonarr series. It is what lets the feed serve the film a second
+	// time as "<SeriesTitle> S00Exx", a title Sonarr's parser can match.
+	SpecialEpisode int
+	// Target is the arr the entry's library item was resolved to, and it decides
+	// the categories: a film on a Sonarr item is served under BOTH.
+	Target      ArrTarget
 	SeasonKnown bool
 	IsMovie     bool
+}
+
+// SeasonRange is one TVDB season an absolute-numbered run's episodes fall into:
+// episodes First..Last are season Season, with Last 0 meaning open-ended. This
+// package's own copy of the mapping-list fact (it imports neither mapping nor
+// align, and EntryInfo is its only channel).
+type SeasonRange struct {
+	Season int
+	First  int
+	Last   int
+}
+
+// contains reports whether the whole episode span first..last sits inside the
+// range. An open-ended range (Last 0) contains a span only from its First on, so
+// it never claims a span that starts before it.
+func (r SeasonRange) contains(first, last int) bool {
+	return r.First <= first && (r.Last == 0 || last <= r.Last)
 }
 
 // EntryInfoFunc resolves the per-show (per-AniList-id) metadata the feed
@@ -45,6 +99,13 @@ type EntryInfo struct {
 // fallback, anime category). The compare cycle supplies it; see
 // entryInfoFunc for the nil-safe wrapper.
 type EntryInfoFunc func(alID int) EntryInfo
+
+// ref resolves one show's metadata to a fresh addressable value, for the title
+// synthesizers that take it by pointer (EntryInfo outgrew the pass-by-value size).
+func (f EntryInfoFunc) ref(alID int) *EntryInfo {
+	info := f(alID)
+	return &info
+}
 
 // entryInfoFunc normalizes a possibly-nil per-show metadata callback to a
 // total function returning the zero EntryInfo (file-name fallback, anime
@@ -56,22 +117,25 @@ func entryInfoFunc(info EntryInfoFunc) EntryInfoFunc {
 	return func(int) EntryInfo { return EntryInfo{} }
 }
 
-// categoriesFor maps a show's Fribb typing to its Torznab categories: a movie
-// routes to Movies (Radarr) and everything else - TV, OVA, ONA, SPECIAL, or an
-// unmapped entry - to Anime (Sonarr). Defaulting the unknown case to anime is
-// deliberate: a single-file OVA/special looks just like a movie by file name,
-// so the failure that matters (a special mis-routed to Radarr, where it can
-// never match) is avoided at the cost of a rare unmapped film not surfacing on
-// Radarr's RSS view.
-func categoriesFor(isMovie bool) []int {
-	if isMovie {
-		return []int{catMovies}
+// categoriesFor maps a show's Fribb typing and its resolved arr to its Torznab
+// categories: a movie to Movies (Radarr), a movie whose library item is a SONARR
+// series to BOTH, and everything else to Anime. BOTH rather than whichever arr won,
+// because a film not owned in Radarr still needs Radarr discovery while its parent
+// series' Sonarr subscribes only to Anime. The unknown case defaults to Anime: a
+// single-file OVA looks like a movie by file name, and a special mis-routed to
+// Radarr can never match there.
+func categoriesFor(isMovie bool, target ArrTarget) []int {
+	if !isMovie {
+		return []int{catAnime}
 	}
-	return []int{catAnime}
+	if target == TargetSonarr {
+		return []int{catMovies, catAnime}
+	}
+	return []int{catMovies}
 }
 
 // synthesizeTitle builds the served release title for one curated torrent.
-func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
+func synthesizeTitle(t *seadex.Torrent, meta *EntryInfo) string {
 	title := strings.TrimSpace(meta.Title)
 	if title == "" {
 		return derivedTitle(t, meta)
@@ -97,7 +161,7 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 // across the file list (so a pack bundling S00 specials with S01 episodes labels S01,
 // never the specials bucket its first file happens to sit in), else no marker (an
 // absolute-numbered pack with no season evidence stays a bare title).
-func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
+func episodeMarker(t *seadex.Torrent, meta *EntryInfo) string {
 	// The synthesized path has no title to judge: it is BUILDING one, so the file
 	// census is the only evidence there is.
 	if !isPack(t) {
@@ -120,7 +184,7 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 // or returns "" when the rule does not apply (no resolved season, a positive
 // season, or a marker that is not the absolute form - all of which the caller
 // handles unchanged).
-func specialsEpisodeMarker(marker string, meta EntryInfo) string {
+func specialsEpisodeMarker(marker string, meta *EntryInfo) string {
 	if !meta.SeasonKnown || meta.Season != 0 {
 		return ""
 	}
@@ -158,18 +222,74 @@ func episodeLabel(e int) string { return fmt.Sprintf("E%02d", e) }
 
 // packSeasonLabel resolves the season token a PACK is labeled with, in the one
 // precedence both title paths share: the entry's resolved season outvotes the
-// pack's file-season evidence (fansub numbering is cour-local), which in turn
-// outvotes nothing at all. ok is false when neither source pins a season, so
-// each caller supplies its own fallback (no marker on the assembled path, the
-// file's own season half on the derived one).
-func packSeasonLabel(t *seadex.Torrent, meta EntryInfo) (string, bool) {
+// pack's own file-season evidence (fansub numbering is cour-local), which
+// outvotes the mapping-list's season ranges - so a token a release name already
+// carries is never rewritten by a range. ok is false when no source pins a
+// season, so each caller supplies its own fallback (no marker on the assembled
+// path, the file's own season half on the derived one).
+func packSeasonLabel(t *seadex.Torrent, meta *EntryInfo) (string, bool) {
 	if meta.SeasonKnown {
 		return seasonLabel(meta.Season), true
 	}
 	if s, ok := packSeason(t.Files); ok {
 		return seasonLabel(s), true
 	}
+	if s, ok := rangeSeason(meta.Seasons, t.Files); ok {
+		return seasonLabel(s), true
+	}
 	return "", false
+}
+
+// rangeSeason resolves the season a tokenless absolute-numbered pack is labeled
+// with from the entry's mapping-list ranges: the pack's absolute episode span,
+// then EXACTLY one range containing the whole span. Zero or several containing
+// ranges (a pack straddling a season boundary, or a span an open range and a
+// bounded sibling both claim) yield no season: the label is written only where
+// the mapping places the WHOLE release inside one TVDB season.
+func rangeSeason(ranges []SeasonRange, files []seadex.File) (int, bool) {
+	if len(ranges) == 0 {
+		return 0, false
+	}
+	first, last, ok := absoluteEpisodeSpan(files)
+	if !ok {
+		return 0, false
+	}
+	season, hits := 0, 0
+	for _, r := range ranges {
+		if r.contains(first, last) {
+			season, hits = r.Season, hits+1
+		}
+	}
+	if hits != 1 {
+		return 0, false
+	}
+	return season, true
+}
+
+// absoluteEpisodeSpan reads the lowest and highest absolute "- NN" episode
+// number across a pack's census population, keyed exactly as distinctEpisodes'
+// absolute arm keys them (episodeKeyBase, version suffix stripped). ok is false
+// when no file carries the absolute form.
+func absoluteEpisodeSpan(files []seadex.File) (first, last int, ok bool) {
+	for _, f := range contentPopulation(files) {
+		base := episodeKeyBase(f.Name)
+		l := lastSubmatchIndex(absoluteEpisode, base)
+		if l == nil {
+			continue
+		}
+		n, err := strconv.Atoi(episodeVersion.ReplaceAllString(base[l[2]:l[3]], ""))
+		if err != nil {
+			continue
+		}
+		if !ok || n < first {
+			first = n
+		}
+		if !ok || n > last {
+			last = n
+		}
+		ok = true
+	}
+	return first, last, ok
 }
 
 // relabelEpisodeSeason rewrites the season half of the LAST SxxExx token in a
@@ -178,7 +298,7 @@ func packSeasonLabel(t *seadex.Torrent, meta EntryInfo) (string, bool) {
 // cour-local correction both title paths share. A no-op without a resolved
 // season or when the value carries no SxxExx token (an absolute "- NN" or
 // marker-less name - nothing to relabel).
-func relabelEpisodeSeason(value string, meta EntryInfo) string {
+func relabelEpisodeSeason(value string, meta *EntryInfo) string {
 	if !meta.SeasonKnown {
 		return value
 	}
@@ -302,7 +422,7 @@ func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
 // applies on the assembled path, with the same precedence (the Fribb season
 // beats file evidence; a SINGLE release's absolute "- NN" or marker-less name
 // is never relabeled).
-func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
+func derivedTitle(t *seadex.Torrent, meta *EntryInfo) string {
 	name := representativeFile(t.Files)
 	if name == "" {
 		return strings.TrimSpace(t.ReleaseGroup)

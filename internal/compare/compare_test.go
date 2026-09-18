@@ -50,15 +50,13 @@ func TestCandidateStableKeyBoundsOversizedComponents(t *testing.T) {
 	}
 }
 
-// TestCandidateStableKeyDistinguishesEveryComponent pins the COMPONENT SET of
-// the headline tie-break key: two candidates differing in any single
-// classified field must key differently. A component dropped from
-// candidateStableKey collapses such a pair onto one key, and
-// betterCandidate's final tie-break then falls through to upstream slice
-// order - the exact failure the key exists to prevent (a flipped headline
-// emits a different notify dedupe key for an unchanged finding: a duplicate
-// alert plus a false resolution). The bounds and permutation tests vary
-// several fields at once, so neither notices a single missing component.
+// TestCandidateStableKeyDistinguishesEveryComponent pins the COMPONENT SET of the headline
+// tie-break key: two candidates differing in any single classified field must key
+// differently. A component dropped from candidateStableKey collapses such a pair onto one
+// key, and betterCandidate's final tie-break then falls through to upstream slice order -
+// the failure the key exists to prevent (a flipped headline emits a different notify dedupe
+// key for an unchanged finding: a duplicate alert plus a false resolution). The bounds and
+// permutation tests vary several fields at once, so neither notices one missing component.
 func TestCandidateStableKeyDistinguishesEveryComponent(t *testing.T) {
 	base := candidate{
 		rel: release.Release{
@@ -224,17 +222,14 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 	}
 }
 
-// TestObtainableLinksCarriesRawABEvidence pins the producer half of the app's
-// single AnimeBytes grading site (h-f43): every link leaves compare carrying
-// the grade classify.ABEvidence read from the RAW SeaDex record, because
-// notify's alert-slot routing now reads that field instead of re-grading the
-// published URL - which would grade the value publishing rewrote.
-//
-// The two rows that matter are a plain public source (no AB evidence) and a
-// mislabeled one: a record labeled with a public tracker whose url carries the
-// AnimeBytes torrent-page shape publishes as an animebytes.tv link, so it must
-// arrive graded ABDefinite and be routed to the AB slot rather than offered as
-// the clickable public link.
+// TestObtainableLinksCarriesRawABEvidence pins the producer half of the app's single
+// AnimeBytes grading site: every link leaves compare carrying the grade
+// classify.ABEvidence read from the RAW SeaDex record, because notify's alert-slot routing
+// reads that field rather than re-grading the published URL, which would grade the value
+// publishing rewrote. The two rows that matter are a plain public source (no AB evidence)
+// and a mislabeled one: a record labeled with a public tracker whose url carries the
+// AnimeBytes torrent-page shape publishes as an animebytes.tv link, so it must arrive
+// graded ABDefinite and route to the AB slot rather than to the clickable public link.
 func TestObtainableLinksCarriesRawABEvidence(t *testing.T) {
 	cands := []candidate{
 		{
@@ -430,15 +425,12 @@ func TestCompareBetterRelease(t *testing.T) {
 	}
 }
 
-// TestCompareUnverifiableEvidenceIsInfo pins the tri-state evidence model on
-// the findings path: unknown group evidence (the release.NoGroup sentinel) on
-// either side of the comparison yields ONE informational `unverifiable`
-// finding - never a silent aligned suppression (the former sentinel==sentinel
-// defect) and never a warn-level better_release (the live 26-NOGRP-best-
-// torrents class: SeaDex side unknown, library known). The finding carries
-// the recommendation fields for the manual review, and its dedupe key is
-// stable across cycles so the normal cross-cycle dedupe emits it once per
-// identity.
+// TestCompareUnverifiableEvidenceIsInfo pins the tri-state evidence model on the findings
+// path: unknown group evidence (the release.NoGroup sentinel) on either side yields ONE
+// informational `unverifiable` finding - never a silent aligned suppression, and never a
+// warn-level better_release (the live 26-NOGRP-best-torrents class, SeaDex side unknown and
+// library known). The finding carries the recommendation fields for the manual review, and
+// its dedupe key is stable across cycles so the normal dedupe emits it once per identity.
 func TestCompareUnverifiableEvidenceIsInfo(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -731,16 +723,13 @@ func TestRecommendedSkipsNonBestAndContentFiltered(t *testing.T) {
 }
 
 func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
-	// The tracker label is untrusted upstream data: a torrent claiming "Nyaa"
-	// but carrying an animebytes.tv URL - absolute, schemeless, or host:port -
-	// must be invisible while the AnimeBytes toggle is off (URL-aware guard on
-	// the RAW upstream URL), and surface only when it is on AND the URL still
-	// yields a usable link. Both the absolute and the schemeless forms must
-	// then publish the ANIMEBYTES URL (trackerlink.Publish recovers the schemeless
-	// form's canonical host rather than base-prefixing it under the wrong
-	// label). The host:port form hides its host from the publisher
-	// (hidden-host: no followable link can be published), so it stays absent
-	// even with the toggle on - an unusable URL is never obtainable evidence.
+	// The tracker label is untrusted upstream data: a torrent claiming "Nyaa" but carrying
+	// an animebytes.tv URL - absolute, schemeless, or host:port - must be invisible while
+	// the AnimeBytes toggle is off (the guard reads the RAW upstream URL), and surface only
+	// when it is on AND the URL still yields a usable link. Absolute and schemeless both
+	// publish the ANIMEBYTES URL, since trackerlink.Publish recovers the schemeless form's
+	// canonical host rather than base-prefixing it under the wrong label. The host:port form
+	// hides its host from the publisher, so it stays absent even with the toggle on.
 	const absURL = "https://animebytes.tv/torrents.php?id=9&torrentid=10"
 	for _, tc := range []struct {
 		sneakyURL string
@@ -896,17 +885,11 @@ func TestCompareFindingCarriesClassifiedReleaseFields(t *testing.T) {
 	}
 }
 
-// TestCompareBrokenBestRecommendedByDefault pins the DEFAULT the operator
-// chose when filters.exclude_tags was introduced: nothing is filtered, so a
-// SeaDex best tagged Broken IS recommended and DOES produce a
-// `better release available` finding on the findings surface.
-//
-// This INVERTS the former TestCompareCurationWarnedBestExcluded, whose three
-// subtests asserted the hardcoded {broken,incomplete} exclusion (silence, the
-// theoretical-best fallback, and recommending only the unwarned sibling). Those
-// expectations now live in TestCompareExcludedTagBestNotRecommended, which
-// configures the same exclusion explicitly - the behaviour did not disappear,
-// it became the operator's call.
+// TestCompareBrokenBestRecommendedByDefault pins the DEFAULT the operator chose for
+// filters.exclude_tags: nothing is filtered, so a SeaDex best tagged Broken IS recommended
+// and DOES produce a `better release available` finding. The excluding behaviour is the
+// operator's call and is pinned in TestCompareExcludedTagBestNotRecommended, which
+// configures the exclusion explicitly.
 func TestCompareBrokenBestRecommendedByDefault(t *testing.T) {
 	newItem := func() *library.Item {
 		return &library.Item{Title: "Warned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
@@ -1039,52 +1022,125 @@ func TestCompareExcludedTagBestNotRecommended(t *testing.T) {
 	})
 }
 
-// TestCompareSpecialUsesSeasonZeroBucketWhenNotExcluded pins the special
-// scope on the findings path, which no other compare test reaches: with
-// exclude_specials at its default false an OVA/ONA/SPECIAL entry is still
-// compared, and it is compared against Sonarr's season-0 bucket only - a
-// real season's groups must not leak in (season 1 here carries the
-// recommended group and would read aligned). The same match with the
-// toggle on must fall silent, so the two arms pin both directions of the
-// gate.
-func TestCompareSpecialUsesSeasonZeroBucketWhenNotExcluded(t *testing.T) {
-	item := &library.Item{
-		Title:        "OVA Run",
-		Arr:          library.ArrSonarr,
-		SeasonGroups: map[int][]string{0: {"erai-raws"}, 1: {"subsplease"}},
+// TestCompareOfferedKindEmitsNothing pins the findings path: a unit inside
+// Sonarr's season-0 bucket is offered in the feed and never compared, because
+// nothing establishes which file in that bucket is this entry's own. Code Geass
+// is the measured case, where the bucket holds a different work entirely.
+//
+// A single-group bucket must be silent too, since it escapes every multi-group
+// guard. This fails if the class is implemented as an information cap, a new
+// status or an Approx flag.
+func TestCompareOfferedKindEmitsNothing(t *testing.T) {
+	best := []seadex.Torrent{{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/950"}}
+	tests := []struct {
+		name     string
+		seasons  map[int][]string
+		torrents []seadex.Torrent
+		record   mapping.Record
+	}{
+		{
+			name:     "populated single-group bucket, the Code Geass shape",
+			seasons:  map[int][]string{0: {"erai-raws"}, 1: {"subsplease"}},
+			torrents: best,
+			record:   mapping.Record{Type: "OVA"},
+		},
+		{
+			name:     "populated multi-group bucket",
+			seasons:  map[int][]string{0: {"erai-raws", "commie"}},
+			torrents: best,
+			record:   mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent},
+		},
+		{
+			// The reachable shape of the kind gate compare.go documents: this
+			// entry linearizes to OutcomeNoBest, and 11 live rows are in that
+			// state.
+			name:     "no isBest torrent at all",
+			seasons:  map[int][]string{0: {"erai-raws"}},
+			torrents: []seadex.Torrent{{ReleaseGroup: "Commie", Tracker: "Nyaa", URL: "https://nyaa.si/view/951"}},
+			record:   mapping.Record{Type: "SPECIAL"},
+		},
 	}
-	entry := seadex.Entry{AniListID: 950, Torrents: []seadex.Torrent{
-		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/950"},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &library.Item{Title: "Offered", Arr: library.ArrSonarr, SeasonGroups: tt.seasons}
+			entry := seadex.Entry{AniListID: 950, TheoreticalBest: "SubsPlease", Torrents: tt.torrents}
+			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: tt.record}
+			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+				t.Errorf("findings = %+v, want none (an unattributable unit is offered, never compared)", got)
+			}
+		})
+	}
+}
+
+// TestCompareComparableClassesAreUntouched is the other side of the rule: it
+// removes a claim from one class, not from the app. A Radarr movie and a
+// positive-season series still emit better_release when they diverge, and the
+// specials-typed entry whose season is ABSENT is compared against the real
+// seasons it spans (LoGH's shape), with exclude_specials still silencing it.
+func TestCompareComparableClassesAreUntouched(t *testing.T) {
+	entry := seadex.Entry{AniListID: 951, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/951"},
 	}}
-	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{Type: "OVA"}}
+	tests := []struct {
+		name      string
+		arr       string
+		item      library.Item
+		record    mapping.Record
+		wantScope string
+	}{
+		{
+			name:      "radarr movie",
+			arr:       library.ArrRadarr,
+			item:      library.Item{Title: "Mugen Train", Arr: library.ArrRadarr, Groups: []string{"erai-raws"}, HasFile: true},
+			record:    mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent},
+			wantScope: "movie",
+		},
+		{
+			name:      "positive-season series",
+			arr:       library.ArrSonarr,
+			item:      library.Item{Title: "Frieren", Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"erai-raws"}}},
+			record:    mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+			wantScope: "season",
+		},
+		{
+			name:      "absent-season special compares against the real seasons",
+			arr:       library.ArrSonarr,
+			item:      library.Item{Title: "LoGH", Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}, 1: {"erai-raws"}}},
+			record:    mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonAbsent},
+			wantScope: "series",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := match.Match{Item: &tt.item, Arr: tt.arr, Entry: entry, Record: tt.record}
+			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			if len(got) != 1 {
+				t.Fatalf("finding count = %d, want 1 (a comparable class still reports): %+v", len(got), got)
+			}
+			if got[0].Status != StatusBetter {
+				t.Errorf("status = %q, want %q", got[0].Status, StatusBetter)
+			}
+			if got[0].Scope != tt.wantScope {
+				t.Errorf("Scope = %q, want %q", got[0].Scope, tt.wantScope)
+			}
+		})
+	}
 
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
-
-	if len(got) != 1 {
-		t.Fatalf("finding count = %d, want 1 (exclude_specials off must still compare a special): %+v", len(got), got)
-	}
-	if got[0].Status != StatusBetter {
-		t.Errorf("status = %q, want better_release", got[0].Status)
-	}
-	if got[0].CurrentGroup != "erai-raws" {
-		t.Errorf("CurrentGroup = %q, want the season-0 specials bucket %q (season 1's subsplease must not leak in - it would read aligned)", got[0].CurrentGroup, "erai-raws")
-	}
-	if got[0].Season != 0 {
-		t.Errorf("Season = %d, want 0 for a special", got[0].Season)
-	}
-
+	special := tests[2]
+	m := match.Match{Item: &special.item, Arr: special.arr, Entry: entry, Record: special.record}
 	if excluded := comparer(filter.Options{}, true).Compare([]match.Match{m}); len(excluded) != 0 {
-		t.Errorf("exclude_specials on must silence the same special, got %+v", excluded)
+		t.Errorf("exclude_specials on must silence a comparable special, got %+v", excluded)
 	}
 }
 
 // TestCompareFindingCarriesScopeAndApprox pins the two alert attributes that
 // say WHAT unit was compared and how exactly: Scope (the shared decision's
-// kind) and Approx (a coarse aggregate). Season alone cannot carry either - a
-// movie, a season-0 special and a whole-series aggregate all report season 0 -
-// so if baseFinding stops projecting them the alert silently claims an exact
-// per-unit attribution for an aggregate comparison and loses the scope label
-// entirely, with every other assertion in the package still green.
+// kind) and Approx (a coarse aggregate). The offered kind has no case here
+// because it emits no finding at all (TestCompareOfferedKindEmitsNothing). Season
+// alone cannot carry either, since a movie and a whole-series aggregate both
+// report season 0, so if baseFinding stops projecting them the alert claims an
+// exact per-unit attribution for an aggregate and loses the scope label, with
+// every other assertion in the package still green.
 func TestCompareFindingCarriesScopeAndApprox(t *testing.T) {
 	best := seadex.Entry{AniListID: 960, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/960"},
@@ -1103,21 +1159,6 @@ func TestCompareFindingCarriesScopeAndApprox(t *testing.T) {
 			seasons:   map[int][]string{1: {"erai-raws"}},
 			record:    mapping.Record{Type: "TV", SeasonTvdb: 1},
 			wantScope: "season",
-		},
-		{
-			name:      "single-group specials bucket is an exact special scope",
-			arr:       library.ArrSonarr,
-			seasons:   map[int][]string{0: {"erai-raws"}},
-			record:    mapping.Record{Type: "OVA"},
-			wantScope: "special",
-		},
-		{
-			name:       "multi-group specials bucket is approximate",
-			arr:        library.ArrSonarr,
-			seasons:    map[int][]string{0: {"erai-raws", "commie"}},
-			record:     mapping.Record{Type: "OVA"},
-			wantScope:  "special",
-			wantApprox: true,
 		},
 		{
 			name:       "whole-series aggregate spanning two seasons is approximate",
