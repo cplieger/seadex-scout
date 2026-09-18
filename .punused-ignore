@@ -79,6 +79,13 @@ method (*ScopeKind).UnmarshalJSON is
 method (*channelXML).UnmarshalXML is
 method (*itemXML).UnmarshalXML is
 method (*errorXML).UnmarshalXML is
+# internal/mapping/animelist.go: parseMappingList's xml.Unmarshal decodes the
+# Anime-Lists document through listXML, whose walk runs DecodeElement on an
+# animeXML per <anime> node. Both methods carry the shared *xmlx.Budget bound
+# and the root-element refusal; both fold nodes as they are read so the
+# retained graph is the answer, never the document.
+method (*listXML).UnmarshalXML is
+method (*animeXML).UnmarshalXML is
 #
 # --- (b) httpx.Transient (cross-module interface dispatch) ------------------
 # httpx/v4 declares `type Transient interface { IsTransient() bool }` and
@@ -142,6 +149,12 @@ method (*StaleMapError).Unwrap is
 # or routing the call sites through the network-backed Loader, which would stop
 # those tests pinning match/audit/scout behavior against a real index.
 function NewIndex is
+# NewIndexWithMappings is the same wrapper with the Anime-Lists mapping-list
+# attached (Loader.Load attaches it through buildIndex on the production path),
+# and exists for the same reason: Index's mappings field is unexported, so the
+# _test.go callers in internal/audit, internal/match and internal/scout have no
+# other way to build an index that answers MappingFor.
+function NewIndexWithMappings is
 
 #
 # (*sanitizedError).Unwrap — same errors-chain class as the wrappers above.
