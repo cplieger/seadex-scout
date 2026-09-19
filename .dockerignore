@@ -1,8 +1,9 @@
 # Minimize the Docker build context. The Dockerfile only needs go.mod,
-# go.sum, the root *.go files, the embedded config.example.yaml, and
-# internal/. Deny everything, then allow the build inputs back in so the
-# gitignored .code-review/ review scratch, .git/, tests/, docs, go.work,
-# and any local secrets never reach the daemon.
+# go.sum, the root *.go files, the embedded config.example.yaml, internal/,
+# the license files the image ships under /usr/share/licenses, and the
+# collector that builds that tree. Deny everything, then allow the build
+# inputs back in so the gitignored .code-review/ review scratch, .git/,
+# tests/, docs, go.work, and any local secrets never reach the daemon.
 *
 !Dockerfile
 !.dockerignore
@@ -11,5 +12,9 @@
 !*.go
 !config.example.yaml
 !internal/
+!LICENSE
+!NOTICE
+!THIRD_PARTY_NOTICES.md
+!scripts/collect-licenses.sh
 # go build never compiles tests; keep test-only edits from invalidating build layers
 **/*_test.go
