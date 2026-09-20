@@ -1,15 +1,12 @@
 # seadex-scout
 
-[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue) ![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
+[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)](https://github.com/cplieger/seadex-scout/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
 <!-- hub-overview BEGIN -->
-A report-only watcher that compares your Sonarr/Radarr anime library against
-[SeaDex](https://releases.moe) (the community-curated index of the best anime
-releases) and tells you, per title, when SeaDex recommends a better release than
-the one on disk. It never downloads, grabs, or touches a torrent client: it tells
-you what to go get, and you decide.
-
-One image and one config file give you three things:
+Keeps your Sonarr/Radarr anime library on the releases
+[SeaDex](https://releases.moe) recommends, the community-curated index of the
+best release for each anime. seadex-scout never downloads and never touches a
+torrent client. One image and one config file give you three things:
 
 1. **Findings on the log** (always on): the daemon compares your library to
    SeaDex and logs a `warn` line when a better release exists than the one on
@@ -18,10 +15,9 @@ One image and one config file give you three things:
 2. **An on-demand report**: a season-by-season audit of how your whole library
    lines up with SeaDex, written as Markdown and JSON. See
    [The report](#the-report).
-3. **An optional [Torznab feed](#indexer-torznab-feed)**: publishes SeaDex's picks
-   for Sonarr/Radarr to grab through their own engine. It stays off until you
-   configure it, and it is the only automation path: seadex-scout itself still
-   never grabs, the arrs do.
+3. **A [Torznab feed](#indexer-torznab-feed)** (opt-in): publishes SeaDex's picks
+   so Sonarr/Radarr grab them through their own engine, profiles, and history.
+   This is the automation path, and it stays off until you configure it.
 
 ## The problem
 
@@ -34,7 +30,10 @@ gaps matter for a storage- and bandwidth-conscious library:
 - Its filters cannot keep encodes and drop remuxes. For a library that prefers a
   good x265 encode over a 40 GB remux, that distinction is the whole point.
 
-seadex-scout closes both gaps and nothing more.
+seadex-scout closes both gaps. Its [Torznab feed](#indexer-torznab-feed) then
+covers ground neither gap describes and `seadexarr` does not: SeaDex published as
+an indexer your arrs grab from, which is the job
+[`seadexerr`](https://github.com/Ryder-C/seadexerr) exists for.
 
 ## What it does
 
