@@ -257,6 +257,9 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	)
 	if isFeedRequest(q) {
 		items = ix.feedFor(scope)
+		if len(items) == 0 {
+			items = []item{bootstrapItem()}
+		}
 		stats = queryStats{answered: true, feed: true, curated: len(items)}
 	} else {
 		raw, fetched, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
@@ -304,6 +307,14 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 // that reading: query dispatches on it and rejectMissingABPasskey selects the same
 // requests through it, so the passkey error covers exactly those requests.
 func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == "" }
+
+func bootstrapItem() item {
+	return item{
+		Title:      "seadex-scout online - no curated releases yet",
+		GUID:       "seadex-scout:bootstrap",
+		Categories: []int{catTV, catAnime, catMovies},
+	}
+}
 
 // applyPaging honors the Torznab offset/limit params (advertised in t=caps) on the
 // synthesized feed. A request without a usable limit gets the advertised default,
