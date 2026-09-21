@@ -52,8 +52,6 @@ const (
 // physically cannot hold a catalogue-wide warned set, so it cannot be handed one
 // by mistake.
 type curationEvidence interface {
-	// scope names the input this evidence was built from.
-	scope() passScope
 	// entries returns the evaluated entries, tag-filtered.
 	entries() []seadex.Entry
 	// carryPolicy names which carry arm this pass's evidence AUTHORIZES for a
@@ -125,7 +123,6 @@ func newEvidence(entries []seadex.Entry, tags tagfilter.Filter, scope passScope)
 	return &windowEvidence{kept: kept, cur: cur, byHash: byHash, warned: warned, tagPolicySet: tags.Len() > 0}
 }
 
-func (e *catalogueEvidence) scope() passScope        { return scopeCatalogue }
 func (e *catalogueEvidence) entries() []seadex.Entry { return e.kept }
 func (e *catalogueEvidence) warnedKeys() int         { return len(e.warned.keys) }
 
@@ -164,7 +161,6 @@ func (e *catalogueEvidence) ownership(infoFor EntryInfoFunc) map[string][]ownedR
 	return ownershipOf(e.kept, infoFor)
 }
 
-func (e *windowEvidence) scope() passScope        { return scopeWindow }
 func (e *windowEvidence) entries() []seadex.Entry { return e.kept }
 func (e *windowEvidence) warnedKeys() int         { return len(e.warned.keys) }
 

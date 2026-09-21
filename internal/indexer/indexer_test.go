@@ -1046,9 +1046,10 @@ func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 
-	// No snapshot yet: the empty-q feed serves nothing.
-	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
-		t.Fatalf("pre-write feed = %d items, want 0", len(got))
+	// No snapshot yet: the empty-q feed over an empty journal is
+	// bootstrap-substituted to the lone ungrabbable placeholder.
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 || got[0].GUID != bootstrapGUID {
+		t.Fatalf("pre-write feed = %+v, want the lone bootstrap placeholder", got)
 	}
 
 	// A cycle in another process (here, a writer with no in-process server)
@@ -1067,8 +1068,10 @@ func TestFeedWriterReload(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
-		t.Fatalf("feed before the reload tick = %d items, want 0: a request must not load the snapshot itself", len(got))
+	// The in-process cache has not reloaded yet, so the journal is still empty
+	// and the request is bootstrap-substituted rather than loading the file itself.
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 || got[0].GUID != bootstrapGUID {
+		t.Fatalf("feed before the reload tick = %+v, want the lone bootstrap placeholder: a request must not load the snapshot itself", got)
 	}
 	tick(ix)
 	got, st, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa")
