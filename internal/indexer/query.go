@@ -21,6 +21,18 @@ const (
 	defaultCapsLimit = 100
 )
 
+// bootstrapGUID is the stable GUID of the single ungrabbable placeholder served
+// on an empty-journal feed request (see bootstrapItem).
+const bootstrapGUID = "seadex-scout:bootstrap"
+
+// bootstrapDownloadURL is the placeholder's enclosure URL. A Torznab item MUST
+// carry a well-formed absolute enclosure URL or the arrs' TorznabRssParser throws
+// dereferencing the absent element and DROPS the item, which would empty the feed
+// and defeat the add/test the placeholder exists to pass. The host is an RFC 2606
+// reserved .invalid name that can never resolve, so even a grab that somehow got
+// past the UnknownSeries rejection fails closed at DNS.
+const bootstrapDownloadURL = "http://seadex-scout.invalid/bootstrap.torrent"
+
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
 // tracker key, each mapping to what every owner of that signal agreed on. byPair
 // records which hash/key combinations were observed on the SAME SeaDex torrent, so
@@ -310,9 +322,10 @@ func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == 
 
 func bootstrapItem() item {
 	return item{
-		Title:      "seadex-scout online - no curated releases yet",
-		GUID:       "seadex-scout:bootstrap",
-		Categories: []int{catTV, catAnime, catMovies},
+		Title:       "seadex-scout online - no curated releases yet",
+		GUID:        bootstrapGUID,
+		DownloadURL: bootstrapDownloadURL,
+		Categories:  []int{catTV, catAnime, catMovies},
 	}
 }
 

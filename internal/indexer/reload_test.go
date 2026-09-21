@@ -968,8 +968,11 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 	setMtime(t, path, failedAt)
 	// The first request's lazy reload reads the malformed file and memoizes it as failed.
 	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
-	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
-		t.Fatalf("initial feed = %d items, want 0 (malformed snapshot must not load)", len(got))
+	// The malformed file must not load: an empty-q feed request over an empty
+	// journal is bootstrap-substituted, so "nothing real loaded" reads as exactly
+	// the ungrabbable placeholder rather than a zero count.
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 || got[0].GUID != bootstrapGUID {
+		t.Fatalf("initial feed = %+v, want the lone bootstrap placeholder (malformed snapshot must not load a real item)", got)
 	}
 	// Repair: a valid snapshot on a NEW inode, renamed over the bad file with
 	// the failed mtime preserved.
@@ -982,8 +985,8 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 	}
 	setMtime(t, path, failedAt)
 	ix.cache.loader.refresh(t.Context())
-	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
-		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
+	if got, _, _ := ix.query(t.Context(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 || got[0].GUID == bootstrapGUID {
+		t.Errorf("after preserved-mtime repair feed = %+v, want 1 real item (a new inode at the failed mtime must be retried, not the bootstrap placeholder)", got)
 	}
 }
 
@@ -1625,8 +1628,9 @@ func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 // of the readiness state machine, with the reload clock actually STARTED - the one
 // configuration in which a resolved first load is observable. An absent snapshot is
 // the intentional fresh-install state (a first boot, or a resident-idle daemon before
-// its first `poll`), so once the first pass resolves, requests must serve the empty
-// feed rather than the snapshot-unavailable Torznab error. Every other test warms the
+// its first `poll`), so once the first pass resolves, requests must serve the answered
+// feed (bootstrap-substituted to the lone placeholder over the empty journal) rather
+// than the snapshot-unavailable Torznab error. Every other test warms the
 // cache synchronously or holds the first load unresolved, so inverting this arm fails
 // an operator's Prowlarr save-test with the whole suite still green.
 func TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves(t *testing.T) {
@@ -1644,8 +1648,11 @@ func TestFreshInstallServesEmptyFeedOnceTheFirstLoadResolves(t *testing.T) {
 	if fault != nil {
 		t.Errorf("fresh-install RSS fault = %+v, want none", fault)
 	}
-	if len(items) != 0 || !stats.answered || !stats.feed {
-		t.Errorf("fresh-install RSS = %d items, stats %+v, want an answered empty feed", len(items), stats)
+	// The empty fresh-install journal is bootstrap-substituted: an answered feed
+	// carrying exactly the lone ungrabbable placeholder, so an arr's add/test
+	// (which fails a zero-result feed) can still save the indexer.
+	if len(items) != 1 || items[0].GUID != bootstrapGUID || !stats.answered || !stats.feed {
+		t.Errorf("fresh-install RSS = %+v, stats %+v, want an answered feed with the lone bootstrap placeholder", items, stats)
 	}
 }
 
