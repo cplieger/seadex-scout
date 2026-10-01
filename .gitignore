@@ -21,3 +21,6 @@ gitleaks-history.sarif
 
 # pgregory.net/rapid failure-repro artifacts (regenerated on demand, never committed)
 **/testdata/rapid/
+
+# Agent workflow scratch
+.agents/
