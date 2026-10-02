@@ -1408,8 +1408,8 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 
 // TestRenderSynthesizedItem checks a synthesized RSS item renders in the live
 // AnimeBytes Torznab item shape: an enclosure with the direct .torrent link, the
-// anime category, the SeaDex freeleech marker (downloadvolumefactor 0.75 +
-// uploadvolumefactor 1), a floored seeders count, the SeaDex entry as comments,
+// anime category, the SeaDex marker (downloadvolumefactor 0.75 +
+// uploadvolumefactor 1 + the scene tag), a floored seeders count, the SeaDex entry as comments,
 // and the info hash.
 func TestRenderSynthesizedItem(t *testing.T) {
 	out, _ := renderFeed([]item{{
@@ -1431,6 +1431,7 @@ func TestRenderSynthesizedItem(t *testing.T) {
 		`<torznab:attr name="infohash" value="143ed15e5e3df072ae91adaeb149973a887590dd"/>`,
 		`<torznab:attr name="downloadvolumefactor" value="0.75"/>`,
 		`<torznab:attr name="uploadvolumefactor" value="1"/>`,
+		`<torznab:attr name="tag" value="scene"/>`,
 		`<torznab:attr name="seeders" value="1"/>`,
 	}
 	for _, w := range want {
@@ -1848,14 +1849,8 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      "PK",
 	}, nil, nil)
-	ix.cache.mu.Lock()
-	ix.cache.snap.NyaaFeed = []journalItem{
-		{Title: "n"},
-	}
-	ix.cache.snap.ABFeed = []journalItem{
-		{Title: "a"},
-	}
-	ix.cache.mu.Unlock()
+	seedJournal(t, ix, upstreamNyaa, journalItem{Title: "n"})
+	seedJournal(t, ix, upstreamAB, journalItem{Title: "a"})
 	if got := ix.feedFor("other"); got != nil {
 		t.Errorf("feedFor(unknown scope) = %+v, want nil", got)
 	}
@@ -1892,9 +1887,7 @@ func TestFeedForExpandsAFilmTwinIntoTwoWireItems(t *testing.T) {
 	plain.GUID, plain.Key = "https://nyaa.si/view/99", "nyaa:99"
 
 	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-	ix.cache.mu.Lock()
-	ix.cache.snap.NyaaFeed = []journalItem{stored, plain}
-	ix.cache.mu.Unlock()
+	seedJournal(t, ix, upstreamNyaa, stored, plain)
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 3 {

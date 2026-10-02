@@ -25,18 +25,15 @@ func twinGUID(guid string) string {
 
 // twinTitle builds the title the film twin is served under - the Sonarr series
 // the film is filed under, the S00Exx token the mapping-list names, and the same
-// release flags the original title carries (Sonarr's quality parser needs them) -
-// or "" when the entry is not a film offered to a Sonarr series with a named
-// special episode.
+// revision token and release flags the original title carries (Sonarr's quality
+// parser needs them) - or "" when the entry is not a film offered to a Sonarr
+// series with a named special episode.
 func twinTitle(t *seadex.Torrent, info *EntryInfo) string {
 	series := strings.TrimSpace(info.SeriesTitle)
 	if info.Target != TargetSonarr || info.SpecialEpisode <= 0 || series == "" {
 		return ""
 	}
-	flags := releaseFlags(t)
-	parts := make([]string, 0, 2+len(flags))
-	parts = append(parts, series, seasonLabel(0)+episodeLabel(info.SpecialEpisode))
-	return strings.Join(append(parts, flags...), " ")
+	return joinWithRevision([]string{series, seasonLabel(0) + episodeLabel(info.SpecialEpisode)}, t)
 }
 
 // sonarrTwin expands a stored item carrying a film twin into the second wire

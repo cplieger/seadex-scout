@@ -30,6 +30,10 @@ const (
 	VerdictBest Verdict = "have_best"
 	// VerdictAlt means the on-disk release matches a listed non-best (alt) release.
 	VerdictAlt Verdict = "have_alt"
+	// VerdictOlderRevision means the on-disk release is a SeaDex best group, but
+	// only at an older revision than SeaDex lists for it (v1 against v2, an
+	// original against a REPACK): the same group's newer release is listed.
+	VerdictOlderRevision Verdict = "have_older_revision"
 	// VerdictUnlisted means the on-disk release matches nothing SeaDex lists.
 	VerdictUnlisted Verdict = "have_unlisted"
 	// VerdictNoFile means the item (or the mapped season) has no file on disk.
@@ -53,7 +57,7 @@ const (
 
 // verdictOrder is the report's most-actionable-first ordering. not_on_seadex is
 // last: it is informational (no SeaDex recommendation exists to act on).
-var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictUnverified, VerdictUnattributed, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
+var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictOlderRevision, VerdictUnverified, VerdictUnattributed, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
 
 // Qualifier annotates a row's verdict with the daemon's finding vocabulary for
 // the same (item, entry). It annotates; it never forks the verdict enum.
@@ -114,8 +118,13 @@ type Row struct {
 	MatchSource   string    `json:"match_source"`
 	CurrentGroups []string  `json:"current_groups,omitempty"`
 	Releases      []Release `json:"releases,omitempty"`
-	AniListID     int       `json:"al_id"`
-	Season        int       `json:"season,omitempty"`
+	// CurrentRevision and BestRevision are set only on a have_older_revision
+	// row: the newest revision held of the superseded best groups and the
+	// newest revision SeaDex lists for them.
+	CurrentRevision release.Revision `json:"current_revision,omitzero"`
+	BestRevision    release.Revision `json:"best_revision,omitzero"`
+	AniListID       int              `json:"al_id"`
+	Season          int              `json:"season,omitempty"`
 	// Scope is the comparison scope resolved for the row: the shared decision's
 	// kind on a matched row (align.Decide), align.ItemKind on an uncovered one.
 	// align.ScopeWholeSeries, the zero value, encodes and renders as "series".
@@ -292,7 +301,8 @@ func (a *Auditor) assess(m *match.Match) Row {
 			}
 		}
 	}
-	d := align.Decide(m.Item, &m.Record, best, alt, m.SiblingSeasons, m.Seasons)
+	listing := align.Listing{Best: best, Alt: alt, BestRevisions: classify.BestRevisions(&m.Entry)}
+	d := align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons)
 	row.Scope = d.Kind
 	row.Season = d.Season
 	row.GroupsUnknown = !m.Item.Comparable()
@@ -300,6 +310,9 @@ func (a *Auditor) assess(m *match.Match) Row {
 	row.CurrentGroups, row.Approx = d.Groups, d.Approx
 	row.Verdict = verdictFor(&d, row.GroupsUnknown)
 	row.Qualifier = rowQualifier(&m.Entry, &d)
+	if d.Standing == align.StandingBestSuperseded {
+		row.CurrentRevision, row.BestRevision = d.HeldRevision, d.ListedRevision
+	}
 	return row
 }
 
@@ -321,8 +334,12 @@ func verdictFor(d *align.Decision, groupsUnknown bool) Verdict {
 		return VerdictUnverified
 	case align.StandingBest:
 		return VerdictBest
+	case align.StandingBestSuperseded:
+		return VerdictOlderRevision
 	case align.StandingAlt:
 		return VerdictAlt
+	case align.StandingUnlisted:
+		return VerdictUnlisted
 	default:
 		return VerdictUnlisted
 	}
@@ -346,7 +363,7 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 	switch {
 	case d.Outcome == align.OutcomeMixed:
 		return QualifierMixed
-	case d.Outcome == align.OutcomeDiverged && entry.Incomplete:
+	case (d.Outcome == align.OutcomeDiverged || d.Outcome == align.OutcomeSuperseded) && entry.Incomplete:
 		return QualifierIncomplete
 	default:
 		return ""

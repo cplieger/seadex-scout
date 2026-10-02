@@ -134,7 +134,8 @@ func renderFeed(items []item) (doc string, rendered int) {
 // writeItem renders one release as an <item>: title, size, seeders and download URL,
 // plus the SeaDex marker. The enclosure is omitted when there is no download URL.
 // Seeders are floored to 1, so the arrs' minimum-seeders check cannot reject a
-// curated release whose swarm count is momentarily 0 or synthesized.
+// curated release whose swarm count is momentarily 0 or synthesized; the
+// bootstrapItem placeholder renders 0 seeders and peers so that check rejects it.
 func writeItem(b *strings.Builder, it *item) {
 	b.WriteString("<item>")
 	writeText(b, "title", it.Title)
@@ -182,13 +183,18 @@ func writeItem(b *strings.Builder, it *item) {
 		writeAttr(b, "tvdbid", strconv.Itoa(it.TvdbID))
 	}
 	// The marker: best -> downloadvolumefactor 0.75 (Freeleech25), alt -> 0.25
-	// (Freeleech75). uploadvolumefactor 1 keeps it from also flagging DoubleUpload.
+	// (Freeleech75), each with the scene tag (markerTag). uploadvolumefactor 1
+	// keeps it from also flagging DoubleUpload.
 	if it.DownloadVolumeFactor != "" {
 		writeAttr(b, "downloadvolumefactor", it.DownloadVolumeFactor)
 		writeAttr(b, "uploadvolumefactor", "1")
+		writeAttr(b, "tag", markerTag)
 	}
 
 	seeders := max(it.Seeders, 1)
+	if it.isPlaceholder() {
+		seeders = 0
+	}
 	leechers := max(it.Leechers, 0)
 	// Saturate instead of wrapping: attrInt accepts counts through math.MaxInt, so a
 	// malformed-but-valid item with huge counts would otherwise overflow negative and

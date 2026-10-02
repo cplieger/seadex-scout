@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -848,10 +849,12 @@ func applyTitles(items []journalItem, titles map[string]string, audit titleAudit
 
 // packCensus is what ONE journal key's file list proves about its episode count
 // (packEvidenceOf), plus the census's own single-episode marker - the token a
-// correction splices into a title that wrongly claims a whole season. The marker
+// correction splices into a title that wrongly claims a whole season - and the
+// newest revision its payload files carry (classify.PayloadRevision). The marker
 // is meaningful only for packEvidenceSingle.
 type packCensus struct {
 	marker   string
+	revision release.Revision
 	evidence packEvidence
 }
 
@@ -876,6 +879,11 @@ func (a titleAudit) served(key, title string) string {
 		// for it (applyTitles writes the served value back).
 		return title
 	}
+	return revisedTitle(a.seasonServed(key, title, &c), c.revision)
+}
+
+// seasonServed is served's season-pack cross-check over one key's census.
+func (a titleAudit) seasonServed(key, title string, c *packCensus) string {
 	titlePack, known := packFromTitle(title)
 	if !known {
 		return title
@@ -891,6 +899,43 @@ func (a titleAudit) served(key, title string) string {
 	default:
 		return title
 	}
+}
+
+// revisedTitle adds the payload's revision token right after a harvested
+// title's season or episode token when the title reads an older revision than
+// the newest payload file carries. It refuses when no token is followed by
+// more text (the trailing-token rule on joinWithRevision), when the
+// season-pack reading or the read version would come out different, or past
+// the persisted-field cap (an over-limit title is dropped on reload).
+func revisedTitle(title string, payloadRev release.Revision) string {
+	token := payloadRev.Token()
+	if token == "" || release.ParseTitleRevision(title).Version >= payloadRev.Version {
+		return title
+	}
+	at, ok := seasonTokenEnd(title)
+	if !ok || !strings.HasPrefix(title[at:], " ") || strings.TrimSpace(title[at:]) == "" {
+		return title
+	}
+	revised := title[:at] + " " + token + title[at:]
+	wasPack, wasKnown := packFromTitle(title)
+	isPack, isKnown := packFromTitle(revised)
+	if isPack != wasPack || isKnown != wasKnown || release.ParseTitleRevision(revised).Version != payloadRev.Version ||
+		len(revised) > maxPersistedFieldBytes {
+		return title
+	}
+	return revised
+}
+
+// seasonTokenEnd returns the offset right after a title's LAST season+episode
+// token, else right after its season-only token, and whether either exists.
+func seasonTokenEnd(title string) (int, bool) {
+	if l := lastSubmatchIndex(episodeToken, title); l != nil {
+		return l[3], true
+	}
+	if m := seasonOnlyTitle.FindStringSubmatchIndex(title); m != nil {
+		return m[3], true
+	}
+	return 0, false
 }
 
 // warn reports one disagreement through the audit's sink, if it has one.
@@ -924,11 +969,14 @@ func censusPacks(cur map[string][]curatedRef) map[string]packCensus {
 	packs := make(map[string]packCensus, len(cur))
 	for key, refs := range cur {
 		var c packCensus
+		revs := make([]release.Revision, 0, len(refs))
 		for _, ref := range refs {
 			if e := packEvidenceOf(ref.torrent); e > c.evidence {
 				c.evidence = e
 			}
+			revs = append(revs, classify.PayloadRevision(ref.torrent.Files))
 		}
+		c.revision = release.NewestRevision(revs...)
 		if c.evidence == packEvidenceSingle {
 			c.marker = censusMarker(refs)
 		}

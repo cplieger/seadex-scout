@@ -463,6 +463,7 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 	files := make([]fileInfo, 0, len(epFiles))
 	groupCounts := make(map[string]int)
 	seasonCounts := make(map[int]map[string]int)
+	var revs revisionFold
 	for i := range epFiles {
 		fi := fileFromEpisode(&epFiles[i])
 		files = append(files, fi)
@@ -471,20 +472,23 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 		// sentinel ("nogrp") for group-less files.
 		groupCounts[fi.group]++
 		addSeasonGroup(seasonCounts, epFiles[i].SeasonNumber, fi.group)
+		revs.add(epFiles[i].SeasonNumber, fi.group, fi.revision)
 	}
 	item := library.Item{
-		SeasonGroups: seasonGroups(seasonCounts),
-		Groups:       sortedKeys(groupCounts),
-		AltTitles:    altTitles(s.AlternateTitles),
-		Arr:          library.ArrSonarr,
-		Title:        s.Title,
-		ImdbID:       s.ImdbID,
-		ArrURL:       library.SafeLogURL(s.WebURL(w.sonarrURL)),
-		ArrID:        s.ID,
-		TvdbID:       s.TvdbID,
-		TmdbID:       s.TmdbID,
-		Year:         s.Year,
-		HasFile:      len(files) > 0,
+		SeasonGroups:    seasonGroups(seasonCounts),
+		SeasonRevisions: revs.seasons(),
+		Revisions:       revs.groups(),
+		Groups:          sortedKeys(groupCounts),
+		AltTitles:       altTitles(s.AlternateTitles),
+		Arr:             library.ArrSonarr,
+		Title:           s.Title,
+		ImdbID:          s.ImdbID,
+		ArrURL:          library.SafeLogURL(s.WebURL(w.sonarrURL)),
+		ArrID:           s.ID,
+		TvdbID:          s.TvdbID,
+		TmdbID:          s.TmdbID,
+		Year:            s.Year,
+		HasFile:         len(files) > 0,
 	}
 	if item.HasFile {
 		// A genuinely fileless series carries no comparable fingerprint: the
@@ -515,6 +519,7 @@ func (w *Walker) movieItem(m *arrapi.Movie) library.Item {
 		// release.NormalizeGroup, which falls back to the LOWERCASED NOGRP
 		// sentinel ("nogrp") for group-less files.
 		item.Groups = []string{fi.group}
+		item.Revisions = map[string]release.Revision{fi.group: fi.revision}
 		item.Current = fingerprint(&fi)
 	}
 	return item
@@ -523,12 +528,14 @@ func (w *Walker) movieItem(m *arrapi.Movie) library.Item {
 // fingerprint classifies a library file into a release.Release using the shared
 // classifier, so the library and SeaDex sides compare in one vocabulary.
 func fingerprint(fi *fileInfo) release.Release {
-	return release.Classify(&release.Input{
+	rel := release.Classify(&release.Input{
 		Names:      nonEmpty(fi.sceneName, fi.relPath),
 		Group:      fi.group,
 		VideoCodec: fi.videoCodec,
 		DualAudio:  isDualAudio(fi.audioLanguages),
 	})
+	rel.Revision = fi.revision
+	return rel
 }
 
 // fileInfo is the release-relevant subset of an arr file.
@@ -538,15 +545,17 @@ type fileInfo struct {
 	relPath        string
 	videoCodec     string
 	audioLanguages string
+	revision       release.Revision
 }
 
 // fileInfoFrom builds a fileInfo from the release-relevant
 // fields common to a Sonarr episode file and a Radarr movie file.
-func fileInfoFrom(group, sceneName, relPath string, mi *arrapi.MediaInfo) fileInfo {
+func fileInfoFrom(group, sceneName, relPath string, mi *arrapi.MediaInfo, q *arrapi.QualityModel) fileInfo {
 	fi := fileInfo{
 		group:     release.NormalizeGroup(group),
 		sceneName: sceneName,
 		relPath:   relPath,
+		revision:  fileRevision(q, sceneName, relPath),
 	}
 	if mi != nil {
 		fi.videoCodec = mi.VideoCodec
@@ -555,14 +564,75 @@ func fileInfoFrom(group, sceneName, relPath string, mi *arrapi.MediaInfo) fileIn
 	return fi
 }
 
+// fileRevision is the revision the arr recorded for the file at import, which
+// is the highest of its readings of the file, folder and grab title and
+// survives a rename. Only without one do the names count, and then only an
+// explicit token: a renamed file has lost its token, so a name without one is
+// missing evidence rather than proof of an original release.
+func fileRevision(q *arrapi.QualityModel, sceneName, relPath string) release.Revision {
+	if q != nil && q.Revision != nil {
+		return release.ArrRevision(q.Revision.Version, q.Revision.IsRepack)
+	}
+	return release.ExplicitRevision(sceneName, relPath)
+}
+
 // fileFromEpisode extracts fileInfo from a Sonarr episode file.
 func fileFromEpisode(f *arrapi.EpisodeFile) fileInfo {
-	return fileInfoFrom(f.ReleaseGroup, f.SceneName, f.RelativePath, f.MediaInfo)
+	return fileInfoFrom(f.ReleaseGroup, f.SceneName, f.RelativePath, f.MediaInfo, f.Quality)
 }
 
 // fileFromMovie extracts fileInfo from a Radarr movie file.
 func fileFromMovie(f *arrapi.MovieFile) fileInfo {
-	return fileInfoFrom(f.ReleaseGroup, f.SceneName, f.RelativePath, f.MediaInfo)
+	return fileInfoFrom(f.ReleaseGroup, f.SceneName, f.RelativePath, f.MediaInfo, f.Quality)
+}
+
+// revisionFold collects each file's revision per (season, group) and per group
+// so a series item can carry the newest reading of each.
+type revisionFold struct {
+	bySeason map[int]map[string][]release.Revision
+	byGroup  map[string][]release.Revision
+}
+
+func (f *revisionFold) add(season int, group string, rev release.Revision) {
+	if f.bySeason == nil {
+		f.bySeason = make(map[int]map[string][]release.Revision)
+		f.byGroup = make(map[string][]release.Revision)
+	}
+	if f.bySeason[season] == nil {
+		f.bySeason[season] = make(map[string][]release.Revision)
+	}
+	f.bySeason[season][group] = append(f.bySeason[season][group], rev)
+	f.byGroup[group] = append(f.byGroup[group], rev)
+}
+
+// seasons folds each (season, group) to its newest reading, or nil when no
+// file was added.
+func (f *revisionFold) seasons() map[int]map[string]release.Revision {
+	if len(f.bySeason) == 0 {
+		return nil
+	}
+	out := make(map[int]map[string]release.Revision, len(f.bySeason))
+	for season, groups := range f.bySeason {
+		out[season] = newestPerGroup(groups)
+	}
+	return out
+}
+
+// groups folds each group to its newest reading across the item, or nil when
+// no file was added.
+func (f *revisionFold) groups() map[string]release.Revision {
+	if len(f.byGroup) == 0 {
+		return nil
+	}
+	return newestPerGroup(f.byGroup)
+}
+
+func newestPerGroup(byGroup map[string][]release.Revision) map[string]release.Revision {
+	out := make(map[string]release.Revision, len(byGroup))
+	for group, revs := range byGroup {
+		out[group] = release.NewestRevision(revs...)
+	}
+	return out
 }
 
 // representative returns the file whose group is the most common on the item

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cplieger/keyenc"
 )
@@ -21,17 +22,14 @@ const (
 	defaultCapsLimit = 100
 )
 
-// bootstrapGUID is the stable GUID of the single ungrabbable placeholder served
-// on an empty-journal feed request (see bootstrapItem).
-const bootstrapGUID = "seadex-scout:bootstrap"
-
-// bootstrapDownloadURL is the placeholder's enclosure URL. A Torznab item MUST
-// carry a well-formed absolute enclosure URL or the arrs' TorznabRssParser throws
-// dereferencing the absent element and DROPS the item, which would empty the feed
-// and defeat the add/test the placeholder exists to pass. The host is an RFC 2606
-// reserved .invalid name that can never resolve, so even a grab that somehow got
-// past the UnknownSeries rejection fails closed at DNS.
-const bootstrapDownloadURL = "http://seadex-scout.invalid/bootstrap.torrent"
+// bootstrapGUID and bootstrapDownloadURL are the placeholder's identity. The URL
+// must be absolute and in an <enclosure>: with no <link>, servarr's parser drops
+// an item without one and resolves a relative value against the indexer's URL
+// (https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Indexers/Torznab/TorznabRssParser.cs#L145-L155).
+const (
+	bootstrapGUID        = "seadex-scout:bootstrap"
+	bootstrapDownloadURL = "http://seadex-scout.invalid/bootstrap.torrent"
+)
 
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
 // tracker key, each mapping to what every owner of that signal agreed on. byPair
@@ -217,14 +215,14 @@ func snapshotUnavailableFault() *torznabFault {
 }
 
 // queryStats summarizes one request for the per-request log line: whether the feed
-// answered it, whether it was served from the synthesized RSS feed rather than a
-// proxied search, how many upstream results survived the download-URL origin
-// filter, and how many items survived curation or synthesis (counted before the
-// category filter and paging). Observability only: an unanswerable request travels
-// as a torznabFault, not as a field here.
+// answered it, whether it came from the synthesized RSS feed, the upstream counts
+// around the download-URL origin filter, the real items that survived curation or
+// synthesis (before the category filter and paging), and whether the placeholder
+// was served. An unanswerable request travels as a torznabFault, not as a field.
 type queryStats struct {
-	answered bool
-	feed     bool
+	answered    bool
+	feed        bool
+	placeholder bool
 	// upstreamFetched is the RAW parsed-item count of the upstream page, BEFORE
 	// filterDownloadURLs' origin gate; upstream is the post-gate survivor count. A
 	// gap between them is that filter dropping items, otherwise invisible.
@@ -269,9 +267,6 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	)
 	if isFeedRequest(q) {
 		items = ix.feedFor(scope)
-		if len(items) == 0 {
-			items = []item{bootstrapItem()}
-		}
 		stats = queryStats{answered: true, feed: true, curated: len(items)}
 	} else {
 		raw, fetched, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
@@ -301,8 +296,18 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		// the app's own Fribb-typed vocabulary, so the client's cat list is meaningful
 		// against them. Proxied results carry the TRACKER's categories and cat was
 		// already forwarded upstream, so re-filtering would empty every Movies search.
-		items = filterByCats(items, parseCats(q.Get("cat")))
+		cats := parseCats(q.Get("cat"))
+		items = filterByCats(items, cats)
+		// The placeholder is decided AFTER the category filter and through it, so it
+		// covers a scope whose journal holds only the other arr's category and still
+		// reaches exactly the requests a real item could. Paging runs after it so a
+		// second page never repeats it.
+		substituted := len(items) == 0
+		if substituted {
+			items = filterByCats([]item{bootstrapItem()}, cats)
+		}
 		items = applyPaging(ix.log, items, q)
+		stats.placeholder = substituted && len(items) > 0
 	}
 	if len(items) > maxItems {
 		// The rendered view is capped; say so, so a short feed is never mistaken for a
@@ -320,14 +325,23 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 // requests through it, so the passkey error covers exactly those requests.
 func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == "" }
 
+// bootstrapItem is an ungrabbable placeholder: the arrs' and Prowlarr's add/test
+// fail a zero-item feed, and a fresh journal is empty by design. Grab safety is
+// layered: no episode, season, year, id or marker; 0 seeders, which the
+// minimum-seeders rule rejects; and a .invalid host (RFC 6761 section 6.4) whose
+// failed fetch counts as an indexer failure, so it is only the last layer.
 func bootstrapItem() item {
 	return item{
+		// Epoch keeps it older than any real item, so a re-arm adds no RSS gap.
+		PubDate:     time.Unix(0, 0).UTC(),
 		Title:       "seadex-scout online - no curated releases yet",
 		GUID:        bootstrapGUID,
 		DownloadURL: bootstrapDownloadURL,
-		Categories:  []int{catTV, catAnime, catMovies},
+		Categories:  []int{catAnime, catMovies},
 	}
 }
+
+func (it *item) isPlaceholder() bool { return it.GUID == bootstrapGUID }
 
 // applyPaging honors the Torznab offset/limit params (advertised in t=caps) on the
 // synthesized feed. A request without a usable limit gets the advertised default,

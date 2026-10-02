@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 // TestReportJSONWireShapeKeys pins the report JSON's KEY SET, which no round-trip
@@ -29,7 +30,9 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 				MatchSource: "id", CurrentGroups: []string{"erai"}, AniListID: 154587, Season: 2,
 				Scope:   align.ScopeSeason,
 				Special: true, Incomplete: true, Approx: true, HiddenAnimeBytes: 3, HiddenAnimeBytesBest: 1,
-				GroupsUnknown: true,
+				GroupsUnknown:   true,
+				CurrentRevision: release.Revision{Version: 1, Marker: release.RevisionNone},
+				BestRevision:    release.Revision{Version: 2, Marker: release.RevisionRepack},
 				Releases: []Release{{
 					Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/1",
 					Warnings: []string{"broken"}, Best: true, Filtered: true,
@@ -58,8 +61,8 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 		}
 		row, _ := rows[0].(map[string]any)
 		wantRowKeys := []string{
-			"al_id", "approx", "arr", "arr_url", "current_groups", "groups_unknown",
-			"hidden_animebytes", "hidden_animebytes_best", "incomplete", "match_source",
+			"al_id", "approx", "arr", "arr_url", "best_revision", "current_groups", "current_revision",
+			"groups_unknown", "hidden_animebytes", "hidden_animebytes_best", "incomplete", "match_source",
 			"qualifier", "releases", "scope", "seadex_url", "season", "special", "title",
 			"verdict",
 		}

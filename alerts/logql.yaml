@@ -21,7 +21,8 @@
 # renamed or retyped without a matching change here:
 #
 #   level=ERROR                     any run fault (the rules key on the level, not a message)
-#   msg="better release available"  the better-release finding
+#   msg="better release available"  the better-release finding, and the newer
+#                                   revision of a group on disk (status=newer_revision)
 #   msg="series spans multiple release groups, manual review"
 #                                   the mixed-group manual-review nudge
 #   msg="report written"            a report was generated
@@ -229,7 +230,10 @@ groups:
       # materially differs. That makes it the safety net for the info-hash gap
       # above: on an AnimeBytes-only release, where there is no hash, a change
       # from 1080p encode to 2160p remux is otherwise invisible to every label
-      # here. It is also required in this projection for the rule's own
+      # here. A newer revision of the group already on disk (status
+      # newer_revision) shares this message and carries `newer-revision · v2 ·
+      # ...` here, so it is its own announcement beside any better_release one.
+      # It is also required in this projection for the rule's own
       # annotations to render it at all, since `sum by` drops what it does not
       # list. The residual cost is narrow and app-side: if a future release of
       # this app classifies a release differently, that release re-announces

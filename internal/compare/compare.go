@@ -29,6 +29,10 @@ const (
 	// StatusBetter means SeaDex recommends a release group the library lacks,
 	// obtainable on a tracker the operator uses.
 	StatusBetter Status = "better_release"
+	// StatusNewerRevision means the library holds a SeaDex best group only at an
+	// older revision (v1 against a listed v2, an original against a REPACK):
+	// the same group's newer release, obtainable on a tracker the operator uses.
+	StatusNewerRevision Status = "newer_revision"
 	// StatusMixedGroup means the series' episodes span multiple groups; a manual
 	// review nudge rather than a false "better release".
 	StatusMixedGroup Status = "mixed_group_manual"
@@ -86,9 +90,15 @@ type Finding struct {
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
 	CurrentGroups []string
-	AniListID     int
-	Season        int
-	DualAudio     bool
+	// CurrentRevision and RecommendedRevision are set only for a same-group
+	// revision gap (StatusNewerRevision, or StatusIncomplete downgraded from
+	// it): the newest revision held of the superseded groups and the newest
+	// revision SeaDex lists for them (align.Decision).
+	CurrentRevision     release.Revision
+	RecommendedRevision release.Revision
+	AniListID           int
+	Season              int
+	DualAudio           bool
 	// Approx marks a coarse comparison (align.Decision.Approx): an offered
 	// bucket held any file, or the whole-series fallback spanned more than one
 	// real season or group, so CurrentGroup is an aggregate rather than an exact
@@ -153,8 +163,8 @@ func (c *Comparer) Compare(matches []match.Match) []Finding {
 // candidate pairs a SeaDex torrent with its classified release so the finding
 // can carry the torrent's URL and info hash after filtering on the release.
 type candidate struct {
-	rel     release.Release
 	torrent seadex.Torrent
+	rel     release.Release
 }
 
 // compareOne compares one matched, in-library entry and returns a finding, or
@@ -165,7 +175,8 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	recGroups := groupSet(recommended)
 	// The daemon only distinguishes best-vs-not, so alt is nil: an on-disk
 	// unit lacking a recommended group reads as unlisted (not aligned).
-	d := align.Decide(m.Item, &m.Record, recGroups, nil, m.SiblingSeasons, m.Seasons)
+	listing := align.Listing{Best: recGroups, BestRevisions: classify.BestRevisions(entry)}
+	d := align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons)
 	// The gate must stay ahead of the outcome switch: an offered kind linearizes
 	// to OutcomeUnverifiable, or to OutcomeNoBest on an empty best set, and that
 	// arm's emptyResult would publish a theoretical_best row carrying a bucket
@@ -182,6 +193,8 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 		return emptyResult(entry, &base)
 	case align.OutcomeAligned:
 		return nil
+	case align.OutcomeSuperseded:
+		return supersededResult(entry, &base, &d, recommended)
 	case align.OutcomeUnverifiable:
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusUnverifiable)
@@ -241,6 +254,29 @@ func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, r
 		status = StatusIncomplete
 	}
 	fillBest(base, recommended, recGroups)
+	return finalize(base, status)
+}
+
+// supersededResult finalizes a same-group revision finding. The pool narrows to
+// the superseded groups first, so the recommendation and its links name the
+// group the operator already holds rather than another best group. An
+// incomplete entry downgrades to the incomplete nudge, as betterResult does.
+func supersededResult(entry *seadex.Entry, base *Finding, d *align.Decision, recommended []candidate) *Finding {
+	// SupersededGroups is a subset of the best set Decide was given, which is
+	// groupSet(recommended), so the pool is never empty for fillBest.
+	var pool []candidate
+	for i := range recommended {
+		if slices.Contains(d.SupersededGroups, release.NormalizeGroup(recommended[i].rel.Group)) {
+			pool = append(pool, recommended[i])
+		}
+	}
+	status := StatusNewerRevision
+	if entry.Incomplete {
+		status = StatusIncomplete
+	}
+	fillBest(base, pool, groupSet(pool))
+	base.CurrentRevision = d.HeldRevision
+	base.RecommendedRevision = d.ListedRevision
 	return finalize(base, status)
 }
 

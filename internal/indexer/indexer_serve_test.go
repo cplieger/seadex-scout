@@ -448,18 +448,32 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 	}
 }
 
-// seedNyaaFeed installs n synthesized Nyaa journal items (GUIDs "0".."n-1", newest-first order)
-// straight into ix's snapshot cache, the shape the paging tests need without a writer round-trip.
-// It is the one place a test names the cache's lock.
+// seedNyaaFeed installs n synthesized Nyaa journal items (GUIDs "0".."n-1", newest-first order),
+// the shape the paging tests need without a writer round-trip.
 func seedNyaaFeed(t *testing.T, ix *Indexer, n int) {
 	t.Helper()
 	feed := make([]journalItem, n)
 	for i := range feed {
 		feed[i] = journalItem{Title: "t", GUID: strconv.Itoa(i)}
 	}
+	seedJournal(t, ix, upstreamNyaa, feed...)
+}
+
+// seedJournal installs items straight into one scope's served snapshot. It is the
+// one place a test writes a scope's journal under the cache's lock, so a change to
+// that locking touches one helper.
+func seedJournal(t *testing.T, ix *Indexer, scope string, items ...journalItem) {
+	t.Helper()
 	ix.cache.mu.Lock()
 	defer ix.cache.mu.Unlock()
-	ix.cache.snap.NyaaFeed = feed
+	switch scope {
+	case upstreamNyaa:
+		ix.cache.snap.NyaaFeed = items
+	case upstreamAB:
+		ix.cache.snap.ABFeed = items
+	default:
+		t.Fatalf("seedJournal: unknown scope %q", scope)
+	}
 }
 
 // TestQueryCapsResults pins the maxItems safety bound at its boundary, in both

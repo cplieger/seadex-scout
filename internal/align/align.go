@@ -1,11 +1,13 @@
 // Package align resolves which on-disk release groups a SeaDex entry should be
 // compared against (scope) and owns the shared comparison decision over them
 // (Decide): file presence before entry state, proven alignment over everything
-// group-shaped, unverifiable evidence (release.OverlapUnknown: a NoGroup
-// member that could hide the membership being tested) before the mixed and
-// diverged claims, mixed only for a not-aligned multi-group unit, and the
-// conservative whole-series aggregation in which a proven divergence outranks
-// unverifiability and any unverifiable season blocks the best claim.
+// group-shaped (unless every held best group is provably an older revision than
+// SeaDex lists, which is superseded rather than aligned), unverifiable evidence
+// (release.OverlapUnknown: a NoGroup member that could hide the membership
+// being tested) before the mixed and diverged claims, mixed only for a
+// not-aligned multi-group unit, and the conservative whole-series aggregation
+// in which a proven divergence outranks unverifiability and any unverifiable
+// season blocks the best claim.
 package align
 
 import (
@@ -15,6 +17,7 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
+	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 // specialSeason is the TVDB season number Sonarr files specials under.
@@ -49,10 +52,13 @@ const (
 // bucket holding any file, or a whole-series aggregate spanning more than one
 // season or group).
 type scopeResult struct {
-	Groups  []string
-	Kind    ScopeKind
-	HasFile bool
-	Approx  bool
+	// Revisions is the held reading per normalized group for a single unit: the
+	// item's for a movie, the season's for a mapped season, nil otherwise.
+	Revisions map[string]release.Revision
+	Groups    []string
+	Kind      ScopeKind
+	HasFile   bool
+	Approx    bool
 }
 
 // RecordSeason resolves, from a Fribb record ALONE, which season the record pins
@@ -93,14 +99,14 @@ func scope(item *library.Item, rec *mapping.Record) scopeResult {
 	// Radarr item is a movie even when a broken upstream mapping carries a
 	// season for it.
 	if item.Arr == library.ArrRadarr {
-		return scopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile}
+		return scopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile, Revisions: item.Revisions}
 	}
 	switch kind, season := RecordSeason(rec); kind {
 	case ScopeSeason:
 		// Group presence doubles as file presence here and in the specials branch:
 		// release.Classify falls back to the literal NOGRP for a group-less file.
 		g := item.SeasonGroups[season]
-		return scopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
+		return scopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0, Revisions: item.SeasonRevisions[season]}
 	case ScopeOffered:
 		// The bucket is read for what it HOLDS, never to attribute a file to this
 		// entry, so Approx means "never attributed" and must stay true for a
@@ -179,10 +185,15 @@ func ItemKind(item *library.Item) ScopeKind {
 // summary is the per-real-season aggregate summarizeWholeSeries collects: the
 // sorted, deduped union of on-disk groups; how many real seasons (season 0
 // excluded) carried files; and whether any of those seasons matched an
-// alt-only group, proved unlisted, or was unverifiable (unknown group
-// evidence on either side of its comparison).
+// alt-only group, proved unlisted, or was unverifiable (unknown group evidence
+// on either side of its comparison).
 type summary struct {
-	Groups      []string
+	Groups []string
+	// superseded is the set of best groups held behind the listing once each
+	// group's held revision is folded across the counted seasons, and held
+	// their folded readings.
+	superseded  []string
+	held        []release.Revision
 	Seasons     int
 	AnyAlt      bool
 	AnyUnlisted bool
@@ -199,27 +210,44 @@ type summary struct {
 // release.GroupsOverlap for wholeSeriesStanding to collapse. Which of those
 // seasons are THIS entry's is ownSeason's single-source call. Reachable edge: an
 // item whose every season belongs to siblings sums to ZERO seasons.
-func summarizeWholeSeries(item *library.Item, best, alt []string, siblingSeasons []int, seasons []mapping.SeasonRange) summary {
+func summarizeWholeSeries(item *library.Item, listing *Listing, siblingSeasons []int, seasons []mapping.SeasonRange) summary {
 	seen := make(map[string]struct{})
 	var s summary
+	var bestGroups []string
+	readings := make(map[string][]release.Revision)
 	for season, groups := range item.SeasonGroups {
 		if season == specialSeason || len(groups) == 0 || !ownSeason(season, siblingSeasons, seasons) {
 			continue
 		}
 		s.Seasons++
 		s.Groups = appendMissingGroups(s.Groups, seen, groups)
-		switch groupStanding(groups, best, alt) {
+		switch groupLadder(groups, listing) {
 		case StandingAlt:
 			s.AnyAlt = true
 		case StandingUnlisted:
 			s.AnyUnlisted = true
 		case StandingUnverified:
 			s.AnyUnverified = true
-		case StandingNoFile, StandingBest:
-			// a season provenly carrying a best group sets no flag (and
-			// NoFile is unreachable: the loop skips empty seasons)
+		case StandingBest:
+			bestGroups = append(bestGroups, groups...)
+			for _, group := range groups {
+				normalized := release.NormalizeGroup(group)
+				readings[normalized] = append(readings[normalized], item.SeasonRevisions[season][normalized])
+			}
+		case StandingNoFile, StandingBestSuperseded:
+			// unreachable: the loop skips empty seasons and groupLadder
+			// never reads revisions
 		}
 	}
+	// The listing's newest revision spans the whole entry, so a season with no
+	// reissued episode must not read behind it on its own: the held side is
+	// folded across the counted seasons first.
+	held := make(map[string]release.Revision, len(readings))
+	for group, revs := range readings {
+		held[group] = release.NewestRevision(revs...)
+	}
+	s.superseded = supersededGroups(bestGroups, held, listing)
+	s.held = heldReadings(s.superseded, held)
 	slices.Sort(s.Groups)
 	s.Approx = s.Seasons > 1 || len(s.Groups) > 1
 	return s

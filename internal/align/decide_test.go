@@ -28,7 +28,7 @@ func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
 			if item.Arr == library.ArrSonarr {
 				rec = mapping.Record{Type: "TV", SeasonTvdb: 1}
 			}
-			d := align.Decide(&item, &rec, []string{"sam"}, nil, nil, nil)
+			d := align.Decide(&item, &rec, &align.Listing{Best: []string{"sam"}}, nil, nil)
 			if d.Standing != align.StandingUnverified {
 				t.Errorf("Standing = %v, want %v (a placeholder's file state is MISSING, not empty)", d.Standing, align.StandingUnverified)
 			}
@@ -149,7 +149,7 @@ func TestDecideSingleUnit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := align.Decide(&tt.item, &tt.rec, tt.best, tt.alt, nil, nil)
+			d := align.Decide(&tt.item, &tt.rec, &align.Listing{Best: tt.best, Alt: tt.alt}, nil, nil)
 			if d.Standing != tt.wantStanding {
 				t.Errorf("Standing = %v, want %v", d.Standing, tt.wantStanding)
 			}
@@ -170,7 +170,7 @@ func TestDecideSingleUnit(t *testing.T) {
 func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
 	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}}
 	rec := mapping.Record{Type: "TV", SeasonTvdb: 2}
-	d := align.Decide(&item, &rec, []string{"sam"}, nil, nil, nil)
+	d := align.Decide(&item, &rec, &align.Listing{Best: []string{"sam"}}, nil, nil)
 	if d.Kind != align.ScopeSeason {
 		t.Errorf("Kind = %v, want ScopeSeason", d.Kind)
 	}
@@ -265,7 +265,7 @@ func TestDecideTriStateEvidence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := align.Decide(&tt.item, &seasonRec, tt.best, tt.alt, nil, nil)
+			d := align.Decide(&tt.item, &seasonRec, &align.Listing{Best: tt.best, Alt: tt.alt}, nil, nil)
 			if d.Standing != tt.wantStanding {
 				t.Errorf("Standing = %v, want %v", d.Standing, tt.wantStanding)
 			}
@@ -303,7 +303,7 @@ func TestDecideSeasonLabel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			item := library.Item{Arr: tt.arr, HasFile: true, SeasonGroups: map[int][]string{2: {"sam"}}}
 			rec := mapping.Record{Type: tt.recType, SeasonTvdb: tt.seasonTvdb}
-			if d := align.Decide(&item, &rec, []string{"sam"}, nil, nil, nil); d.Season != tt.want {
+			if d := align.Decide(&item, &rec, &align.Listing{Best: []string{"sam"}}, nil, nil); d.Season != tt.want {
 				t.Errorf("Season = %d, want %d", d.Season, tt.want)
 			}
 		})
@@ -318,7 +318,7 @@ func TestDecideSeasonLabel(t *testing.T) {
 func TestDecideSingleUnitApproxPassThrough(t *testing.T) {
 	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}}
 	rec := mapping.Record{Type: "OVA"}
-	d := align.Decide(&item, &rec, []string{"cait-sidhe"}, nil, nil, nil)
+	d := align.Decide(&item, &rec, &align.Listing{Best: []string{"cait-sidhe"}}, nil, nil)
 	if !d.Approx {
 		t.Error("Approx = false, want true (multi-group specials bucket is approximate)")
 	}

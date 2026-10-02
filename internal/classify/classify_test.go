@@ -262,3 +262,98 @@ func TestPublishRefusalNamesTheCause(t *testing.T) {
 		})
 	}
 }
+
+func TestPayloadRevision(t *testing.T) {
+	episodes := func(format string, n int) []seadex.File {
+		files := make([]seadex.File, 0, n)
+		for i := 1; i <= n; i++ {
+			files = append(files, seadex.File{Name: fmt.Sprintf(format, i), Length: 1000})
+		}
+		return files
+	}
+	tests := []struct {
+		desc  string
+		files []seadex.File
+		want  release.Revision
+	}{
+		{"every episode v2", episodes("[G] Show - S01E%02dv2 (BD 1080p).mkv", 12), release.Revision{Version: 2, Marker: release.RevisionVersion}},
+		{"one reissued episode in an otherwise original pack", mixedPack(), release.Revision{Version: 2, Marker: release.RevisionVersion}},
+		{"no episode reissued", episodes("[G] Show - %02d (BD).mkv", 12), release.Revision{Version: 1, Marker: release.RevisionNone}},
+		{"creditless extra never votes", append(episodes("[G] Show - %02d (BD).mkv", 2), seadex.File{Name: "[G] Show - NCOP v3.mkv", Length: 1000}), release.Revision{Version: 1, Marker: release.RevisionNone}},
+		{"every file repack", episodes("86.Eighty.Six.S01E%02d.REPACK.1080p.Blu-ray.Opus2.0.x265-koala.mkv", 3), release.Revision{Version: 2, Marker: release.RevisionRepack}},
+		{"no files", nil, release.Revision{}},
+		{"directory-bearing names", []seadex.File{{Name: "Show v3/[G] Show - 01v2.mkv", Length: 1000}}, release.Revision{Version: 2, Marker: release.RevisionVersion}},
+		{"reissued episode beside an over-long premiere", []seadex.File{
+			{Name: "[G] Show - 01 (BD).mkv", Length: 3000},
+			{Name: "[G] Show - 02v2 (BD).mkv", Length: 1000},
+			{Name: "[G] Show - 03 (BD).mkv", Length: 1000},
+		}, release.Revision{Version: 2, Marker: release.RevisionVersion}},
+	}
+	for _, tc := range tests {
+		if got := PayloadRevision(tc.files); got != tc.want {
+			t.Errorf("PayloadRevision(%s) = %+v, want %+v", tc.desc, got, tc.want)
+		}
+	}
+}
+
+// mixedPack is a 12-episode pack whose group reissued one episode: eleven
+// untokened files and episode 07 as v2.
+func mixedPack() []seadex.File {
+	files := make([]seadex.File, 0, 12)
+	for i := 1; i <= 12; i++ {
+		token := ""
+		if i == 7 {
+			token = "v2"
+		}
+		files = append(files, seadex.File{Name: fmt.Sprintf("[G] Show - %02d%s (BD 1080p).mkv", i, token), Length: 1000})
+	}
+	return files
+}
+
+func TestBestRevisions(t *testing.T) {
+	v2Files := []seadex.File{{Name: "[UDF] 91 Days - 04v2 (BDRip 1080p).mkv", Length: 1000}}
+	plain := []seadex.File{{Name: "[G] Show - 01 (BD).mkv", Length: 1000}}
+	originalPack := []seadex.File{{Name: "[G] Show - 01 (BD).mkv", Length: 1000}, {Name: "[G] Show - 02 (BD).mkv", Length: 1000}}
+	entry := &seadex.Entry{Torrents: []seadex.Torrent{
+		{ReleaseGroup: "UDF", Tracker: "Nyaa", IsBest: true, Files: v2Files},
+		{ReleaseGroup: "udf", Tracker: "AB", IsBest: true, Files: v2Files},
+		{ReleaseGroup: "G", IsBest: true, Files: originalPack},
+		{ReleaseGroup: "G", IsBest: true, Files: []seadex.File{{Name: "[G] Show - 02v2 (BD).mkv", Length: 1000}}},
+		{ReleaseGroup: "O", IsBest: true, Files: originalPack},
+		{ReleaseGroup: "K", IsBest: true, Files: []seadex.File{{Name: "[K] Show - 01v3 (BD).mkv", Length: 1000}}},
+		{ReleaseGroup: "K", IsBest: false, Files: plain},
+		{ReleaseGroup: "Z", IsBest: true, Files: v2Files},
+		{ReleaseGroup: "Z", IsBest: true},
+		{ReleaseGroup: "", IsBest: true, Files: v2Files},
+		{ReleaseGroup: "Alt", IsBest: false, Files: v2Files},
+	}}
+	got := BestRevisions(entry)
+	want := map[string]release.Revision{
+		"udf":   {Version: 2, Marker: release.RevisionVersion},
+		"g":     {Version: 2, Marker: release.RevisionVersion},
+		"o":     {Version: 1, Marker: release.RevisionNone},
+		"k":     {Version: 3, Marker: release.RevisionVersion},
+		"z":     {},
+		"nogrp": {Version: 2, Marker: release.RevisionVersion},
+	}
+	if len(got) != len(want) {
+		t.Errorf("BestRevisions() = %+v, want %+v", got, want)
+	}
+	for group, rev := range want {
+		if got[group] != rev {
+			t.Errorf("BestRevisions()[%q] = %+v, want %+v", group, got[group], rev)
+		}
+	}
+}
+
+func TestTorrentCarriesFileRevisionNeverNotes(t *testing.T) {
+	entry := &seadex.Entry{Notes: "the v3 batch fixes the subtitles; REPACK of episode 4"}
+	torrent := &seadex.Torrent{ReleaseGroup: "G", Files: []seadex.File{{Name: "[G] Show - 01v2 (BD 1080p).mkv", Length: 1000}}}
+	if got := Torrent(entry, torrent).Revision; got != (release.Revision{Version: 2, Marker: release.RevisionVersion}) {
+		t.Errorf("Torrent().Revision = %+v, want v2 from the file name", got)
+	}
+	torrent.Files = []seadex.File{{Name: "[G] Show - 01 (BD 1080p).mkv", Length: 1000}}
+	if got := Torrent(entry, torrent).Revision; got != (release.Revision{Version: 1, Marker: release.RevisionNone}) {
+		t.Errorf("Torrent().Revision with unversioned files = %+v, want v1 (notes are not evidence)", got)
+	}
+}

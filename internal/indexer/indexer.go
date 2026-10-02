@@ -15,6 +15,12 @@ const (
 	// (SeaDex best), 0.25 -> Freeleech75 (SeaDex alt).
 	dvfBest = "0.75"
 	dvfAlt  = "0.25"
+	// markerTag rides on every marked item, so the arrs flag it Scene beside the
+	// tier: best is Freeleech25 + Scene, alt Freeleech75 + Scene. Real trackers
+	// emit 0.75 and 0.25 for partial freeleech, but no Cardigann or Jackett
+	// definition can emit the scene tag, so the pair is unique to this feed.
+	// https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Indexers/Torznab/TorznabRssParser.cs#L235-L280
+	markerTag = "scene"
 
 	// upstreamNyaa / upstreamAB name the two proxied Prowlarr indexers. They double
 	// as the per-tracker path segments the feed serves and as the scope values.

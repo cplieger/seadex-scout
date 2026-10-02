@@ -58,13 +58,50 @@ func ABEvidence(t *seadex.Torrent) tracker.ABEvidence {
 // release.Input for a SeaDex torrent is built, so compare and audit classify
 // the same release identically.
 func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
-	return release.Classify(&release.Input{
+	rel := release.Classify(&release.Input{
 		Names:     payload.Names(t.Files),
 		Notes:     entry.Notes,
 		Group:     t.ReleaseGroup,
 		Tracker:   t.Tracker,
 		DualAudio: t.DualAudio,
 	})
+	rel.Revision = PayloadRevision(t.Files)
+	return rel
+}
+
+// PayloadRevision is the NEWEST revision among a torrent's episode files, or
+// unknown when the torrent lists none or any of them reads unknown. Newest,
+// because a group reissuing one fixed episode re-posts the whole pack with
+// only that file renamed vN. It reads payload.Population, the episode census,
+// so creditless extras and samples never vote.
+func PayloadRevision(files []seadex.File) release.Revision {
+	population := payload.Population(files)
+	revs := make([]release.Revision, len(population))
+	for i := range population {
+		revs[i] = release.ParseRevision(population[i].Name)
+	}
+	return release.NewestRevision(revs...)
+}
+
+// BestRevisions maps each normalized best release group of the entry to the
+// NEWEST revision SeaDex lists for it across every isBest torrent of that group,
+// whatever the content filters, tags, tracker toggle or obtainability. The
+// daemon and the report both read it, so they compare against one value.
+func BestRevisions(entry *seadex.Entry) map[string]release.Revision {
+	byGroup := make(map[string][]release.Revision)
+	for i := range entry.Torrents {
+		t := &entry.Torrents[i]
+		if !t.IsBest {
+			continue
+		}
+		group := release.NormalizeGroup(t.ReleaseGroup)
+		byGroup[group] = append(byGroup[group], PayloadRevision(t.Files))
+	}
+	out := make(map[string]release.Revision, len(byGroup))
+	for group, revs := range byGroup {
+		out[group] = release.NewestRevision(revs...)
+	}
+	return out
 }
 
 // FileResolution classifies a torrent's resolution from its file names

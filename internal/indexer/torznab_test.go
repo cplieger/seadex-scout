@@ -793,7 +793,7 @@ func limitKind(t *testing.T, err error) xmlx.Kind {
 
 // TestWriteItemOmitsOptionalElements pins writeItem's documented omissions on
 // an item whose optional fields are empty: no enclosure without a download
-// URL, no volume-factor attrs without a marker, and no comments element. The
+// URL, no volume-factor or tag attrs without a marker, and no comments element. The
 // render/parse round-trip cannot observe any of them. pubDate is NOT among the
 // omissions: Sonarr's RSS parser rejects a whole response over one element-less
 // item, so an unknown date renders the epoch instead.
@@ -801,7 +801,7 @@ func TestWriteItemOmitsOptionalElements(t *testing.T) {
 	var b strings.Builder
 	writeItem(&b, &item{Title: "Show - S01", GUID: "https://nyaa.si/view/42"})
 	out := b.String()
-	for _, absent := range []string{"<enclosure", "downloadvolumefactor", "uploadvolumefactor", "<comments>"} {
+	for _, absent := range []string{"<enclosure", "downloadvolumefactor", "uploadvolumefactor", `name="tag"`, "<comments>"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("rendered %s for an item carrying no such value:\n%s", absent, out)
 		}
@@ -1011,7 +1011,7 @@ func TestWriteItemRendersTvdbIDAttr(t *testing.T) {
 
 	withID := base
 	withID.TvdbID = 79525
-	wantWith := []string{"category", "category", "size", "infohash", "tvdbid", "downloadvolumefactor", "uploadvolumefactor", "seeders", "peers"}
+	wantWith := []string{"category", "category", "size", "infohash", "tvdbid", "downloadvolumefactor", "uploadvolumefactor", "tag", "seeders", "peers"}
 	if got := attrNames(withID); !slices.Equal(got, wantWith) {
 		t.Errorf("attrs with a tvdb id = %v, want %v (no other attr may move)", got, wantWith)
 	}
@@ -1021,7 +1021,7 @@ func TestWriteItemRendersTvdbIDAttr(t *testing.T) {
 		t.Errorf("rendered item is missing %s:\n%s", want, b.String())
 	}
 
-	wantWithout := []string{"category", "category", "size", "infohash", "downloadvolumefactor", "uploadvolumefactor", "seeders", "peers"}
+	wantWithout := []string{"category", "category", "size", "infohash", "downloadvolumefactor", "uploadvolumefactor", "tag", "seeders", "peers"}
 	if got := attrNames(base); !slices.Equal(got, wantWithout) {
 		t.Errorf("attrs without a tvdb id = %v, want %v", got, wantWithout)
 	}

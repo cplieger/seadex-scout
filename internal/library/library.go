@@ -27,18 +27,26 @@ const (
 // for govet fieldalignment.
 type Item struct {
 	SeasonGroups map[int][]string `json:"season_groups,omitempty"`
-	Arr          string           `json:"arr"`
-	ImdbID       string           `json:"imdb_id,omitempty"`
-	Title        string           `json:"title"`
+	// SeasonRevisions is, per season and per normalized group, the NEWEST
+	// revision that group's files in the season carry (release.NewestRevision,
+	// so unknown when any of those files' revision is unknown). Keys mirror
+	// SeasonGroups; a missing key reads as the unknown zero value.
+	SeasonRevisions map[int]map[string]release.Revision `json:"season_revisions,omitempty"`
+	// Revisions is the same fold over all of the item's files per group; it is
+	// the movie scope's source.
+	Revisions map[string]release.Revision `json:"revisions,omitempty"`
+	Arr       string                      `json:"arr"`
+	ImdbID    string                      `json:"imdb_id,omitempty"`
+	Title     string                      `json:"title"`
 	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
 	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
 	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an
 	// audit Row. The sink-side SafeLogURL calls are belt-and-braces for an Item
 	// built outside the walker (tests, future construction paths).
 	ArrURL    string          `json:"arr_url,omitempty"`
-	Current   release.Release `json:"current"`
 	AltTitles []string        `json:"alt_titles,omitempty"`
 	Groups    []string        `json:"groups,omitempty"`
+	Current   release.Release `json:"current"`
 	ArrID     int             `json:"arr_id"`
 	TvdbID    int             `json:"tvdb_id,omitempty"`
 	TmdbID    int             `json:"tmdb_id,omitempty"`
@@ -92,7 +100,7 @@ type Diff struct {
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its file presence, group set, per-season group
-// attribution, or current fingerprint differs.
+// attribution, revision readings, or current fingerprint differs.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey, prevFailed := indexByKey(prev)
 	curByKey, curFailed := indexByKey(cur)
@@ -163,10 +171,12 @@ func indexByKey(s *Snapshot) (byKey map[string]*Item, failed map[string]struct{}
 }
 
 // sameItem reports whether two items have the same current release state
-// (file presence, group set, per-season group attribution, and fingerprint),
-// for diff change detection.
+// (file presence, group set, per-season group attribution, revision readings,
+// and fingerprint), for diff change detection.
 func sameItem(a, b *Item) bool {
 	return a.HasFile == b.HasFile && a.Current == b.Current &&
 		slices.Equal(a.Groups, b.Groups) &&
-		maps.EqualFunc(a.SeasonGroups, b.SeasonGroups, slices.Equal)
+		maps.EqualFunc(a.SeasonGroups, b.SeasonGroups, slices.Equal) &&
+		maps.EqualFunc(a.SeasonRevisions, b.SeasonRevisions, maps.Equal) &&
+		maps.Equal(a.Revisions, b.Revisions)
 }
