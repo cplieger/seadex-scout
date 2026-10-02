@@ -66,6 +66,32 @@ func TestCompareOlderRevisionOfBestGroupIsNewerRevision(t *testing.T) {
 	}
 }
 
+// TestCompareOlderRevisionOfDecoratedSeaDexLabel pins that the revision rule
+// keys the listed and the held revisions on one group identity when SeaDex
+// decorates the label, while the finding still names the group as SeaDex
+// writes it.
+func TestCompareOlderRevisionOfDecoratedSeaDexLabel(t *testing.T) {
+	held := release.NormalizeGroup("ZR")
+	item := &library.Item{
+		Title: "BLUE LOCK", Arr: library.ArrSonarr, HasFile: true,
+		Groups:          []string{held},
+		SeasonGroups:    map[int][]string{1: {held}},
+		SeasonRevisions: map[int]map[string]release.Revision{1: {held: revOriginal}},
+	}
+	entry := seadex.Entry{AniListID: 137822, Torrents: []seadex.Torrent{{
+		IsBest: true, ReleaseGroup: "-ZR-", Tracker: "Nyaa", URL: "https://nyaa.si/view/1",
+		Files: []seadex.File{{Name: "[-ZR-] BLUE LOCK - S01E03v2 [1080p].mkv", Length: 1 << 30}},
+	}}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	if len(got) != 1 || got[0].Status != StatusNewerRevision {
+		t.Fatalf("Compare(held ZR v1, SeaDex best -ZR- v2) = %+v, want one %q finding", got, StatusNewerRevision)
+	}
+	if f := got[0]; f.RecommendedGroup != "-ZR-" || len(f.RecommendedGroups) != 1 || f.RecommendedGroups[0] != "zr" {
+		t.Errorf("recommended = %q / %v, want the SeaDex label -ZR- over the identity [zr]", f.RecommendedGroup, f.RecommendedGroups)
+	}
+}
+
 func TestCompareOlderRevisionOnIncompleteEntryIsIncomplete(t *testing.T) {
 	entry := udfEntry("v2")
 	entry.Incomplete = true

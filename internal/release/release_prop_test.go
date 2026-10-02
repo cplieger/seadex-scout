@@ -56,6 +56,48 @@ func TestGroupsOverlapProperties(t *testing.T) {
 	})
 }
 
+// TestNormalizeGroupProperties property-tests the group identity both sides
+// compare on. Idempotence over arbitrary text: a value already normalized (the
+// library side persists normalized groups and compare normalizes them again)
+// must not move. And a metamorphic pair over built names that start and end
+// with a letter or digit: wrapping the name in edge delimiters, appending a
+// whitespace-separated parenthetical qualifier, or both, never changes its
+// identity, while a qualifier glued to the name without whitespace is kept.
+func TestNormalizeGroupProperties(t *testing.T) {
+	alnum := rapid.SampledFrom([]rune("aZ09ūσ³"))
+	inner := rapid.SampledFrom([]rune("aZ09ū-_. &+@'|"))
+	name := rapid.Custom(func(t *rapid.T) string {
+		body := rapid.SliceOfN(inner, 0, 6).Draw(t, "inner")
+		return string(alnum.Draw(t, "first")) + string(body) + string(alnum.Draw(t, "last"))
+	})
+	edge := rapid.StringOfN(rapid.SampledFrom([]rune(" ._-")), 1, 3, -1)
+	qualifier := rapid.StringOfN(rapid.SampledFrom([]rune("a4k HDR")), 0, 8, -1)
+
+	rapid.Check(t, func(t *rapid.T) {
+		raw := rapid.String().Draw(t, "raw")
+		if once := NormalizeGroup(raw); NormalizeGroup(once) != once {
+			t.Fatalf("NormalizeGroup not idempotent: %q -> %q -> %q", raw, once, NormalizeGroup(once))
+		}
+
+		n := name.Draw(t, "name")
+		want := NormalizeGroup(n)
+		q := " (" + qualifier.Draw(t, "qualifier") + ")"
+		decorated := []string{
+			edge.Draw(t, "lead") + n + edge.Draw(t, "trail"),
+			n + q,
+			edge.Draw(t, "lead2") + n + q + edge.Draw(t, "trail2"),
+		}
+		for _, d := range decorated {
+			if got := NormalizeGroup(d); got != want {
+				t.Fatalf("NormalizeGroup(%q) = %q, want %q (the identity of %q)", d, got, want, n)
+			}
+		}
+		if glued := n + "(x)"; NormalizeGroup(glued) == want {
+			t.Fatalf("NormalizeGroup(%q) = %q, the identity of %q; a qualifier needs whitespace before it", glued, want, n)
+		}
+	})
+}
+
 // TestClassifyPlantedMarkerProperties property-tests Classify with an oracle-style
 // planted-marker construction, never a reimplementation of the tokenizer: a name is BUILT
 // from a marker-free title vocabulary plus one or more known marker tokens joined by a

@@ -407,6 +407,22 @@ func TestCompareAlignedProducesNoFinding(t *testing.T) {
 	}
 }
 
+// TestCompareDecoratedSeaDexLabelHeldAsBareGroupIsAligned pins that the daemon
+// reads a held group as holding SeaDex's decorated best label: SeaDex lists
+// "-ZR-" while the arr parses ZR from the same files, and the walker persists
+// the arr's group normalized, so the item is aligned and no finding is emitted.
+func TestCompareDecoratedSeaDexLabelHeldAsBareGroupIsAligned(t *testing.T) {
+	held := release.NormalizeGroup("ZR")
+	item := &library.Item{Title: "Blue Exorcist", Groups: []string{held}, SeasonGroups: map[int][]string{4: {held}}}
+	entry := seadex.Entry{AniListID: 166240, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "-ZR-", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 4}}
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Errorf("Compare(held ZR, SeaDex best -ZR-) = %+v, want no finding", got)
+	}
+}
+
 func TestCompareBetterRelease(t *testing.T) {
 	item := &library.Item{Title: "Frieren", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
 	entry := seadex.Entry{AniListID: 154587, Torrents: []seadex.Torrent{

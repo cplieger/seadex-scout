@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/nametoken"
 	"github.com/cplieger/seadex-scout/internal/tracker"
@@ -291,17 +293,74 @@ var noGroupVariants = map[string]bool{
 	"nogrp": true, "nogroup": true, "no-group": true, "no_group": true, "no group": true,
 }
 
-// NormalizeGroup lowercases and trims a release-group name for override and
-// comparison lookups (SeaDex and arr casing differ), so the compare layer keys
-// group-membership sets the same way Classify keys overrides. An empty group
-// and every no-group spelling variant (NOGRP, NoGroup, no-group, ...)
-// normalizes to the LOWERCASED unknown-evidence token ("nogrp", i.e.
+// NormalizeGroup is the one group identity both the SeaDex side and the library
+// side compare on: lowercased, trimmed, and stripped of the decoration SeaDex
+// labels carry while the arrs parse the bare name from the same files. A
+// whitespace-separated trailing parenthetical qualifier is dropped
+// ("Baws (4k HDR)" is baws) and leading or trailing release-name delimiters
+// are trimmed ("-ZR-" is zr); inner characters always survive ("Erai-raws",
+// "E.N.D", "SubsPlus+"). It is idempotent. An empty group and every no-group
+// spelling variant normalize to the unknown-evidence token, NoGroup lowercased.
 func NormalizeGroup(group string) string {
 	g := strings.ToLower(strings.TrimSpace(group))
-	if g == "" || noGroupVariants[g] {
+	if g == "" {
+		return noGroupNormalized
+	}
+	g = stripGroupDecoration(g)
+	if noGroupVariants[g] {
 		return noGroupNormalized
 	}
 	return g
+}
+
+// isGroupDelimiter reports whether r belongs to the release-name delimiter
+// alphabet (whitespace, '.', '_', '-'): at a label's edge such a rune is
+// decoration, and every other rune is part of the name.
+func isGroupDelimiter(r rune) bool {
+	return unicode.IsSpace(r) || r == '.' || r == '_' || r == '-'
+}
+
+// stripGroupDecoration applies the qualifier drop and the delimiter trim until
+// neither changes the label, so the result is a fixed point. Each step is
+// refused when it would leave no letter or number, so a label made only of
+// punctuation ("-__-'", "_") keeps its own spelling instead of collapsing.
+func stripGroupDecoration(g string) string {
+	for {
+		next := g
+		if dropped := dropGroupQualifier(next); hasLetterOrNumber(dropped) {
+			next = dropped
+		}
+		if trimmed := strings.TrimFunc(next, isGroupDelimiter); hasLetterOrNumber(trimmed) {
+			next = trimmed
+		}
+		if next == g {
+			return g
+		}
+		g = next
+	}
+}
+
+// dropGroupQualifier removes one trailing "(...)" that whitespace separates
+// from the name before it. A qualifier holding a parenthesis of its own is
+// kept, since cutting at its inner "(" would leave an unbalanced name.
+func dropGroupQualifier(g string) string {
+	if !strings.HasSuffix(g, ")") {
+		return g
+	}
+	open := strings.LastIndexByte(g, '(')
+	if open <= 0 || strings.ContainsRune(g[open+1:len(g)-1], ')') {
+		return g
+	}
+	if before, _ := utf8.DecodeLastRuneInString(g[:open]); !unicode.IsSpace(before) {
+		return g
+	}
+	return g[:open]
+}
+
+func hasLetterOrNumber(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	})
 }
 
 // Overlap is the three-valued outcome of comparing two release-group sets.
