@@ -70,6 +70,15 @@ method (*gqlErrors).UnmarshalJSON is
 method (ScopeKind).MarshalJSON is
 method (*ScopeKind).UnmarshalJSON is
 #
+# internal/release/revision.go: RevisionMarker's encoding.TextMarshaler pair is
+# the same mechanism through the Text interfaces: encoding/json calls them for
+# Revision.Marker inside library.Item.SeasonRevisions and Revisions, persisted
+# in state.json by state.Store.Save and read back by Load. MarshalText refuses a
+# value outside the declared markers; UnmarshalText decodes an unknown name to
+# RevisionUnknown, so a snapshot never quarantines over one marker.
+method (RevisionMarker).MarshalText is
+method (*RevisionMarker).UnmarshalText is
+#
 # --- (a) xml.Unmarshaler ----------------------------------------------------
 # Same shape, encoding/xml side, all in internal/indexer/torznab.go:
 # parseTorznab's xml.Unmarshal decodes feedXML.Channel (channelXML), whose
