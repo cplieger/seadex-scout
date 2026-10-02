@@ -23,6 +23,9 @@ func FuzzClassify(f *testing.F) {
 	f.Add("Show S01 PREMUX 1080p", "", "PMR", "Nyaa", "")
 	f.Add("Show 1080p x265", "grab the remux", "LostYears", "AB", "")
 	f.Add("Show 480p", "crf 18 encode", "no_group", "RuTracker", "avc")
+	f.Add("[-ZR-] Show - 01 [1080p].mkv", "", "-ZR-", "Nyaa", "")
+	f.Add("Show 2160p", "", "Baws (4k HDR)", "AB", "HEVC")
+	f.Add("Show", "", "-__-'", "Nyaa", "")
 	f.Fuzz(func(t *testing.T, name, notes, group, trackerName, codec string) {
 		rel := Classify(&Input{Names: []string{name}, Notes: notes, Group: group, Tracker: trackerName, VideoCodec: codec})
 

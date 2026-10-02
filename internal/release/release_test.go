@@ -305,8 +305,7 @@ func TestClassifyUnrecognizedVideoCodecFallsBackToText(t *testing.T) {
 // TestNormalizeGroupFoldsNoGroupVariants pins the no-group spelling fold: every
 // documented variant (NOGRP, NoGroup, no-group, no_group, "no group", any
 // casing) normalizes to the same value as the canonical NoGroup, so a SeaDex
-// side and a library side spelling "no group" differently still compare equal;
-// a real group is only lowercased and trimmed.
+// side and a library side spelling "no group" differently still compare equal.
 func TestNormalizeGroupFoldsNoGroupVariants(t *testing.T) {
 	want := NormalizeGroup(NoGroup)
 	variants := []string{
@@ -320,7 +319,68 @@ func TestNormalizeGroupFoldsNoGroupVariants(t *testing.T) {
 		}
 	}
 	if got := NormalizeGroup(" SubsPlease "); got != "subsplease" {
-		t.Errorf("NormalizeGroup(SubsPlease) = %q, want subsplease (real groups only fold case/space)", got)
+		t.Errorf("NormalizeGroup(SubsPlease) = %q, want subsplease", got)
+	}
+}
+
+// TestNormalizeGroupStripsSeaDexLabelDecoration pins the label shapes measured
+// on the live SeaDex catalogue whose bare name is what the arrs parse from the
+// same files: a delimiter wrapper or a trailing delimiter, and a
+// whitespace-separated trailing parenthetical qualifier.
+func TestNormalizeGroupStripsSeaDexLabelDecoration(t *testing.T) {
+	tests := []struct{ label, want string }{
+		{label: "-ZR-", want: "zr"},
+		{label: "-KS-", want: "ks"},
+		{label: "kej_", want: "kej"},
+		{label: "succ_", want: "succ"},
+		{label: "Baws (1080p SDR)", want: "baws"},
+		{label: "Baws (4k HDR)", want: "baws"},
+		{label: "Iznjie Biznjie (BD)", want: "iznjie biznjie"},
+		{label: " -ZR- ", want: "zr"},
+		{label: "-Baws (4k HDR)-", want: "baws"},
+		{label: "Baws (BD) (4k HDR)", want: "baws"},
+		{label: "-No-Group-", want: NormalizeGroup(NoGroup)},
+	}
+	for _, tc := range tests {
+		if got := NormalizeGroup(tc.label); got != tc.want {
+			t.Errorf("NormalizeGroup(%q) = %q, want %q", tc.label, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizeGroupKeepsRealNames pins the labels whose punctuation is part of
+// the name: inner delimiters and symbols, a trailing symbol outside the
+// delimiter alphabet, a parenthesis not separated by whitespace, a qualifier
+// with nested or unbalanced parentheses, non-ASCII letters and numbers, and
+// labels made only of punctuation. Each only folds case.
+func TestNormalizeGroupKeepsRealNames(t *testing.T) {
+	labels := []string{
+		"Erai-raws", "Okay-Subs", "Bunny-Apocalypse", "A&C", "GSK_kun", "E.N.D",
+		"SubsPlus+", "cal@izuAnime", "Team ONIBE", "Yūrei", "7³ACG", "μtw-Kaleido",
+		"Shirσ", "GetNasu'd", "No.0.Is.No.1.In.My.Heart", "Delicio.us",
+		"VCB-Studio | Underwater", "Anime-Koi & MTBB", "Lv.99 Villain",
+		"Foo(BD)", "(BD)", "Foo (a (b))", "a (b) c)", "-__-'", "_", "Hi10p-Meakes",
+	}
+	for _, label := range labels {
+		if got, want := NormalizeGroup(label), strings.ToLower(label); got != want {
+			t.Errorf("NormalizeGroup(%q) = %q, want %q", label, got, want)
+		}
+	}
+}
+
+// TestGroupsOverlapMatchesDecoratedSeaDexLabel pins the comparison the
+// normalization exists for: a library holding the group the arr parsed reads
+// as holding the SeaDex group the label decorates.
+func TestGroupsOverlapMatchesDecoratedSeaDexLabel(t *testing.T) {
+	tests := []struct{ seadex, library string }{
+		{seadex: "-ZR-", library: "ZR"},
+		{seadex: "-KS-", library: "KS"},
+		{seadex: "Baws (1080p SDR)", library: "Baws"},
+	}
+	for _, tc := range tests {
+		if got := GroupsOverlap([]string{tc.seadex}, []string{tc.library}); got != OverlapKnown {
+			t.Errorf("GroupsOverlap([%q], [%q]) = %v, want OverlapKnown", tc.seadex, tc.library, got)
+		}
 	}
 }
 

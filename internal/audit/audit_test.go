@@ -1391,3 +1391,27 @@ func TestClassifyReleasesMapsPublisherRefusalToItsOwnMarker(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditDecoratedSeaDexLabelsReadAsHeldGroup pins that the report reads a
+// held group as holding SeaDex's decorated best labels: a film whose bests are
+// labelled "Baws (1080p SDR)" and "Baws (4k HDR)" while Radarr parsed Baws
+// reads have_best, and the best column keeps both labels as SeaDex writes them.
+func TestAuditDecoratedSeaDexLabelsReadAsHeldGroup(t *testing.T) {
+	item := &library.Item{Arr: library.ArrRadarr, ArrID: 3, Title: "Violet Evergarden: The Movie", TmdbID: 533514, Groups: []string{"baws"}, HasFile: true}
+	entry := seadex.Entry{AniListID: 103047, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "Baws (1080p SDR)", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{IsBest: true, ReleaseGroup: "Baws (4k HDR)", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrRadarr, Source: match.SourceID, Entry: entry, Record: mapping.Record{Type: "MOVIE", TmdbMovies: []int{533514}}}
+	rep := New(Config{}).Audit([]match.Match{m}, nil, nil, nil)
+	if len(rep.Rows) != 1 {
+		t.Fatalf("Audit rows = %d, want 1", len(rep.Rows))
+	}
+	row := rep.Rows[0]
+	if row.Verdict != VerdictBest {
+		t.Errorf("Audit(held baws, SeaDex bests Baws (1080p SDR) + Baws (4k HDR)) verdict = %q, want %q", row.Verdict, VerdictBest)
+	}
+	if got, want := displayBestGroups(row.Releases), []string{"Baws (1080p SDR)", "Baws (4k HDR)"}; !slices.Equal(got, want) {
+		t.Errorf("displayBestGroups = %q, want %q", got, want)
+	}
+}
