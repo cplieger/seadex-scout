@@ -43,7 +43,9 @@ type Release struct {
 	Kind        Kind         `json:"kind,omitempty"`
 	TrackerType tracker.Type `json:"tracker_type,omitempty"`
 	Reason      string       `json:"reason,omitempty"`
-	DualAudio   bool         `json:"dual_audio,omitempty"`
+	// Revision is the release revision. Classify never sets it.
+	Revision  Revision `json:"revision,omitzero"`
+	DualAudio bool     `json:"dual_audio,omitempty"`
 }
 
 // Input is the raw material for Classify.

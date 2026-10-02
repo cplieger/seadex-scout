@@ -40,13 +40,14 @@ const (
 
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
-	VerdictUnlisted:     "You have a release SeaDex does not list as best or alt.",
-	VerdictAlt:          "You have a listed alt; SeaDex marks a different release best.",
-	VerdictUnverified:   "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
-	VerdictUnattributed: "A film or special filed inside Sonarr's season-0 bucket, where nothing attributes one file to one entry, so the app offers this entry in the feed and never compares it. The groups shown are what the bucket holds.",
-	VerdictNoFile:       "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
-	VerdictBest:         "You already have SeaDex's best release.",
-	VerdictNotOnSeaDex:  "In your library and recognized as anime (Fribb-mapped), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
+	VerdictUnlisted:      "You have a release SeaDex does not list as best or alt.",
+	VerdictAlt:           "You have a listed alt; SeaDex marks a different release best.",
+	VerdictOlderRevision: "You have SeaDex's best group, but an older revision of it: SeaDex lists a newer version, PROPER or REPACK from the same group.",
+	VerdictUnverified:    "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
+	VerdictUnattributed:  "A film or special filed inside Sonarr's season-0 bucket, where nothing attributes one file to one entry, so the app offers this entry in the feed and never compares it. The groups shown are what the bucket holds.",
+	VerdictNoFile:        "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
+	VerdictBest:          "You already have SeaDex's best release.",
+	VerdictNotOnSeaDex:   "In your library and recognized as anime (Fribb-mapped), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
 }
 
 // renderJSON renders the report as indented JSON (the machine-ingestible copy).
@@ -109,7 +110,9 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"season-0 bucket to one entry; " +
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
-	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
+	"`incomplete` - the SeaDex entry itself is incomplete; " +
+	"`revision v1, SeaDex v2` - on a have_older_revision row, the newest revision you hold of the group and " +
+	"the newest revision SeaDex lists for it (`(repack)` or `(proper)` names the token that raised it).\n\n" +
 	"SeaDex best annotations: the `SeaDex best` column holds ONLY upstream SeaDex group text, and " +
 	"everything this report has to say about those releases is in the `Notes` column - so a release group " +
 	"literally named `SEV (broken)` upstream cannot be read as a warning from us, and a warning from us " +
@@ -229,10 +232,14 @@ func notesCell(row *Row) string {
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison
-// annotations in parentheses: "approx" for a coarse multi-group bucket and the
+// annotations in parentheses: the held and listed revisions on a
+// have_older_revision row, "approx" for a coarse multi-group bucket and the
 // qualifier when one applies - e.g. "S2 (approx, mixed)".
 func scopeCell(row *Row) string {
 	var notes []string
+	if row.CurrentRevision.Known() && row.BestRevision.Known() {
+		notes = append(notes, "revision "+row.CurrentRevision.String()+", SeaDex "+row.BestRevision.String())
+	}
 	if row.Approx {
 		notes = append(notes, "approx")
 	}
@@ -402,6 +409,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 		"rows", len(r.Rows),
 		"have_best", r.Totals[string(VerdictBest)],
 		"have_alt", r.Totals[string(VerdictAlt)],
+		"have_older_revision", r.Totals[string(VerdictOlderRevision)],
 		"have_unlisted", r.Totals[string(VerdictUnlisted)],
 		"no_file", r.Totals[string(VerdictNoFile)],
 		"unverified", r.Totals[string(VerdictUnverified)],
@@ -423,6 +431,8 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"qualifier", string(row.Qualifier),
 			"scope", scopeLabel(row),
 			"approx", row.Approx,
+			"current_revision", row.CurrentRevision.String(),
+			"best_revision", row.BestRevision.String(),
 			"hidden_animebytes", row.HiddenAnimeBytes,
 			"hidden_animebytes_best", row.HiddenAnimeBytesBest,
 			"current_group", joinGroupsAttr(row.CurrentGroups),

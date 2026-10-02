@@ -310,6 +310,8 @@ func findingKVs(f *compare.Finding) []any {
 		"ab_url", capURLAttr(abLink.url),
 		"ab_tracker", capAlertTextAttr(abLink.abTracker()),
 		"info_hash", capAttr(f.InfoHash),
+		"current_revision", f.CurrentRevision.String(),
+		"recommended_revision", f.RecommendedRevision.String(),
 		"seadex_tags", seadexTags(f),
 		"status", string(f.Status),
 	}
@@ -452,14 +454,20 @@ func (p publicLink) abTracker() string {
 }
 
 // seadexTags renders a compact descriptive tag line for a finding — the SeaDex
-// qualifier (best / incomplete / theoretical-best / mixed-group / unverifiable),
-// the release kind, resolution, and dual-audio — for an alert footer. Only best
-// releases are ever surfaced, so "alt" never appears.
+// qualifier (best / newer-revision plus the listed revision / incomplete /
+// theoretical-best / mixed-group / unverifiable), the release kind,
+// resolution, and dual-audio — for an alert footer. Only best releases are
+// ever surfaced, so "alt" never appears.
 func seadexTags(f *compare.Finding) string {
 	var tags []string
 	switch f.Status {
 	case compare.StatusBetter:
 		tags = append(tags, "best")
+	case compare.StatusNewerRevision:
+		tags = append(tags, "newer-revision")
+		if rev := f.RecommendedRevision.String(); rev != "" {
+			tags = append(tags, rev)
+		}
 	case compare.StatusIncomplete:
 		tags = append(tags, "incomplete")
 	case compare.StatusTheoretical:
@@ -516,10 +524,10 @@ func joinGroupsAttr(groups []string) string {
 }
 
 // level maps a finding status to its slog level: an actionable better release
-// warns, every informational nudge logs at info. The one home of that policy,
-// beside message().
+// or newer revision warns, every informational nudge logs at info. The one
+// home of that policy, beside message().
 func level(s compare.Status) slog.Level {
-	if s == compare.StatusBetter {
+	if s == compare.StatusBetter || s == compare.StatusNewerRevision {
 		return slog.LevelWarn
 	}
 	return slog.LevelInfo
@@ -528,7 +536,9 @@ func level(s compare.Status) slog.Level {
 // message returns the human-facing log message for a finding status.
 func message(status compare.Status) string {
 	switch status {
-	case compare.StatusBetter:
+	// A newer revision shares the better-release message so every alert rule
+	// matching on it fires; status and seadex_tags tell the two apart.
+	case compare.StatusBetter, compare.StatusNewerRevision:
 		return "better release available"
 	case compare.StatusMixedGroup:
 		return "series spans multiple release groups, manual review"

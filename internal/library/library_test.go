@@ -1,6 +1,8 @@
 package library
 
 import (
+	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/release"
@@ -232,4 +234,70 @@ func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
 			t.Errorf("diff = %+v, want zero Diff (a placeholder on both sides is no transition)", d)
 		}
 	})
+}
+
+func TestDiffSnapshotsDetectsRevisionOnlyChange(t *testing.T) {
+	none1 := release.Revision{Version: 1, Marker: release.RevisionNone}
+	v2 := release.Revision{Version: 2, Marker: release.RevisionVersion}
+	base := func() Item {
+		return Item{
+			Arr: ArrSonarr, ArrID: 1, Groups: []string{"g"}, HasFile: true,
+			SeasonGroups:    map[int][]string{1: {"g"}},
+			SeasonRevisions: map[int]map[string]release.Revision{1: {"g": none1}},
+			Revisions:       map[string]release.Revision{"g": none1},
+		}
+	}
+	seasonChanged := base()
+	seasonChanged.SeasonRevisions = map[int]map[string]release.Revision{1: {"g": v2}}
+	itemChanged := base()
+	itemChanged.Revisions = map[string]release.Revision{"g": v2}
+	tests := []struct {
+		desc string
+		cur  Item
+		want int
+	}{
+		{"season revision re-grabbed", seasonChanged, 1},
+		{"item revision re-grabbed", itemChanged, 1},
+		{"unchanged", base(), 0},
+	}
+	for _, tc := range tests {
+		d := DiffSnapshots(&Snapshot{Items: []Item{base()}}, &Snapshot{Items: []Item{tc.cur}})
+		if d.Changed != tc.want || d.Added != 0 || d.Removed != 0 {
+			t.Errorf("DiffSnapshots [%s] = %+v, want Changed=%d only", tc.desc, d, tc.want)
+		}
+	}
+}
+
+func TestLegacyItemDecodesWithoutRevisions(t *testing.T) {
+	var it Item
+	if err := json.Unmarshal([]byte(`{"arr":"sonarr","arr_id":1,"title":"T","season_groups":{"1":["g"]},"groups":["g"],"has_file":true,"current":{"group":"G"}}`), &it); err != nil {
+		t.Fatalf("decoding an item written before revisions existed: %v", err)
+	}
+	if it.SeasonRevisions != nil || it.Revisions != nil {
+		t.Errorf("legacy item decoded revisions %+v / %+v, want both nil (every reading unknown)", it.SeasonRevisions, it.Revisions)
+	}
+	if !slices.Equal(it.Groups, []string{"g"}) || !slices.Equal(it.SeasonGroups[1], []string{"g"}) || it.Current.Group != "G" {
+		t.Errorf("legacy item siblings = groups %v, season groups %v, current %q; want them intact", it.Groups, it.SeasonGroups, it.Current.Group)
+	}
+}
+
+func TestItemRevisionsRoundTrip(t *testing.T) {
+	repack := release.Revision{Version: 3, Marker: release.RevisionRepack}
+	in := Item{
+		Arr: ArrSonarr, ArrID: 1, Title: "T",
+		SeasonRevisions: map[int]map[string]release.Revision{0: {"udf": repack}},
+		Revisions:       map[string]release.Revision{"udf": repack},
+		Current:         release.Release{Group: "UDF", Revision: repack},
+	}
+	b, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var out Item
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("json.Unmarshal(%s): %v", b, err)
+	}
+	if out.SeasonRevisions[0]["udf"] != repack || out.Revisions["udf"] != repack || out.Current.Revision != repack {
+		t.Errorf("round trip of %s = %+v / %+v / %+v, want %+v everywhere", b, out.SeasonRevisions, out.Revisions, out.Current.Revision, repack)
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/nametoken"
 	"github.com/cplieger/seadex-scout/internal/payload"
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -151,7 +152,30 @@ func synthesizeTitle(t *seadex.Torrent, meta *EntryInfo) string {
 			parts = append(parts, marker)
 		}
 	}
-	return strings.Join(append(parts, releaseFlags(t)...), " ")
+	return joinWithRevision(parts, t)
+}
+
+// joinWithRevision joins a synthesized title's head (the show and its season or
+// episode marker) to the release flags, with the payload's revision token
+// between the two when the title would otherwise read an older revision than
+// the newest payload file carries: without it Sonarr reads Version 1 off a pack
+// whose reissued episode is v2 and never sees the upgrade. The token is added
+// only before a non-empty flag list, because Sonarr reads a trailing bracketed
+// token as the release group, and only when the tokened title reads exactly
+// the payload's version.
+func joinWithRevision(head []string, t *seadex.Torrent) string {
+	flags := releaseFlags(t)
+	plain := strings.Join(slices.Concat(head, flags), " ")
+	payloadRev := classify.PayloadRevision(t.Files)
+	token := payloadRev.Token()
+	if len(flags) == 0 || token == "" || release.ParseTitleRevision(plain).Version >= payloadRev.Version {
+		return plain
+	}
+	tokened := strings.Join(slices.Concat(head, []string{token}, flags), " ")
+	if release.ParseTitleRevision(tokened).Version != payloadRev.Version {
+		return plain
+	}
+	return tokened
 }
 
 // episodeMarker derives the season/episode token for a synthesized series title from

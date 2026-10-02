@@ -28,6 +28,7 @@ func TestVerdictFor(t *testing.T) {
 		{name: "best", decision: align.Decision{Standing: align.StandingBest}, want: VerdictBest},
 		{name: "alt", decision: align.Decision{Standing: align.StandingAlt}, want: VerdictAlt},
 		{name: "unlisted", decision: align.Decision{Standing: align.StandingUnlisted}, want: VerdictUnlisted},
+		{name: "older revision", decision: align.Decision{Standing: align.StandingBestSuperseded}, want: VerdictOlderRevision},
 		// The three origins of an unverified standing the report keeps as
 		// unverified: a NOGRP side on a compared scope, a placeholder whose files
 		// could not be read, and an offered unit whose files could not be read
@@ -542,7 +543,7 @@ func TestRowQualifier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
-			d := align.Decide(item, &rec, tt.best, tt.alt, nil, nil)
+			d := align.Decide(item, &rec, &align.Listing{Best: tt.best, Alt: tt.alt}, nil, nil)
 			if got := rowQualifier(&tt.entry, &d); got != tt.want {
 				t.Errorf("rowQualifier() = %q, want %q", got, tt.want)
 			}

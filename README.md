@@ -131,8 +131,9 @@ The `mode` setting (or a subcommand) picks the run mode:
   updates the health marker, and exits `0` or `1`. Each `poll` is a separate
   process that starts with no cached library, so **every `poll` is a full pass**:
   schedule it around 24 hours apart, not every few minutes. The Torznab feed is
-  served from the last cycle's snapshot, so it is empty until the first `poll`
-  runs. With [Ofelia](https://github.com/mcuadros/ofelia), label the service:
+  served from the last cycle's snapshot, so its RSS check carries no releases
+  until the first `poll` runs. With [Ofelia](https://github.com/mcuadros/ofelia),
+  label the service:
 
   ```yaml
       labels:
@@ -154,6 +155,10 @@ groups. Each row gets a verdict:
 
 - `have_best`: you have a release SeaDex marks best.
 - `have_alt`: you have a listed alt; SeaDex marks a different release best.
+- `have_older_revision`: you have SeaDex's best group, but only an older revision
+  of it (for example v1 while SeaDex lists the group's v2, or an original while it
+  lists a REPACK). The Scope cell shows both, as `revision v1, SeaDex v2`; see
+  [Release classification and filters](#release-classification-and-filters).
 - `have_unlisted`: you have a release SeaDex does not list.
 - `no_file`: the mapped season or movie has no file on disk.
 - `unverified`: files are present, but the release-group evidence on at least
@@ -221,10 +226,16 @@ or an AnimeBytes link built from your `ab_passkey`. If every upstream query fail
 a search answers a Torznab error rather than an empty feed, so the arr records a
 failed search instead of concluding there were no results.
 
-Every item, either way, carries a **download-volume-factor marker**: SeaDex's
-_best_ release is tagged `0.75` (which the arrs read as AnimeBytes Freeleech25)
-and an _alt_ `0.25` (Freeleech75). That marker is the signal you map to a Custom
-Format, which is what makes the arrs prefer SeaDex's pick. Each item's category is
+Every item, either way, carries a **marker**: a download volume factor for the
+tier plus a `scene` tag. SeaDex's _best_ release gets the factor `0.75`, which
+with the `scene` tag the arrs record as the Indexer Flags Freeleech25 and Scene,
+and an _alt_ gets `0.25` (Freeleech75 and Scene). Map that pair to a Custom Format
+with both flags required, which is what makes the arrs prefer SeaDex's pick.
+Requiring both matters because some trackers use real 25% and 75% freeleech
+(OldToonsWorld is one), and their indexer definitions cannot set Scene. A Custom
+Format on the tier flag alone keeps matching the feed, and the
+[setup guide](docs/torznab-indexer.md#3-create-two-custom-formats) shows how to add
+the Scene condition to an existing library. Each item's category is
 the entry's real media type together with the arr its library item resolved to: a
 series, OVA, or special is `5070` (Anime → Sonarr) and a film is `2000` (Movies →
 Radarr), and a film whose library item is a Sonarr series is offered under Anime as
@@ -232,7 +243,14 @@ well, because the arr that owns the media subscribes only to Anime. A film that 
 files as a special of a series you have in Sonarr is served as a second item titled
 `<Series> S00Exx` under Anime, which carries that offer instead, so Sonarr's parser
 can match it, and a season pack whose file names carry no season token gets the token
-of the one TVDB season the mapping places it in.
+of the one TVDB season the mapping places it in. When the newest file of a release
+carries a newer revision (a `v2`, `PROPER` or `REPACK`, even on one reissued
+episode of a pack) and the title would otherwise read an older one, the title gains
+that revision (`Show S01 [v2] 1080p [Grp]`,
+`86 Eighty Six S01 REPACK 1080p [koala]`), so the arr sees the upgrade the daemon
+reports. The token is placed before the release flags, never at the end, where
+Sonarr would read it as the release group. A search result keeps the tracker's own
+title.
 
 **It answers whole-season searches, not per-episode ones.** SeaDex tracks season
 packs, so the feed answers a season search with the pack and returns nothing,
@@ -319,6 +337,26 @@ codec (x265/x264), dual-audio, and **kind** (`remux` / `encode` / `unknown`). An
 unclassifiable release is `unknown` and is never silently dropped. The comparison
 is **group-centric**: an item is aligned when a recommended release group is
 already present on it.
+
+The comparison also reads the release **revision**: a `v2`/`v3` token (`04v2`,
+`S01E05v3`, `[v2]`), a `PROPER`, or a `REPACK`/`RERIP` (`REPACK2` is one more than
+`REPACK`). The library side is the revision Sonarr or Radarr recorded when it
+imported the file, which survives a rename; only when the arr reports none does a
+token in the file's scene name or path count. The SeaDex side is read from the
+release's file names (never the entry notes) with the same grammar the arrs use,
+so a file that came from the very torrent SeaDex lists can never look older than
+it. Both sides compare their newest revision: the newest one your files of a group
+carry, against the newest file SeaDex lists across that group's best releases.
+Your side covers what the entry is compared against: a season, a movie, or all
+seasons together for an entry that spans several. A group that reissues one
+episode of a pack as `v2` therefore lists `v2`.
+When, for every SeaDex best group you hold, your newest revision is provably older
+than SeaDex's, the item is not aligned: the daemon logs a `newer_revision` finding
+and the report says `have_older_revision`. This includes a library that holds the
+pack without the reissued episode. Holding the listed revision or a newer one stays
+aligned, and so does missing revision evidence on either side (an unversioned
+SeaDex release, or a library file with no recorded revision): a missing token is
+never read as an older release.
 
 These filters shape the findings and the report only. The
 [indexer](#indexer-torznab-feed) feed applies none of them; there the arrs filter
@@ -414,7 +452,11 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
   groups, the release's classification, and one link per obtainable source
   (`nyaa_url`, `public_url` + `public_tracker`, `ab_url` + `ab_tracker`), so an
   alert can render a clickable notification straight from the labels;
-  [`alerts/logql.yaml`](alerts/logql.yaml) names the attributes it groups by. Informational
+  [`alerts/logql.yaml`](alerts/logql.yaml) names the attributes it groups by. A
+  newer revision of a group you already hold logs the same `warn` message with
+  `status=newer_revision`, `current_revision` and `recommended_revision` (for
+  example `v1` and `v2`), and a `seadex_tags` value starting `newer-revision`, so
+  existing better-release alert rules fire on it too. Informational
   cases (`incomplete`, `theoretical_best`, `mixed_group_manual`, `unverifiable`)
   log at `info`. Every pass closes with a completion line: `tick complete` or
   `cycle complete` when healthy, `tick degraded` or `cycle degraded` at `warn`
@@ -440,7 +482,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 | `SeadexScoutCycleError` | a run logs an error: the Sonarr/Radarr library walk failed, or a degradation guard escalated | warning |
 | `SeadexScoutScanStalled` | no `tick`/`cycle` completion line and no `reconcile started` in 3h, so the poll loop is wedged | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` in 72h, so the 24h full pass has stopped while ticks keep the stall rule satisfied | warning |
-| `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
+| `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk, or a newer revision of the group on disk (informational, not a fault) | info |
 | `SeadexScoutMixedGroupManual` | the files on disk span more than one release group, so the app cannot say which one you have (informational) | info |
 | `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
 

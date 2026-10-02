@@ -327,6 +327,7 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		"upstream_fetched", stats.upstreamFetched,
 		"upstream", stats.upstream,
 		"curated", stats.curated,
+		"placeholder", stats.placeholder,
 		"identity_conflicts", stats.identityConflicts,
 		"returned", rendered)
 }

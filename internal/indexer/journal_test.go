@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx/capture"
@@ -2314,13 +2315,18 @@ func TestApplyTitlesAuditSilentWithoutCensus(t *testing.T) {
 // against: it reads the three-valued file evidence per journal key, folds a
 // key's several curated occurrences to the STRONGEST evidence so the result
 // cannot depend on catalogue order, and carries the single-episode marker a
-// correction is built from (only for the single-episode grade).
+// correction is built from (only for the single-episode grade) and the NEWEST
+// payload revision across the occurrences.
 func TestCensusPacksFoldsOccurrences(t *testing.T) {
 	packFiles := []seadex.File{
 		{Name: "Show S01E01 [1080p].mkv", Length: 1 << 30},
 		{Name: "Show S01E02 [1080p].mkv", Length: 1 << 30},
 	}
 	singleFiles := []seadex.File{{Name: "Show S01E07 [1080p].mkv", Length: 1 << 30}}
+	v2PackFiles := []seadex.File{
+		{Name: "Show S01E01v2 [1080p].mkv", Length: 1 << 30},
+		{Name: "Show S01E02v2 [1080p].mkv", Length: 1 << 30},
+	}
 	entry := &seadex.Entry{AniListID: 7}
 	cur := map[string][]curatedRef{
 		"nyaa:1": {{entry: entry, torrent: &seadex.Torrent{Files: packFiles}}},
@@ -2330,13 +2336,22 @@ func TestCensusPacksFoldsOccurrences(t *testing.T) {
 			{entry: entry, torrent: &seadex.Torrent{Files: packFiles}},
 		},
 		"nyaa:4": {{entry: entry, torrent: &seadex.Torrent{}}},
+		"nyaa:5": {{entry: entry, torrent: &seadex.Torrent{Files: v2PackFiles}}},
+		"nyaa:6": {
+			{entry: entry, torrent: &seadex.Torrent{Files: packFiles}},
+			{entry: entry, torrent: &seadex.Torrent{Files: v2PackFiles}},
+		},
 	}
+	original := release.Revision{Version: 1, Marker: release.RevisionNone}
+	v2 := release.Revision{Version: 2, Marker: release.RevisionVersion}
 	got := censusPacks(cur)
 	want := map[string]packCensus{
-		"nyaa:1": {evidence: packEvidencePack},
-		"nyaa:2": {evidence: packEvidenceSingle, marker: "S01E07"},
-		"nyaa:3": {evidence: packEvidencePack},
+		"nyaa:1": {evidence: packEvidencePack, revision: original},
+		"nyaa:2": {evidence: packEvidenceSingle, marker: "S01E07", revision: original},
+		"nyaa:3": {evidence: packEvidencePack, revision: original},
 		"nyaa:4": {evidence: packEvidenceUnknown},
+		"nyaa:5": {evidence: packEvidencePack, revision: v2},
+		"nyaa:6": {evidence: packEvidencePack, revision: v2},
 	}
 	for key, want := range want {
 		if got[key] != want {
@@ -2587,7 +2602,7 @@ func TestCensusMarkerIgnoresOccurrencesWithoutAMarker(t *testing.T) {
 	got := censusPacks(cur)
 	want := packCensus{evidence: packEvidenceSingle, marker: "S01E07"}
 	for _, key := range []string{"nyaa:5", "nyaa:6", "nyaa:7"} {
-		if got[key] != want {
+		if got[key].evidence != want.evidence || got[key].marker != want.marker {
 			t.Errorf("censusPacks[%s] = %+v, want %+v (a marker-less occurrence must not win the marker)", key, got[key], want)
 		}
 	}
