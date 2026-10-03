@@ -1,13 +1,14 @@
 // Package degradation is the neutral home of the application-wide degradation
 // policy: the cadence-named escalation thresholds, the streak transition rule,
-// and the fractions the shrink and size guards trigger at.
+// the vocabulary of lasting conditions, and the fractions the shrink and size
+// guards trigger at.
 package degradation
 
 // TickEscalationThreshold is the TICK-cadence consecutive-degraded-cycle streak
-// at which a persisted streak escalates its log site from WARN to ERROR (firing
-// the SeadexScoutCycleError Loki rule). 8 passes is about 2h at the default 15m
-// poll_interval: long enough to ride out a transient upstream or arr oddity,
-// short enough that a persistent fault alerts instead of degrading forever.
+// at which a persisted streak escalates its log site from WARN to ERROR. 8 passes
+// is about 2h at the default 15m poll_interval: long enough to ride out a
+// transient upstream or arr oddity, short enough that a persistent fault alerts
+// instead of degrading forever.
 const TickEscalationThreshold = 8
 
 // ReconcileEscalationThreshold is the same policy at the RECONCILE's daily
@@ -17,6 +18,25 @@ const ReconcileEscalationThreshold = 2
 // ShrunkWalkAcceptThreshold is when the LIBRARY shrink guard gives up and
 // accepts the smaller library as the new shape.
 const ShrunkWalkAcceptThreshold = 3 * ReconcileEscalationThreshold
+
+// Condition names a lasting degraded condition. Every escalated ERROR carries one
+// under AttrCondition, and alerts/logql.yaml keys its standing rules on these
+// values, so each value is part of the log contract.
+type Condition string
+
+// AttrCondition is the slog attribute key a Condition is logged under.
+const AttrCondition = "condition"
+
+// The lasting degraded conditions, one per escalating log site.
+const (
+	SeaDexUnreachable           Condition = "seadex-unreachable"
+	SeaDexWindowOversize        Condition = "seadex-window-oversize"
+	SeaDexCatalogueFetchFailing Condition = "seadex-catalogue-fetch-failing"
+	MappingRefreshRejected      Condition = "mapping-refresh-rejected"
+	AniListLookupsFailing       Condition = "anilist-lookups-failing"
+	LibraryWalkShrunk           Condition = "library-walk-shrunk"
+	LibraryWalkPartial          Condition = "library-walk-partial"
+)
 
 // Advance advances or resets a persisted degradation streak in place and reports
 // whether it has reached its escalation threshold. The threshold is a PARAMETER so

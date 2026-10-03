@@ -1,9 +1,9 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
 // written atomically: the last library snapshot (for diffing), the cached Fribb
 // map plus its HTTP validators, the AniList fallback memo, and the degradation
-// streak counters. It holds NO finding state - internal/notify reports findings
-// as STATE and rebuilds its whole set from each pass. A missing file loads as
-// an empty state (a cold start), never an error.
+// streak counters with the conditions they escalated. It holds NO finding state:
+// internal/notify reports findings as STATE and rebuilds its whole set from each
+// pass. A missing file loads as an empty state (a cold start), never an error.
 package state
 
 import (
@@ -51,8 +51,12 @@ type State struct {
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
 	// judged that arr's fresh item count a suspicious truncation and carried its prior
 	// items forward instead.
-	ShrunkWalksByArr map[string]int   `json:"shrunk_walks_by_arr,omitempty"`
-	Library          library.Snapshot `json:"library"`
+	ShrunkWalksByArr map[string]int `json:"shrunk_walks_by_arr,omitempty"`
+	// Standing lists the escalated conditions standing at the last save, so a new
+	// process keeps stating them until an observer sees them end. Owner:
+	// internal/scout's standing set.
+	Standing []StandingCondition `json:"standing,omitempty"`
+	Library  library.Snapshot    `json:"library"`
 	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed, whichever
 	// pre-compare gate closed the cycle: the scout records the fetch outcome ahead of
 	// gate selection, so a coinciding failure cannot hide the outage.
@@ -69,6 +73,13 @@ type State struct {
 	// SchemaVersion by every Save (on the shallow copy it writes; the
 	// caller's State is never mutated).
 	Version int `json:"version,omitempty"`
+}
+
+// StandingCondition is one State.Standing entry; Arr is set only for a condition
+// that stands per arr.
+type StandingCondition struct {
+	Condition degradation.Condition `json:"condition"`
+	Arr       string                `json:"arr,omitempty"`
 }
 
 // Store loads and saves the state file at a fixed path.

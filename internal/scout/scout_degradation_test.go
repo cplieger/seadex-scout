@@ -52,7 +52,7 @@ func secondSeaDexEntry() seadex.Entry {
 // partial-walk streak and its escalation: below the threshold a completed
 // partial cycle only advances the counter (the per-cycle "reason=partial-walk"
 // degraded line is the whole signal), and on the threshold cycle the same site
-// escalates to ERROR - firing the SeadexScoutCycleError Loki rule - because a
+// escalates to ERROR - firing the SeadexScoutLibraryDegraded Loki rule - because a
 // permanently failing series never self-heals and, inside the cold-start
 // window, silences every finding. A completed WHOLE walk resets the streak, so
 // a recovered arr starts fresh instead of escalating on its next blip.
@@ -111,6 +111,9 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 			wantStreak := strconv.Itoa(degradation.ReconcileEscalationThreshold)
 			if got, ok := recorder.AttrValue("library walk partial repeatedly", "consecutive_partial_walks"); tc.wantError && (!ok || got != wantStreak) {
 				t.Errorf("escalation streak attr = %q ok=%v, want %q (the ERROR must carry the up-to-date streak)", got, ok, wantStreak)
+			}
+			if got, ok := recorder.AttrValue("library walk partial repeatedly", "condition"); tc.wantError && (!ok || got != "library-walk-partial") {
+				t.Errorf("escalation condition attr = %q ok=%v, want library-walk-partial (the standing alert rule keys on it)", got, ok)
 			}
 			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
 				t.Errorf("degraded reasons = %v, want [partial-walk]", reasons)

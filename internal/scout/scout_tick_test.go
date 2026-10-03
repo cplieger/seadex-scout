@@ -392,6 +392,9 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 			t.Errorf("after %d oversize ticks ERROR count = %d, want %d", i, got, wantErrors)
 		}
 	}
+	if got, ok := recorder.AttrValue(errSub, "condition"); !ok || got != "seadex-window-oversize" {
+		t.Errorf("escalated oversize ERROR condition = %q (found=%t), want seadex-window-oversize (the standing alert rule keys on it)", got, ok)
+	}
 	if _, window := countWindowModes(sea); window != 0 {
 		t.Errorf("window fetches = %d, want 0 (an oversized window defers to the reconcile, it does not fetch a prefix)", window)
 	}
@@ -1010,6 +1013,9 @@ func TestCycleRetriesReconcileUntilReadyThenGivesUp(t *testing.T) {
 	}
 	if _, window := countWindowModes(sea); window != 0 {
 		t.Errorf("window fetches = %d, want 0 (a tick with no established finding set must not compare, let alone publish)", window)
+	}
+	if probes := len(sea.countSince); probes != 0 {
+		t.Errorf("probes = %d, want 0 (with no restored tick condition to settle, a tick before the first reconcile reads nothing)", probes)
 	}
 	if got := recorder.CountExact("findings reported"); got != summariesBefore {
 		t.Errorf("report summary lines = %d, want the pre-tick %d (publishing a window's findings as the whole state resolves everything else)", got, summariesBefore)

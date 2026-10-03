@@ -151,20 +151,24 @@ func newCore(log *slog.Logger, store StateStore, lib *arrwalk.Walker, mapSrc Map
 // because it is CADENCE-RELATIVE: ~2h on the tick, 8 days on the reconcile.
 
 // Scout runs compare cycles from its assembled dependencies, carrying the
-// compare-cycle components only: the one-shot audit is *Reporter's. The three
-// counters below are per-PROCESS and deliberately not persisted - a restart runs
-// a reconcile, which is exactly the state a fresh count wants, and persisting
-// them would make a losable value load-bearing for correctness.
+// compare-cycle components only: the one-shot audit is *Reporter's. The tick
+// streaks and the retry counter below are per-PROCESS: a restart runs a
+// reconcile, which is the state a fresh count wants. The one exception is the
+// oversize streak of a standing condition, which restoreStanding resumes.
 type Scout struct {
 	core
 	comparer *compare.Comparer
 	notifier *notify.Notifier
+	// standing holds the escalated conditions every completed pass re-states.
+	standing standingSet
 	// aniListStats reports the AniList client's cumulative request counters; nil
 	// when no AniList client is wired (see Deps.AniListStats).
 	aniListStats func() AniListStats
 	// feed rebuilds and persists the indexer's Torznab feed. Nil when no
 	// Torznab feed is configured (the cycle then skips all feed work).
 	feed FeedWriter
+	// persistedStanding is standing as state.json last held it.
+	persistedStanding []state.StandingCondition
 	// pollInterval is the loop's own interval, which decides how many ticks
 	// separate two reconciles (see reconcileEvery).
 	pollInterval time.Duration
@@ -184,6 +188,8 @@ type Scout struct {
 	// process started. Until it has, a tick must not publish the partial set:
 	// emitting 2 rows where the truth is 190 resolves 188 live conditions.
 	ready bool
+	// restored reports whether this process has seeded standing from state.json.
+	restored bool
 }
 
 // reconcileRetryLatch bounds the immediate retry of a reconcile that did not
@@ -223,25 +229,31 @@ func (s *Scout) reconcileCadenceAttr() string {
 	return (time.Duration(s.reconcileEvery()) * s.pollInterval).String()
 }
 
-// Cycle runs ONE loop iteration and reports whether it was healthy. It dispatches
-// between the two kinds of pass: a RECONCILE (the full pass - whole catalogue,
-// whole arr walk, whole compare, whole feed and curation-index rebuild) on the
-// FIRST iteration and every reconcileEvery-th one after it, and a TICK (a bounded
-// recent-changes window) on every other. The first iteration reconciles because
-// everything downstream assumes a complete pass has happened: the notifier's set
-// is empty until one runs, and the tick compares against a cached library only a
-// walk can populate. A reconcile that established no set is retried next pass.
+// Cycle runs ONE loop iteration and reports whether it was healthy. The FIRST
+// iteration and every reconcileEvery-th one after it is a RECONCILE (whole
+// catalogue, arr walk, compare, feed and curation-index rebuild), because the
+// notifier's set and the tick's cached library both need a complete pass; every
+// other iteration is a TICK over a bounded recent-changes window. A reconcile
+// that established no set is retried next pass. A pass a shutdown did not cut
+// short then re-states the standing conditions it did not observe itself, so
+// the alert rules' lookback spans one pass.
 func (s *Scout) Cycle(ctx context.Context) bool {
 	due := s.iterations%s.reconcileEvery() == 0 || s.reconcileRetryDue()
 	s.iterations++
-	if !due {
-		return s.tick(ctx)
+	var healthy bool
+	if due {
+		healthy = s.reconcile(ctx)
+		if !s.ready {
+			// The reconcile did not reach finishCompletedCycle, so the finding set
+			// is still empty or stale: charge the attempt against the retry budget.
+			s.reconcileRetries++
+		}
+	} else {
+		healthy = s.tick(ctx)
 	}
-	healthy := s.reconcile(ctx)
-	if !s.ready {
-		// The reconcile did not reach finishCompletedCycle, so the finding set
-		// is still empty or stale: charge the attempt against the retry budget.
-		s.reconcileRetries++
+	if ctx.Err() == nil {
+		s.standing.restate(s.log, s.iterations)
+		s.persistStanding(ctx)
 	}
 	return healthy
 }
@@ -300,6 +312,11 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 	s.log.Info("reconcile started", "interval", s.reconcileCadenceAttr())
 	startStats := s.aniStats()
 	st := s.loadState(ctx)
+	if !s.restored {
+		// The first pass of a process is always a reconcile, so this is its first load.
+		s.restored = true
+		s.restoreStanding(st.Standing)
+	}
 
 	snap, walkErr := s.library.Walk(ctx)
 	if walkErr != nil && ctx.Err() != nil {
@@ -441,7 +458,12 @@ func logSafeUpstreamError(err error) error {
 // is read off the returned Cache, so this stays the single log site.
 func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache, *mapping.Index, error) {
 	mapCache, idx, mapErr := s.mapping.Load(ctx, &st.Mapping)
-	if mapErr != nil && ctx.Err() == nil {
+	key := standingKey{cond: degradation.MappingRefreshRejected}
+	if mapErr == nil {
+		s.standing.clear(key)
+		return mapCache, idx, nil
+	}
+	if ctx.Err() == nil {
 		attrs := mappingDegradedAttrs(mapErr, idx.Len(), mapCache.RejectedRefreshes)
 		// Escalate on the PERSISTED streak, not on the error type: a guard that keeps
 		// refusing a fresh body with no usable stale cache to return degrades with a
@@ -449,9 +471,12 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 		if mapCache.RejectedRefreshes >= degradation.TickEscalationThreshold {
 			// The attrs carry the streak (stale_consecutive_rejections) and,
 			// when a stale map was returned, the rejecting guard (stale_reason).
-			s.log.Error("mapping degraded: refresh rejected repeatedly; inspect upstream, or remove state.json to cold-start if the change is legitimate", attrs...)
+			s.log.Error("mapping degraded: refresh rejected repeatedly; inspect upstream, or remove state.json to cold-start if the change is legitimate",
+				append(attrs, degradation.AttrCondition, string(key.cond))...)
+			s.standing.observe(key, s.iterations)
 		} else {
 			s.log.Warn("mapping degraded", attrs...)
+			s.standing.clear(key)
 		}
 	}
 	return mapCache, idx, mapErr
@@ -558,17 +583,18 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 
 // escalate emits a latched degradation at the level its streak has earned: ERROR
 // once the streak has reached threshold, WARN before that, with the SAME attrs
-// either way so a Loki query need not know which level it landed at. Four
-// conditions across both kinds of pass share the app's alert contract: WARN is a
-// transient failure or a designed outcome, ERROR is reserved for a condition that
-// will not clear without an operator, and the streak tells those apart. Both
-// messages are passed in, because the WARN and the ERROR say different things.
-func (s *Scout) escalate(streak, threshold int, warnMsg, errMsg string, attrs ...any) {
+// either way so a Loki query need not know which level it landed at. WARN is a
+// transient failure, ERROR a condition that has outlasted its tolerance, and the
+// streak tells them apart. Both messages are passed in because they say
+// different things. Only the ERROR names key's condition and keeps it standing.
+func (s *Scout) escalate(key standingKey, streak, threshold int, warnMsg, errMsg string, attrs ...any) {
 	if streak >= threshold {
-		s.log.Error(errMsg, attrs...)
+		s.log.Error(errMsg, append(attrs, degradation.AttrCondition, string(key.cond))...)
+		s.standing.observe(key, s.iterations)
 		return
 	}
 	s.log.Warn(warnMsg, attrs...)
+	s.standing.clear(key)
 }
 
 // recordAniListDegradation advances or resets the persisted AniList degradation
@@ -578,11 +604,16 @@ func (s *Scout) escalate(streak, threshold int, warnMsg, errMsg string, attrs ..
 // AniList-degraded cycle at the threshold - including one whose completion line
 // the partial-walk arm wins.
 func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) {
-	if degradation.Advance(&st.AniListDegraded, result.Degraded, degradation.ReconcileEscalationThreshold) {
-		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
-			"incomplete_lookups", len(result.IncompleteIDs),
-			"consecutive_anilist_degraded", st.AniListDegraded)
+	key := standingKey{cond: degradation.AniListLookupsFailing}
+	if !degradation.Advance(&st.AniListDegraded, result.Degraded, degradation.ReconcileEscalationThreshold) {
+		s.standing.clear(key)
+		return
 	}
+	s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
+		"incomplete_lookups", len(result.IncompleteIDs),
+		"consecutive_anilist_degraded", st.AniListDegraded,
+		degradation.AttrCondition, string(key.cond))
+	s.standing.observe(key, s.iterations)
 }
 
 // recordPartialWalk advances or resets the persisted partial-walk streak and
@@ -592,10 +623,15 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 // single permanently failing series would only ever WARN, while its items'
 // findings are carried forward on evidence that never refreshes.
 func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
-	if degradation.Advance(&st.PartialWalks, snap.Partial, degradation.ReconcileEscalationThreshold) {
-		s.log.Error("library walk partial repeatedly; the failing series never compare and the one-shot report refuses a partial snapshot, so those items' findings are carried forward on evidence that never refreshes - inspect the arrs' episode endpoints for the skipped series",
-			"consecutive_partial_walks", st.PartialWalks)
+	key := standingKey{cond: degradation.LibraryWalkPartial}
+	if !degradation.Advance(&st.PartialWalks, snap.Partial, degradation.ReconcileEscalationThreshold) {
+		s.standing.clear(key)
+		return
 	}
+	s.log.Error("library walk partial repeatedly; the failing series never compare and the one-shot report refuses a partial snapshot, so those items' findings are carried forward on evidence that never refreshes - inspect the arrs' episode endpoints for the skipped series",
+		"consecutive_partial_walks", st.PartialWalks,
+		degradation.AttrCondition, string(key.cond))
+	s.standing.observe(key, s.iterations)
 }
 
 // logCompletedCycle emits the one completion line the deadman alert counts:
@@ -762,8 +798,13 @@ func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap 
 // resets the streak; a cancelled fetch is evidence of neither an outage nor a
 // recovery, so it leaves the streak untouched and stays silent.
 func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr error) {
+	key := standingKey{cond: degradation.SeaDexCatalogueFetchFailing}
 	if seaErr == nil {
 		st.SeadexFailures = 0
+		s.standing.clear(key)
+		// A full catalogue read is also a successful SeaDex read, so it ends the
+		// fast path's unreachability as surely as a tick read would.
+		s.resetUnreachable()
 		return
 	}
 	if ctx.Err() != nil {
@@ -774,7 +815,7 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	// below it the WARN keeps a blip off the alert. Both levels carry the streak.
 	st.SeadexFailures++
 	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.feed != nil}
-	s.escalate(st.SeadexFailures, degradation.ReconcileEscalationThreshold,
+	s.escalate(key, st.SeadexFailures, degradation.ReconcileEscalationThreshold,
 		"seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle",
 		"seadex fetch failed repeatedly; skipping comparison, findings re-stated unchanged this cycle - inspect SeaDex (releases.moe) reachability and egress",
 		attrs...)
@@ -828,10 +869,12 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 	prior, current := countItemsByArr(st.Library.Items), countItemsByArr(snap.Items)
 	var suspect []string
 	for _, arr := range s.library.EnabledArrs() {
+		key := standingKey{cond: degradation.LibraryWalkShrunk, arr: arr}
 		if prior[arr] == 0 || !degradation.Shrunk(current[arr], prior[arr]) {
 			// A recovered (or never-tripped) side ends its OWN streak; deleting rather
 			// than zeroing keeps the map to the sides with evidence against them.
 			delete(st.ShrunkWalksByArr, arr)
+			s.standing.clear(key)
 			continue
 		}
 		streak := st.ShrunkWalksByArr[arr] + 1
@@ -841,6 +884,7 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 			// WARN, not ERROR: this is a DESIGNED outcome. But it can never be SILENT
 			// - a mass-resolve nobody was told about is what the guard prevents.
 			delete(st.ShrunkWalksByArr, arr)
+			s.standing.clear(key)
 			s.log.Warn("library walk stayed shrunken for the whole tolerated streak; accepting the smaller library for this arr as the new shape, so its stale findings resolve this cycle - if that is not intended, fix that arr and arr_tags and the next walk re-establishes the larger library", attrs...)
 			continue
 		}
@@ -852,7 +896,7 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 		// One log site, escalating: a shrink that persists for a day is a
 		// misconfiguration rather than a blip. Both arms name the arr, both counts,
 		// the streak, the passes left before acceptance, and the remedy.
-		s.escalate(streak, degradation.ReconcileEscalationThreshold,
+		s.escalate(key, streak, degradation.ReconcileEscalationThreshold,
 			"library walk shrank below half this arr's prior snapshot; carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
 			"library walk shrank repeatedly for this arr; still carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
 			attrs...)
@@ -988,11 +1032,11 @@ const saveGrace = 5 * time.Second
 // cancelled (SIGTERM during a redeploy) the atomic write fails with
 // context.Canceled and the caches are lost, so a cancellation is retried once
 // with a detached, briefly-bounded context, letting the expensive AniList memo
-// survive the restart. The retry gets a full saveGrace measured from the
-// CANCELLATION, because the first attempt never spends the stop grace either way.
-// A cancellation is not a fault, so only a genuine write failure logs at ERROR;
-// a deliberate preservation refusal (state.ErrSavePreserved) logs at WARN.
+// survive the restart. A cancellation is not a fault, so only a genuine write
+// failure logs at ERROR; a preservation refusal (state.ErrSavePreserved) logs at
+// WARN. Every save carries the current standing set.
 func (s *Scout) save(ctx context.Context, st *state.State) {
+	st.Standing = s.standing.conditions()
 	err := s.store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
 		// The container stop grace starts at the SIGTERM that cancelled ctx, so the
@@ -1010,7 +1054,9 @@ func (s *Scout) save(ctx context.Context, st *state.State) {
 			return
 		}
 		s.log.Error("state save failed", "error", err)
+		return
 	}
+	s.persistedStanding = st.Standing
 }
 
 // sumCounts totals a per-arr count map for a flat log field.

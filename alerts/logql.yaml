@@ -3,8 +3,9 @@
 # logs to Loki (Grafana Alloy's Docker log discovery does this with no
 # configuration) and evaluate this group with Loki's ruler; firing alerts deliver
 # through your Alertmanager like any Prometheus alert. The rules assume the
-# default JSON log handler (log.format: json); for log.format: text, swap the
-# "| json | level=`ERROR`" parser stage for a "|= `level=ERROR`" line filter.
+# default JSON log handler, log.format: json. For log.format: text, replace each
+# "| json" stage with "| logfmt", which parses the same fields out of the text
+# handler's key=value lines.
 # They also assume the default log.level: info. Six of the matched messages are
 # INFO records ("tick complete", "cycle complete", "reconcile started",
 # "reconcile complete", "report written", "series spans multiple release groups,
@@ -16,11 +17,21 @@
 # selector (or job/service, depending on your log collector) to your deployment
 # and the stall window to your poll_interval.
 #
-# STABLE MESSAGES (the log contract). These six are what the rules below match
-# on, and they are the ONLY log output treated as a contract - they will not be
+# STABLE MESSAGES (the log contract). These are what the rules below match on,
+# and they are the ONLY log output treated as a contract - they will not be
 # renamed or retyped without a matching change here:
 #
-#   level=ERROR                     any run fault (the rules key on the level, not a message)
+#   level=ERROR with no condition   a one-off or local fault (the fault rule keys on
+#                                   the level and the absent attribute, not a message)
+#   level=ERROR with condition=...  a lasting degraded condition, logged on every
+#                                   pass while it holds, by the escalated line or by
+#                                   msg="degraded condition still standing". The
+#                                   values are seadex-unreachable,
+#                                   seadex-window-oversize,
+#                                   seadex-catalogue-fetch-failing,
+#                                   anilist-lookups-failing,
+#                                   mapping-refresh-rejected, library-walk-shrunk
+#                                   (which also carries arr) and library-walk-partial
 #   msg="better release available"  the better-release finding, and the newer
 #                                   revision of a group on disk (status=newer_revision)
 #   msg="series spans multiple release groups, manual review"
@@ -37,74 +48,221 @@
 groups:
   - name: seadex-scout
     rules:
-      # Fault: a daemon run logged an error. The primary case is a failed
-      # Sonarr/Radarr library walk (an arr connection, API, or tag-resolution
-      # failure), which marks the run unhealthy; a failed state save/load or a
-      # panicked run also log at ERROR. The rule counts every level=ERROR line,
-      # so an indexer (Torznab feed) fault trips it too: a feed that stops
-      # outside shutdown (e.g. its :9118 bind fails at startup) or a panicked
-      # feed goroutine logs at ERROR, even though neither touches container
-      # health. SeaDex, mapping, and AniList outages
-      # log at WARN by design (the run stays healthy and keeps prior findings),
-      # so this rule does not fire on an upstream blip — but a degradation that
-      # persists escalates: a suspicious library shrink, a failed SeaDex fetch,
-      # or a partial arr walk repeated for 2 consecutive full reconciles (48h),
-      # a rejected mapping refresh repeated for 8 changed ticks (~2h), or a
-      # SeaDex the fast path could not read on 8 consecutive ticks (~2h)
-      # re-logs at ERROR and fires this rule. "An error was logged" is a one-time event, so route it to a
-      # `send_resolved: false` receiver — the 15m count window clearing means
-      # errors merely stopped, not a real recovery worth announcing as RESOLVED.
+      # Fault: a one-off error, or one only a change or a fix can clear. Every
+      # ERROR line WITHOUT a condition attribute lands here. The usual cause is a
+      # failed Sonarr or Radarr library walk, which also marks the container
+      # unhealthy. The others are a Torznab feed that could not start or
+      # panicked, credentials Prowlarr rejected, a state.json, overrides.json or
+      # health marker that could not be read or written, a check loop that
+      # stalled or could not take its lock, and a recovered panic. A lasting
+      # degraded condition carries a condition attribute instead and belongs to
+      # the two standing rules below, so an upstream outage never fires this
+      # rule once per pass.
+      # A shutdown-interrupted run, a state save skipped to preserve bytes it
+      # could not classify, and a report skipped because another report holds
+      # the lock log at WARN and do not reach it either.
+      #
+      # The [1h] window is longer than the gap between two passes, which is 15
+      # minutes at the default poll_interval. A fault that repeats on every pass
+      # therefore stays one continuously firing alert instead of resolving and
+      # firing again each pass, and a one-off error clears an hour later. How
+      # often a firing alert is sent again is your Alertmanager's
+      # repeat_interval. Clearing means the error stopped repeating, not that
+      # anything was confirmed fixed, so route this rule to a
+      # `send_resolved: false` receiver. On a poll_interval above 20 minutes,
+      # widen the window to at least three times the interval.
       - alert: SeadexScoutCycleError
         expr: |
           sum by (container) (count_over_time(
-            {container="seadex-scout"} | json | level=`ERROR` [15m]
+            {container="seadex-scout"} | json | level=`ERROR` | condition=`` [1h]
           )) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "seadex-scout logged an error"
+          summary: "seadex-scout logged an error that needs a look"
           description: >
-            A seadex-scout daemon run logged an error in the last 15m. The usual
-            cause is a failed Sonarr/Radarr library walk (logged as "library walk
-            failed; cycle unhealthy"), which stops findings from updating; check
-            the arr url and api_key and the /config volume. A persistent
-            degradation also lands here: a library walk that stays shrunken below
-            half the prior snapshot, an arr walk that stays partial, or a SeaDex
-            fetch that keeps failing escalates from WARN to ERROR after 2
-            consecutive full reconciles (48h, since the reconcile is the pass
-            that observes them and it runs daily); a mapping refresh the
-            acceptance guards keep rejecting escalates after 8 attempts (~2h,
-            since a changed tick attempts one too), and a SeaDex the cheap tick
-            cannot read at all escalates after 8 consecutive ticks (~2h);
-            inspect the arrs and arr_tags (or the mapping upstream), or
-            remove state.json to accept the change if it is legitimate. A
-            mapping refresh refused for a reason that cannot self-heal - a body
-            over the download size cap, a list over the record cap, an
-            identifier count over the aggregate budget, a non-array document
-            (the upstream schema moved), or a 304 answered to a request that
-            carried no validators - counts toward that streak even on a first
-            boot with no cache to fall back on. The other
-            frequent ERROR is a health-marker write failure ("queued rerun could
-            not record poll health"); check the /tmp mount and free space, since
-            in external-scheduler mode a stale marker never turns the container
-            unhealthy on its own. A wrong or revoked indexer.prowlarr_api_key
-            (or a per-tracker Torznab URL pointing at the wrong Prowlarr
-            indexer) also reaches this rule, on either the title harvest or a
-            search: an upstream that answers 401/403 or a Torznab error code in
-            the 100-199 credentials band cannot clear without an operator, and
-            left un-alerted it is the worst case here - every search answers the
-            arr an error, the arr counts those toward disabling this indexer with
-            RSS included, and meanwhile the container stays healthy and the
-            compare loop keeps logging "cycle complete". Bounded to one line per
-            upstream per rebuild. A 404 from the same upstream stays a WARN: a
-            removed Prowlarr indexer is a config question but not provably a
-            credential one. What deliberately does NOT reach this rule:
-            a shutdown-interrupted run, a state save the store refused in order
-            to preserve unclassifiable bytes ("state save skipped; on-disk state
-            preserved"), a report skipped because another report holds the lock,
-            and a report half written successfully but without a durable parent
-            directory - none of those need operator action.
+            seadex-scout logged an error in the last hour that is not an
+            upstream outage. The usual cause is a failed read of the Sonarr or
+            Radarr library, logged as `library walk failed`. Findings stop
+            updating and the container is marked unhealthy until a read works
+            again. Check the arr `url` and `api_key`, that the arr is running,
+            and that the `/config` volume is writable.
+
+            The Torznab feed may have failed to start, for example because port
+            9118 is in use. Prowlarr may have rejected
+            `indexer.prowlarr_api_key` or a Torznab URL. `state.json`,
+            `overrides.json` or the health marker in `/tmp` may not be readable
+            or writable. Each of these is fixed on your side.
+
+            A recovered crash, logged as `panicked`, is a bug in seadex-scout.
+            Restart the container and report it with the log line. A check loop
+            that stalled or could not take its lock in `/config` usually clears
+            with a restart. Report it if it comes back.
+
+            Search the container log for `ERROR` to see which case this is.
+            Problems at SeaDex, at AniList or with the anime ID map fire
+            SeadexScoutUpstreamUnavailable instead, and a shrunken or
+            incomplete library fires SeadexScoutLibraryDegraded.
+      # Standing condition: an upstream seadex-scout depends on has been failing
+      # for hours. This is a lasting state rather than an event. While it holds,
+      # the app logs an ERROR naming it in a condition attribute on every pass:
+      # the escalated diagnostic on a pass that checks the upstream, and
+      # "degraded condition still standing" on every other pass. The alert
+      # therefore stays firing for the whole outage and resolves within an hour
+      # of recovery. Route it to a `send_resolved: true` receiver, so the
+      # RESOLVED message tells you the upstream is back. Alertmanager also
+      # re-sends a firing alert every repeat_interval, 4h by default. For one
+      # message per outage, give the route a repeat_interval longer than an
+      # outage lasts and keep it below the notification-log retention, as the
+      # routing notes on SeadexScoutBetterReleaseFound explain.
+      #
+      # The window must exceed the gap between two passes, with margin. Loki's
+      # ruler does not support keep_firing_for. Its RuleDesc has no such field,
+      # so the key parses and the value is discarded, and this lookback alone
+      # holds the alert between two emissions. [1h] covers four passes at the
+      # default 15-minute poll_interval. On a poll_interval above 20 minutes,
+      # widen it to at least three times the interval. With poll_interval: off,
+      # each `poll` run is one pass, so the gap is your scheduler's interval and
+      # the window must be at least three times that. A `poll` run started with
+      # docker exec logs to the exec session rather than the container log, so
+      # in that mode point the selector at the stream that carries its output.
+      #
+      # Group only by condition. Every other attribute on these lines, such as
+      # the streak count or the error text, changes from one pass to the next,
+      # and grouping by one would open a new alert on every pass.
+      #
+      # The app saves its list of standing conditions in state.json and states
+      # each one again when it starts, so a restart during an outage keeps the
+      # alert firing instead of resolving it.
+      - alert: SeadexScoutUpstreamUnavailable
+        expr: |
+          sum by (condition) (count_over_time(
+            {container="seadex-scout"} | json | level=`ERROR`
+            | condition=~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected`
+            [1h]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ if eq $labels.condition "seadex-unreachable" -}}
+            SeaDex is not answering, so seadex-scout cannot see new releases
+            {{- else if eq $labels.condition "seadex-catalogue-fetch-failing" -}}
+            seadex-scout cannot download the full SeaDex catalogue
+            {{- else if eq $labels.condition "seadex-window-oversize" -}}
+            SeaDex changed too much at once for the quick check
+            {{- else if eq $labels.condition "anilist-lookups-failing" -}}
+            AniList is not answering title lookups
+            {{- else if eq $labels.condition "mapping-refresh-rejected" -}}
+            seadex-scout keeps refusing an update to its anime ID map
+            {{- else -}}
+            seadex-scout reports a lasting upstream problem: {{ $labels.condition }}
+            {{- end }}
+          description: >-
+            {{ if eq $labels.condition "seadex-unreachable" -}}
+            seadex-scout has not reached SeaDex at releases.moe on any check for
+            about 2 hours. This is almost always an outage at SeaDex itself, and
+            there is nothing to fix on your side. If this host cannot reach other
+            websites either, check its network instead.
+
+            Your existing findings are kept, and the Torznab feed keeps serving
+            what it already has. Neither picks up anything new until SeaDex
+            answers again. This alert then resolves on its own within an hour.
+            {{- else if eq $labels.condition "seadex-catalogue-fetch-failing" -}}
+            The last 2 full downloads of the SeaDex catalogue have failed. Until it works again, releases removed or edited on SeaDex are
+            not picked up, and your library is not re-checked against the whole
+            catalogue. Your existing findings are kept.
+
+            If SeaDex is unreachable at the same time, this is the same outage
+            and there is nothing to fix on your side. Otherwise, look for
+            `seadex fetch failed` in the container log. The alert resolves after
+            the next daily pass that downloads the catalogue, which can be up to
+            a day after SeaDex comes back.
+            {{- else if eq $labels.condition "seadex-window-oversize" -}}
+            For about 2 hours, SeaDex has reported more changes in the last 48
+            hours than the quick check downloads at once. Until it clears, only
+            the daily full pass picks up changes, so a new release can take up to
+            a day to appear. Your existing findings are kept.
+
+            This usually follows a large edit at SeaDex and clears on its own. If
+            it lasts more than a day, check that this container's clock is
+            correct, because a clock running behind has the same effect.
+            {{- else if eq $labels.condition "anilist-lookups-failing" -}}
+            Title lookups at AniList, graphql.anilist.co, failed on the last 2
+            daily passes. The anime that need a lookup are not compared, and their
+            existing findings are kept unchanged. Anime matched by ID are not
+            affected.
+
+            This is usually an outage or rate limit at AniList, and there is
+            nothing to fix on your side. If this host cannot reach other websites
+            either, check its network instead. The alert resolves after a daily
+            pass whose lookups succeed.
+            {{- else if eq $labels.condition "mapping-refresh-rejected" -}}
+            seadex-scout refused the last 8 updates of its anime ID map, the Fribb
+            anime-lists file on GitHub, because they failed its safety checks. It
+            keeps matching with its last good copy, so findings continue on
+            slightly older ID data. On a first start with no saved copy, nothing
+            is compared until an update is accepted.
+
+            If the list was reorganized on purpose, remove `state.json` from the
+            `/config` volume and restart to accept it. The next start rebuilds
+            the caches, which can take about half an hour. Otherwise, wait for
+            the list to be fixed upstream. The alert resolves once an update is
+            accepted.
+            {{- else -}}
+            seadex-scout reports the lasting condition {{ $labels.condition }}.
+            Search the container log for lines with this condition.
+            {{- end }}
+      # Standing condition: Sonarr or Radarr keeps returning a library that is
+      # much smaller or incomplete. Unlike the upstream rule above, this is a
+      # local fault to act on. It is a lasting state with the same emission
+      # contract, window and routing as SeadexScoutUpstreamUnavailable, so the
+      # comments there apply here too.
+      #
+      # Group by condition and arr. A shrunken library is judged per arr, so each
+      # arr is its own alert and one arr recovering resolves only its own.
+      - alert: SeadexScoutLibraryDegraded
+        expr: |
+          sum by (condition, arr) (count_over_time(
+            {container="seadex-scout"} | json | level=`ERROR`
+            | condition=~`library-walk-shrunk|library-walk-partial` [1h]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ if eq $labels.condition "library-walk-shrunk" -}}
+            seadex-scout sees far fewer items in {{ $labels.arr }} than before
+            {{- else if eq $labels.condition "library-walk-partial" -}}
+            Sonarr could not return the episodes of some series
+            {{- else -}}
+            seadex-scout reports a lasting library problem: {{ $labels.condition }}
+            {{- end }}
+          description: >-
+            {{ if eq $labels.condition "library-walk-shrunk" -}}
+            On the last 2 daily passes, {{ $labels.arr }} returned less than half
+            the series or movies it returned before. seadex-scout treats that as a
+            fault, so it keeps comparing against its previous copy of that library
+            and no findings are lost. Check that {{ $labels.arr }} is running with
+            its full library and that `arr_tags` still matches it.
+
+            If the smaller library is intended, remove `state.json` from the
+            `/config` volume and restart to accept it now. Otherwise seadex-scout
+            accepts it on its own after 6 daily passes in a row. The findings for
+            the missing items then resolve, and so does this alert.
+            {{- else if eq $labels.condition "library-walk-partial" -}}
+            On the last 2 daily passes, Sonarr failed to return the episode list
+            for some series. Those series are not compared, and their existing
+            findings are kept without being refreshed. Search the container log
+            for `sonarr episode fetch` to see which series, then check them in
+            Sonarr.
+            {{- else -}}
+            seadex-scout reports the lasting condition {{ $labels.condition }}.
+            Search the container log for lines with this condition.
+            {{- end }}
       # Deadman (daemon mode): the poll loop closes every iteration with a
       # completion line — `tick complete` / `cycle complete` when the pass did
       # its job, `tick degraded` / `cycle degraded` (with a reason attribute)
@@ -126,9 +284,9 @@ groups:
       # for the same event must not disagree, or the tighter one pages for what
       # the looser one calls healthy. At the 15m default the marker is what actually
       # restarts a wedged loop, at 3h; this rule firing just after that is the
-      # signal the restart did not help. Unlike the other three (one-time
-      # events), this is a condition/deadman — keep it on a `send_resolved: true`
-      # receiver so you are told when the watcher recovers.
+      # signal the restart did not help. Like the two standing rules, and unlike
+      # the one-time events, this is a condition and a deadman. Keep it on a
+      # `send_resolved: true` receiver so you are told when the watcher recovers.
       - alert: SeadexScoutScanStalled
         expr: |
           absent_over_time({container="seadex-scout"} |~ `((cycle|tick) (complete|degraded)|reconcile started)` [3h])
@@ -150,7 +308,7 @@ groups:
             this deadman quiet during a SeaDex outage or a long quiet stretch
             upstream — neither is a wedged loop, and neither is fixed by the
             restart this rule asks for; the outage alerts on its own through
-            SeadexScoutCycleError once the fast path has been blind for 2h.
+            SeadexScoutUpstreamUnavailable after about 2 hours.
             Matching the START line keeps it quiet through a slow cold pass,
             which is the same event the health lease tolerates for 3h.
             The 3h window assumes a poll_interval of 1h or less (the default is
