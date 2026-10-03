@@ -30,6 +30,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/pathredact"
+	"github.com/cplieger/seadex-scout/internal/reportfs"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 
@@ -243,6 +244,9 @@ func runReport(cfg *config.Config) (err error) {
 		return pathredact.Err(cfg.ReportDir, err)
 	}
 	defer release()
+	if probeErr := probeReportDir(ctx, cfg.ReportDir); probeErr != nil {
+		return probeErr
+	}
 
 	// Narrower than the daemon's build: a read-only state store, so a corrupt
 	// state.json is left in place for the daemon's own Load to detect and report.
@@ -279,6 +283,31 @@ func checkReportDir(dir string) error {
 			"half of the report pair - use an absolute path under the /config mount")
 	}
 	return nil
+}
+
+// probeWritable is atomicfile.ProbeWritable behind a package variable: running as
+// root, no permission bit can make the probe fail in a test.
+var probeWritable = atomicfile.ProbeWritable
+
+// probeReportDir proves report.dir takes an owner-only write the way the report
+// pair's writes do, so a read-only, full or ACL-widening mount fails before the
+// ~25m walk rather than at the final write. Field-name-only, like checkReportDir.
+func probeReportDir(ctx context.Context, dir string) error {
+	res, err := probeWritable(ctx, dir, atomicfile.WithMode(reportfs.FileMode))
+	if err != nil {
+		return pathredact.Err(dir, err)
+	}
+	if res.Writable() {
+		return nil
+	}
+	cause := pathredact.Err(dir, res.Err)
+	if errors.Is(res.Err, atomicfile.ErrModeNotStored) {
+		return fmt.Errorf("report.dir does not keep files owner-only (%#o), usually because "+
+			"of an inherited ACL on the mount - remove the ACL or point report.dir at a "+
+			"directory without one: %w", reportfs.FileMode, cause)
+	}
+	return fmt.Errorf("report.dir is not writable (%s failed) - check that the mount is "+
+		"read-write, has free space and is writable by the container user: %w", res.Stage, cause)
 }
 
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).

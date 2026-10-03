@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/atomicfile/v3"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
@@ -890,6 +891,85 @@ func TestRunReportRejectsRelativeReportDir(t *testing.T) {
 	}
 	if _, statErr := os.Stat("rel-report-dir"); statErr == nil {
 		t.Error("runReport created the relative report dir before refusing")
+	}
+}
+
+// TestRunReportProbesReportDirBeforeTheWalk pins that runReport refuses a
+// report.dir the pair's owner-only writes would fail on BEFORE it builds anything.
+// The probe is stubbed with the ACL-widening refusal, which root cannot provoke on
+// a test filesystem. Serial (swaps probeWritable).
+func TestRunReportProbesReportDirBeforeTheWalk(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	probed := false
+	probeWritable = func(_ context.Context, d string, _ ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+		probed = true
+		return atomicfile.ProbeResult{
+			Dir:   d,
+			Stage: atomicfile.ProbeStageCreate,
+			Err:   fmt.Errorf("%w: %s/.atomicfile-1.tmp: asked 0600, stored 0670", atomicfile.ErrModeNotStored, d),
+		}, nil
+	}
+	t.Cleanup(func() { probeWritable = atomicfile.ProbeWritable })
+
+	err := runReport(&config.Config{ReportDir: dir})
+	if !probed {
+		t.Fatalf("runReport(%q) never probed report.dir; err = %v", dir, err)
+	}
+	if !errors.Is(err, atomicfile.ErrModeNotStored) {
+		t.Fatalf("runReport(%q) = %v, want the probe's ErrModeNotStored", dir, err)
+	}
+	for _, want := range []string{"report.dir", "ACL"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("runReport(%q) error = %q, want it to name %q", dir, err, want)
+		}
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("report.dir probe error echoes the configured value: %v", err)
+	}
+}
+
+// TestProbeReportDirAsksForOwnerOnlyMode pins the probe's mode intent. An
+// Option is opaque, so the options the probe receives are replayed through a
+// real write and the file it leaves is what they mean. Serial (swaps
+// probeWritable).
+func TestProbeReportDirAsksForOwnerOnlyMode(t *testing.T) {
+	var got []atomicfile.Option
+	probeWritable = func(_ context.Context, d string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+		got = opts
+		return atomicfile.ProbeResult{Dir: d}, nil
+	}
+	t.Cleanup(func() { probeWritable = atomicfile.ProbeWritable })
+
+	if err := probeReportDir(t.Context(), t.TempDir()); err != nil {
+		t.Fatalf("probeReportDir() = %v, want nil", err)
+	}
+	replay := filepath.Join(t.TempDir(), "replay")
+	if _, err := atomicfile.WriteFile(t.Context(), replay, []byte("x"), got...); err != nil {
+		t.Fatalf("Setup: WriteFile(replay) with the probe's options: %v", err)
+	}
+	info, err := os.Stat(replay)
+	if err != nil {
+		t.Fatalf("Setup: Stat(replay): %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("probeReportDir probed with options that write mode %v, want -rw-------: the probe "+
+			"must ask for the mode the report pair is written at", perm)
+	}
+}
+
+// TestProbeReportDirAcceptsWritableDir pins the real probe's pass path: a
+// writable report.dir passes and the probe leaves nothing behind in it.
+func TestProbeReportDirAcceptsWritableDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := probeReportDir(t.Context(), dir); err != nil {
+		t.Fatalf("probeReportDir(%q) = %v, want nil", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", dir, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("probeReportDir(%q) left %d entries behind, want 0", dir, len(entries))
 	}
 }
 
