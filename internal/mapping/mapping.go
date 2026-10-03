@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/atomicfile/v4"
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/runesafe/v2"
