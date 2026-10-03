@@ -27,7 +27,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/atomicfile/v4"
 	"github.com/cplieger/envx/yamlenv/v2"
 	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/seadex-scout/internal/credname"
