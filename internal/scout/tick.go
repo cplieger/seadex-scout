@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadexapi"
@@ -23,9 +24,9 @@ const (
 	changeWindow = 48 * time.Hour
 
 	// frozenFastPathTolerance is how long the fast path may stay frozen before the
-	// diagnostic ERRORs. It pages at ERROR because nothing in this stack alerts on
-	// WARN, and a frozen fast path means no new RSS items and no new findings, with
-	// only the reconcile still working. It is the tolerance BOTH latches use; the
+	// diagnostic ERRORs. It escalates because the alert rules ignore WARN, and a
+	// frozen fast path means no new RSS items and no new findings, with only the
+	// reconcile still working. It is the tolerance BOTH latches use; the
 	// unreachable one is the tick's half of the persisted SeadexFailures streak,
 	// which advances only inside a reconcile.
 	frozenFastPathTolerance = 2 * time.Hour
@@ -59,8 +60,9 @@ func (s *Scout) tick(ctx context.Context) bool {
 	if !s.ready {
 		// No complete pass has established the finding set yet, so this tick's
 		// handful of findings would publish as the app's whole state. Emit the
-		// liveness line and nothing else: an empty "findings reported" line reads as
-		// "no findings", a claim this tick cannot make.
+		// liveness line and publish nothing: an empty "findings reported" line reads
+		// as "no findings", a claim this tick cannot make.
+		s.settleRestoredTickConditions(ctx)
 		s.logTickDegraded("awaiting-first-reconcile", "reconcile_attempts", s.reconcileRetries)
 		return true
 	}
@@ -78,7 +80,8 @@ func (s *Scout) tick(ctx context.Context) bool {
 	}
 	switch {
 	case count == 0:
-		s.oversizeRun, s.unreachableRun = 0, 0
+		s.resetOversize()
+		s.resetUnreachable()
 		// A complete tick: the probe answered, and the answer was "nothing". Nothing
 		// was compared, so the standing set is re-stated rather than replaced.
 		s.notifier.Reemit()
@@ -86,14 +89,14 @@ func (s *Scout) tick(ctx context.Context) bool {
 	case count >= seadexapi.MaxWindowEntries:
 		// This EXIT's own evidence settles the other counter: the probe read the
 		// upstream, and the answer was not empty.
-		s.unreachableRun = 0
+		s.resetUnreachable()
 		return s.tickOversizeWindow(ctx, count)
 	}
 	// Not an exit: the tick continues into a window fetch, so only the counter that
 	// measures upstream STATE is settled here. Reachability is not established
 	// until that fetch returns, and resetting unreachableRun here would cancel the
 	// increment the same tick's fetch failure makes.
-	s.oversizeRun = 0
+	s.resetOversize()
 	return s.tickChanged(ctx, since, count)
 }
 
@@ -183,10 +186,43 @@ func (s *Scout) logTickDegraded(reason string, attrs ...any) {
 // picks a counter. It re-fires at and above the threshold, so a count-based rule
 // keeps firing while the condition holds.
 func (s *Scout) warnUnreachableUpstream(msg string, err error) {
-	s.escalate(s.unreachableRun, s.latchTicks(), msg,
+	s.escalate(standingKey{cond: degradation.SeaDexUnreachable}, s.unreachableRun, s.latchTicks(), msg,
 		"SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
 		attrError, logSafeUpstreamError(err),
 		"consecutive_unreachable_ticks", s.unreachableRun)
+}
+
+// resetUnreachable ends the fast path's unreachability streak and the standing
+// condition it escalated; every site that observes a successful SeaDex read
+// resets through it, so no reset can leave the condition standing.
+func (s *Scout) resetUnreachable() {
+	s.unreachableRun = 0
+	s.standing.clear(standingKey{cond: degradation.SeaDexUnreachable})
+}
+
+// resetOversize is resetUnreachable's sibling for the oversize streak.
+func (s *Scout) resetOversize() {
+	s.oversizeRun = 0
+	s.standing.clear(standingKey{cond: degradation.SeaDexWindowOversize})
+}
+
+// settleRestoredTickConditions probes SeaDex for a tick condition restored from
+// state.json before any reconcile has succeeded, so it clears when SeaDex
+// answers instead of at the next daily pass, up to a day later. A failed probe
+// leaves it standing for the end-of-pass re-statement.
+func (s *Scout) settleRestoredTickConditions(ctx context.Context) {
+	if !s.standing.has(standingKey{cond: degradation.SeaDexUnreachable}) &&
+		!s.standing.has(standingKey{cond: degradation.SeaDexWindowOversize}) {
+		return
+	}
+	count, err := s.seadex.CountWindow(ctx, time.Now().Add(-changeWindow))
+	if err != nil {
+		return
+	}
+	s.resetUnreachable()
+	if count < seadexapi.MaxWindowEntries {
+		s.resetOversize()
+	}
 }
 
 // warnOversizeWindow reports a window too large to fetch, escalating a sustained
@@ -194,7 +230,7 @@ func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 // is working. The remedy is to wait for the reconcile or check the clock - one
 // running BEHIND widens every window the same way a bulk upstream edit does.
 func (s *Scout) warnOversizeWindow(count int) {
-	s.escalate(s.oversizeRun, s.latchTicks(),
+	s.escalate(standingKey{cond: degradation.SeaDexWindowOversize}, s.oversizeRun, s.latchTicks(),
 		"SeaDex change window too large to fetch; deferring to the reconcile",
 		"SeaDex change window has been too large to fetch repeatedly; the fast path is frozen and only the daily reconcile is refreshing - check this container's clock, then wait for the reconcile",
 		"window_entries", count, "max", seadexapi.MaxWindowEntries,
@@ -228,7 +264,7 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 	}
 	// The fast path READ the upstream, so this is where its unreachability streak
 	// ends - a reset at the probe would cancel this boundary's own increment.
-	s.unreachableRun = 0
+	s.resetUnreachable()
 	if !mapUsable(mapErr) {
 		// The gate runs BEFORE the feed advance deliberately; see
 		// tickMappingUnusable for the rule and for all three of its effects.

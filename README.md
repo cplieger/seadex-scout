@@ -479,7 +479,9 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `SeadexScoutCycleError` | a run logs an error: the Sonarr/Radarr library walk failed, or a degradation guard escalated | warning |
+| `SeadexScoutCycleError` | a run logs an error that is not a lasting upstream or library problem, such as a failed Sonarr/Radarr library read, a feed that cannot start, or a crash | warning |
+| `SeadexScoutUpstreamUnavailable` | SeaDex, AniList or the anime ID map has been failing long enough to escalate; fires once per outage and resolves when it recovers | warning |
+| `SeadexScoutLibraryDegraded` | an arr library has shrunk by more than half or returned incomplete episode lists on 2 daily passes; fires once and resolves when it recovers | warning |
 | `SeadexScoutScanStalled` | no `tick`/`cycle` completion line and no `reconcile started` in 3h, so the poll loop is wedged | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` in 72h, so the 24h full pass has stopped while ticks keep the stall rule satisfied | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk, or a newer revision of the group on disk (informational, not a fault) | info |
@@ -495,8 +497,7 @@ so its lines never reach the container's log stream: the count rules go blind an
 both stall rules false-fire. Drop them and alert on your external scheduler's job
 result. A report is observed only as the container's command (`mode: report`).
 The rules assume the default `info` level and JSON log handler; for
-`log.format: text`, swap the `| json | level="ERROR"` parser stage for a
-`|= "level=ERROR"` line filter. Route by whatever labels your Alertmanager uses.
+`log.format: text`, replace each `| json` parser stage with `| logfmt`. Route by whatever labels your Alertmanager uses.
 
 ## Contributing
 

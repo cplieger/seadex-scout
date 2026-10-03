@@ -246,7 +246,7 @@ func TestCycleShrunkSideDoesNotRatchetPriorCount(t *testing.T) {
 // TestCycleShrunkSideEscalatesThenAcceptsAtThreshold pins the whole ladder of
 // the single shrink log site, per arr: below degradation.ReconcileEscalationThreshold a
 // shrunken side WARNs, at that threshold the SAME site logs ERROR (firing the
-// SeadexScoutCycleError Loki rule) while still withholding the side, and at
+// SeadexScoutLibraryDegraded Loki rule) while still withholding the side, and at
 // degradation.ShrunkWalkAcceptThreshold the guard ACCEPTS the smaller library with
 // one loud WARN, not an ERROR, because acceptance is a designed outcome rather than
 // a condition needing an operator. On acceptance the fresh (empty) side is persisted,
@@ -314,6 +314,9 @@ func TestCycleShrunkSideEscalatesThenAcceptsAtThreshold(t *testing.T) {
 				}
 				if !slices.Contains(findingArrs(recorder), library.ArrRadarr) {
 					t.Error("withheld side's finding was dropped, want it still stated")
+				}
+				if tc.wantLevel == slog.LevelError && !recorder.HasAttr("library walk shrank repeatedly", "condition", "library-walk-shrunk") {
+					t.Error("escalated shrink ERROR carries no condition=library-walk-shrunk, want it (the standing alert rule keys on it)")
 				}
 				return
 			}

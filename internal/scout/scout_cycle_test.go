@@ -461,9 +461,9 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 // TestCycleSeaDexFailureEscalatesAfterRepeatedFailures pins the WARN-to-ERROR
 // escalation of the single seadex-fetch-failed log site (mirroring the
 // shrunk-walk and mapping guards'): below the threshold a failed SeaDex fetch
-// logs at WARN; on the 8th consecutive failure (the persisted streak reaching
-// degradation.ReconcileEscalationThreshold) the same site logs at ERROR (firing the
-// existing SeadexScoutCycleError Loki rule) - exactly one line either way,
+// logs at WARN; once the persisted streak reaches
+// degradation.ReconcileEscalationThreshold the same site logs at ERROR (firing the
+// SeadexScoutUpstreamUnavailable Loki rule) - exactly one line either way,
 // with the streak persisted, prior findings preserved, and the "cycle
 // degraded" completion line unchanged.
 func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
@@ -504,6 +504,9 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 				if errs != 1 || warns != 0 {
 					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN (single log site)", errs, warns)
 				}
+				if got, ok := recorder.AttrValue("seadex fetch failed repeatedly", "condition"); !ok || got != "seadex-catalogue-fetch-failing" {
+					t.Errorf("escalation condition attr = %q (found=%t), want seadex-catalogue-fetch-failing (the standing alert rule keys on it)", got, ok)
+				}
 			} else if warns != 1 || errs != 0 {
 				t.Errorf("below-threshold log counts: WARN=%d ERROR=%d, want exactly one WARN and no ERROR", warns, errs)
 			}
@@ -521,7 +524,7 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 // gate precedence cannot hide an observed SeaDex outage: when an unusable
 // mapping wins the pre-compare gate on the same cycle the SeaDex fetch failed,
 // the streak still advances and the single seadex-fetch-failed site still
-// escalates to ERROR at the threshold (firing SeadexScoutCycleError). Before the
+// escalates to ERROR at the threshold (firing SeadexScoutUpstreamUnavailable). Before the
 // fetch outcome was recorded ahead of gate selection, a coinciding
 // mapping or walk gate left the streak frozen, so a first boot with both
 // upstreams down could WARN forever and never alert.
@@ -1061,7 +1064,7 @@ func TestSaveGenuineFailureLogsError(t *testing.T) {
 // escalation of the single degraded-mapping log site: below the threshold a
 // guard-rejected refresh logs "mapping degraded" at WARN; once the persisted
 // streak reaches degradation.TickEscalationThreshold the same site logs at
-// ERROR (firing the existing SeadexScoutCycleError Loki rule) with the remedy
+// ERROR (firing the SeadexScoutUpstreamUnavailable Loki rule) with the remedy
 // in the message and the streak/guard in the structured attrs - exactly one
 // line either way (no double-logging), still returning the stale cache.
 func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
@@ -1112,6 +1115,9 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 			if tc.wantError {
 				if errs != 1 || warns != 0 {
 					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN (single log site)", errs, warns)
+				}
+				if got, ok := recorder.AttrValue("mapping degraded", "condition"); !ok || got != "mapping-refresh-rejected" {
+					t.Errorf("escalation condition attr = %q (found=%t), want mapping-refresh-rejected (the standing alert rule keys on it)", got, ok)
 				}
 			} else if warns != 1 || errs != 0 {
 				t.Errorf("below-threshold log counts: WARN=%d ERROR=%d, want exactly one WARN and no ERROR", warns, errs)
@@ -1566,7 +1572,7 @@ func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 // TestCycleAniListDegradedStreakEscalatesToError pins the fourth escalation
 // class: a persistent AniList degradation (result.Degraded on consecutive
 // completed cycles) must escalate its log site to ERROR (firing the
-// SeadexScoutCycleError rule) at the shared threshold, exactly like the
+// SeadexScoutUpstreamUnavailable rule) at the shared threshold, exactly like the
 // shrunk-walk, SeaDex-failure, and mapping-rejection streaks: a permanently
 // broken egress to graphql.anilist.co would otherwise WARN "cycle degraded"
 // forever while findings stay frozen. Below the threshold no ERROR fires,
@@ -1625,6 +1631,9 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 	}
 	if n := recorder.CountExact("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"); n != 1 {
 		t.Errorf("escalation ERROR count at threshold = %d, want 1", n)
+	}
+	if got, ok := recorder.AttrValue("anilist lookups degraded repeatedly", "condition"); !ok || got != "anilist-lookups-failing" {
+		t.Errorf("escalation condition attr = %q (found=%t), want anilist-lookups-failing (the standing alert rule keys on it)", got, ok)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 1 {
 		t.Errorf("'cycle degraded' completion line count = %d, want 1 (the deadman vocabulary must not change)", n)

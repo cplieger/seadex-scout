@@ -38,7 +38,7 @@ every 24 hours after that, and a **tick** (a bounded recent-changes window
 compared against the cached library snapshot) on every other iteration.
 It binds no HTTP port unless that feed is configured. Cross-cycle state is a
 single atomic JSON file (library snapshot, cached ID map, AniList memo,
-degradation streaks); when the feed is configured, the cycle also persists the
+degradation streaks and the conditions they escalated); when the feed is configured, the cycle also persists the
 materialized feed snapshot as a second atomic JSON file the server reads. The
 finding set is deliberately NOT part of it: findings are current state held in
 memory and re-emitted every pass, so a notification lost downstream is
@@ -61,7 +61,9 @@ direction (leaves have no internal imports):
 - `internal/degradation`: the shared degradation policy: the two cadence-named
   thresholds a persisted degradation streak escalates from WARN to ERROR at (a
   tick's and a reconcile's), the streak transition rule, the shrink guards'
-  trigger fraction, and the library shrink guard's acceptance threshold.
+  trigger fraction, the library shrink guard's acceptance threshold, and the
+  `Condition` values an escalated ERROR carries, which `alerts/logql.yaml`
+  keys its standing rules on.
 - `internal/titlekey`: the normalized-title key algorithm shared by the
   matcher's title index and the AniList payload gate.
 - `internal/seadex`: the releases.moe PocketBase client (paged entries with the
