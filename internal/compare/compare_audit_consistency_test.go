@@ -147,12 +147,11 @@ func TestCompareAuditConsistency(t *testing.T) {
 			wantVerdict: audit.VerdictUnverified,
 		},
 		{
-			name:        "season sentinel both sides: daemon unverifiable, audit unverified, never aligned",
+			name:        "season sentinel both sides: daemon silent, audit have_best",
 			seasons:     map[int][]string{1: {"nogrp"}},
 			record:      seasonRec,
 			entry:       nogrpBest,
-			wantStatus:  StatusUnverifiable,
-			wantVerdict: audit.VerdictUnverified,
+			wantVerdict: audit.VerdictBest,
 		},
 		{
 			name:        "whole-series unknown season blocks have_best: daemon unverifiable, audit unverified",

@@ -39,7 +39,7 @@ const (
 	// VerdictNoFile means the item (or the mapped season) has no file on disk.
 	VerdictNoFile Verdict = "no_file"
 	// VerdictUnverified means the item has files on disk but the comparison is
-	// unverifiable: the release-group evidence on at least one side is unknown
+	// unverifiable: the release-group evidence on exactly one side is unknown
 	// (an untagged release, NOGRP), or the library walk could not read this
 	// item's file data at all, so neither alignment nor a divergence can
 	// honestly be claimed.
@@ -292,26 +292,6 @@ func itemTotals(matched map[string]itemStanding, uncoveredKeys []string) ItemTot
 		}
 	}
 	return t
-}
-
-// notBestVerdicts are the verdicts that say the held release is not SeaDex's
-// best while a best exists to move to: what the daemon reports as an upgrade.
-var notBestVerdicts = []Verdict{VerdictAlt, VerdictOlderRevision, VerdictUnlisted}
-
-// HiddenFrom counts the not-at-best rows (have_alt, have_older_revision,
-// have_unlisted) whose AniList id is absent from reported, the ids the daemon
-// currently emits a finding for.
-func (r *Report) HiddenFrom(reported map[int]struct{}) int {
-	n := 0
-	for i := range r.Rows {
-		if !slices.Contains(notBestVerdicts, r.Rows[i].Verdict) {
-			continue
-		}
-		if _, ok := reported[r.Rows[i].AniListID]; !ok {
-			n++
-		}
-	}
-	return n
 }
 
 // incompleteEntries renders the transiently-unresolved AniList ids as the

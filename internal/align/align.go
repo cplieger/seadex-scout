@@ -186,7 +186,7 @@ func ItemKind(item *library.Item) ScopeKind {
 // sorted, deduped union of on-disk groups; how many real seasons (season 0
 // excluded) carried files; and whether any of those seasons matched an
 // alt-only group, proved unlisted, or was unverifiable (unknown group evidence
-// on either side of its comparison).
+// on one side of its comparison).
 type summary struct {
 	Groups []string
 	// superseded is the set of best groups held behind the listing once each

@@ -7,19 +7,20 @@ seadex-scout keeps your Sonarr and Radarr anime library in sync with the best re
 
 ## What it does
 
-seadex-scout helps you keep your anime library on SeaDex's recommended releases, in three ways:
+seadex-scout helps you keep your anime library on SeaDex's recommended releases, in four ways:
 
 - Tells you when SeaDex lists a better release than yours, or a newer v2 or REPACK of it.
+- Shows those upgrades, and how much of your library matches SeaDex, in Grafana.
 - Writes an on-demand report comparing each season you have with SeaDex.
 - Can offer SeaDex's picks to Sonarr and Radarr as an indexer, so they download them under your quality rules.
 
-You can leave out remuxes, require dual audio, skip specials and add AnimeBytes releases. It checks SeaDex every 15 minutes and rereads your whole library once a day.
+You can leave out remuxes, require dual audio, skip specials and add AnimeBytes releases.
 
 ## Who it is for
 
-seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, season by season, and reports to its log and a report file. It sends no messages. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
+seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, season by season, and reports to its log, a dashboard and a report file. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
 
-You need a Sonarr instance, a Radarr instance or both, with anime in them. The optional indexer also needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
+You need a Sonarr instance, a Radarr instance or both, with anime in them. The dashboard needs Grafana with Loki collecting the container's log. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 
 seadex-scout is free software under the GPL-3.0-or-later license.
 <!-- hub-overview END -->
@@ -66,7 +67,9 @@ On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**.
 
 ## Reading the results
 
-seadex-scout has no web page. Its findings go to the container log and to the report below. Each finding is one `better release available` warning. It names the show, the release group you have, the one SeaDex recommends, and a link to the release. A finding repeats on every check until you upgrade, so a log alert tool such as Loki can keep reminding you, as [Monitoring](#monitoring) shows. To stop the reminders for one show, add the `al_id` from its log line to `filters.ignore`.
+The easiest place to read the results is the Grafana dashboard each release ships. It lists every upgrade newest first, with links to the release and to the show in Sonarr or Radarr, and shows how much of your library is at SeaDex's best or alt. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
+
+To get a message instead, load the shipped Loki alert rules. Your Alertmanager then sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. [Monitoring and alerts](docs/monitoring.md#alerting) shows how. To stop the messages for one show, add its `al_id` to `filters.ignore`.
 
 For a full report, run this while the container is up:
 
@@ -74,7 +77,7 @@ For a full report, run this while the container is up:
 docker exec seadex-scout /seadex-scout report
 ```
 
-It writes a timestamped Markdown and JSON pair into `config/reports`. Each season gets a verdict, such as `have_best` or `have_alt`. seadex-scout never deletes old reports. [How seadex-scout works](docs/how-it-works.md#the-report) explains every verdict.
+It writes a timestamped Markdown and JSON pair into `config/reports`, with a verdict for each season. [How seadex-scout works](docs/how-it-works.md#the-report) explains every verdict.
 
 ## Adding the indexer
 

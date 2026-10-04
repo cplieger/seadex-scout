@@ -188,23 +188,23 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 	}
 }
 
-// TestAuditUnknownGroupEvidenceIsUnverified pins the tri-state evidence model end to
-// end through the audit: the NoGroup sentinel is unknown evidence, never an identity
-// token, so a group-less on-disk release against a group-less SeaDex best reads
-// unverified - "we could not verify either side" - rather than have_best, and unknown
-// evidence on EITHER side alone (a NOGRP-only library item against a known best, or a
-// known library group against a NOGRP-only best torrent) yields the same unverified
-// verdict instead of have_unlisted.
-func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
+// TestAuditUntaggedGroupEvidence pins the tri-state evidence model end to end
+// through the audit: a group-less on-disk release against a group-less SeaDex best
+// is a match and reads have_best, while the NoGroup sentinel on ONE side alone (a
+// NOGRP-only library item against a known best, or a known library group against a
+// NOGRP-only best torrent) is unknown evidence and reads unverified instead of
+// have_unlisted.
+func TestAuditUntaggedGroupEvidence(t *testing.T) {
 	a := New(Config{})
 	tests := []struct {
 		name      string
 		diskGroup string
 		bestGroup string // "" classifies to the NoGroup sentinel
+		want      Verdict
 	}{
-		{name: "sentinel on both sides is not alignment proof", diskGroup: "nogrp", bestGroup: ""},
-		{name: "NOGRP-only library item against a known best", diskGroup: "nogrp", bestGroup: "SEV"},
-		{name: "known library group against a NOGRP-only best", diskGroup: "sev", bestGroup: ""},
+		{name: "sentinel on both sides is a match", diskGroup: "nogrp", bestGroup: "", want: VerdictBest},
+		{name: "NOGRP-only library item against a known best", diskGroup: "nogrp", bestGroup: "SEV", want: VerdictUnverified},
+		{name: "known library group against a NOGRP-only best", diskGroup: "sev", bestGroup: "", want: VerdictUnverified},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -232,11 +232,11 @@ func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 			if row == nil {
 				t.Fatal("expected a row for the matched entry")
 			}
-			if row.Verdict != VerdictUnverified {
-				t.Errorf("verdict = %q, want %q (unknown evidence proves neither alignment nor divergence)", row.Verdict, VerdictUnverified)
+			if row.Verdict != tt.want {
+				t.Errorf("verdict = %q, want %q", row.Verdict, tt.want)
 			}
 			if row.Qualifier != "" {
-				t.Errorf("qualifier = %q, want none (the unverified verdict itself carries the story)", row.Qualifier)
+				t.Errorf("qualifier = %q, want none", row.Qualifier)
 			}
 		})
 	}

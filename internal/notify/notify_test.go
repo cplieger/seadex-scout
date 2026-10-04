@@ -703,6 +703,30 @@ func TestFindingLineCarriesJoinedRecommendedGroups(t *testing.T) {
 	}
 }
 
+// TestFindingLineCarriesJoinedAltGroups pins the alt_groups attribute: the
+// dashboard's SeaDex alt column reads it, so it rides every finding line
+// joined like recommended_groups, whatever the status.
+func TestFindingLineCarriesJoinedAltGroups(t *testing.T) {
+	for _, status := range []compare.Status{compare.StatusBetter, compare.StatusMixedGroup} {
+		t.Run(string(status), func(t *testing.T) {
+			notifier, recorder := newCapturedNotifier()
+			f := testFinding("alt", "Frieren")
+			f.Status = status
+			f.AltGroups = []string{"erai-raws", "judas"}
+
+			notifier.Report([]compare.Finding{f}, nil)
+
+			got, seen := recorder.AttrValue(message(status), "alt_groups")
+			if !seen {
+				t.Fatalf("%q line carries no alt_groups attribute", message(status))
+			}
+			if got != "erai-raws,judas" {
+				t.Errorf("alt_groups = %q, want %q", got, "erai-raws,judas")
+			}
+		})
+	}
+}
+
 // TestFindingAttrVolumeIsBounded pins the emit path's volume bound (capAttr):
 // SeaDex admits multi-MB URLs (up to 512 per entry), and an unbounded slog
 // record would exceed downstream log-pipeline line limits — silently dropping
@@ -735,8 +759,9 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 }
 
 // TestAggregateAttrsAreBoundedBeforeJoining pins the aggregate attributes'
-// bound (logattr.Joiner): recommended_groups and release_urls aggregate untrusted
-// SeaDex data (up to 512 torrents, each admitting a multi-MB URL), so joining
+// bound (logattr.Joiner): recommended_groups, alt_groups and release_urls
+// aggregate untrusted SeaDex data (up to 512 torrents, each admitting a
+// multi-MB URL), so joining
 // first would materialize a ~48 MiB aggregate before the 8 KiB cap applied - a
 // plausible OOM kill of the documented 256 MiB container that would suppress
 // the very warn line the better-release alert keys on. Both must emit bounded
@@ -750,11 +775,12 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 	for range 512 {
 		f.Links = append(f.Links, compare.ReleaseLink{Tracker: "Nyaa\u009b", URL: "https://nyaa.si/" + huge})
 		f.RecommendedGroups = append(f.RecommendedGroups, "grp\u202e"+huge)
+		f.AltGroups = append(f.AltGroups, "alt\u202e"+huge)
 	}
 
 	notifier.Report([]compare.Finding{f}, nil)
 
-	for _, key := range []string{"release_urls", "recommended_groups"} {
+	for _, key := range []string{"release_urls", "recommended_groups", "alt_groups"} {
 		got, ok := recorder.AttrValue("better release available", key)
 		if !ok {
 			t.Fatalf("finding line carries no %s attribute", key)
@@ -795,6 +821,7 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 		ReleaseURL:        huge,
 		ArrURL:            huge,
 		RecommendedGroups: []string{huge},
+		AltGroups:         []string{huge},
 		CurrentGroups:     []string{huge},
 		Links:             []compare.ReleaseLink{{Tracker: huge, URL: huge}},
 	}}, nil)
@@ -821,6 +848,9 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 		for _, g := range got.RecommendedGroups {
 			check("RecommendedGroups element", g)
 		}
+		for _, g := range got.AltGroups {
+			check("AltGroups element", g)
+		}
 		for _, g := range got.CurrentGroups {
 			check("CurrentGroups element", g)
 		}
@@ -832,10 +862,10 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 }
 
 // TestReportBoundsRetainedRowToItsDocumentedCeiling pins the RESIDENCY bound
-// maxRetainedElemBytes' comment states as a number: a retained row's three
+// maxRetainedElemBytes' comment states as a number: a retained row's four
 // untrusted slices are bounded at maxRetainedListItems elements, each at
-// maxRetainedElemBytes, so the worst-case row is 64 x 256 x 4 = 64 KiB rather
-// than the 2 MiB the count cap alone left. Neither half is observable from the
+// maxRetainedElemBytes, so the worst-case row is 64 x 256 x 5 = 80 KiB rather
+// than the 2.5 MiB the count cap alone left. Neither half is observable from the
 // emit path, so dropping capRetainedList's truncation (one SeaDex entry admits
 // 512 torrents) or widening capRetainedElem restores a multi-MB resident row in a
 // 256 MiB container (CWE-400) while the sibling test, 32x looser, stays green.
@@ -844,10 +874,12 @@ func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 	const upstreamMax = 512 // internal/seadex's maxTorrentsPerEntry
 	huge := strings.Repeat("z", 4*maxAttrBytes)
 	groups := make([]string, upstreamMax)
+	alt := make([]string, upstreamMax)
 	current := make([]string, upstreamMax)
 	links := make([]compare.ReleaseLink, upstreamMax)
 	for i := range groups {
 		groups[i] = huge
+		alt[i] = huge
 		current[i] = huge
 		links[i] = compare.ReleaseLink{Tracker: huge, URL: huge}
 	}
@@ -858,6 +890,7 @@ func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 		Status:            compare.StatusBetter,
 		Title:             "Frieren",
 		RecommendedGroups: groups,
+		AltGroups:         alt,
 		CurrentGroups:     current,
 		Links:             links,
 	}}, nil)
@@ -868,6 +901,7 @@ func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 	for _, got := range n.current {
 		for field, count := range map[string]int{
 			"RecommendedGroups": len(got.RecommendedGroups),
+			"AltGroups":         len(got.AltGroups),
 			"CurrentGroups":     len(got.CurrentGroups),
 			"Links":             len(got.Links),
 		} {
@@ -877,6 +911,7 @@ func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 		}
 		elems := map[string][]string{
 			"RecommendedGroups element": got.RecommendedGroups,
+			"AltGroups element":         got.AltGroups,
 			"CurrentGroups element":     got.CurrentGroups,
 		}
 		for _, l := range got.Links {
@@ -896,7 +931,7 @@ func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 
 // TestReportDoesNotMutateCallerFindings pins the aliasing guard in
 // boundRetained. The retained row is a SHALLOW copy of the caller's finding, so
-// its three slice headers still point at the caller's backing arrays - bounding
+// its four slice headers still point at the caller's backing arrays - bounding
 // them in place would silently edit the compare result the audit report and the
 // cycle's own log line also read.
 func TestReportDoesNotMutateCallerFindings(t *testing.T) {
@@ -907,6 +942,7 @@ func TestReportDoesNotMutateCallerFindings(t *testing.T) {
 		Status:            compare.StatusBetter,
 		Title:             "Frieren",
 		RecommendedGroups: []string{huge},
+		AltGroups:         []string{huge},
 		CurrentGroups:     []string{huge},
 		Links:             []compare.ReleaseLink{{Tracker: "Nyaa", URL: huge}},
 	}}
@@ -916,21 +952,13 @@ func TestReportDoesNotMutateCallerFindings(t *testing.T) {
 	if got := len(findings[0].RecommendedGroups[0]); got != len(huge) {
 		t.Errorf("caller's RecommendedGroups[0] shrank to %d bytes; Report must not mutate it", got)
 	}
+	if got := len(findings[0].AltGroups[0]); got != len(huge) {
+		t.Errorf("caller's AltGroups[0] shrank to %d bytes; Report must not mutate it", got)
+	}
 	if got := len(findings[0].CurrentGroups[0]); got != len(huge) {
 		t.Errorf("caller's CurrentGroups[0] shrank to %d bytes; Report must not mutate it", got)
 	}
 	if got := len(findings[0].Links[0].URL); got != len(huge) {
 		t.Errorf("caller's Links[0].URL shrank to %d bytes; Report must not mutate it", got)
-	}
-}
-
-func TestEmittedIDsExcludesIgnored(t *testing.T) {
-	notifier, _ := newIgnoringNotifier(2)
-	a, b := testFinding("k1", "Frieren"), testFinding("k2", "Other")
-	a.AniListID, b.AniListID = 1, 2
-	notifier.Report([]compare.Finding{a, b}, nil)
-	got := notifier.EmittedIDs()
-	if _, ok := got[1]; !ok || len(got) != 1 {
-		t.Errorf("EmittedIDs() = %v, want only 1 (2 is ignored)", got)
 	}
 }

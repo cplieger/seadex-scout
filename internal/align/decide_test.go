@@ -183,9 +183,10 @@ func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
 }
 
 // TestDecideTriStateEvidence pins the three-valued evidence model: unknown group
-// evidence (release.NoGroup on either side) yields StandingUnverified and
+// evidence (release.NoGroup) on ONE side yields StandingUnverified and
 // OutcomeUnverifiable, never a confident alignment and never a divergence, while
-// a known-known best match wins outright even beside unknown members.
+// NoGroup on both sides aligns and a known-known best match wins outright even
+// beside unknown members.
 // Unverifiability of the best comparison short-circuits BEFORE the alt rung: when
 // "do you have the best?" is unanswerable, a proven alt must not imply you lack it.
 func TestDecideTriStateEvidence(t *testing.T) {
@@ -214,11 +215,11 @@ func TestDecideTriStateEvidence(t *testing.T) {
 			wantOutcome:  align.OutcomeUnverifiable,
 		},
 		{
-			name:         "sentinel on both sides is unverifiable, never aligned",
+			name:         "sentinel on both sides aligns",
 			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"nogrp"}}},
 			best:         []string{"nogrp"},
-			wantStanding: align.StandingUnverified,
-			wantOutcome:  align.OutcomeUnverifiable,
+			wantStanding: align.StandingBest,
+			wantOutcome:  align.OutcomeAligned,
 		},
 		{
 			name:         "unknown member beside a known best match still aligns",

@@ -28,7 +28,7 @@ func librarySeasonTwoEntry() seadex.Entry {
 
 // libraryScout builds a scout over one Frieren series holding Erai-raws for
 // season 1, against the Frieren entry plus librarySeasonTwoEntry.
-func libraryScout(t *testing.T, ignore map[int]struct{}, sonarr arrwalk.SonarrClient, st *state.State) (*Scout, *capture.Recorder) {
+func libraryScout(t *testing.T, sonarr arrwalk.SonarrClient, st *state.State) (*Scout, *capture.Recorder) {
 	t.Helper()
 	logger, recorder := capture.New()
 	st.Mapping = mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
@@ -43,7 +43,7 @@ func libraryScout(t *testing.T, ignore map[int]struct{}, sonarr arrwalk.SonarrCl
 		SeaDex:   &fakeSeaDex{entries: append(seadexFrierenEntry(), librarySeasonTwoEntry())},
 		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
 		Comparer: compare.New(compare.Config{}),
-		Notifier: notify.NewNotifier(logger, ignore),
+		Notifier: notify.NewNotifier(logger, nil),
 		Auditor:  audit.New(audit.Config{}),
 	}), recorder
 }
@@ -56,31 +56,20 @@ func frierenSonarr() *fakeSonarr {
 }
 
 func TestReconcileLogsTheLibraryOnACleanWalk(t *testing.T) {
-	for name, tc := range map[string]struct {
-		ignore     map[int]struct{}
-		wantHidden string
-	}{
-		"reported":           {wantHidden: "0"},
-		"ignored by filters": {ignore: map[int]struct{}{154587: {}}, wantHidden: "1"},
+	s, rec := libraryScout(t, frierenSonarr(), &state.State{})
+	if !s.Cycle(t.Context()) {
+		t.Fatal("Cycle healthy=false, want true")
+	}
+	if n := rec.CountExact("library summary"); n != 1 {
+		t.Fatalf("library summary count = %d, want 1", n)
+	}
+	for key, want := range map[string]string{
+		"rows": "2", "have_unlisted": "1", "no_file": "1", "anime_items": "1",
+		"items_with_entry": "1", "items_all_best": "0", "items_all_best_or_alt": "0",
 	} {
-		t.Run(name, func(t *testing.T) {
-			s, rec := libraryScout(t, tc.ignore, frierenSonarr(), &state.State{})
-			if !s.Cycle(t.Context()) {
-				t.Fatal("Cycle healthy=false, want true")
-			}
-			if n := rec.CountExact("library summary"); n != 1 {
-				t.Fatalf("library summary count = %d, want 1", n)
-			}
-			for key, want := range map[string]string{
-				"rows": "2", "have_unlisted": "1", "no_file": "1", "anime_items": "1",
-				"items_with_entry": "1", "items_all_best": "0", "items_all_best_or_alt": "0",
-				"hidden_by_filters": tc.wantHidden,
-			} {
-				if got, _ := rec.AttrValue("library summary", key); got != want {
-					t.Errorf("library summary %s = %q, want %q", key, got, want)
-				}
-			}
-		})
+		if got, _ := rec.AttrValue("library summary", key); got != want {
+			t.Errorf("library summary %s = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -112,7 +101,7 @@ func TestReconcileWithholdsTheLibraryOnAnIncompleteWalk(t *testing.T) {
 		"shrunken walk": {sonarr: frierenSonarr(), prior: shrunkPrior, reason: "library-shrunk"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			s, rec := libraryScout(t, nil, tc.sonarr, tc.prior)
+			s, rec := libraryScout(t, tc.sonarr, tc.prior)
 			if !s.Cycle(t.Context()) {
 				t.Fatal("Cycle healthy=false, want true")
 			}
