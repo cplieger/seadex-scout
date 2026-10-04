@@ -2291,6 +2291,20 @@ func TestToConfigFilterBoundsAreInclusive(t *testing.T) {
 			t.Error("a map exactly at the bound produced no exclusions")
 		}
 	})
+	t.Run("an exclude_tags key exactly at the length bound is accepted", func(t *testing.T) {
+		key := strings.Repeat("k", maxExcludeTagLen)
+		fc := defaultFileConfig()
+		fc.Filters.ExcludeTags = map[string][]string{key: {"feed"}}
+
+		c := fc.toConfig()
+
+		if c.tagFilterErr != nil {
+			t.Fatalf("tagFilterErr = %v for a %d-byte tag key, want nil", c.tagFilterErr, maxExcludeTagLen)
+		}
+		if !c.TagFilter.Excludes([]string{key}, tagfilter.SurfaceFeed) {
+			t.Errorf("a %d-byte tag key produced no exclusion", maxExcludeTagLen)
+		}
+	})
 }
 
 // TestValidateSurfacesTagFilterError pins that a rejected filters.exclude_tags

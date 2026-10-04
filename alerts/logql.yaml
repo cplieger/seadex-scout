@@ -565,7 +565,7 @@ groups:
       # in each arr, and Loki must treat those as distinct series.
       # It does NOT cover a film or special filed in Sonarr's season-0 bucket —
       # the app is silent for those by design, because the bucket cannot
-      # attribute a file to one entry (see the README's offered rows).
+      # attribute a file to one entry (see the `unattributed` verdict in docs/how-it-works.md).
       - alert: SeadexScoutMixedGroupManual
         expr: |
           sum by (title, alert_title, al_id, arr, arr_url, season, recommended_group, alert_recommended_group, seadex_tags) (

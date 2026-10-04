@@ -349,6 +349,7 @@ func TestPackSeasonLabelRangeBranch(t *testing.T) {
 		}}, meta: EntryInfo{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 200}}}, want: "S08", wantOK: true},
 		{name: "rule two: inside one bounded range", t: absolutePack(1090, 1100), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S22", wantOK: true},
 		{name: "rule two: straddling a bounded range and the open one", t: absolutePack(1150, 1160), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: filling a bounded range end to end", t: absolutePack(1086, 1155), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S22", wantOK: true},
 		{name: "rule two: inside the open range", t: absolutePack(1160, 1170), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S23", wantOK: true},
 		{name: "rule two: starting before the open range", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
 		// The span is the LOWEST and highest episode the files carry, not the first

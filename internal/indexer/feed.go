@@ -410,32 +410,11 @@ var multiSpace = regexp.MustCompile(`\s{2,}`)
 // lastSubmatchIndex returns the submatch index pairs of the LAST non-overlapping match
 // of re in s, or nil when there is none.
 func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
-	var last []int
-	for off := 0; off <= len(s); {
-		m := re.FindStringSubmatchIndex(s[off:])
-		if m == nil {
-			break
-		}
-		if last == nil {
-			last = make([]int, len(m))
-		}
-		for i := range m {
-			if m[i] < 0 {
-				last[i] = -1
-				continue
-			}
-			last[i] = m[i] + off
-		}
-		if m[1] == m[0] {
-			// Out-of-contract empty match (no pattern here can produce one):
-			// advance so the scan cannot spin. This is a termination guard, not
-			// FindAll's rune-width progression.
-			off = last[1] + 1
-			continue
-		}
-		off = last[1]
+	all := re.FindAllStringSubmatchIndex(s, -1)
+	if len(all) == 0 {
+		return nil
 	}
-	return last
+	return all[len(all)-1]
 }
 
 // derivedTitle is the file-name derivation with the entry's known mapping
@@ -613,16 +592,14 @@ const (
 )
 
 // packEvidenceOf grades what a torrent's file list proves about its episode
-// count. Both halves of the single-episode test - the distinct-token count and
-// the population it is counted over - are read from contentPopulation, the SAME
-// population coveredEpisodes counts, so the token count and the
-// is-there-anything-to-count test can never describe different file sets.
+// count. The distinct-token count is read from contentPopulation, the SAME
+// population coveredEpisodes counts, so one recognized token implies a
+// non-empty population.
 func packEvidenceOf(t *seadex.Torrent) packEvidence {
-	pop := contentPopulation(t.Files)
-	switch n := distinctEpisodes(pop); {
+	switch n := distinctEpisodes(contentPopulation(t.Files)); {
 	case n > 1:
 		return packEvidencePack
-	case n == 1 && len(pop) > 0:
+	case n == 1:
 		return packEvidenceSingle
 	default:
 		return packEvidenceUnknown
