@@ -41,7 +41,7 @@
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
 #     attrs: current_tier, recommended_group, alert_recommended_group, seadex_tags,
 #     attrs: info_hash, resolution, kind, release_url, nyaa_url, public_url,
-#     attrs: public_tracker, ab_url, ab_tracker
+#     attrs: public_tracker, ab_url, ab_tracker, current_revision, recommended_revision
 #   msg="series spans multiple release groups, manual review"
 #                                   the mixed-group manual-review nudge
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,

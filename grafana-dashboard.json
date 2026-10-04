@@ -449,7 +449,7 @@
     {
       "id": 20,
       "title": "Upgrades available",
-      "description": "Every upgrade SeaDex recommends for your library as of the latest check, newest first. Click a title to open it in Sonarr or Radarr, Release to open the recommended release, and SeaDex for the entry on releases.moe. Listed says whether SeaDex lists the group you have without recommending it under your filters, which makes the upgrade optional, or does not list it at all. It is empty on a row for an older revision, where you already hold the recommended group and SeaDex lists a newer version of its release. If Loki refuses the look-back over the selected range, the upgrades still show with First seen empty. First seen is the earliest time this finding was logged within the selected time range. A finding older than the range, or older than the logs your Loki keeps, shows the earliest time still held, so widen the range to look further back. Loki's max_query_length setting can refuse a very long range. First seen reads each log line's timestamp through label_format, which needs a Loki version that supports __timestamp__ there. Loki 3.7 is known to work.",
+      "description": "Every upgrade SeaDex recommends for your library as of the latest check, newest first. Why says how much the upgrade matters. A newer version is a fixed release of the group you already have. Optional means you hold a release SeaDex lists as an alternative. Your release is not on SeaDex means SeaDex does not list the group you have at all. Format is the kind of release SeaDex recommends. Click a title to open it in Sonarr or Radarr, Release to open the recommended release, and SeaDex for the entry on releases.moe. If Loki refuses the look-back over the selected range, the upgrades still show with First seen empty. First seen is the earliest time this finding was logged within the selected time range. A finding older than the range, or older than the logs your Loki keeps, shows the earliest time still held, so widen the range to look further back. Loki's max_query_length setting can refuse a very long range. First seen reads each log line's timestamp through label_format, which needs a Loki version that supports __timestamp__ there. Loki 3.7 is known to work.",
       "type": "table",
       "gridPos": {
         "h": 11,
@@ -573,6 +573,22 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "why"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Why"
+              },
+              {
+                "id": "custom.width",
+                "value": 330
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "current_group"
             },
             "properties": [
@@ -583,48 +599,6 @@
               {
                 "id": "custom.width",
                 "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "current_tier"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Listed"
-              },
-              {
-                "id": "custom.width",
-                "value": 130
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "alt": {
-                        "text": "listed, not recommended",
-                        "color": "yellow",
-                        "index": 0
-                      },
-                      "unlisted": {
-                        "text": "not listed",
-                        "color": "red",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
               }
             ]
           },
@@ -647,16 +621,16 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "seadex_tags"
+              "options": "format"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Tags"
+                "value": "Format"
               },
               {
                 "id": "custom.width",
-                "value": 260
+                "value": 200
               }
             ]
           },
@@ -790,6 +764,30 @@
                 "value": true
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seadex_tags"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
           }
         ]
       },
@@ -810,7 +808,7 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, current_tier, resolution, kind, release_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", resolution=\"resolution\", kind=\"kind\", release_url=\"release_url\", arr_url=\"arr_url\" | msg=`better release available` [2h]))",
+          "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, why, format, resolution, kind, release_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", status=\"status\", current_revision=\"current_revision\", recommended_revision=\"recommended_revision\", resolution=\"resolution\", kind=\"kind\", release_url=\"release_url\", arr_url=\"arr_url\" | msg=`better release available` | label_format why=`{{ if eq .status \"newer_revision\" }}Newer version, you have {{ .current_revision }} and SeaDex lists {{ .recommended_revision }}{{ else if eq .current_tier \"alt\" }}Optional, you have a SeaDex alternative{{ else if eq .current_tier \"unlisted\" }}Your release is not on SeaDex{{ else }}SeaDex has a better release{{ end }}`, format=`{{ regexReplaceAll \"^(best|newer-revision · v\\\\d+)( · )?\" .seadex_tags \"\" }}` [2h]))",
           "queryType": "instant"
         },
         {
@@ -838,10 +836,10 @@
               "Value #B": 0,
               "title": 1,
               "season": 2,
-              "current_group": 3,
-              "current_tier": 4,
+              "why": 3,
+              "current_group": 4,
               "recommended_group": 5,
-              "seadex_tags": 6,
+              "format": 6,
               "release_url": 7,
               "al_id": 8,
               "arr": 9
@@ -1059,6 +1057,18 @@
               {
                 "id": "custom.hidden",
                 "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
               }
             ]
           }
@@ -1338,6 +1348,18 @@
               {
                 "id": "custom.hidden",
                 "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
               }
             ]
           }
@@ -2057,6 +2079,18 @@
                 "value": true
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
           }
         ]
       },
@@ -2206,6 +2240,18 @@
                   {
                     "id": "displayName",
                     "value": "Lines"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*"
+                },
+                "properties": [
+                  {
+                    "id": "noValue",
+                    "value": "-"
                   }
                 ]
               }
