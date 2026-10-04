@@ -73,17 +73,12 @@ func TestReconcileLogsTheLibraryOnACleanWalk(t *testing.T) {
 			}
 			for key, want := range map[string]string{
 				"rows": "2", "have_unlisted": "1", "no_file": "1", "anime_items": "1",
-				"items_with_entry": "1", "items_all_best": "0", "hidden_by_filters": tc.wantHidden,
+				"items_with_entry": "1", "items_all_best": "0", "items_all_best_or_alt": "0",
+				"hidden_by_filters": tc.wantHidden,
 			} {
 				if got, _ := rec.AttrValue("library summary", key); got != want {
 					t.Errorf("library summary %s = %q, want %q", key, got, want)
 				}
-			}
-			if n := rec.CountExact("library gap"); n != 1 {
-				t.Errorf("library gap count = %d, want 1 (the season-2 no_file row)", n)
-			}
-			if !rec.HasAttr("library gap", "al_id", "333") || !rec.HasAttr("library gap", "verdict", string(audit.VerdictNoFile)) {
-				t.Errorf("library gap = %v, want al_id 333 verdict no_file", rec.Messages())
 			}
 		})
 	}
@@ -127,10 +122,8 @@ func TestReconcileWithholdsTheLibraryOnAnIncompleteWalk(t *testing.T) {
 			if rec.CountExact("better release available") == 0 {
 				t.Fatal("no finding emitted, want the compare to have run")
 			}
-			for _, msg := range []string{"library summary", "library gap"} {
-				if n := rec.CountExact(msg); n != 0 {
-					t.Errorf("%s count = %d, want 0 on an incomplete walk", msg, n)
-				}
+			if n := rec.CountExact("library summary"); n != 0 {
+				t.Errorf("library summary count = %d, want 0 on an incomplete walk", n)
 			}
 		})
 	}

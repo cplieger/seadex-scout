@@ -216,7 +216,8 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 
 // TestDashboardShape pins what makes the file importable into any deployment:
 // a string uid, a datasource variable first and used by every query, a
-// container variable, no fixed number of days, and no host but the SeaDex site.
+// container variable, the optional-upgrades switch defaulting to Hide, no fixed
+// number of days, and no host but the SeaDex site.
 func TestDashboardShape(t *testing.T) {
 	raw, err := os.ReadFile(dashboardPath)
 	if err != nil {
@@ -234,8 +235,16 @@ func TestDashboardShape(t *testing.T) {
 		name, _ := vm["name"].(string)
 		names = append(names, name)
 	}
-	if !slices.Equal(names, []string{"datasource", "container"}) {
-		t.Errorf("template variables = %v, want [datasource container]", names)
+	if !slices.Equal(names, []string{"datasource", "container", "optional"}) {
+		t.Errorf("template variables = %v, want [datasource container optional]", names)
+	}
+	if len(vars) == 3 {
+		opt, _ := vars[2].(map[string]any)
+		cur, _ := opt["current"].(map[string]any)
+		if opt["query"] != "Hide : alt, Show : none" || cur["text"] != "Hide" || cur["value"] != "alt" {
+			t.Errorf("optional variable query = %v, current = %v, want options Hide : alt, Show : none with Hide selected",
+				opt["query"], cur)
+		}
 	}
 	text := string(raw)
 	if n, m := strings.Count(text, `"expr"`), strings.Count(text, `"uid": "${datasource}"`); m < n {
@@ -294,10 +303,33 @@ func TestDashboardGuardsTheBestShareDenominator(t *testing.T) {
 			}
 		}
 	}
-	for _, panel := range []string{"Anime at SeaDex best", "Anime at SeaDex best, over time"} {
+	for _, panel := range []string{"Anime at SeaDex best", "Anime at SeaDex alt", "Anime at SeaDex best and alt, over time"} {
 		if !ratios[panel] {
 			t.Errorf("panel %q does not divide by items_with_entry, want the best-share ratio", panel)
 		}
+	}
+}
+
+// The upgrades tile and table must hide the same optional upgrades, or the
+// count and the list disagree, so every finding read carries the filter.
+func TestDashboardFiltersOptionalUpgradesEverywhere(t *testing.T) {
+	findingRe := regexp.MustCompile("\\{[^{}]*\\}\\s*\\|=\\s*`better release available`")
+	const filter = `| current_tier != "$optional"`
+	n := 0
+	for _, tg := range dashboardTargets(loadDashboard(t)) {
+		for _, loc := range findingRe.FindAllStringIndex(tg.expr, -1) {
+			n++
+			pipe := tg.expr[loc[0]:]
+			if end := strings.Index(pipe, "["); end >= 0 {
+				pipe = pipe[:end]
+			}
+			if !strings.Contains(pipe, filter) {
+				t.Errorf("panel %q reads findings without %s\nexpr: %s", tg.panel, filter, tg.expr)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s reads no finding", dashboardPath)
 	}
 }
 

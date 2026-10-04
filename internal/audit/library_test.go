@@ -30,7 +30,9 @@ func seasonMatch(item *library.Item, alID, season int, best, alt string) match.M
 
 // TestAuditItemTotals pins the item-level counts: a series with several
 // entries is one item, a row nothing was compared on neither earns nor blocks
-// all-at-best, and an item that is both matched and not_on_seadex counts once.
+// all-at-best or all-best-or-alt, an alt row moves an item from the first to
+// the second, a row below alt blocks both, and an item that is both matched
+// and not_on_seadex counts once.
 func TestAuditItemTotals(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{
@@ -53,6 +55,10 @@ func TestAuditItemTotals(t *testing.T) {
 			Arr: library.ArrSonarr, ArrID: 5, Title: "OfferedOnly", TvdbID: 500, HasFile: true,
 			Groups: []string{"erai"}, SeasonGroups: map[int][]string{0: {"erai"}},
 		},
+		{
+			Arr: library.ArrSonarr, ArrID: 6, Title: "AltUnlisted", TvdbID: 600, HasFile: true,
+			Groups: []string{"meh", "zzz"}, SeasonGroups: map[int][]string{1: {"meh"}, 2: {"zzz"}},
+		},
 	}}
 	idx := mapping.NewIndex([]mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
@@ -60,6 +66,7 @@ func TestAuditItemTotals(t *testing.T) {
 		{AniListID: 6, Type: "TV", TvdbID: 300},
 		{AniListID: 7, Type: "TV", TvdbID: 400},
 		{AniListID: 9, Type: "TV", TvdbID: 500},
+		{AniListID: 10, Type: "TV", TvdbID: 600},
 	})
 	offered := seasonMatch(&snap.Items[4], 8, 0, "best", "")
 	offered.Record = mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonPresent}
@@ -71,6 +78,8 @@ func TestAuditItemTotals(t *testing.T) {
 		seasonMatch(&snap.Items[1], 5, 2, "great", "meh"),
 		seasonMatch(&snap.Items[2], 6, 2, "good", ""),
 		offered,
+		seasonMatch(&snap.Items[5], 10, 1, "great", "meh"),
+		seasonMatch(&snap.Items[5], 11, 2, "good", ""),
 	}
 
 	rep := New(Config{}).Audit(matches, snap, idx, nil)
@@ -85,12 +94,13 @@ func TestAuditItemTotals(t *testing.T) {
 		"OnlyNoFile":  {VerdictNoFile},
 		"Uncovered":   {VerdictNotOnSeaDex},
 		"OfferedOnly": {VerdictUnattributed, VerdictNotOnSeaDex},
+		"AltUnlisted": {VerdictUnlisted, VerdictAlt},
 	} {
 		if got := verdicts[title]; !slices.Equal(got, want) {
 			t.Fatalf("%s verdicts = %v, want %v: the fixture no longer builds the case it names", title, got, want)
 		}
 	}
-	want := ItemTotals{Anime: 5, WithEntry: 4, AllBest: 1}
+	want := ItemTotals{Anime: 6, WithEntry: 5, AllBest: 1, AllBestOrAlt: 2}
 	if rep.Items != want {
 		t.Errorf("Audit(...).Items = %+v, want %+v", rep.Items, want)
 	}
@@ -137,7 +147,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 4, string(VerdictNoFile): 1, string(VerdictUnverified): 1, string(VerdictAlt): 1},
-		Items:       ItemTotals{Anime: 9, WithEntry: 7, AllBest: 3},
+		Items:       ItemTotals{Anime: 9, WithEntry: 7, AllBest: 3, AllBestOrAlt: 5},
 		Rows: []Row{
 			{Title: "Gone", AniListID: 1, Arr: library.ArrSonarr, Verdict: VerdictNoFile, SeaDexURL: "https://releases.moe/1"},
 			{Title: "Unknown", AniListID: 2, Arr: library.ArrRadarr, Verdict: VerdictUnverified, SeaDexURL: "https://releases.moe/2"},
@@ -149,11 +159,8 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	r.LogLibrary(log, 5)
 
 	recs := rec.Records()
-	if len(recs) != 3 {
-		t.Fatalf("LogLibrary emitted %v, want a summary and two gap lines", rec.Messages())
-	}
-	if recs[0].Message != "library summary" {
-		t.Fatalf("first record = %q, want library summary", recs[0].Message)
+	if len(recs) != 1 || recs[0].Message != "library summary" {
+		t.Fatalf("LogLibrary emitted %v, want one library summary and no per-row line", rec.Messages())
 	}
 	summaryAttrs := recordAttrs(recs[0])
 	for _, key := range libraryContract(t, "library summary") {
@@ -162,40 +169,23 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 		}
 	}
 	for key, want := range map[string]int64{
-		"rows": 4, "have_best": 4, "no_file": 1, "have_alt": 1,
-		"anime_items": 9, "items_with_entry": 7, "items_all_best": 3, "hidden_by_filters": 5,
+		"rows": 4, "have_best": 4, "no_file": 1, "have_alt": 1, "anime_items": 9, "items_with_entry": 7,
+		"items_all_best": 3, "items_all_best_or_alt": 5, "hidden_by_filters": 5,
 	} {
 		if summaryAttrs[key] != want {
 			t.Errorf("library summary %s = %v, want %d", key, summaryAttrs[key], want)
-		}
-	}
-	gapKeys := libraryContract(t, "library gap")
-	for i, wantTitle := range []string{"Gone", "Unknown"} {
-		gap := recs[i+1]
-		if gap.Message != "library gap" {
-			t.Errorf("record %d = %q, want library gap", i+1, gap.Message)
-			continue
-		}
-		attrs := recordAttrs(gap)
-		if attrs["title"] != wantTitle {
-			t.Errorf("gap %d title = %v, want %s", i, attrs["title"], wantTitle)
-		}
-		for _, key := range gapKeys {
-			if _, ok := attrs[key]; !ok {
-				t.Errorf("library gap lacks %q, which alerts/logql.yaml declares stable", key)
-			}
 		}
 	}
 }
 
 func TestReportSummaryCarriesItemTotals(t *testing.T) {
 	log, rec := capture.New()
-	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Totals: map[string]int{}, Items: ItemTotals{Anime: 3, WithEntry: 2, AllBest: 1}}
+	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Totals: map[string]int{}, Items: ItemTotals{Anime: 3, WithEntry: 2, AllBest: 1, AllBestOrAlt: 2}}
 	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}
 	attrs := recordAttrs(rec.Records()[0])
-	for key, want := range map[string]int64{"anime_items": 3, "items_with_entry": 2, "items_all_best": 1} {
+	for key, want := range map[string]int64{"anime_items": 3, "items_with_entry": 2, "items_all_best": 1, "items_all_best_or_alt": 2} {
 		if attrs[key] != want {
 			t.Errorf("report summary %s = %v, want %d", key, attrs[key], want)
 		}
