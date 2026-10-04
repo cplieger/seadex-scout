@@ -144,14 +144,14 @@ The healthcheck runs `seadex-scout health`, which reads a marker file each compl
 
 ## Monitoring
 
-seadex-scout writes JSON logs to standard output and has no metrics endpoint. Eight Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
+seadex-scout writes JSON logs to standard output and has no metrics endpoint. Nine Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard ships with every release as `grafana-dashboard.json`. It lists the upgrades to act on, newest first, and shows whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md) explains both and shows how to load them.
 
 ## Documentation
 
 - [Torznab feed setup](docs/torznab-indexer.md) connects the indexer to Prowlarr, Sonarr and Radarr, step by step.
 - [Configuration](docs/configuration.md) lists every setting and shows how to run checks from an outside scheduler.
 - [How seadex-scout works](docs/how-it-works.md) explains matching, the report verdicts, release versions and the indexer's behavior.
-- [Monitoring and alerts](docs/monitoring.md) describes the log lines, health and the Loki alert rules.
+- [Monitoring and alerts](docs/monitoring.md) describes the log lines, health, the Grafana dashboard and the Loki alert rules.
 - [Security](docs/security.md) has a hardened compose setup and explains how credentials are handled.
 
 ## Credits
