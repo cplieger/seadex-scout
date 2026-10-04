@@ -552,6 +552,9 @@ func TestIndex_SiblingSeasons(t *testing.T) {
 		{AniListID: 300, Type: "TV", TvdbID: 6789, SeasonKind: SeasonPresent, SeasonTvdb: 1},
 		// No tvdb id at all.
 		{AniListID: 400, Type: "MOVIE", TmdbMovies: []int{7}},
+		// Season-scoped records that carry no tvdb id: they share no series.
+		{AniListID: 500, Type: "TV", SeasonKind: SeasonPresent, SeasonTvdb: 1},
+		{AniListID: 501, Type: "TV", SeasonKind: SeasonPresent, SeasonTvdb: 2},
 	})
 	tests := []struct {
 		name string
@@ -563,6 +566,7 @@ func TestIndex_SiblingSeasons(t *testing.T) {
 		{name: "a cour-split record DOES report its shared season", id: 200, want: []int{3}},
 		{name: "a sole holder on its own tvdb id reports nothing", id: 300},
 		{name: "a record with no tvdb id reports nil", id: 400},
+		{name: "a season-scoped record with no tvdb id reports nil beside others like it", id: 500},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

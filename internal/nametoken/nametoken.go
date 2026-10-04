@@ -29,7 +29,7 @@ const NonWordEdge = `[^` + wordClass + `]`
 // spellings whose strings.ToLower image equals the token's lowercase form: each
 // ASCII letter becomes an explicit case class - with U+0130 added to the i class
 // and U+212A to the k class, the only non-ASCII runes strings.ToLower maps onto
-// ASCII - digits match themselves, and anything else is quoted literally.
+// ASCII - and anything else is quoted literally (a digit quotes to itself).
 func Literal(token string) string {
 	var b strings.Builder
 	for _, r := range token {
@@ -48,8 +48,6 @@ func Literal(token string) string {
 				b.WriteString(`\x{212A}`)
 			}
 			b.WriteByte(']')
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
 		default:
 			b.WriteString(regexp.QuoteMeta(string(r)))
 		}

@@ -123,10 +123,7 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	}
 	// Zero out a non-usable TVDB id here so the usability rule has ONE home:
 	// callers do a presence check, never a policy check.
-	if r.TvdbID <= 0 {
-		return 0, nil, nil
-	}
-	return r.TvdbID, nil, nil
+	return max(r.TvdbID, 0), nil, nil
 }
 
 // AllIDs returns every canonical identifier the record carries, with no type gate:
@@ -279,9 +276,10 @@ func (i *Index) Len() int {
 // against a run it does not cover. Resolving it here keeps align from reading
 // the map a second time.
 func (i *Index) SiblingSeasons(rec *Record) []int {
-	if i == nil || rec == nil || rec.TvdbID <= 0 {
+	if i == nil || rec == nil {
 		return nil
 	}
+	// buildIndex keys only positive tvdb ids, so a record without one finds no counts.
 	counts := i.seasonsByTvdb[rec.TvdbID]
 	if len(counts) == 0 {
 		return nil
@@ -337,9 +335,7 @@ func NewIndexWithMappings(records []Record, mappings map[int]Mapping) *Index {
 func deduplicateRecords(records []Record) []Record {
 	last := make(map[int]int, len(records))
 	for i := range records {
-		if records[i].AniListID > 0 {
-			last[records[i].AniListID] = i
-		}
+		last[records[i].AniListID] = i
 	}
 	out := make([]Record, 0, len(last))
 	for i := range records {
@@ -725,7 +721,7 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 	age := time.Since(prev.FetchedAt)
 	// age >= 0 rejects a future FetchedAt (clock skew or a corrupt state file): a
 	// negative age is never fresh, forcing a revalidating fetch.
-	if l.refresh > 0 && age >= 0 && age < l.refresh && cacheUsable(prev.Records) {
+	if age >= 0 && age < l.refresh && cacheUsable(prev.Records) {
 		l.log.Debug("mapping: cache fresh, skipping fetch", "records", indexedRecordCount(prev.Records), "age", age.Round(time.Second))
 		return *prev, nil
 	}
