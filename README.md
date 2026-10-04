@@ -3,68 +3,30 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)](https://github.com/cplieger/seadex-scout/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
 <!-- hub-overview BEGIN -->
-Keeps your Sonarr/Radarr anime library on the releases
-[SeaDex](https://releases.moe) recommends, the community-curated index of the
-best release for each anime. seadex-scout never downloads and never touches a
-torrent client. One image and one config file give you three things:
-
-1. **Findings on the log** (always on): the daemon compares your library to
-   SeaDex and logs a `warn` line when a better release exists than the one on
-   disk. You turn those lines into Loki/Grafana alerts (see
-   [Alerting](#alerting)); the app ships no notifier of its own.
-2. **An on-demand report**: a season-by-season audit of how your whole library
-   lines up with SeaDex, written as Markdown and JSON. See
-   [The report](#the-report).
-3. **A [Torznab feed](#indexer-torznab-feed)** (opt-in): publishes SeaDex's picks
-   so Sonarr/Radarr grab them through their own engine, profiles, and history.
-   This is the automation path, and it stays off until you configure it.
-
-## The problem
-
-To keep an anime library aligned with SeaDex by hand, you open `releases.moe`,
-look up each show, and compare your files against the recommendation.
-[`seadexarr`](https://github.com/bbtufty/seadexarr) automates the lookup, but two
-gaps matter for a storage- and bandwidth-conscious library:
-
-- Its only notifier is Discord, so it cannot alert through Loki and Grafana.
-- Its filters cannot keep encodes and drop remuxes. For a library that prefers a
-  good x265 encode over a 40 GB remux, that distinction is the whole point.
-
-seadex-scout closes both gaps. Its [Torznab feed](#indexer-torznab-feed) then
-covers ground neither gap describes and `seadexarr` does not: SeaDex published as
-an indexer your arrs grab from, which is the job
-[`seadexerr`](https://github.com/Ryder-C/seadexerr) exists for.
+seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://releases.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
 
 ## What it does
 
-On start, and every 24 hours after that, seadex-scout runs one full pass:
+seadex-scout helps you keep your anime library on SeaDex's recommended releases, in three ways:
 
-1. It walks the Sonarr/Radarr anime library (with arr-side tag include/exclude)
-   and fingerprints each item's current release: group, resolution, codec,
-   remux-vs-encode, and dual-audio.
-2. It matches each SeaDex entry to a library item by **AniList ID** through the
-   [Fribb anime-lists](https://github.com/Fribb/anime-lists) ID bridge, with an
-   **AniList title fallback** for the entries that do not map.
-3. It filters SeaDex's recommended releases by your preferences (remux policy,
-   AnimeBytes on or off, dual-audio).
-4. It compares the surviving recommendation against what you have and emits a
-   `warn` log line when SeaDex has something better.
+- Tells you when SeaDex lists a better release than yours, or a newer v2 or REPACK of it.
+- Writes an on-demand report comparing each season you have with SeaDex.
+- Can offer SeaDex's picks to Sonarr and Radarr as an indexer, so they download them under your quality rules.
 
-Between two full passes, a cheap **tick** runs every `poll_interval`. It asks
-SeaDex what changed in the last 48 hours and compares only those entries against
-the cached library. Upstream load then tracks how often SeaDex changes, not how
-often you poll. See [Scheduling](#scheduling).
+You can leave out remuxes, require dual audio, skip specials and add AnimeBytes releases. It checks SeaDex every 15 minutes and rereads your whole library once a day.
 
-When the [Torznab feed](#indexer-torznab-feed) is configured, the same pass
-rebuilds it from that one SeaDex fetch, so a finding and what the arrs can grab
-from the feed always reflect the same refresh.
+## Who it is for
+
+seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, season by season, and reports to its log and a report file. It sends no messages. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
+
+You need a Sonarr instance, a Radarr instance or both, with anime in them. The optional indexer also needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
+
+seadex-scout is free software under the GPL-3.0-or-later license.
 <!-- hub-overview END -->
 
 ## Quick start
 
-The image publishes to both `ghcr.io/cplieger/seadex-scout` and
-`docker.io/cplieger/seadex-scout`; identical images and tags. The same example
-ships as [`compose.yaml`](compose.yaml):
+The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository.
 
 ```yaml
 services:
@@ -72,437 +34,134 @@ services:
     image: ghcr.io/cplieger/seadex-scout:latest
     container_name: seadex-scout
     restart: unless-stopped
-    # PUID/PGID come from .env; ./config must ALREADY be owned by this uid.
+    # Create ./config and run "sudo chown 1000:1000 config" before the first start,
+    # or the container restarts in a loop. If you set PUID and PGID in .env, use those numbers.
     user: "${PUID:-1000}:${PGID:-1000}"
-    # The first boot writes /config/config.yaml reading these; an unset variable
-    # stays unset, so Radarr is off until RADARR_URL is set.
     environment:
-      - "SONARR_URL=http://sonarr:8989"
-      - SONARR_API_KEY
-      - RADARR_URL
+      - SONARR_URL  # from .env, the address you open Sonarr at, such as http://192.168.1.10:8989
+      - SONARR_API_KEY  # from .env, found in Sonarr under Settings, General, API Key
+      - RADARR_URL  # optional, set both RADARR_ lines in .env to add Radarr
       - RADARR_API_KEY
-      - SEADEX_SCOUT_FEED_KEY
+      - SEADEX_SCOUT_FEED_KEY  # these three are for the optional indexer, see docs/torznab-indexer.md
       - SEADEX_SCOUT_PROWLARR_KEY
       - SEADEX_SCOUT_AB_PASSKEY
     volumes:
-      - "./config:/config"  # config.yaml, state, and the reports dir
+      - "./config:/config"  # config.yaml, saved state and the reports folder
 ```
 
-1. Create the config directory owned by that uid:
-   `mkdir config && chown "${PUID:-1000}:${PGID:-1000}" config`.
-2. Put `SONARR_API_KEY=<your key>` in `.env` beside the compose file, and change
-   `SONARR_URL` if Sonarr is not reachable at `http://sonarr:8989`.
-3. Start the container. The first boot writes `/config/config.yaml`, reads the
-   Sonarr connection from those two variables, and starts.
+1. In the folder that holds `compose.yaml`, create the config folder: `mkdir config && sudo chown 1000:1000 config`. If your `.env` sets `PUID` and `PGID`, use those numbers instead of `1000`.
+2. Create a file named `.env` beside `compose.yaml` with these two lines:
 
-With no variable set, the first boot still writes the file and then stops with a
-message naming both remedies; set the variables, or open the file and put the
-`url` and `api_key` values in it, then restart. The file is the single source of
-truth: every other setting lives there, and a variable is read only where the
-file references it. Every key is in the
-[Configuration reference](#configuration-reference).
+   ```sh
+   SONARR_URL=http://192.168.1.10:8989
+   SONARR_API_KEY=your-sonarr-api-key
+   ```
 
-## Run modes
+   `SONARR_URL` is the address you open Sonarr at from another device on your network, not `localhost`. The API key is on Sonarr's Settings, General page. Add `RADARR_URL` and `RADARR_API_KEY` the same way to include Radarr.
+3. Run `docker compose up -d`.
 
-The `mode` setting (or a subcommand) picks the run mode:
+Run `docker logs seadex-scout`. You should see `sonarr reachable`. Findings then appear as `better release available` lines. If you see `sonarr ping failed at startup`, the address is wrong or Sonarr is down.
 
-- **daemon** (default): the poll loop above, flagging better releases as findings
-  on the log, and serving the [Torznab feed](#indexer-torznab-feed) when one is
-  configured.
-- **report**: a one-shot, read-only audit. It scans the whole library once, writes
-  a SeaDex-alignment report, and exits. Run it as the container command
-  (`report`), set `mode: report` in the config, or use `docker exec` while the
-  daemon runs.
+On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**. Enter your Sonarr URL and API key, then start it.
 
-### Scheduling
+## Reading the results
 
-- **Built-in** (default): `poll_interval` is a Go duration (`15m` default and
-  minimum). The daemon runs one pass every interval, and there are two kinds. A
-  **full pass** re-reads the whole SeaDex catalogue, re-walks Sonarr/Radarr, and
-  rebuilds the feed; it runs on start and every 24 hours after that (a constant,
-  not a config key). Every other pass is a **tick**, which fetches only what
-  SeaDex changed in the last 48 hours and compares those entries against the
-  cached library. Ticks keep the findings and the feed fresh in minutes; the full
-  pass is the backstop for what a window cannot see, for example a release SeaDex
-  removed. One cadence drives both the findings loop and the Torznab feed.
-- **External / resident-idle**: set `poll_interval: off` (or `disabled` / `0`).
-  The daemon runs no internal timer; the container idles healthy and an external
-  scheduler drives each cycle with the `poll` subcommand, which runs one cycle,
-  updates the health marker, and exits `0` or `1`. Each `poll` is a separate
-  process that starts with no cached library, so **every `poll` is a full pass**:
-  schedule it around 24 hours apart, not every few minutes. The Torznab feed is
-  served from the last cycle's snapshot, so its RSS check carries no releases
-  until the first `poll` runs. With [Ofelia](https://github.com/mcuadros/ofelia),
-  label the service:
+seadex-scout has no web page. Its findings go to the container log and to the report below. Each finding is one `better release available` warning. It names the show, the release group you have, the one SeaDex recommends, and a link to the release. A finding repeats on every check until you upgrade, so a log alert tool such as Loki can keep reminding you, as [Monitoring](#monitoring) shows. To stop the reminders for one show, add the `al_id` from its log line to `filters.ignore`.
 
-  ```yaml
-      labels:
-        ofelia.enabled: "true"
-        ofelia.job-exec.seadex-poll.schedule: "@every 24h"
-        ofelia.job-exec.seadex-poll.command: "/seadex-scout poll"
-  ```
-
-  Any scheduler works: `docker exec seadex-scout /seadex-scout poll` is the whole
-  contract.
-
-### The report
-
-The report answers, for every anime with a SeaDex match: which release you have,
-and whether it is SeaDex's best, a listed alt, or neither. It is season-level:
-each SeaDex entry (one AniList ID = one cour, movie, or special) is scoped to its
-TVDB season through the Fribb mapping and compared against that season's on-disk
-groups. Each row gets a verdict:
-
-- `have_best`: you have a release SeaDex marks best.
-- `have_alt`: you have a listed alt; SeaDex marks a different release best.
-- `have_older_revision`: you have SeaDex's best group, but only an older revision
-  of it (for example v1 while SeaDex lists the group's v2, or an original while it
-  lists a REPACK). The Scope cell shows both, as `revision v1, SeaDex v2`; see
-  [Release classification and filters](#release-classification-and-filters).
-- `have_unlisted`: you have a release SeaDex does not list.
-- `no_file`: the mapped season or movie has no file on disk.
-- `unverified`: files are present, but the release-group evidence on at least
-  one side is unknown, or the item's file data could not be read. Neither
-  alignment nor a divergence can be claimed; check which non-best bucket the
-  item belongs in.
-- `unattributed`: a film or a special filed inside Sonarr's season-0 bucket,
-  where nothing ties one file to one entry, so the app offers the entry in the
-  Torznab feed with its best/alt marker and never compares it; the arr's own
-  quality profile decides.
-
-A trailing **`not_on_seadex`** section then lists the library items recognized as
-anime (through the Fribb catalogue) that no SeaDex entry the app can compare
-covers, so you can see which of your titles have no recommendation to compare
-against. That includes an item whose only SeaDex entries are films or specials the
-app offers without comparing, so a row here means "nothing comparable covers these
-files", not always "SeaDex has never heard of it". Every row links the
-Sonarr/Radarr item, the SeaDex entry, and each best release.
-
-Each run writes a timestamped pair into `report.dir` (default
-`/config/reports`): `report-<UTC date+time>.md` grouped by verdict and
-`report-<UTC date+time>.json` beside it, plus one `report item` log line per
-anime. Successive runs never overwrite one another, and the app deletes no
-reports, so prune old pairs yourself. A second report started while one is still
-running logs `report skipped; another report is already running` and exits `0`, so
-a scheduled report that overlaps a running one is not a failure.
-
-While the daemon runs, produce a new report without stopping it:
+For a full report, run this while the container is up:
 
 ```sh
 docker exec seadex-scout /seadex-scout report
 ```
 
-A report never writes the state cache, so it is safe to run alongside a daemon
-cycle. To produce reports on a schedule, use the same Ofelia `job-exec` pattern as
-above with `/seadex-scout report`. The output of a `docker exec` run goes to the
-exec session, not the container log stream, so Loki never sees its `report item`
-lines.
+It writes a timestamped Markdown and JSON pair into `config/reports`. Each season gets a verdict, such as `have_best` or `have_alt`. seadex-scout never deletes old reports. [How seadex-scout works](docs/how-it-works.md#the-report) explains every verdict.
 
-> When you run `report` as the container's command (rather than `docker exec` into
-> the running daemon), disable the image's baked healthcheck for that one-shot
-> container (compose: `healthcheck: { disable: true }`; docker run:
-> `--no-healthcheck`). The health marker belongs to the daemon's poll loop, so a
-> report-only container reads unhealthy while the report is still generating, and
-> an unhealthy-restart watchdog could kill it mid-run.
+## Adding the indexer
 
-## Indexer (Torznab feed)
+The indexer is off until you set it up. It offers SeaDex's picks to Sonarr and Radarr as a Torznab indexer, marked so a Custom Format can score them. It finds releases by searching through the Nyaa and AnimeBytes indexers you already have in Prowlarr.
 
-When a Prowlarr Torznab URL is configured, the daemon serves a
-[Torznab](https://torznab.github.io/spec-1.3-draft/) feed of SeaDex releases for
-Sonarr/Radarr, alongside the compare loop in the same process. It is the opt-in
-automation path: unlike the report-only findings, it lets the arrs grab. Point
-your arrs at it (directly or through Prowlarr) and they parse, match, and grab
-through their own engines, profiles, and history, exactly as for any other
-indexer. To set it up, see [docs/torznab-indexer.md](docs/torznab-indexer.md).
+You fill in the `indexer` section of `config.yaml`, add port `9118` to the service, and add the feed to Sonarr and Radarr as a Torznab indexer. Then you create two Custom Formats, one for SeaDex's best picks and one for its alternatives. In that indexer's settings in Sonarr, tick **Anime Standard Format Search**. Without it, Sonarr asks only for single episodes, which the indexer does not answer, and you get nothing.
 
-The feed handles its two request kinds two different ways. A **search** (the arr's
-automatic or interactive search, which carries a query) is proxied to Prowlarr's
-Nyaa and AnimeBytes Torznab endpoints and filtered to what SeaDex curates, so its
-download links are Prowlarr's own and no tracker passkey is needed here. A
-**periodic RSS check** (the no-query "recent releases" fetch the arrs run on their
-sync interval) carries no query, so the feed synthesizes the SeaDex list itself,
-titling each item from SeaDex's own file names, with a public Nyaa `.torrent` link
-or an AnimeBytes link built from your `ab_passkey`. If every upstream query fails,
-a search answers a Torznab error rather than an empty feed, so the arr records a
-failed search instead of concluding there were no results.
-
-Every item, either way, carries a **marker**: a download volume factor for the
-tier plus a `scene` tag. SeaDex's _best_ release gets the factor `0.75`, which
-with the `scene` tag the arrs record as the Indexer Flags Freeleech25 and Scene,
-and an _alt_ gets `0.25` (Freeleech75 and Scene). Map that pair to a Custom Format
-with both flags required, which is what makes the arrs prefer SeaDex's pick.
-Requiring both matters because some trackers use real 25% and 75% freeleech
-(OldToonsWorld is one), and their indexer definitions cannot set Scene. A Custom
-Format on the tier flag alone keeps matching the feed, and the
-[setup guide](docs/torznab-indexer.md#3-create-two-custom-formats) shows how to add
-the Scene condition to an existing library. Each item's category is
-the entry's real media type together with the arr its library item resolved to: a
-series, OVA, or special is `5070` (Anime → Sonarr) and a film is `2000` (Movies →
-Radarr), and a film whose library item is a Sonarr series is offered under Anime as
-well, because the arr that owns the media subscribes only to Anime. A film that TVDB
-files as a special of a series you have in Sonarr is served as a second item titled
-`<Series> S00Exx` under Anime, which carries that offer instead, so Sonarr's parser
-can match it, and a season pack whose file names carry no season token gets the token
-of the one TVDB season the mapping places it in. When the newest file of a release
-carries a newer revision (a `v2`, `PROPER` or `REPACK`, even on one reissued
-episode of a pack) and the title would otherwise read an older one, the title gains
-that revision (`Show S01 [v2] 1080p [Grp]`,
-`86 Eighty Six S01 REPACK 1080p [koala]`), so the arr sees the upgrade the daemon
-reports. The token is placed before the release flags, never at the end, where
-Sonarr would read it as the release group. A search result keeps the tracker's own
-title.
-
-**It answers whole-season searches, not per-episode ones.** SeaDex tracks season
-packs, so the feed answers a season search with the pack and returns nothing,
-without contacting a tracker, for a per-episode query. Specials and movies are
-single releases and are always answered.
-
-> **Setup requirement:** the feed relies on the season search, so enable **Anime
-> Standard Format Search** on the seadex-scout indexer in Sonarr (Settings →
-> Indexers → the indexer). Without it, Sonarr sends only per-episode queries,
-> which the feed does not answer.
-
-## Security
-
-The feed is gated by `feed_api_key`: a request without the matching `apikey` gets
-`401`. Its links are Prowlarr proxy URLs (for searches) and, for the AnimeBytes
-RSS feed, direct AnimeBytes links that embed your `ab_passkey`. Treat the endpoint
-as sensitive and keep it on your LAN; behind an internal reverse proxy is fine
-(that is what the per-tracker subdomain routing is for), but do not put it on the
-public internet. seadex-scout sends the Prowlarr API key in a request header,
-never in a logged URL, and never writes it to the logs.
-
-The synthesized feed is also persisted on disk between cycles as
-`/config/feed.json`, and its AnimeBytes items embed the `ab_passkey` in their
-download links. The file is written owner-only (`0600`), but treat it as
-secret-bearing: a `/config` backup captures the passkey even when your
-`config.yaml` only references it through `${SEADEX_SCOUT_AB_PASSKEY}`.
-
-The image is distroless and runs as a non-root user. For a hardened deployment,
-layer these directives onto the service:
-
-```yaml
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-    tmpfs: ["/tmp:size=1m,mode=1777,noexec,nosuid,nodev"]  # backs the health marker
-```
-
-## How matching works
-
-SeaDex keys everything on AniList IDs; Sonarr keys on TVDB, Radarr on TMDB/IMDb.
-seadex-scout bridges them:
-
-- **ID mapping.** The Fribb `anime-list-mini.json` dataset maps `anilist_id` to
-  `type` (TV vs movie), `tvdb_id`, `themoviedb_id`, and `imdb_id`. The `type` decides
-  which arr is tried first: a movie by TMDB movie id then IMDb id in Radarr, anything
-  else by TVDB id in Sonarr. A film you do not have in Radarr then falls back to its
-  `tvdb_id`, which is the series TVDB files the film under, so it links in Sonarr
-  instead of being lost.
-- **Episode mapping.** The Anime-Lists `anime-list-master.xml` mapping-list,
-  joined on the record's `anidb_id`, adds two facts Fribb drops: which TVDB
-  season-0 episode a film filed under a series is, and which TVDB seasons an
-  absolute-numbered run's episodes fall in. The first is what lets the feed offer
-  such a film to Sonarr under a title it can match; the second is what lets a
-  tokenless season pack carry its season and the report judge a split show
-  against its own seasons.
-- **Overrides.** To pin the entries Fribb misses, drop a `/config/overrides.json`
-  beside the config: a JSON array of records keyed by `anilist_id`, applied ahead
-  of Fribb. Absent is fine. Fields per record: `anilist_id` (required), `type`
-  (`movie` routes to Radarr, anything else to Sonarr), `tvdb_id`, `tmdb_movies`
-  (array of ints), `imdb_ids` (array of strings), `anidb_id` (the mapping-list
-  join key; the episode and season facts themselves always come from the list),
-  `season_tvdb`, and
-  `season_kind`. `season_kind` says whether upstream maps a TVDB season for the
-  entry at all: `present` with a positive `season_tvdb` compares against that
-  season, `present` with `season_tvdb` 0 means the entry lands in Sonarr's
-  season-0 bucket, where it is offered in the feed but never compared, and
-  `absent` judges the entry against the whole series. Omit it and a positive
-  `season_tvdb` still scopes that season; only an entry without one is routed by its
-  `type`. These are
-  NOT the upstream Fribb field names (`imdb_id`, `themoviedb_id`, `season`), which
-  are ignored with a warning naming the key. An override **replaces** the whole
-  mapping record for its `anilist_id` (no field-by-field merge), so when
-  correcting an entry Fribb already has, restate every field the entry needs.
-- **Title fallback.** When an entry maps through neither, seadex-scout fetches its
-  titles and format from AniList and tries a conservative normalized
-  title-plus-year match against the library: exact match, single candidate
-  required, and an ambiguous match is skipped rather than guessed.
-
-## Release classification and filters
-
-Each SeaDex release and each library file is classified into one vocabulary:
-release group, tracker (public like Nyaa, private like AnimeBytes), resolution,
-codec (x265/x264), dual-audio, and **kind** (`remux` / `encode` / `unknown`). An
-unclassifiable release is `unknown` and is never silently dropped. The comparison
-is **group-centric**: an item is aligned when a recommended release group is
-already present on it.
-
-The comparison also reads the release **revision**: a `v2`/`v3` token (`04v2`,
-`S01E05v3`, `[v2]`), a `PROPER`, or a `REPACK`/`RERIP` (`REPACK2` is one more than
-`REPACK`). The library side is the revision Sonarr or Radarr recorded when it
-imported the file, which survives a rename; only when the arr reports none does a
-token in the file's scene name or path count. The SeaDex side is read from the
-release's file names (never the entry notes) with the same grammar the arrs use,
-so a file that came from the very torrent SeaDex lists can never look older than
-it. Both sides compare their newest revision: the newest one your files of a group
-carry, against the newest file SeaDex lists across that group's best releases.
-Your side covers what the entry is compared against: a season, a movie, or all
-seasons together for an entry that spans several. A group that reissues one
-episode of a pack as `v2` therefore lists `v2`.
-When, for every SeaDex best group you hold, your newest revision is provably older
-than SeaDex's, the item is not aligned: the daemon logs a `newer_revision` finding
-and the report says `have_older_revision`. This includes a library that holds the
-pack without the reissued episode. Holding the listed revision or a newer one stays
-aligned, and so does missing revision evidence on either side (an unversioned
-SeaDex release, or a library file with no recorded revision): a missing token is
-never read as an older release.
-
-These filters shape the findings and the report only. The
-[indexer](#indexer-torznab-feed) feed applies none of them; there the arrs filter
-through their own quality profile and Custom Formats. All are optional:
-
-- `filters.exclude_remux` (default false): when true, releases classified `remux`
-  never count as a recommendation. The default keeps them, because on SeaDex a
-  remux is often the best release.
-- `filters.require_dual_audio` (default false): drop releases that are not
-  dual-audio.
-- `filters.exclude_specials` (default false): when true, drop OVA/ONA/special
-  entries from findings and the report.
-- `animebytes` (default false): the one tracker knob. The public trackers SeaDex
-  lists (Nyaa, AnimeTosho, RuTracker) are always considered; the private tracker
-  AnimeBytes is included only when you turn this on. On, a finding carries every
-  source, so a release on both Nyaa and AnimeBytes shows both links. Because
-  seadex-scout only links, an AnimeBytes link
-  is the torrent page you open as a member: no tracker credentials are needed.
-- `arr_tags.include` / `arr_tags.exclude` (arr-side): scan only items carrying an
-  include tag, and never items carrying an exclude tag; an exclude wins when an
-  item has both.
+Right after setup, the indexer's RSS list is empty. It lists only picks SeaDex adds from then on. Sonarr and Radarr find the older ones when they search. [Torznab feed setup](docs/torznab-indexer.md) has every click.
 
 ## Configuration reference
 
-All configuration lives in one YAML file, `/config/config.yaml`. The first boot
-writes it from the annotated template
-[`config.example.yaml`](config.example.yaml) with a generated `feed_api_key`.
+Settings live in one file, `config/config.yaml`. The first start writes it from the annotated [`config.example.yaml`](config.example.yaml) with a generated `feed_api_key`. seadex-scout reads it once at start, so restart the container after an edit. A misspelled key stops the start with an error that names it, such as `unknown configuration key "anime_bytes"`.
 
-Any string value can reference `SONARR_*`, `RADARR_*`, or `SEADEX_SCOUT_*`
-environment variables with `${VAR}`, so secrets can live in an `.env` or a Docker
-secret instead of the file. The file is the source of truth: a variable is read
-only where the file references it, which the starter does for the four connection
-values below. A reference to a variable that is not set reads as empty in those
-four; anywhere else it stays as written. API keys are never logged (only whether
-each is set).
+The starter file reads the four connection settings below from the environment. Turn on at least Sonarr or Radarr. Any value in the file can name a `SONARR_*`, `RADARR_*` or `SEADEX_SCOUT_*` variable as `${VAR}`, so secrets can stay in `.env`.
 
 | Variable | Description | Default |
 | --- | --- | --- |
+| `SONARR_URL` | Where seadex-scout reaches Sonarr. Unset turns Sonarr off. | _(unset)_ |
+| `SONARR_API_KEY` | Sonarr's API key, needed when `SONARR_URL` is set. | _(unset)_ |
+| `RADARR_URL` | Where seadex-scout reaches Radarr. Unset turns Radarr off. | _(unset)_ |
+| `RADARR_API_KEY` | Radarr's API key, needed when `RADARR_URL` is set. | _(unset)_ |
 | `CONFIG_PATH` | Path of the config file. | `/config/config.yaml` |
-| `SONARR_URL` | Where seadex-scout reaches Sonarr; an internal address is fine. Unset = Sonarr off. | _(unset)_ |
-| `SONARR_API_KEY` | Sonarr's API key (Settings → General → API Key); required when `SONARR_URL` is set. | _(unset)_ |
-| `RADARR_URL` | Where seadex-scout reaches Radarr. Unset = Radarr off. | _(unset)_ |
-| `RADARR_API_KEY` | Radarr's API key; required when `RADARR_URL` is set. | _(unset)_ |
 
-The compose example also passes `SEADEX_SCOUT_FEED_KEY`, `SEADEX_SCOUT_PROWLARR_KEY` and `SEADEX_SCOUT_AB_PASSKEY`; they are read only where `config.yaml` references them, for the `indexer.feed_api_key`, `indexer.prowlarr_api_key` and `indexer.ab_passkey` keys below.
-
-The keys the file itself holds, with the values the starter ships:
+The settings most people change:
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `sonarr.url` | `${SONARR_URL}` | Where seadex-scout reaches Sonarr. Sonarr is on when this is set; at least one arr must be on. |
-| `sonarr.api_key` | `${SONARR_API_KEY}` | Required when Sonarr is on. |
-| `sonarr.enabled` | _(unset)_ | Optional. `false` turns Sonarr off whatever `url` says; `true` requires `url` and `api_key`; absent follows `url`. |
-| `sonarr.public_url` | _(unset)_ | Browser base for the report's deep-links; empty reuses `url`. |
-| `radarr.*` | `${RADARR_URL}`, `${RADARR_API_KEY}` | Same four keys as `sonarr`. |
-| `mode` | `daemon` | `daemon` (scheduled) or `report` (one-shot, then exit). |
-| `poll_interval` | `15m` | Pass cadence for the findings and the feed; minimum `15m`. `off`, `disabled`, or `0` = external. |
-| `animebytes` | `false` | Set true when you have an AnimeBytes account: adds AB releases and links. |
-| `filters.exclude_remux` | `false` | Drop releases classified `remux`. |
-| `filters.require_dual_audio` | `false` | Drop releases that are not dual-audio. |
-| `filters.exclude_specials` | `false` | Drop OVA/ONA/special entries. |
-| `filters.exclude_tags` | `{}` | Per-tag exclusions keyed on SeaDex's own tags, each listing the surfaces to drop it from (`findings`, `report`, `feed`). |
-| `filters.ignore` | `[]` | AniList IDs whose findings are never alerted on; the report and the feed still carry them. |
-| `arr_tags.include` | `[]` | Scan only arr items carrying one of these tags; `[]` = all. |
-| `arr_tags.exclude` | `[]` | Never scan arr items carrying one of these tags; an exclude wins. |
-| `report.dir` | `/config/reports` | Where the timestamped `report-<UTC date+time>.md` + `.json` pairs are written. |
-| `indexer.feed_api_key` | _(generated on first boot)_ | The key the arrs send and the feed checks. |
-| `indexer.nyaa_torznab_url` | _(unset)_ | Prowlarr Nyaa Torznab URL, for example `http://prowlarr:9696/1/api`; empty = off. |
-| `indexer.ab_torznab_url` | _(unset)_ | Prowlarr AnimeBytes Torznab URL; empty = off. |
-| `indexer.prowlarr_api_key` | _(unset)_ | Prowlarr API key; secret, never logged. |
-| `indexer.ab_passkey` | _(unset)_ | AnimeBytes passkey for the AB RSS download links; empty = AB RSS off. Nyaa needs none. |
-| `log.level` | `info` | `debug`, `info`, `warn`, or `error`. |
-| `log.format` | `json` | `json` or `text`. |
+| `mode` | `daemon` | `daemon` runs on a schedule. `report` writes one report and exits. |
+| `poll_interval` | `15m` | How often to check SeaDex for changes. Minimum `15m`. `off` hands scheduling to an outside tool. |
+| `animebytes` | `false` | Set `true` when you have an AnimeBytes account, to include its releases and links. |
+| `filters.exclude_remux` | `false` | Leave out releases classified as remux. |
+| `filters.require_dual_audio` | `false` | Leave out releases that are not dual audio. |
+| `filters.exclude_specials` | `false` | Leave out OVA, ONA and special entries. |
+| `filters.ignore` | `[]` | AniList IDs of shows to stop warning about. They still appear in the report and the indexer. |
+| `arr_tags.include` | `[]` | Check only items with one of these Sonarr or Radarr tags. `[]` checks everything. |
+| `arr_tags.exclude` | `[]` | Never check items with one of these tags. An exclude wins over an include. |
+| `sonarr.public_url` | _(unset)_ | The Sonarr address your browser uses, for links in the report. Empty reuses `sonarr.url`. |
+| `report.dir` | `/config/reports` | Where each report pair is written. |
+| `log.level` | `info` | `debug`, `info`, `warn` or `error`. The shipped alert rules need `info`. |
 
-An unknown or misplaced key is rejected at startup with an error naming it
-(`unknown configuration key "anime_bytes"`), so a typo fails fast instead of being
-silently ignored.
+[Configuration](docs/configuration.md) lists every key, including the indexer settings and how to run checks from an outside scheduler.
 
-The upstream endpoints (SeaDex, Fribb, Anime-Lists, AniList), their request cadences, and the
-internal file locations under `/config` (the state cache, the reports, and the
-overrides file) are fixed and are not config keys, so the file stays limited to
-what you actually tune.
+| Mount | Description |
+| --- | --- |
+| `/config` | `config.yaml`, saved state, the indexer's `feed.json` and the `reports` folder. |
 
-## Observability
+| Port | Description |
+| --- | --- |
+| `9118` | The optional indexer. Bound only when a Torznab URL is set. |
 
-Observability is slog-only: no metrics endpoint, and no HTTP surface unless you
-configure the [indexer](#indexer-torznab-feed) feed, the only thing that binds a
-port (fixed at `:9118`). An alert-only deployment stays socket-less.
+## Security
 
-- **slog to Loki.** A JSON handler writes to stdout; Alloy (or any collector)
-  ships it to Loki. A finding is one line at `warn` (`msg="better release
-  available"`) carrying the title, the AniList id, the current and recommended
-  groups, the release's classification, and one link per obtainable source
-  (`nyaa_url`, `public_url` + `public_tracker`, `ab_url` + `ab_tracker`), so an
-  alert can render a clickable notification straight from the labels;
-  [`alerts/logql.yaml`](alerts/logql.yaml) names the attributes it groups by. A
-  newer revision of a group you already hold logs the same `warn` message with
-  `status=newer_revision`, `current_revision` and `recommended_revision` (for
-  example `v1` and `v2`), and a `seadex_tags` value starting `newer-revision`, so
-  existing better-release alert rules fire on it too. Informational
-  cases (`incomplete`, `theoretical_best`, `mixed_group_manual`, `unverifiable`)
-  log at `info`. Every pass closes with a completion line: `tick complete` or
-  `cycle complete` when healthy, `tick degraded` or `cycle degraded` at `warn`
-  with a `reason` when an upstream outage or a safety guard skipped the
-  comparison, plus a `reconcile complete` line from every full pass. Report mode
-  emits one `report item` line per anime.
-- **Health.** The distroless image's Docker `HEALTHCHECK` runs the
-  `seadex-scout health` subcommand against a `/tmp/.healthy` file marker, so it
-  needs no shell and no port; the marker reflects the last cycle's library-ingest
-  outcome.
+seadex-scout opens no port until you set up the indexer. The indexer then answers only requests that carry its `feed_api_key`, and refuses the rest with `401`.
 
-## Alerting
+Keep the indexer on your local network, because the AnimeBytes RSS links it serves contain your AnimeBytes passkey. If you write the passkey into `config.yaml` itself rather than `.env`, a backup of `config` carries it too.
 
-seadex-scout ships no notifier of its own; its operational state is in its logs.
-Ship the container's logs to Loki (Grafana
-Alloy's Docker log discovery does this with no configuration) and evaluate the
-rules in [`alerts/logql.yaml`](alerts/logql.yaml) with
-[Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts
-deliver through your Alertmanager like any Prometheus metric alert. They cover:
+seadex-scout never logs an API key, and sends the Prowlarr key in a request header rather than in a URL. The image runs as a non-root user on a distroless base, which has no shell. [Security](docs/security.md) has a hardened compose setup.
 
-| Alert | Fires when | Severity |
-| --- | --- | --- |
-| `SeadexScoutCycleError` | a run logs an error that is not a lasting upstream or library problem, such as a failed Sonarr/Radarr library read, a feed that cannot start, or a crash | warning |
-| `SeadexScoutUpstreamUnavailable` | SeaDex, AniList or the anime ID map has been failing long enough to escalate; fires once per outage and resolves when it recovers | warning |
-| `SeadexScoutLibraryDegraded` | an arr library has shrunk by more than half or returned incomplete episode lists on 2 daily passes; fires once and resolves when it recovers | warning |
-| `SeadexScoutScanStalled` | no `tick`/`cycle` completion line and no `reconcile started` in 3h, so the poll loop is wedged | warning |
-| `SeadexScoutReconcileStalled` | no `reconcile complete` in 72h, so the 24h full pass has stopped while ticks keep the stall rule satisfied | warning |
-| `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk, or a newer revision of the group on disk (informational, not a fault) | info |
-| `SeadexScoutMixedGroupManual` | the files on disk span more than one release group, so the app cannot say which one you have (informational) | info |
-| `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
+## Troubleshooting
 
-Thresholds and the `severity` labels are starting points. Adjust the `container`
-selector (or `job` / `service`, depending on your log collector) to your
-deployment; the stall window assumes a `poll_interval` of 1h or less (the default
-is 15m), so widen it to at least three times a longer interval. In
-resident-idle (`poll_interval: off`) each cycle runs as a `docker exec` child,
-so its lines never reach the container's log stream: the count rules go blind and
-both stall rules false-fire. Drop them and alert on your external scheduler's job
-result. A report is observed only as the container's command (`mode: report`).
-The rules assume the default `info` level and JSON log handler; for
-`log.format: text`, replace each `| json` parser stage with `| logfmt`. Route by whatever labels your Alertmanager uses.
+The healthcheck runs `seadex-scout health`, which reads a marker file each completed check refreshes. Unhealthy means the last read of your Sonarr or Radarr library failed, or no check has finished in 3 hours. A `poll_interval` over 1 hour lengthens that wait. A SeaDex outage keeps the container healthy and keeps your existing findings.
+
+- The container restarts in a loop at the first start. The `config` folder does not belong to the container user. Run the `chown` from the quick start.
+- The log says `no config found; wrote a starter config, but it cannot start yet`. `SONARR_URL` or `SONARR_API_KEY` did not reach the container. Check `.env`, then restart.
+- The log says `sonarr ping failed at startup`. Use Sonarr's network address, not `localhost`, and check that Sonarr is running.
+- The indexer finds nothing on searches. Tick **Anime Standard Format Search** on the indexer in Sonarr.
+
+## Monitoring
+
+seadex-scout writes JSON logs to standard output and has no metrics endpoint. Eight Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
+
+## Documentation
+
+- [Torznab feed setup](docs/torznab-indexer.md) connects the indexer to Prowlarr, Sonarr and Radarr, step by step.
+- [Configuration](docs/configuration.md) lists every setting and shows how to run checks from an outside scheduler.
+- [How seadex-scout works](docs/how-it-works.md) explains matching, the report verdicts, release versions and the indexer's behavior.
+- [Monitoring and alerts](docs/monitoring.md) describes the log lines, health and the Loki alert rules.
+- [Security](docs/security.md) has a hardened compose setup and explains how credentials are handled.
+
+## Credits
+
+- The way seadex-scout compares the release groups in a Sonarr or Radarr anime library with SeaDex follows [seadexarr](https://github.com/bbtufty/seadexarr).
+- The indexer reads a release's tracker ID from its page URL and accepts only an ID made of digits. Both rules follow [seadexerr](https://github.com/Ryder-C/seadexerr), a Prowlarr indexer for SeaDex releases.
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-the repo layout, the conventions, and how to run the checks locally.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, the conventions, and how to run the checks locally.
 
 ## Disclaimer
 
@@ -512,7 +171,6 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0-or-later. Linking [`arrapi`](https://github.com/cplieger/arrapi) (GPL-3.0-or-later) makes
-seadex-scout GPL-3.0-or-later. See [LICENSE](LICENSE). The image carries the license text of every bundled component under `/usr/share/licenses/`.
+GPL-3.0-or-later. Linking [`arrapi`](https://github.com/cplieger/arrapi) (GPL-3.0-or-later) makes seadex-scout GPL-3.0-or-later. See [LICENSE](LICENSE). The image carries the license text of every bundled component under `/usr/share/licenses/`.
 
 Third-party attributions are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
