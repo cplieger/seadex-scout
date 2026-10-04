@@ -70,7 +70,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// must never bind and serve the passkey-bearing feed behind a guessable or
 	// absent gate. Field-name-only: the rejected value is a credential.
 	if ix.keyUnusable {
-		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference; refusing to serve the Torznab feed")
+		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference, so the Torznab feed is not served")
 	}
 	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so a feed with
 	// AnimeBytes ON takes the empty-passkey path. Say why once at startup: config
