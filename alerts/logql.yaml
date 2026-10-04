@@ -69,10 +69,7 @@
 #                                   full pass whose library read was complete
 #     attrs: rows, have_best, have_alt, have_older_revision, have_unlisted, no_file,
 #     attrs: unverified, unattributed, not_on_seadex, anime_items, items_with_entry,
-#     attrs: items_all_best, hidden_by_filters
-#   msg="library gap"               one no_file or unverified row of the same audit
-#     attrs: title, al_id, arr, verdict, scope, current_group, seadex_best, arr_url,
-#     attrs: seadex_url
+#     attrs: items_all_best, items_all_best_or_alt, hidden_by_filters
 #
 # Every OTHER message and attribute this app logs is diagnostic, not contract:
 # it may be reworded, re-levelled, or change attribute type in any release. If

@@ -55,7 +55,7 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 			t.Errorf("report JSON keys = %v, want %v", keys, wantReportKeys)
 		}
 		items, _ := decoded["items"].(map[string]any)
-		wantItemKeys := []string{"all_best", "anime", "with_entry"}
+		wantItemKeys := []string{"all_best", "all_best_or_alt", "anime", "with_entry"}
 		if keys := slices.Sorted(maps.Keys(items)); !slices.Equal(keys, wantItemKeys) {
 			t.Errorf("items JSON keys = %v, want %v", keys, wantItemKeys)
 		}

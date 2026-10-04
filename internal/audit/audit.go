@@ -168,6 +168,9 @@ type ItemTotals struct {
 	// row nothing was compared on (no_file, unattributed) neither earns nor blocks
 	// it, so an item made only of such rows is not counted.
 	AllBest int `json:"all_best"`
+	// AllBestOrAlt is the items with an entry whose every compared row is
+	// have_best or have_alt, by the same rules as AllBest, so it includes AllBest.
+	AllBestOrAlt int `json:"all_best_or_alt"`
 }
 
 // Report is the full audit result.
@@ -252,15 +255,17 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 }
 
 type itemStanding struct {
-	best, notBest bool
+	best, alt, belowAlt bool
 }
 
 func (s itemStanding) with(v Verdict) itemStanding {
 	switch v {
 	case VerdictBest:
 		s.best = true
-	case VerdictAlt, VerdictOlderRevision, VerdictUnlisted, VerdictUnverified:
-		s.notBest = true
+	case VerdictAlt:
+		s.alt = true
+	case VerdictOlderRevision, VerdictUnlisted, VerdictUnverified:
+		s.belowAlt = true
 	case VerdictNoFile, VerdictUnattributed, VerdictNotOnSeaDex:
 	}
 	return s
@@ -276,7 +281,13 @@ func itemTotals(matched map[string]itemStanding, uncoveredKeys []string) ItemTot
 		}
 	}
 	for _, s := range matched {
-		if s.best && !s.notBest {
+		if s.belowAlt {
+			continue
+		}
+		if s.best || s.alt {
+			t.AllBestOrAlt++
+		}
+		if s.best && !s.alt {
 			t.AllBest++
 		}
 	}

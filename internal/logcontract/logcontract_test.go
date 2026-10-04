@@ -65,7 +65,7 @@ func TestParseShippedRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(alerts/logql.yaml): %v", err)
 	}
-	for _, msg := range []string{"better release available", "reconcile complete", "indexer request", "library summary", "library gap"} {
+	for _, msg := range []string{"better release available", "reconcile complete", "indexer request", "library summary"} {
 		if _, ok := c.Messages[msg]; !ok {
 			t.Errorf("shipped contract lacks %q", msg)
 		}

@@ -422,17 +422,12 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	return nil
 }
 
-// LogLibrary emits one "library summary" line and one "library gap" line per
-// no_file or unverified row. The messages differ from Log's so a Loki counter
-// never sums a report run with a daemon pass. hiddenByFilters is the caller's
-// HiddenFrom count, since only the caller holds the daemon's findings.
+// LogLibrary emits one "library summary" line. Its message differs from Log's
+// so a Loki counter never sums a report run with a daemon pass.
+// hiddenByFilters is the caller's HiddenFrom count, since only the caller holds
+// the daemon's findings.
 func (r *Report) LogLibrary(log *slog.Logger, hiddenByFilters int) {
 	log.Info("library summary", append(r.summaryAttrs(), "hidden_by_filters", hiddenByFilters)...)
-	for i := range r.Rows {
-		if v := r.Rows[i].Verdict; v == VerdictNoFile || v == VerdictUnverified {
-			log.Info("library gap", rowAttrs(&r.Rows[i])...)
-		}
-	}
 }
 
 func (r *Report) summaryAttrs() []any {
@@ -449,6 +444,7 @@ func (r *Report) summaryAttrs() []any {
 		"anime_items", r.Items.Anime,
 		"items_with_entry", r.Items.WithEntry,
 		"items_all_best", r.Items.AllBest,
+		"items_all_best_or_alt", r.Items.AllBestOrAlt,
 	}
 }
 
