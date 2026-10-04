@@ -134,7 +134,7 @@ seadex-scout opens no port until you set up the indexer. The indexer then answer
 
 Keep the indexer on your local network, because the AnimeBytes RSS links it serves contain your AnimeBytes passkey. If you write the passkey into `config.yaml` itself rather than `.env`, a backup of `config` carries it too.
 
-seadex-scout never logs an API key, and sends the Prowlarr key in a request header rather than in a URL. The image runs as a non-root user on a distroless base, which has no shell. [Security](docs/security.md) has a hardened compose setup.
+seadex-scout never logs an API key, and sends the Prowlarr key in a request header rather than in a URL. The image runs as a non-root user on a distroless base, which has no shell. [Security](docs/hardening.md) has a hardened compose setup.
 
 ## Troubleshooting
 
@@ -155,7 +155,7 @@ seadex-scout writes JSON logs to standard output and has no metrics endpoint. Ni
 - [Configuration](docs/configuration.md) lists every setting and shows how to run checks from an outside scheduler.
 - [How seadex-scout works](docs/how-it-works.md) explains matching, the report verdicts, release versions and the indexer's behavior.
 - [Monitoring and alerts](docs/monitoring.md) describes the log lines, health, the Grafana dashboard and the Loki alert rules.
-- [Security](docs/security.md) has a hardened compose setup and explains how credentials are handled.
+- [Security](docs/hardening.md) has a hardened compose setup and explains how credentials are handled.
 
 ## Credits
 
