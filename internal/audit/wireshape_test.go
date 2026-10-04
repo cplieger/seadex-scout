@@ -50,9 +50,14 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 		if err := json.Unmarshal(data, &decoded); err != nil {
 			t.Fatalf("report json does not parse: %v", err)
 		}
-		wantReportKeys := []string{"generated_at", "incomplete_mappings", "rows", "totals"}
+		wantReportKeys := []string{"generated_at", "incomplete_mappings", "items", "rows", "totals"}
 		if keys := slices.Sorted(maps.Keys(decoded)); !slices.Equal(keys, wantReportKeys) {
 			t.Errorf("report JSON keys = %v, want %v", keys, wantReportKeys)
+		}
+		items, _ := decoded["items"].(map[string]any)
+		wantItemKeys := []string{"all_best", "anime", "with_entry"}
+		if keys := slices.Sorted(maps.Keys(items)); !slices.Equal(keys, wantItemKeys) {
+			t.Errorf("items JSON keys = %v, want %v", keys, wantItemKeys)
 		}
 
 		rows, _ := decoded["rows"].([]any)
@@ -111,7 +116,7 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 		if err := json.Unmarshal(data, &decoded); err != nil {
 			t.Fatalf("minimal report json does not parse: %v", err)
 		}
-		wantReportKeys := []string{"generated_at", "rows", "totals"}
+		wantReportKeys := []string{"generated_at", "items", "rows", "totals"}
 		if keys := slices.Sorted(maps.Keys(decoded)); !slices.Equal(keys, wantReportKeys) {
 			t.Errorf("minimal report JSON keys = %v, want %v", keys, wantReportKeys)
 		}

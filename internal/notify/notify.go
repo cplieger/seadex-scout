@@ -67,6 +67,19 @@ func (n *Notifier) Reemit() {
 	n.emitAll(0, len(n.current), 0)
 }
 
+// EmittedIDs returns the AniList ids the last pass emitted a finding for: the
+// current set minus the operator's filters.ignore.
+func (n *Notifier) EmittedIDs() map[int]struct{} {
+	ids := make(map[int]struct{}, len(n.current))
+	for key := range n.current {
+		id := n.current[key].AniListID
+		if _, ignored := n.ignore[id]; !ignored {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
 // report is the shared body. comparedIDs nil means FULL deletion authority
 // (every row may be deleted by omission); non-nil bounds it to those owners.
 func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
@@ -288,6 +301,7 @@ func findingKVs(f *compare.Finding) []any {
 		"scope", f.Scope,
 		"approx", f.Approx,
 		"current_group", capAttr(f.CurrentGroup),
+		"current_tier", string(f.Tier),
 		"recommended_group", capAttr(f.RecommendedGroup),
 		"alert_recommended_group", capAlertTextAttr(f.RecommendedGroup),
 		"recommended_groups", joinGroupsAttr(f.RecommendedGroups),

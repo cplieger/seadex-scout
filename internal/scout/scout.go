@@ -97,6 +97,9 @@ type Deps struct {
 	Matcher  *match.Matcher
 	Comparer *compare.Comparer
 	Notifier *notify.Notifier
+	// Auditor runs the report's audit over each clean reconcile's match set so
+	// the library lines reach the log daily. Nil skips them.
+	Auditor *audit.Auditor
 	// AniListStats reports the AniList client's cumulative request counters for
 	// the cycle completion logs. A narrow callback rather than the concrete
 	// client; nil when no AniList client is wired (the daemon always wires it).
@@ -159,6 +162,7 @@ type Scout struct {
 	core
 	comparer *compare.Comparer
 	notifier *notify.Notifier
+	auditor  *audit.Auditor
 	// standing holds the escalated conditions every completed pass re-states.
 	standing standingSet
 	// aniListStats reports the AniList client's cumulative request counters; nil
@@ -295,6 +299,7 @@ func New(deps *Deps) *Scout {
 		core:         newCore(deps.Logger, deps.Store, deps.Library, deps.Mapping, deps.SeaDex, deps.Matcher),
 		comparer:     deps.Comparer,
 		notifier:     deps.Notifier,
+		auditor:      deps.Auditor,
 		aniListStats: deps.AniListStats,
 		feed:         deps.Feed,
 		pollInterval: deps.PollInterval,
@@ -358,7 +363,10 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		// A transient AniList degradation instead flows into the compare below.
 		return s.finishInterruptedMatch(ctx, start, startStats, &st, &snap, &mapCache, &result)
 	}
-	return s.finishCompletedCycle(ctx, start, startStats, &st, &snap, &mapCache, entries, &result, mapErr, shrunkArrs)
+	return s.finishCompletedCycle(ctx, &completedPass{
+		start: start, startStats: startStats, st: &st, snap: &snap, mapCache: &mapCache,
+		idx: idx, entries: entries, result: &result, mapErr: mapErr, shrunkArrs: shrunkArrs,
+	})
 }
 
 // warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics for
@@ -535,15 +543,31 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 	return true
 }
 
+// completedPass is what a reconcile hands finishCompletedCycle once matching
+// finished, grouped so that no two same-typed values can be transposed.
+type completedPass struct {
+	start      time.Time
+	mapErr     error
+	st         *state.State
+	snap       *library.Snapshot
+	mapCache   *mapping.Cache
+	idx        *mapping.Index
+	result     *match.Result
+	entries    []seadex.Entry
+	shrunkArrs []string
+	startStats AniListStats
+}
+
 // finishCompletedCycle runs the compare over the completed match result, reports
 // the findings, logs the completion line ("cycle complete", or "cycle degraded"
 // for a shrink-guarded arr, a partial walk, an AniList degradation or a
 // stale-but-usable map), and persists the refreshed state. On a partial walk the
 // compare runs on the items that walked cleanly only, and finding resolution is
 // scoped so degraded items' prior findings are preserved rather than resolved.
-// shrunkArrs are the arrs whose PRIOR items snap already carries; that needs no
-// authority narrowing and only decides the completion line's severity.
-func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result *match.Result, mapErr error, shrunkArrs []string) bool {
+// p.shrunkArrs are the arrs whose PRIOR items p.snap already carries; that needs
+// no authority narrowing and only decides the completion line's severity.
+func (s *Scout) finishCompletedCycle(ctx context.Context, p *completedPass) bool {
+	st, snap, result := p.st, p.snap, p.result
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.comparer.Compare(cleanMatches)
 	// Findings are reported as STATE: the whole set is re-emitted and a condition
@@ -554,31 +578,42 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	// publish it (see Scout.ready). This is the ONLY site that sets it: every other
 	// reconcile exit gated before the compare or was interrupted.
 	s.ready = true
+	s.logLibrary(p)
 
 	diff := library.DiffSnapshots(&st.Library, snap)
 	attrs := make([]any, 0, 26)
 	attrs = append(attrs,
-		"seadex_entries", len(entries),
+		"seadex_entries", len(p.entries),
 		"library_items", len(snap.Items),
 		"findings", len(findings),
 		"mapped", sumCounts(result.Coverage.Hits),
 		"unmapped", sumCounts(result.Coverage.Unmapped),
 	)
-	attrs = append(attrs, s.aniListCycleAttrs(startStats)...)
+	attrs = append(attrs, s.aniListCycleAttrs(p.startStats)...)
 	attrs = append(attrs,
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
-		"duration", time.Since(start).Round(time.Millisecond).String())
+		"duration", time.Since(p.start).Round(time.Millisecond).String())
 	s.recordAniListDegradation(st, result)
 	s.recordPartialWalk(st, snap)
-	s.logCompletedCycle(snap, result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
+	s.logCompletedCycle(snap, result, p.mapErr, failedItems, st.AniListDegraded, p.shrunkArrs, attrs)
 	// A SECOND line, carrying nothing but the fact that a full pass finished: once
 	// most iterations are ticks, the deadman cannot tell "the loop is alive" from
 	// "the backstop still runs". Emitted for every reconcile that ran end to end.
 	s.log.Info("reconcile complete", "interval", s.reconcileCadenceAttr())
 
-	st.Library, st.Mapping, st.Memo = *snap, *mapCache, result.Memo
+	st.Library, st.Mapping, st.Memo = *snap, *p.mapCache, result.Memo
 	s.save(ctx, st)
 	return true
+}
+
+// logLibrary logs only on a clean walk: a partial or shrink-merged snapshot is
+// the same refusal Reporter.reportSnapshot applies.
+func (s *Scout) logLibrary(p *completedPass) {
+	if s.auditor == nil || p.snap.Partial || len(p.shrunkArrs) > 0 {
+		return
+	}
+	rep := s.auditor.Audit(p.result.Matches, p.snap, p.idx, p.result.IncompleteIDs)
+	rep.LogLibrary(s.log, rep.HiddenFrom(s.notifier.EmittedIDs()))
 }
 
 // escalate emits a latched degradation at the level its streak has earned: ERROR

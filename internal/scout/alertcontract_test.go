@@ -274,6 +274,45 @@ func TestStandingRuleTextNamesEveryCondition(t *testing.T) {
 // sentenceEndRe matches the end of a sentence in rendered annotation prose.
 var sentenceEndRe = regexp.MustCompile(`[.!?](\s|$)`)
 
+// feedRuleWindowRe captures every range-vector window, day-sized ones included.
+var feedRuleWindowRe = regexp.MustCompile(`\[(\d+[smhd])\]`)
+
+// TestFeedNotPolledRuleShape pins SeadexScoutFeedNotPolled: per scope, a
+// tracker RSS-polled within 7 days and silent for 6 hours. Both sides count the
+// same lines and group by scope alone, or `unless` stops matching them up; the
+// annotations may name only scope, the one label the sum keeps.
+func TestFeedNotPolledRuleShape(t *testing.T) {
+	r := rule(t, shippedRules(t), "SeadexScoutFeedNotPolled")
+	sides := strings.Split(r.Expr, "unless")
+	if len(sides) != 2 {
+		t.Fatalf("SeadexScoutFeedNotPolled splits into %d sides on unless, want 2:\n%s", len(sides), r.Expr)
+	}
+	for i, want := range []string{"7d", "6h"} {
+		side := alertRule{Alert: r.Alert, Expr: sides[i]}
+		if got := grouping(t, side); !slices.Equal(got, []string{"scope"}) {
+			t.Errorf("side %d groups by %v, want [scope]", i, got)
+		}
+		for _, filter := range []string{"msg=`indexer request`", "| feed=`true`", `scope="scope"`} {
+			if !strings.Contains(side.Expr, filter) {
+				t.Errorf("side %d lacks %s, want it counting RSS polls only:\n%s", i, filter, side.Expr)
+			}
+		}
+		if got := feedRuleWindowRe.FindAllStringSubmatch(side.Expr, -1); len(got) != 1 || got[0][1] != want {
+			t.Errorf("side %d windows = %v, want exactly [%s]", i, got, want)
+		}
+	}
+	if norm := func(s, w string) string { return strings.Join(strings.Fields(strings.ReplaceAll(s, w, "")), " ") }; norm(sides[0], "[7d]") != norm(sides[1], "[6h]") {
+		t.Errorf("the two sides differ beyond their window, want the same lines counted:\n%s", r.Expr)
+	}
+	for field, text := range r.Annotations {
+		for _, m := range labelRefRe.FindAllStringSubmatch(text, -1) {
+			if m[1] != "scope" {
+				t.Errorf("%s interpolates $labels.%s, which sum by (scope) drops", field, m[1])
+			}
+		}
+	}
+}
+
 // TestAlertDescriptionsFitAParagraphBudget pins the public text budget on the
 // rules whose descriptions carry the most guidance: every rendered paragraph
 // holds at most five sentences and 100 words, so a notification stays readable
@@ -296,6 +335,8 @@ func TestAlertDescriptionsFitAParagraphBudget(t *testing.T) {
 	}
 	fault := rule(t, rules, "SeadexScoutCycleError")
 	check(fault.Alert, renderAnnotation(t, fault.Alert, fault.Annotations["description"], nil))
+	feed := rule(t, rules, "SeadexScoutFeedNotPolled")
+	check(feed.Alert, renderAnnotation(t, feed.Alert, feed.Annotations["description"], map[string]string{"scope": "ab"}))
 	for _, name := range standingRules {
 		r := rule(t, rules, name)
 		for _, c := range ruleConditions(t, r) {

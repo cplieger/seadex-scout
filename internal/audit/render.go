@@ -397,51 +397,18 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 // generated", so a Loki counter keyed on either never double-counts a run.
 // Cancellation is observed before the summary and between row records, so a
 // shutdown neither emits a rowless summary nor spends its grace on row lines.
-// Every untrusted string passes through capDisplayText; the three aggregate
-// attributes stream through logattr.Joiner instead of being materialized.
 func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	if err := interrupted(ctx, "report log"); err != nil {
 		return err
 	}
 	stamp := r.GeneratedAt.UTC().Format(time.RFC3339)
-	log.Info("report summary",
-		"generated_at", stamp,
-		"rows", len(r.Rows),
-		"have_best", r.Totals[string(VerdictBest)],
-		"have_alt", r.Totals[string(VerdictAlt)],
-		"have_older_revision", r.Totals[string(VerdictOlderRevision)],
-		"have_unlisted", r.Totals[string(VerdictUnlisted)],
-		"no_file", r.Totals[string(VerdictNoFile)],
-		"unverified", r.Totals[string(VerdictUnverified)],
-		"unattributed", r.Totals[string(VerdictUnattributed)],
-		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
-		"incomplete_mappings", len(r.Incomplete))
+	log.Info("report summary", append(append([]any{"generated_at", stamp}, r.summaryAttrs()...),
+		"incomplete_mappings", len(r.Incomplete))...)
 	for i := range r.Rows {
 		if err := interrupted(ctx, "report log"); err != nil {
 			return err
 		}
-		row := &r.Rows[i]
-		bestGroups, bestNotes := joinBestAttrs(row.Releases)
-		log.Info("report item",
-			"generated_at", stamp,
-			"title", capDisplayText(row.Title),
-			"al_id", row.AniListID,
-			"arr", capDisplayText(row.Arr),
-			"verdict", string(row.Verdict),
-			"qualifier", string(row.Qualifier),
-			"scope", scopeLabel(row),
-			"approx", row.Approx,
-			"current_revision", row.CurrentRevision.String(),
-			"best_revision", row.BestRevision.String(),
-			"hidden_animebytes", row.HiddenAnimeBytes,
-			"hidden_animebytes_best", row.HiddenAnimeBytesBest,
-			"current_group", joinGroupsAttr(row.CurrentGroups),
-			"groups_unknown", row.GroupsUnknown,
-			"seadex_best", bestGroups,
-			"seadex_best_notes", bestNotes,
-			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
-			"seadex_url", capDisplayText(row.SeaDexURL),
-			"match_source", capDisplayText(row.MatchSource))
+		log.Info("report item", append([]any{"generated_at", stamp}, rowAttrs(&r.Rows[i])...)...)
 	}
 	for i := range r.Incomplete {
 		if err := interrupted(ctx, "report log"); err != nil {
@@ -453,6 +420,62 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"seadex_url", capDisplayText(r.Incomplete[i].SeaDexURL))
 	}
 	return nil
+}
+
+// LogLibrary emits one "library summary" line and one "library gap" line per
+// no_file or unverified row. The messages differ from Log's so a Loki counter
+// never sums a report run with a daemon pass. hiddenByFilters is the caller's
+// HiddenFrom count, since only the caller holds the daemon's findings.
+func (r *Report) LogLibrary(log *slog.Logger, hiddenByFilters int) {
+	log.Info("library summary", append(r.summaryAttrs(), "hidden_by_filters", hiddenByFilters)...)
+	for i := range r.Rows {
+		if v := r.Rows[i].Verdict; v == VerdictNoFile || v == VerdictUnverified {
+			log.Info("library gap", rowAttrs(&r.Rows[i])...)
+		}
+	}
+}
+
+func (r *Report) summaryAttrs() []any {
+	return []any{
+		"rows", len(r.Rows),
+		"have_best", r.Totals[string(VerdictBest)],
+		"have_alt", r.Totals[string(VerdictAlt)],
+		"have_older_revision", r.Totals[string(VerdictOlderRevision)],
+		"have_unlisted", r.Totals[string(VerdictUnlisted)],
+		"no_file", r.Totals[string(VerdictNoFile)],
+		"unverified", r.Totals[string(VerdictUnverified)],
+		"unattributed", r.Totals[string(VerdictUnattributed)],
+		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
+		"anime_items", r.Items.Anime,
+		"items_with_entry", r.Items.WithEntry,
+		"items_all_best", r.Items.AllBest,
+	}
+}
+
+// Every untrusted string passes through capDisplayText; the three aggregate
+// attributes stream through logattr.Joiner instead of being materialized.
+func rowAttrs(row *Row) []any {
+	bestGroups, bestNotes := joinBestAttrs(row.Releases)
+	return []any{
+		"title", capDisplayText(row.Title),
+		"al_id", row.AniListID,
+		"arr", capDisplayText(row.Arr),
+		"verdict", string(row.Verdict),
+		"qualifier", string(row.Qualifier),
+		"scope", scopeLabel(row),
+		"approx", row.Approx,
+		"current_revision", row.CurrentRevision.String(),
+		"best_revision", row.BestRevision.String(),
+		"hidden_animebytes", row.HiddenAnimeBytes,
+		"hidden_animebytes_best", row.HiddenAnimeBytesBest,
+		"current_group", joinGroupsAttr(row.CurrentGroups),
+		"groups_unknown", row.GroupsUnknown,
+		"seadex_best", bestGroups,
+		"seadex_best_notes", bestNotes,
+		"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
+		"seadex_url", capDisplayText(row.SeaDexURL),
+		"match_source", capDisplayText(row.MatchSource),
+	}
 }
 
 // interrupted maps a done context to the audit-interrupted error for stage,
