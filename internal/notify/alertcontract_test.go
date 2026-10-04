@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/logcontract"
 )
 
 // The shipped alerts/logql.yaml keys its better-release rule on an exact msg literal,
@@ -260,5 +261,54 @@ func TestCapAlertTextAttrHoldsTheAlertBound(t *testing.T) {
 	const honest = "Sousou no Frieren [SubsPlease]"
 	if got, want := capAlertTextAttr(honest), `Sousou no Frieren \[SubsPlease\]`; got != want {
 		t.Errorf("capAlertTextAttr(%q) = %q, want %q", honest, got, want)
+	}
+}
+
+// TestFindingLinesCarryTheLogContract pins every finding message alerts/logql.yaml
+// declares stable to the attributes it lists for it, so a dashboard or rule
+// built on the contract cannot lose a column to a renamed key. current_tier
+// is asserted with its value too: it is the one attribute the dashboard reads
+// that no alert rule groups by.
+func TestFindingLinesCarryTheLogContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
+	if err != nil {
+		t.Fatalf("read alerts/logql.yaml: %v", err)
+	}
+	contract, err := logcontract.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse the log contract: %v", err)
+	}
+	for _, status := range []compare.Status{compare.StatusBetter, compare.StatusMixedGroup, compare.StatusUnverifiable} {
+		t.Run(string(status), func(t *testing.T) {
+			msg := message(status)
+			want, ok := contract.Messages[msg]
+			if !ok || len(want) == 0 {
+				t.Fatalf("alerts/logql.yaml declares no attributes for %q", msg)
+			}
+			f := testFinding("k1", "Frieren")
+			f.Status, f.Tier = status, compare.TierAlt
+			notifier, recorder := newCapturedNotifier()
+			notifier.Report([]compare.Finding{f}, nil)
+			got := map[string]string{}
+			for _, rec := range recorder.Records() {
+				if rec.Message == msg {
+					rec.Attrs(func(a slog.Attr) bool {
+						got[a.Key] = a.Value.String()
+						return true
+					})
+				}
+			}
+			if len(got) == 0 {
+				t.Fatalf("no %q line emitted", msg)
+			}
+			for _, key := range want {
+				if _, ok := got[key]; !ok {
+					t.Errorf("%q line lacks %q, which alerts/logql.yaml declares stable", msg, key)
+				}
+			}
+			if status == compare.StatusBetter && got["current_tier"] != string(compare.TierAlt) {
+				t.Errorf("current_tier = %q, want %q", got["current_tier"], compare.TierAlt)
+			}
+		})
 	}
 }

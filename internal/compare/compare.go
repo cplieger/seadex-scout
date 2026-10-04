@@ -63,6 +63,20 @@ type ReleaseLink struct {
 	Headline bool
 }
 
+// Tier is what a diverged unit already holds, measured against everything the
+// entry lists rather than only what is recommended. It separates an optional
+// upgrade from an overdue one.
+type Tier string
+
+const (
+	// TierAlt means the unit holds a group the entry lists but does not recommend
+	// under the operator's filters: a SeaDex alt, or a best the filters exclude.
+	TierAlt Tier = "alt"
+	// TierUnlisted means every group the unit holds is known and the entry lists
+	// none of them.
+	TierUnlisted Tier = "unlisted"
+)
+
 // Finding is one comparison result for a library item. It carries the
 // semantic fields the notification layer emits; finding-set identity is the notify
 // package's own policy, derived from these fields at the notification boundary.
@@ -80,6 +94,9 @@ type Finding struct {
 	ArrURL           string
 	InfoHash         string
 	Status           Status
+	// Tier is set on a StatusBetter finding only, and stays empty there when
+	// unknown group evidence on the listed side leaves it undecided.
+	Tier Tier
 	// Scope is the comparison scope the shared decision resolved
 	// (align.Decision.Kind, rendered via its String): "season", "movie",
 	// "offered" or "series".
@@ -202,7 +219,11 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusMixedGroup)
 	case align.OutcomeDiverged:
-		return betterResult(entry, &base, recommended, recGroups)
+		f := betterResult(entry, &base, recommended, recGroups)
+		if f.Status == StatusBetter {
+			f.Tier = c.tier(m, recGroups)
+		}
+		return f
 	default:
 		// Every Outcome the shared linearization produces is handled above.
 		fillBest(&base, recommended, recGroups)
@@ -243,6 +264,46 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		out = append(out, candidate{rel: rel, torrent: *t})
 	}
 	return out
+}
+
+// tier decides Finding.Tier by judging the unit a second time, with every group
+// the entry lists as the alt rung (the recommended ones among them change
+// nothing, since the best rung is judged first). It is a separate decision because the
+// alt rung can change the first one: an untagged (NOGRP) alt turns a proven
+// divergence into an unverifiable comparison, which would change the emission.
+func (c *Comparer) tier(m *match.Match, recGroups []string) Tier {
+	listing := align.Listing{Best: recGroups, Alt: c.listedGroups(&m.Entry)}
+	switch align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons).Standing {
+	case align.StandingAlt:
+		return TierAlt
+	case align.StandingUnlisted:
+		return TierUnlisted
+	default:
+		return ""
+	}
+}
+
+// listedGroups returns the distinct normalized groups of the entry's torrents.
+// It applies no content, tag or obtainability filter, since it describes what
+// is held rather than what to get; only a definite AnimeBytes torrent is
+// skipped with the toggle off, as the report does.
+func (c *Comparer) listedGroups(entry *seadex.Entry) []string {
+	seen := make(map[string]struct{}, len(entry.Torrents))
+	var groups []string
+	for i := range entry.Torrents {
+		t := &entry.Torrents[i]
+		if !c.animeBytes && classify.ABEvidence(t) == tracker.ABDefinite {
+			continue
+		}
+		rel := classify.Torrent(entry, t)
+		g := release.NormalizeGroup(rel.Group)
+		if _, dup := seen[g]; dup {
+			continue
+		}
+		seen[g] = struct{}{}
+		groups = append(groups, g)
+	}
+	return groups
 }
 
 // betterResult finalizes a diverged finding: a better release the operator

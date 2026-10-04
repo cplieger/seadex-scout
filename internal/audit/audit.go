@@ -157,6 +157,19 @@ type IncompleteEntry struct {
 	AniListID int    `json:"al_id"`
 }
 
+// ItemTotals counts library ITEMS (one series or one film), where Report.Totals
+// counts rows: a series that three SeaDex entries match is one item and three rows.
+type ItemTotals struct {
+	// Anime is every item the report has a row for: a SeaDex match or not_on_seadex.
+	Anime int `json:"anime"`
+	// WithEntry is the items at least one SeaDex entry matched.
+	WithEntry int `json:"with_entry"`
+	// AllBest is the items with an entry whose every COMPARED row is have_best. A
+	// row nothing was compared on (no_file, unattributed) neither earns nor blocks
+	// it, so an item made only of such rows is not counted.
+	AllBest int `json:"all_best"`
+}
+
 // Report is the full audit result.
 type Report struct {
 	GeneratedAt time.Time      `json:"generated_at"`
@@ -166,6 +179,7 @@ type Report struct {
 	// resolved this run (a transient AniList failure), sorted by AniList id.
 	// Empty on a fully resolved run, and omitted from the JSON.
 	Incomplete []IncompleteEntry `json:"incomplete_mappings,omitempty"`
+	Items      ItemTotals        `json:"items"`
 }
 
 // Config configures an Auditor.
@@ -201,6 +215,7 @@ func New(cfg Config) *Auditor {
 func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index, incompleteIDs map[int]struct{}) Report {
 	rows := make([]Row, 0, len(matches))
 	covered := make(map[string]struct{})
+	matched := make(map[string]itemStanding)
 	for i := range matches {
 		m := &matches[i]
 		if !m.InLibrary() {
@@ -215,16 +230,77 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		if a.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
-		rows = append(rows, a.assess(m))
+		row := a.assess(m)
+		matched[m.Item.Key()] = matched[m.Item.Key()].with(row.Verdict)
+		rows = append(rows, row)
 	}
-	rows = append(rows, uncoveredRows(snap, idx, covered, a.excludeSpecials)...)
+	uncovered, uncoveredKeys := uncoveredRows(snap, idx, covered, a.excludeSpecials)
+	rows = append(rows, uncovered...)
 
 	totals := make(map[string]int, len(verdictOrder))
 	for i := range rows {
 		totals[string(rows[i].Verdict)]++
 	}
 	sortRows(rows)
-	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows, Incomplete: incompleteEntries(incompleteIDs)}
+	return Report{
+		GeneratedAt: time.Now().UTC(),
+		Totals:      totals,
+		Items:       itemTotals(matched, uncoveredKeys),
+		Rows:        rows,
+		Incomplete:  incompleteEntries(incompleteIDs),
+	}
+}
+
+type itemStanding struct {
+	best, notBest bool
+}
+
+func (s itemStanding) with(v Verdict) itemStanding {
+	switch v {
+	case VerdictBest:
+		s.best = true
+	case VerdictAlt, VerdictOlderRevision, VerdictUnlisted, VerdictUnverified:
+		s.notBest = true
+	case VerdictNoFile, VerdictUnattributed, VerdictNotOnSeaDex:
+	}
+	return s
+}
+
+// An item can be both matched and uncovered (its only entries are offered
+// ones), so Anime is the union.
+func itemTotals(matched map[string]itemStanding, uncoveredKeys []string) ItemTotals {
+	t := ItemTotals{Anime: len(matched), WithEntry: len(matched)}
+	for _, key := range uncoveredKeys {
+		if _, ok := matched[key]; !ok {
+			t.Anime++
+		}
+	}
+	for _, s := range matched {
+		if s.best && !s.notBest {
+			t.AllBest++
+		}
+	}
+	return t
+}
+
+// notBestVerdicts are the verdicts that say the held release is not SeaDex's
+// best while a best exists to move to: what the daemon reports as an upgrade.
+var notBestVerdicts = []Verdict{VerdictAlt, VerdictOlderRevision, VerdictUnlisted}
+
+// HiddenFrom counts the not-at-best rows (have_alt, have_older_revision,
+// have_unlisted) whose AniList id is absent from reported, the ids the daemon
+// currently emits a finding for.
+func (r *Report) HiddenFrom(reported map[int]struct{}) int {
+	n := 0
+	for i := range r.Rows {
+		if !slices.Contains(notBestVerdicts, r.Rows[i].Verdict) {
+			continue
+		}
+		if _, ok := reported[r.Rows[i].AniListID]; !ok {
+			n++
+		}
+	}
+	return n
 }
 
 // incompleteEntries renders the transiently-unresolved AniList ids as the
@@ -242,10 +318,10 @@ func incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
 }
 
 // uncoveredRows lists library items that are recognized anime (present in the
-// Fribb map) but were not covered by any SeaDex match.
-func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) []Row {
+// Fribb map) but were not covered by any SeaDex match, plus each row's item key.
+func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) (rows []Row, keys []string) {
 	if snap == nil {
-		return nil
+		return nil, nil
 	}
 	// audit contributes only its specials policy: with the filter on, a special
 	// record catalogues nothing, so a specials-only item cannot surface as
@@ -253,7 +329,6 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 	cat := match.NewCatalogue(idx, func(r mapping.Record) bool {
 		return !excludeSpecials || !r.IsSpecial()
 	})
-	var rows []Row
 	for i := range snap.Items {
 		it := &snap.Items[i]
 		if _, ok := covered[it.Key()]; ok {
@@ -272,8 +347,9 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 			GroupsUnknown: !it.Comparable(),
 			Scope:         align.ItemKind(it),
 		})
+		keys = append(keys, it.Key())
 	}
-	return rows
+	return rows, keys
 }
 
 // assess builds one row: classify the entry's releases, resolve the shared

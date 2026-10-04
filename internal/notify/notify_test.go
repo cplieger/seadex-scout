@@ -923,3 +923,14 @@ func TestReportDoesNotMutateCallerFindings(t *testing.T) {
 		t.Errorf("caller's Links[0].URL shrank to %d bytes; Report must not mutate it", got)
 	}
 }
+
+func TestEmittedIDsExcludesIgnored(t *testing.T) {
+	notifier, _ := newIgnoringNotifier(2)
+	a, b := testFinding("k1", "Frieren"), testFinding("k2", "Other")
+	a.AniListID, b.AniListID = 1, 2
+	notifier.Report([]compare.Finding{a, b}, nil)
+	got := notifier.EmittedIDs()
+	if _, ok := got[1]; !ok || len(got) != 1 {
+		t.Errorf("EmittedIDs() = %v, want only 1 (2 is ignored)", got)
+	}
+}

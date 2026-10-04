@@ -157,6 +157,7 @@ func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Notifier: notify.NewNotifier(c.log, cfg.IgnoreFindings),
+		Auditor:  audit.New(auditConfig(cfg)),
 		AniListStats: func() scout.AniListStats {
 			st := anilistClient.Stats()
 			return scout.AniListStats{Calls: st.Calls, RateLimitWaits: st.RateLimitWaits}
@@ -187,13 +188,19 @@ func buildReporter(ctx context.Context, cfg *config.Config) (builtReporter, erro
 		Mapping: c.mapping,
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
-		Auditor: audit.New(audit.Config{
-			TagFilter:       cfg.TagFilter,
-			ExcludeSpecials: cfg.ExcludeSpecials,
-			AnimeBytes:      cfg.AnimeBytes,
-		}),
+		Auditor: audit.New(auditConfig(cfg)),
 	})
 	return builtReporter{reporter: sc, cleanup: c.cleanup}, nil
+}
+
+// auditConfig projects the operator config into the audit policy, built in one
+// place so the one-shot report and the reconcile's library lines cannot drift.
+func auditConfig(cfg *config.Config) audit.Config {
+	return audit.Config{
+		TagFilter:       cfg.TagFilter,
+		ExcludeSpecials: cfg.ExcludeSpecials,
+		AnimeBytes:      cfg.AnimeBytes,
+	}
 }
 
 // upstreamConfig projects the operator config into the indexer's shared Prowlarr

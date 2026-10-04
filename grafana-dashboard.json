@@ -1,0 +1,2498 @@
+{
+  "title": "SeaDex Scout",
+  "uid": "seadex-scout",
+  "description": "What seadex-scout found for your anime library: upgrades to act on, newest first, what was resolved recently, how the library stands against SeaDex, and whether the scout itself is healthy. The upgrades table links each title to the arr, the recommended release and its SeaDex entry on releases.moe. Check by hand and Library gaps link the arr and releases.moe, and Recently resolved links releases.moe.",
+  "tags": [
+    "anime",
+    "seadex",
+    "sonarr",
+    "radarr"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 0,
+  "refresh": "5m",
+  "schemaVersion": 42,
+  "version": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Loki",
+        "type": "datasource",
+        "query": "loki",
+        "current": {
+          "text": "Loki",
+          "value": "loki"
+        },
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "container",
+        "label": "Container",
+        "type": "textbox",
+        "description": "The value of the container label your log collector puts on seadex-scout's lines.",
+        "query": "seadex-scout",
+        "current": {
+          "text": "seadex-scout",
+          "value": "seadex-scout"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "seadex-scout",
+            "value": "seadex-scout"
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "At a glance",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "title": "Status",
+      "description": "One signal built from the shipped alert rules. Healthy means a check ran in the last 3 hours, a full check in the last 72 hours, and nothing logged an ERROR in the last hour. Upstream outage means SeaDex, AniList or the anime ID map is failing. Nothing is yours to fix, and seadex-scout keeps running on its saved data. Needs attention means an ERROR you can fix, such as a failed Sonarr or Radarr read. Stalled means the check loop stopped, so every panel here is going stale. The Scout health row at the bottom says why. With poll_interval set to off, each check runs in a docker exec child whose lines never reach the container log, so this tile reads Stalled in that mode.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unknown",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Healthy",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Upstream outage",
+                  "color": "orange",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 2,
+                "to": 3,
+                "result": {
+                  "text": "Needs attention",
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 4,
+                "to": 15,
+                "result": {
+                  "text": "Stalled",
+                  "color": "red",
+                  "index": 3
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "8 * (sum(absent_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded|reconcile started` [3h])) or vector(0))\n+ 4 * (sum(absent_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` [72h])) or vector(0))\n+ 2 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition!~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))\n+ 1 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition=~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Upgrades available",
+      "description": "Better releases SeaDex recommends for what you have, after your filters, as of the latest check. The table below lists them.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "count(sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` [2h])))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Check by hand",
+      "description": "Findings seadex-scout could not decide on its own. The files on disk span more than one release group, or the release group is unknown on one side. The Check by hand table lists them.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 11,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "count(sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h])))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "New in this range",
+      "description": "Upgrades available now that were not available when the selected time range began. If the range reaches past the logs your Loki keeps, every upgrade counts as new.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 15,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "count(sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` [2h])) unless on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` [2h] offset $__range)))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Anime at SeaDex best",
+      "description": "Share of your anime with a SeaDex entry where every compared season or film already holds SeaDex's best release. An anime whose only SeaDex entries have no file, or are offered in the feed without being compared, counts as having an entry and never as at best. So the share stays below 100 percent while any such anime exist. This is the SeaDex view, so your remux and dual-audio filters are not applied and it can disagree with Upgrades available. It reads the daily library summary, so it lags by up to a day, and it is empty while no anime in your library has a SeaDex entry.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No summary yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0,
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h])) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) > 0) * 100",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Act on these",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "collapsed": false
+    },
+    {
+      "id": 20,
+      "title": "Upgrades available",
+      "description": "Every upgrade SeaDex recommends for your library as of the latest check, newest first. Click a title to open it in Sonarr or Radarr, Release to open the recommended release, and SeaDex for the entry on releases.moe. Listed says whether SeaDex lists the group you have without recommending it under your filters, which makes the upgrade optional, or does not list it at all. It is empty on a row for an older revision, where you already hold the recommended group and SeaDex lists a newer version of its release. If Loki refuses the look-back over the selected range, the upgrades still show with First seen empty. First seen is the earliest time this finding was logged within the selected time range. A finding older than the range, or older than the logs your Loki keeps, shows the earliest time still held, so widen the range to look further back. Loki's max_query_length setting can refuse a very long range. First seen reads each log line's timestamp through label_format, which needs a Loki version that supports __timestamp__ there. Loki 3.7 is known to work.",
+      "type": "table",
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          },
+          "noValue": "No upgrades available"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "First seen"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-BlYlRd"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in the arr",
+                    "url": "${__data.fields.arr_url}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 320
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "season"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Season"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "-",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "current_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "You have"
+              },
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "current_tier"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Listed"
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "alt": {
+                        "text": "listed, not recommended",
+                        "color": "yellow",
+                        "index": 0
+                      },
+                      "unlisted": {
+                        "text": "not listed",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recommended_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex recommends"
+              },
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seadex_tags"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Tags"
+              },
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "release_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Release"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open the release",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".+",
+                      "result": {
+                        "text": "Open",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "al_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on releases.moe",
+                    "url": "https://releases.moe/${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Arr"
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "info_hash"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "resolution"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "kind"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "First seen",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, current_tier, resolution, kind, release_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", resolution=\"resolution\", kind=\"kind\", release_url=\"release_url\", arr_url=\"arr_url\" | msg=`better release available` [2h]))",
+          "queryType": "instant"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "min by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (min_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nand on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` [2h]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "Value #B": 0,
+              "title": 1,
+              "season": 2,
+              "current_group": 3,
+              "current_tier": 4,
+              "recommended_group": 5,
+              "seadex_tags": 6,
+              "release_url": 7,
+              "al_id": 8,
+              "arr": 9
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Check by hand",
+      "description": "Findings seadex-scout could not decide on its own, as of the latest check. Several groups on disk means the files span more than one release group, so no single current group can be named. Group unknown means the release group is missing on one side. Open the title in the arr and compare it with SeaDex by hand.",
+      "type": "table",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          },
+          "noValue": "Nothing to check"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in the arr",
+                    "url": "${__data.fields.arr_url}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 320
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "season"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Season"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "-",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "msg"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Why"
+              },
+              {
+                "id": "custom.width",
+                "value": 170
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "series spans multiple release groups, manual review": {
+                        "text": "several groups on disk",
+                        "index": 0
+                      },
+                      "release group unverifiable, manual review": {
+                        "text": "group unknown",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "current_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "You have"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recommended_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex recommends"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "al_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on releases.moe",
+                    "url": "https://releases.moe/${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Arr"
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Title",
+            "desc": false
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "title": 0,
+              "season": 1,
+              "msg": 2,
+              "current_group": 3,
+              "recommended_group": 4,
+              "al_id": 5,
+              "arr": 6
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "What changed",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "collapsed": false
+    },
+    {
+      "id": 30,
+      "title": "Recently resolved",
+      "description": "Upgrades that stopped being reported within the selected time range, most recent first. Usually the arr imported the recommended release, through the feed, a search or by hand. A finding also lands here when SeaDex changes its recommendation. Last seen is the last check that still reported it. First seen is the earliest time this finding was logged within the selected time range. A finding older than the range, or older than the logs your Loki keeps, shows the earliest time still held, so widen the range to look further back. Loki's max_query_length setting can refuse a very long range. First seen reads each log line's timestamp through label_format, which needs a Loki version that supports __timestamp__ there. Loki 3.7 is known to work.",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          },
+          "noValue": "Nothing resolved in this range"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Last seen"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-BlYlRd"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "First seen"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-BlYlRd"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              },
+              {
+                "id": "custom.width",
+                "value": 320
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "season"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Season"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "-",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recommended_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex recommended"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seadex_tags"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Tags"
+              },
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "al_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on releases.moe",
+                    "url": "https://releases.moe/${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Arr"
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "info_hash"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Last seen",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (max_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nunless on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` [2h]))",
+          "queryType": "instant"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "min by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (min_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nunless on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\" | msg=`better release available` [2h]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "Value #A": 0,
+              "Value #B": 1,
+              "title": 2,
+              "season": 3,
+              "recommended_group": 4,
+              "seadex_tags": 5,
+              "al_id": 6,
+              "arr": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Your library against SeaDex",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "collapsed": false
+    },
+    {
+      "id": 40,
+      "title": "Anime in your library",
+      "description": "Counted per series or film. With a SeaDex entry counts those SeaDex lists at least one entry for. All at SeaDex best counts those where every compared season or film already holds a SeaDex best release, and Entry, not at best is the rest of those with an entry. An anime whose only SeaDex entries have no file, or are offered in the feed without being compared, counts as having an entry and never as at best. Hidden by your filters counts entries SeaDex has a better release for that seadex-scout reports nothing about, mostly because your filters exclude that release, such as a remux, or because you ignore the show. This is the SeaDex view, so your remux and dual-audio filters are not applied and these numbers can disagree with Upgrades available. They come from the library summary each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary, so they keep the previous one for up to 26 hours and then go empty until a complete check. They are also empty until the first full check of a seadex-scout version that logs the summary.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "-",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", anime_items=\"anime_items\" | msg=`library summary` | unwrap anime_items [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Anime in your library"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h]))",
+          "queryType": "instant",
+          "legendFormat": "With a SeaDex entry"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]))",
+          "queryType": "instant",
+          "legendFormat": "All at SeaDex best"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Entry, not at best"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", hidden_by_filters=\"hidden_by_filters\" | msg=`library summary` | unwrap hidden_by_filters [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Hidden by your filters"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "title": "Entries by verdict",
+      "description": "One bar per verdict, counted per SeaDex entry in your library, with the verdicts the report uses. A SeaDex alt and Not listed are where upgrades come from. This is the SeaDex view, so your remux and dual-audio filters are not applied and these numbers can disagree with Upgrades available. They come from the library summary each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary, so they keep the previous one for up to 26 hours and then go empty until a complete check. They are also empty until the first full check of a seadex-scout version that logs the summary.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "noValue": "-",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "At SeaDex best"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "A SeaDex alt"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Older revision"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Not listed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "No file"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unverified"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Offered, not compared"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Not on SeaDex"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]))",
+          "queryType": "instant",
+          "legendFormat": "At SeaDex best"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_alt=\"have_alt\" | msg=`library summary` | unwrap have_alt [26h]))",
+          "queryType": "instant",
+          "legendFormat": "A SeaDex alt"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_older_revision=\"have_older_revision\" | msg=`library summary` | unwrap have_older_revision [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Older revision"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_unlisted=\"have_unlisted\" | msg=`library summary` | unwrap have_unlisted [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Not listed"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", no_file=\"no_file\" | msg=`library summary` | unwrap no_file [26h]))",
+          "queryType": "instant",
+          "legendFormat": "No file"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", unverified=\"unverified\" | msg=`library summary` | unwrap unverified [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Unverified"
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", unattributed=\"unattributed\" | msg=`library summary` | unwrap unattributed [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Offered, not compared"
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", not_on_seadex=\"not_on_seadex\" | msg=`library summary` | unwrap not_on_seadex [26h]))",
+          "queryType": "instant",
+          "legendFormat": "Not on SeaDex"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "title": "Anime at SeaDex best, over time",
+      "description": "The share in the At a glance tile, one point per day across the selected time range. It rises as upgrades land. This is the SeaDex view, so your remux and dual-audio filters are not applied and these numbers can disagree with Upgrades available. They come from the library summary each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary, so they keep the previous one for up to 26 hours and then go empty until a complete check. They are also empty until the first full check of a seadex-scout version that logs the summary.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "interval": "1d",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "spanNulls": true,
+            "showPoints": "always"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval])) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval])) > 0) * 100",
+          "queryType": "range",
+          "legendFormat": "At SeaDex best"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "title": "Library gaps",
+      "description": "Entries SeaDex has a recommendation for that seadex-scout never reports as an upgrade. No file means you hold the series or film but no file for this season or entry. Unverified means files are present but the release group is unknown on one side, so neither a match nor a mismatch can be shown. A row that cleared can stay here for up to 26 hours after the full check that last listed it. This is the SeaDex view, so your remux and dual-audio filters are not applied and these numbers can disagree with Upgrades available. They come from the library summary each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary, so they keep the previous one for up to 26 hours and then go empty until a complete check. They are also empty until the first full check of a seadex-scout version that logs the summary.",
+      "type": "table",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          },
+          "noValue": "No gaps, or no summary yet"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in the arr",
+                    "url": "${__data.fields.arr_url}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 320
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scope"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Scope"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "verdict"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Verdict"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "no_file": {
+                        "text": "no file",
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "unverified": {
+                        "text": "unverified",
+                        "color": "purple",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "current_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "You have"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seadex_best"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex best"
+              },
+              {
+                "id": "custom.width",
+                "value": 220
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seadex_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on releases.moe",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".+",
+                      "result": {
+                        "text": "Open",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Arr"
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "al_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Verdict",
+            "desc": false
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (title, al_id, arr, verdict, scope, current_group, seadex_best, arr_url, seadex_url) (count_over_time({container=\"$container\"} |= `library gap` | json msg=\"msg\", title=\"title\", al_id=\"al_id\", arr=\"arr\", verdict=\"verdict\", scope=\"scope\", current_group=\"current_group\", seadex_best=\"seadex_best\", arr_url=\"arr_url\", seadex_url=\"seadex_url\" | msg=`library gap` [26h]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "title": 0,
+              "scope": 1,
+              "verdict": 2,
+              "current_group": 3,
+              "seadex_best": 4,
+              "seadex_url": 5,
+              "arr": 6
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Scout health",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 50,
+          "title": "Why",
+          "description": "What sets the Status tile, over the last hour. A condition is a lasting problem seadex-scout reports on every check until it clears. An upstream condition, at SeaDex, AniList or the anime ID map, needs nothing from you. A library condition names the arr to look at. An error without a condition is a one-off fault, shown by its log message.",
+          "type": "table",
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 58
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "filterable": true,
+                "align": "auto"
+              },
+              "noValue": "No problems"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "condition"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Condition"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 240
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "arr"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Arr"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 70
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "msg"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Error"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value #A"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Lines"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value #B"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Lines"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "sortBy": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (condition, arr) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", arr=\"arr\" | level=`ERROR` | condition!=`` [1h]))",
+              "queryType": "instant"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "loki",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (msg) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", msg=\"msg\" | level=`ERROR` | condition=`` [1h]))",
+              "queryType": "instant"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "condition": 0,
+                  "arr": 1,
+                  "msg": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 51,
+          "title": "Last full check",
+          "description": "When the last full check finished. It compares the whole SeaDex catalogue with the whole library once a day. Older than 72 hours fires SeadexScoutReconcileStalled.",
+          "type": "stat",
+          "gridPos": {
+            "h": 3,
+            "w": 6,
+            "x": 12,
+            "y": 58
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "dateTimeFromNow",
+              "noValue": "Over 72 hours ago",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${datasource}"
+              },
+              "expr": "max(max_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [72h])) * 1000",
+              "queryType": "instant"
+            }
+          ]
+        },
+        {
+          "id": 52,
+          "title": "Last check",
+          "description": "When the last check of any kind finished. The quick check runs at every poll_interval, 15 minutes by default. Older than 3 hours fires SeadexScoutScanStalled.",
+          "type": "stat",
+          "gridPos": {
+            "h": 3,
+            "w": 6,
+            "x": 18,
+            "y": 58
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "dateTimeFromNow",
+              "noValue": "Over 3 hours ago",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${datasource}"
+              },
+              "expr": "max(max_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [3h])) * 1000",
+              "queryType": "instant"
+            }
+          ]
+        },
+        {
+          "id": 53,
+          "title": "New feed releases in this range",
+          "description": "Releases the Torznab RSS feed newly offered your arrs within the selected time range. It shows the feed is alive. Most of them are for shows you do not have, and the arrs decide what to grab. It reads 0 when the feed is not configured.",
+          "type": "stat",
+          "gridPos": {
+            "h": 3,
+            "w": 12,
+            "x": 12,
+            "y": 61
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "noValue": "0",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(sum_over_time({container=\"$container\"} |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
+              "queryType": "instant"
+            }
+          ]
+        },
+        {
+          "id": 54,
+          "title": "Feed polls per tracker",
+          "description": "RSS polls of the Torznab feed by your arrs, per tracker, across the selected time range. A tracker whose bars stop has been disabled or marked failing in the arr. SeadexScoutFeedNotPolled fires after 6 hours of silence. Empty when the feed is not configured.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 64
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "lineWidth": 1,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "sum"
+              ],
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (scope) (count_over_time({container=\"$container\"} |= `indexer request` | json msg=\"msg\", scope=\"scope\", feed=\"feed\" | msg=`indexer request` | feed=`true` [$__interval]))",
+              "queryType": "range",
+              "legendFormat": "{{scope}}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

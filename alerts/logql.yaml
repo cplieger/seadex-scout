@@ -6,20 +6,23 @@
 # default JSON log handler, log.format: json. For log.format: text, replace each
 # "| json" stage with "| logfmt", which parses the same fields out of the text
 # handler's key=value lines.
-# They also assume the default log.level: info. Six of the matched messages are
+# They also assume the default log.level: info. Seven of the matched messages are
 # INFO records ("tick complete", "cycle complete", "reconcile started",
 # "reconcile complete", "report written", "series spans multiple release groups,
-# manual review"), so at log.level: warn the report rule and the mixed-group rule
-# can never fire and BOTH stall rules fire permanently on a healthy app - only
-# the degraded arms of the loop deadman survive. Drop those four rules before
-# raising the level.
+# manual review", "indexer request"), so at log.level: warn the report rule, the
+# mixed-group rule and the feed rule can never fire and BOTH stall rules fire
+# permanently on a healthy app - only the degraded arms of the loop deadman
+# survive. Drop those five rules before raising the level. The bundled
+# grafana-dashboard.json reads INFO lines too and goes mostly empty at warn.
 # Thresholds and the severity labels are starting points; adjust the container
 # selector (or job/service, depending on your log collector) to your deployment
 # and the stall window to your poll_interval.
 #
-# STABLE MESSAGES (the log contract). These are what the rules below match on,
-# and they are the ONLY log output treated as a contract - they will not be
-# renamed or retyped without a matching change here:
+# STABLE MESSAGES (the log contract). These are what the rules below and the
+# bundled grafana-dashboard.json match on, and they are the ONLY log output
+# treated as a contract - they will not be renamed or retyped without a matching
+# change here. The attrs: line under each message names the attributes that are
+# stable ON THAT MESSAGE; msg and level are stable on every line.
 #
 #   level=ERROR with no condition   a one-off or local fault (the fault rule keys on
 #                                   the level and the absent attribute, not a message)
@@ -32,14 +35,44 @@
 #                                   anilist-lookups-failing,
 #                                   mapping-refresh-rejected, library-walk-shrunk
 #                                   (which also carries arr) and library-walk-partial
+#     attrs: condition, arr
 #   msg="better release available"  the better-release finding, and the newer
 #                                   revision of a group on disk (status=newer_revision)
+#     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
+#     attrs: current_tier, recommended_group, alert_recommended_group, seadex_tags,
+#     attrs: info_hash, resolution, kind, release_url, nyaa_url, public_url,
+#     attrs: public_tracker, ab_url, ab_tracker
 #   msg="series spans multiple release groups, manual review"
 #                                   the mixed-group manual-review nudge
+#     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
+#     attrs: recommended_group, alert_recommended_group, seadex_tags
+#   msg="release group unverifiable, manual review"
+#                                   a comparison that untagged releases left undecided
+#     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
+#     attrs: recommended_group, alert_recommended_group, seadex_tags
 #   msg="report written"            a report was generated
-#   msg="cycle complete|degraded"   \ the loop deadman, matched as
-#   msg="tick complete|degraded"    / "(cycle|tick) (complete|degraded)"
+#     attrs: anime
+#   msg="cycle complete"            \
+#   msg="cycle degraded"             | the loop deadman, matched as
+#   msg="tick complete"              | "(cycle|tick) (complete|degraded)"
+#   msg="tick degraded"             /
+#   msg="reconcile started"         the start of a full pass, also in the loop deadman
 #   msg="reconcile complete"        the backstop deadman
+#   msg="indexer request"           one Torznab request from an arr; feed=true is an
+#                                   RSS poll, the shape the feed rule counts
+#     attrs: scope, feed
+#   msg="indexer feed snapshot written"
+#                                   the feed was rebuilt or advanced; journal_new is
+#                                   the count of releases newly added to the RSS feed
+#     attrs: journal_new
+#   msg="library summary"           the daily library audit's counts, logged by each
+#                                   full pass whose library read was complete
+#     attrs: rows, have_best, have_alt, have_older_revision, have_unlisted, no_file,
+#     attrs: unverified, unattributed, not_on_seadex, anime_items, items_with_entry,
+#     attrs: items_all_best, hidden_by_filters
+#   msg="library gap"               one no_file or unverified row of the same audit
+#     attrs: title, al_id, arr, verdict, scope, current_group, seadex_best, arr_url,
+#     attrs: seadex_url
 #
 # Every OTHER message and attribute this app logs is diagnostic, not contract:
 # it may be reworded, re-levelled, or change attribute type in any release. If
@@ -358,6 +391,48 @@ groups:
             being reported. None in 72h (two missed reconciles) means the full
             pass is failing or the loop's cadence is wrong — check for repeated
             `cycle degraded` or arr-walk errors in the same stream.
+      # Standing condition: an arr stopped reading one tracker's RSS feed. Each
+      # arr polls an enabled Torznab indexer on its own RSS interval, and every
+      # poll logs an `indexer request` line with feed=true. An arr that marks the
+      # indexer failed, or an indexer disabled by hand, stops polling with no
+      # error anywhere, and new SeaDex releases stop reaching the arr.
+      #
+      # The rule fires per scope (nyaa, ab) only for a tracker that WAS polled
+      # in the last 7 days and has been silent for 6 hours, so a tracker you keep
+      # disabled never fires. The alert resolves at the first rule evaluation
+      # after the next poll, and on its own once a tracker has been silent for
+      # the whole 7 days, which is when it counts as disabled on purpose. 6h is
+      # several times the usual RSS interval of 15 to 60 minutes. Raise it if
+      # your arrs poll less often. Route it to a `send_resolved: true` receiver.
+      #
+      # It also fires when seadex-scout itself is down or its log stream stops
+      # reaching Loki, beside SeadexScoutScanStalled. That rule then names the
+      # cause.
+      - alert: SeadexScoutFeedNotPolled
+        expr: |
+          sum by (scope) (count_over_time(
+            {container="seadex-scout"} |= `indexer request`
+            | json msg="msg", scope="scope", feed="feed" | msg=`indexer request` | feed=`true` [7d]
+          ))
+          unless
+          sum by (scope) (count_over_time(
+            {container="seadex-scout"} |= `indexer request`
+            | json msg="msg", scope="scope", feed="feed" | msg=`indexer request` | feed=`true` [6h]
+          ))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The arrs stopped reading the seadex-scout {{ $labels.scope }} feed"
+          description: >
+            No arr has read the {{ $labels.scope }} RSS feed of seadex-scout in
+            6 hours, though one did in the last 7 days. New SeaDex releases on
+            that tracker are not reaching your arrs. Open the indexer in
+            Prowlarr, Sonarr or Radarr and check whether it is disabled or marked
+            as failing, then run its test.
+
+            If SeadexScoutScanStalled is firing too, seadex-scout itself is down
+            or its logs stopped reaching Loki. Fix that first.
       # Informational, not a fault: SeaDex recommends a better release than the
       # one on disk — the app's activity signal; keep it at severity info or drop
       # it, it is not page-worthy.

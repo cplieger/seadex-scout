@@ -1155,3 +1155,31 @@ func TestServeCompleteFeedReportsNoDeliveryFault(t *testing.T) {
 		}
 	}
 }
+
+// TestServeLogsRSSPollAsFeed pins the request-log shape the shipped
+// SeadexScoutFeedNotPolled rule counts: an arr's RSS poll logs its scope with
+// feed=true, and a search logs feed=false, so searches cannot hold the rule
+// quiet while RSS polling has stopped.
+func TestServeLogsRSSPollAsFeed(t *testing.T) {
+	tests := map[string]struct{ query, wantFeed string }{
+		"rss poll": {query: "cat=5070", wantFeed: "true"},
+		"search":   {query: "t=tvsearch&q=Frieren&season=1", wantFeed: "false"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			log, rec := capture.New()
+			ix := freshNyaaIndexer(t, &Config{}, log)
+			if _, code := serveRaw(ix, "/nyaa", tc.query); code != http.StatusOK {
+				t.Fatalf("GET /nyaa?%s = %d, want 200", tc.query, code)
+			}
+			if !rec.HasAttr("indexer request", "scope", "nyaa") {
+				got, _ := rec.AttrValue("indexer request", "scope")
+				t.Errorf("request log scope = %q, want nyaa", got)
+			}
+			if !rec.HasAttr("indexer request", "feed", tc.wantFeed) {
+				got, _ := rec.AttrValue("indexer request", "feed")
+				t.Errorf("request log feed = %q, want %s", got, tc.wantFeed)
+			}
+		})
+	}
+}
