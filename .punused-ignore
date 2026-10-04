@@ -164,6 +164,16 @@ function NewIndex is
 # _test.go callers in internal/audit, internal/match and internal/scout have no
 # other way to build an index that answers MappingFor.
 function NewIndexWithMappings is
+#
+# --- (c) logcontract.Parse and Contract.Allows ------------------------------
+# internal/logcontract parses the stable-message list in alerts/logql.yaml. Its
+# only callers are the contract tests in three other packages (the repo root's
+# dashboard_contract_test.go, internal/audit and internal/notify), which check
+# that the dashboard reads and the daemon emits only what that list names. A
+# _test.go helper cannot be shared across packages, so the parser sits in an
+# ordinary file; production never needs it.
+function Parse is used in test only
+method (*Contract).Allows is used in test only
 
 #
 # (*sanitizedError).Unwrap — same errors-chain class as the wrappers above.
