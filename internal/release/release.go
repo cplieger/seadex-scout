@@ -372,10 +372,11 @@ const (
 	OverlapNone Overlap = iota
 	// OverlapKnown means a known group on one side is present, known, on the
 	// other: proven common membership. Known evidence wins outright, whatever
-	// unknown members ride along in either set.
+	// unknown members ride along in either set. NoGroup on both sides also
+	// counts as a match.
 	OverlapKnown
 	// OverlapUnknown means the comparison is indeterminate: no known group is
-	// shared, and at least one side carries an unknown member (NoGroup) while
+	// shared, and exactly one side carries an unknown member (NoGroup) while
 	// the other side is non-empty — the unknown member could be any group,
 	// including one that would make the sets overlap, so neither overlap nor
 	// divergence is proven.
@@ -410,6 +411,9 @@ func GroupsOverlap(a, b []string) Overlap {
 		if _, ok := knownB[group]; ok {
 			return OverlapKnown
 		}
+	}
+	if unknownA && unknownB {
+		return OverlapKnown
 	}
 	if (unknownA && len(b) > 0) || (unknownB && len(a) > 0) {
 		return OverlapUnknown

@@ -67,19 +67,6 @@ func (n *Notifier) Reemit() {
 	n.emitAll(0, len(n.current), 0)
 }
 
-// EmittedIDs returns the AniList ids the last pass emitted a finding for: the
-// current set minus the operator's filters.ignore.
-func (n *Notifier) EmittedIDs() map[int]struct{} {
-	ids := make(map[int]struct{}, len(n.current))
-	for key := range n.current {
-		id := n.current[key].AniListID
-		if _, ignored := n.ignore[id]; !ignored {
-			ids[id] = struct{}{}
-		}
-	}
-	return ids
-}
-
 // report is the shared body. comparedIDs nil means FULL deletion authority
 // (every row may be deleted by omission); non-nil bounds it to those owners.
 func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
@@ -123,7 +110,7 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 const maxRetainedListItems = 64
 
 // maxRetainedElemBytes bounds one ELEMENT of a retained slice: the count cap
-// alone left a hostile row at 2 MiB.
+// alone left a hostile row at 2.5 MiB.
 const maxRetainedElemBytes = 256
 
 // capRetainedList clones the retained PREFIX of an untrusted slice, dropping
@@ -144,6 +131,7 @@ func capRetainedList[T any](s []T) []T {
 // the log and leave the resident value whole.
 func boundRetained(f *compare.Finding) {
 	f.RecommendedGroups = capRetainedList(f.RecommendedGroups)
+	f.AltGroups = capRetainedList(f.AltGroups)
 	f.CurrentGroups = capRetainedList(f.CurrentGroups)
 	f.Links = capRetainedList(f.Links)
 	f.Title = capAttr(f.Title)
@@ -159,6 +147,9 @@ func boundRetained(f *compare.Finding) {
 	// Per ELEMENT on maxRetainedElemBytes, not capAttr's log-line budget.
 	for i := range f.RecommendedGroups {
 		f.RecommendedGroups[i] = capRetainedElem(f.RecommendedGroups[i])
+	}
+	for i := range f.AltGroups {
+		f.AltGroups[i] = capRetainedElem(f.AltGroups[i])
 	}
 	for i := range f.CurrentGroups {
 		f.CurrentGroups[i] = capRetainedElem(f.CurrentGroups[i])
@@ -305,6 +296,7 @@ func findingKVs(f *compare.Finding) []any {
 		"recommended_group", capAttr(f.RecommendedGroup),
 		"alert_recommended_group", capAlertTextAttr(f.RecommendedGroup),
 		"recommended_groups", joinGroupsAttr(f.RecommendedGroups),
+		"alt_groups", joinGroupsAttr(f.AltGroups),
 		"tracker", capAttr(f.Tracker),
 		"resolution", f.Resolution,
 		"codec", f.Codec,
@@ -521,8 +513,8 @@ func joinLinksAttr(links []compare.ReleaseLink) string {
 	return j.String()
 }
 
-// joinGroupsAttr renders the recommended release groups as a comma-separated
-// list through the same bounded joiner: the group list is untrusted SeaDex data
+// joinGroupsAttr renders a release-group list comma-separated through the
+// same bounded joiner: the group list is untrusted SeaDex data
 // and must not be materialized before the cap applies.
 func joinGroupsAttr(groups []string) string {
 	j := logattr.NewJoiner()

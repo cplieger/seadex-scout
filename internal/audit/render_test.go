@@ -1023,6 +1023,36 @@ func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 	}
 }
 
+// TestRenderMarkdownLabelsMisleadingVerdictKeys pins the plain label the
+// Markdown shows beside the no_file and unattributed keys, in the summary table
+// and the section heading, while every other verdict renders its bare key.
+func TestRenderMarkdownLabelsMisleadingVerdictKeys(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictNoFile): 1, string(VerdictUnattributed): 1, string(VerdictBest): 1},
+		Rows: []Row{
+			{Title: "Kyousougiga", Arr: "sonarr", Verdict: VerdictNoFile},
+			{Title: "Code Geass", Arr: "sonarr", Verdict: VerdictUnattributed},
+			{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest},
+		},
+	}
+
+	md := renderMarkdown(r)
+
+	for _, want := range []string{
+		"| no_file (season not found) | 1 |\n",
+		"## no_file (season not found) (1)\n",
+		"| unattributed (unmapped specials) | 1 |\n",
+		"## unattributed (unmapped specials) (1)\n",
+		"| have_best | 1 |\n",
+		"## have_best (1)\n",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("renderMarkdown lacks %q:\n%s", want, md)
+		}
+	}
+}
+
 // TestRenderMarkdownLegendsStateTheOfferedClass pins the three reader-facing
 // strings the offered kind made false, TOGETHER: a corrected subset leaves one
 // legend lying beside a fixed one, and this report is read by someone who has only

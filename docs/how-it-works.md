@@ -27,9 +27,9 @@ The report works per season. Each SeaDex entry covers one AniList ID, which is o
 | `have_alt` | You have a listed alternative, and SeaDex marks a different release best. |
 | `have_older_revision` | You have SeaDex's best group, but an older revision, such as v1 against SeaDex's v2. The Scope cell shows both, as `revision v1, SeaDex v2`. |
 | `have_unlisted` | You have a release SeaDex does not list. |
-| `no_file` | The mapped season or movie has no file on disk. |
-| `unverified` | Files are present, but a release group is unknown or the files could not be read. Check which verdict applies. |
-| `unattributed` | A film or special in Sonarr's season 0, where no file is tied to one entry. The indexer offers it, and your profile decides. |
+| `no_file` | Season not found. No files sit where the entry maps, because they are missing or Sonarr files that season under specials. |
+| `unverified` | Files are present, but one side has no release group, or the files could not be read. Two untagged sides count as a match. |
+| `unattributed` | Unmapped specials. A film or special in Sonarr's season 0 that no file is tied to. The indexer offers it, and your profile decides. |
 
 A trailing `not_on_seadex` section lists the library items recognized as anime, through the Fribb list, that no comparable SeaDex entry covers. It shows which of your titles have no recommendation to compare against. That includes an item whose only SeaDex entries are films or specials the app offers without comparing. A row there means nothing comparable covers those files, which is not always the same as SeaDex never having heard of the show. A `not_on_seadex` row links only the library item, because it has no comparable SeaDex entry.
 

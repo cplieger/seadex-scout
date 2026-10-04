@@ -12,8 +12,8 @@ import (
 // sentinel on both sides, so a group-less library file and a group-less SeaDex
 // release (or SeaDex's own literal "NOGRP") serialize as the same first-class
 // token rather than being skipped. What the sentinel MEANS is the decision
-// layer's business: GroupsOverlap treats it as unknown evidence, never as an
-// identity (see TestGroupsOverlap).
+// layer's business: GroupsOverlap treats it as unknown evidence against a named
+// group and as a match against itself (see TestGroupsOverlap).
 func TestGroupNoGroupFallback(t *testing.T) {
 	if got := Classify(&Input{Group: ""}).Group; got != NoGroup {
 		t.Errorf("Classify empty group = %q, want %q", got, NoGroup)
@@ -65,11 +65,11 @@ func TestClassifyDualAudioStructuredOnly(t *testing.T) {
 
 // TestGroupsOverlap pins the three-valued group-set comparison's contract: a known group
 // shared between the sides (case/whitespace-insensitively) is proven overlap; all-known
-// disjoint sets are proven divergence; an unknown member (the NoGroup sentinel or any
-// spelling variant, the empty string included) makes an otherwise matchless comparison
-// indeterminate, so sentinel-against-sentinel is Unknown and never Known; a known-known
-// match wins outright even with unknown members alongside; and an empty side is always
-// None, which no unknown member can hide a match against.
+// disjoint sets are proven divergence; the NoGroup sentinel (or any spelling variant, the
+// empty string included) on BOTH sides is a match; an unknown member on ONE side makes an
+// otherwise matchless comparison indeterminate; a known-known match wins outright even
+// with unknown members alongside; and an empty side is always None, which no unknown
+// member can hide a match against.
 func TestGroupsOverlap(t *testing.T) {
 	tests := []struct {
 		name string
@@ -79,8 +79,9 @@ func TestGroupsOverlap(t *testing.T) {
 	}{
 		{name: "case and whitespace insensitive known match", a: []string{" SubsPlease "}, b: []string{"subsplease"}, want: OverlapKnown},
 		{name: "disjoint known groups are proven divergence", a: []string{"PMR"}, b: []string{"LostYears"}, want: OverlapNone},
-		{name: "sentinel on both sides is unknown, not a match", a: []string{""}, b: []string{NoGroup}, want: OverlapUnknown},
-		{name: "no-group spelling variants are unknown, not a match", a: []string{"no-group"}, b: []string{"nogroup"}, want: OverlapUnknown},
+		{name: "sentinel on both sides is a match", a: []string{""}, b: []string{NoGroup}, want: OverlapKnown},
+		{name: "no-group spelling variants on both sides are a match", a: []string{"no-group"}, b: []string{"nogroup"}, want: OverlapKnown},
+		{name: "sentinel on both sides beside known misses is a match", a: []string{"PMR", NoGroup}, b: []string{"LostYears", NoGroup}, want: OverlapKnown},
 		{name: "unknown library side against a known set is unknown", a: []string{NoGroup}, b: []string{"LostYears"}, want: OverlapUnknown},
 		{name: "known library side against an unknown set is unknown", a: []string{"SubsPlease"}, b: []string{NoGroup}, want: OverlapUnknown},
 		{name: "unknown member beside a known miss is unknown", a: []string{"SubsPlease", NoGroup}, b: []string{"LostYears"}, want: OverlapUnknown},

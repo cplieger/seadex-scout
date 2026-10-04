@@ -41,7 +41,7 @@ const (
 	// StatusTheoretical means the entry only names a theoretical best (not muxed).
 	StatusTheoretical Status = "theoretical_best"
 	// StatusUnverifiable means the comparison is indeterminate: the release
-	// group evidence on at least one side is unknown (a group-less on-disk
+	// group evidence on exactly one side is unknown (a group-less on-disk
 	// file or a group-less SeaDex release, both carried as the release.NoGroup
 	// sentinel) and could hide an alignment - so neither a confident aligned
 	// silence nor a better_release warning is honest.
@@ -102,7 +102,11 @@ type Finding struct {
 	// "offered" or "series".
 	Scope             string
 	RecommendedGroups []string
-	Links             []ReleaseLink
+	// AltGroups is the sorted set of groups the entry lists only as alts:
+	// groups of its non-best torrents that no best torrent shares, with a
+	// definite AnimeBytes torrent skipped while the toggle is off.
+	AltGroups []string
+	Links     []ReleaseLink
 	// CurrentGroups preserves the scoped on-disk group set with its element
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
@@ -201,15 +205,15 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	if d.Kind == align.ScopeOffered {
 		return nil
 	}
-	if d.Outcome == align.OutcomeNoFile {
+	if d.Outcome == align.OutcomeNoFile || d.Outcome == align.OutcomeAligned {
 		return nil
 	}
 	base := baseFinding(m, &d)
+	listed, alt := c.listedGroups(entry)
+	base.AltGroups = alt
 	switch d.Outcome {
 	case align.OutcomeNoBest:
 		return emptyResult(entry, &base)
-	case align.OutcomeAligned:
-		return nil
 	case align.OutcomeSuperseded:
 		return supersededResult(entry, &base, &d, recommended)
 	case align.OutcomeUnverifiable:
@@ -221,7 +225,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	case align.OutcomeDiverged:
 		f := betterResult(entry, &base, recommended, recGroups)
 		if f.Status == StatusBetter {
-			f.Tier = c.tier(m, recGroups)
+			f.Tier = c.tier(m, recGroups, listed)
 		}
 		return f
 	default:
@@ -271,8 +275,8 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 // nothing, since the best rung is judged first). It is a separate decision because the
 // alt rung can change the first one: an untagged (NOGRP) alt turns a proven
 // divergence into an unverifiable comparison, which would change the emission.
-func (c *Comparer) tier(m *match.Match, recGroups []string) Tier {
-	listing := align.Listing{Best: recGroups, Alt: c.listedGroups(&m.Entry)}
+func (c *Comparer) tier(m *match.Match, recGroups, listed []string) Tier {
+	listing := align.Listing{Best: recGroups, Alt: listed}
 	switch align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons).Standing {
 	case align.StandingAlt:
 		return TierAlt
@@ -283,13 +287,13 @@ func (c *Comparer) tier(m *match.Match, recGroups []string) Tier {
 	}
 }
 
-// listedGroups returns the distinct normalized groups of the entry's torrents.
-// It applies no content, tag or obtainability filter, since it describes what
-// is held rather than what to get; only a definite AnimeBytes torrent is
+// listedGroups returns the distinct normalized groups of the entry's torrents
+// (listed) and, sorted, those listed only by non-best torrents (alt). It
+// applies no content, tag or obtainability filter, since it describes what
+// SeaDex lists rather than what to get; only a definite AnimeBytes torrent is
 // skipped with the toggle off, as the report does.
-func (c *Comparer) listedGroups(entry *seadex.Entry) []string {
-	seen := make(map[string]struct{}, len(entry.Torrents))
-	var groups []string
+func (c *Comparer) listedGroups(entry *seadex.Entry) (listed, alt []string) {
+	best := make(map[string]bool, len(entry.Torrents))
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
 		if !c.animeBytes && classify.ABEvidence(t) == tracker.ABDefinite {
@@ -297,13 +301,19 @@ func (c *Comparer) listedGroups(entry *seadex.Entry) []string {
 		}
 		rel := classify.Torrent(entry, t)
 		g := release.NormalizeGroup(rel.Group)
-		if _, dup := seen[g]; dup {
-			continue
+		isBest, seen := best[g]
+		if !seen {
+			listed = append(listed, g)
 		}
-		seen[g] = struct{}{}
-		groups = append(groups, g)
+		best[g] = isBest || t.IsBest
 	}
-	return groups
+	for _, g := range listed {
+		if !best[g] {
+			alt = append(alt, g)
+		}
+	}
+	slices.Sort(alt)
+	return listed, alt
 }
 
 // betterResult finalizes a diverged finding: a better release the operator

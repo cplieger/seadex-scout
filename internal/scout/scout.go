@@ -613,7 +613,7 @@ func (s *Scout) logLibrary(p *completedPass) {
 		return
 	}
 	rep := s.auditor.Audit(p.result.Matches, p.snap, p.idx, p.result.IncompleteIDs)
-	rep.LogLibrary(s.log, rep.HiddenFrom(s.notifier.EmittedIDs()))
+	rep.LogLibrary(s.log)
 }
 
 // escalate emits a latched degradation at the level its streak has earned: ERROR

@@ -45,9 +45,24 @@ var verdictDesc = map[Verdict]string{
 	VerdictOlderRevision: "You have SeaDex's best group, but an older revision of it: SeaDex lists a newer version, PROPER or REPACK from the same group.",
 	VerdictUnverified:    "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
 	VerdictUnattributed:  "A film or special filed inside Sonarr's season-0 bucket, where nothing attributes one file to one entry, so the app offers this entry in the feed and never compares it. The groups shown are what the bucket holds.",
-	VerdictNoFile:        "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
+	VerdictNoFile:        "No file sits where this entry maps. The mapped season, movie, or specials bucket is empty, or a whole-series comparison found no real season with files. Either the files are missing, or Sonarr files that season elsewhere, such as under TVDB's specials.",
 	VerdictBest:          "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex:   "In your library and recognized as anime (Fribb-mapped), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
+}
+
+// verdictLabel is the plain name the Markdown shows beside a verdict key whose
+// key alone misleads a reader; the key stays as the machine name.
+var verdictLabel = map[Verdict]string{
+	VerdictNoFile:       "season not found",
+	VerdictUnattributed: "unmapped specials",
+}
+
+// verdictHeading is a verdict's Markdown name: the key, plus its label if any.
+func verdictHeading(v Verdict) string {
+	if label := verdictLabel[v]; label != "" {
+		return fmt.Sprintf("%s (%s)", v, label)
+	}
+	return string(v)
 }
 
 // renderJSON renders the report as indented JSON (the machine-ingestible copy).
@@ -76,7 +91,7 @@ func renderMarkdown(r *Report) string {
 
 	b.WriteString("## Summary\n\n| Verdict | Count |\n| --- | --- |\n")
 	for _, v := range verdictOrder {
-		fmt.Fprintf(&b, "| %s | %d |\n", v, r.Totals[string(v)])
+		fmt.Fprintf(&b, "| %s | %d |\n", verdictHeading(v), r.Totals[string(v)])
 	}
 	b.WriteByte('\n')
 	b.WriteString(annotationLegend)
@@ -86,7 +101,7 @@ func renderMarkdown(r *Report) string {
 		if len(rows) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "## %s (%d)\n\n", v, len(rows))
+		fmt.Fprintf(&b, "## %s (%d)\n\n", verdictHeading(v), len(rows))
 		if desc := verdictDesc[v]; desc != "" {
 			fmt.Fprintf(&b, "%s\n\n", desc)
 		}
@@ -424,10 +439,8 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 
 // LogLibrary emits one "library summary" line. Its message differs from Log's
 // so a Loki counter never sums a report run with a daemon pass.
-// hiddenByFilters is the caller's HiddenFrom count, since only the caller holds
-// the daemon's findings.
-func (r *Report) LogLibrary(log *slog.Logger, hiddenByFilters int) {
-	log.Info("library summary", append(r.summaryAttrs(), "hidden_by_filters", hiddenByFilters)...)
+func (r *Report) LogLibrary(log *slog.Logger) {
+	log.Info("library summary", r.summaryAttrs()...)
 }
 
 func (r *Report) summaryAttrs() []any {

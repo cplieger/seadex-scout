@@ -99,7 +99,7 @@
     {
       "id": 10,
       "title": "Status",
-      "description": "Healthy means checks run and nothing fails. Upstream outage means SeaDex, AniList or the anime ID map is down, so there is nothing for you to fix. Needs attention is an error you can fix, and Stalled means checks stopped, so open Scout health at the bottom.",
+      "description": "✓ means checks run and nothing fails. ! means SeaDex, AniList or the anime ID map is down, so there is nothing for you to fix. ✗ means an error you can fix or checks that stopped, and Scout health at the bottom says why.",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -140,12 +140,12 @@
               "type": "value",
               "options": {
                 "0": {
-                  "text": "Healthy",
+                  "text": "✓",
                   "color": "green",
                   "index": 0
                 },
                 "1": {
-                  "text": "Upstream outage",
+                  "text": "!",
                   "color": "orange",
                   "index": 1
                 }
@@ -157,7 +157,7 @@
                 "from": 2,
                 "to": 3,
                 "result": {
-                  "text": "Needs attention",
+                  "text": "✗",
                   "color": "red",
                   "index": 2
                 }
@@ -169,7 +169,7 @@
                 "from": 4,
                 "to": 15,
                 "result": {
-                  "text": "Stalled",
+                  "text": "✗",
                   "color": "red",
                   "index": 3
                 }
@@ -207,12 +207,12 @@
     },
     {
       "id": 11,
-      "title": "Upgrades available",
-      "description": "Upgrades SeaDex recommends for what you have, after your filters. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top.",
+      "title": "Upgrades and checks",
+      "description": "Upgrades counts the upgrades SeaDex recommends for what you have, after your filters. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. Check by hand counts the findings seadex-scout could not decide on its own.",
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 5,
+        "w": 6,
         "x": 6,
         "y": 1
       },
@@ -233,15 +233,68 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "blue",
-                "value": 1
               }
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Upgrades"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "blue",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Check by hand"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -253,7 +306,7 @@
         },
         "colorMode": "background",
         "graphMode": "none",
-        "textMode": "value",
+        "textMode": "value_and_name",
         "justifyMode": "auto",
         "orientation": "auto"
       },
@@ -266,64 +319,9 @@
           },
           "expr": "count(sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h])))",
           "queryType": "instant"
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "title": "Check by hand",
-      "description": "Findings seadex-scout could not decide on its own. The Check by hand table lists them.",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 11,
-        "y": 1
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "0",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              }
-            ]
-          }
         },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
         {
-          "refId": "A",
+          "refId": "B",
           "datasource": {
             "type": "loki",
             "uid": "${datasource}"
@@ -335,14 +333,14 @@
     },
     {
       "id": 14,
-      "title": "Anime at SeaDex best",
+      "title": "SeaDex best",
       "description": "Share of your anime on SeaDex where every season or film you have is SeaDex's best release. It updates once a day.",
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 1
+        "w": 6,
+        "x": 0,
+        "y": 5
       },
       "datasource": {
         "type": "loki",
@@ -398,14 +396,14 @@
     },
     {
       "id": 15,
-      "title": "Anime at SeaDex alt",
+      "title": "SeaDex alt",
       "description": "Share of your anime on SeaDex where you have SeaDex's best or an alt, with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts here. It updates once a day.",
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
+        "w": 6,
+        "x": 6,
+        "y": 5
       },
       "datasource": {
         "type": "loki",
@@ -460,969 +458,15 @@
       ]
     },
     {
-      "id": 2,
-      "title": "Upgrades",
-      "type": "row",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 5
-      },
-      "collapsed": false
-    },
-    {
-      "id": 20,
-      "title": "Upgrades available",
-      "description": "Upgrades SeaDex recommends for your library, newest first. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. The Nyaa, AnimeBytes and Other columns show only when some upgrade has a link there.",
-      "type": "table",
-      "gridPos": {
-        "h": 11,
-        "w": 24,
-        "x": 0,
-        "y": 6
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "filterable": true,
-            "align": "auto"
-          },
-          "noValue": "No upgrades available"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #B"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "First seen"
-              },
-              {
-                "id": "unit",
-                "value": "dateTimeFromNow"
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "continuous-BlYlRd"
-                }
-              },
-              {
-                "id": "custom.width",
-                "value": 120
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #A"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "title"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Title"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open in Sonarr or Radarr",
-                    "url": "${__data.fields.arr_url}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 280
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "season"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Season"
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "-",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 70
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "why"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Why"
-              },
-              {
-                "id": "custom.width",
-                "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "current_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "You have"
-              },
-              {
-                "id": "custom.width",
-                "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "recommended_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex recommends"
-              },
-              {
-                "id": "custom.width",
-                "value": 160
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "nyaa_url"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Nyaa"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on Nyaa",
-                    "url": "${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".+",
-                      "result": {
-                        "text": "Open",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 70
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "ab_url"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "AnimeBytes"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on AnimeBytes",
-                    "url": "${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".+",
-                      "result": {
-                        "text": "Open",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 105
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "public_url"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Other"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on the tracker",
-                    "url": "${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".+",
-                      "result": {
-                        "text": "Open",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 70
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "al_id"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on releases.moe",
-                    "url": "https://releases.moe/${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "App"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "sonarr": {
-                        "text": "Sonarr",
-                        "index": 0
-                      },
-                      "radarr": {
-                        "text": "Radarr",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr_url"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "info_hash"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "seadex_tags"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "noValue",
-                "value": "-"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "sortBy": [
-          {
-            "displayName": "First seen",
-            "desc": true
-          }
-        ]
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, why, nyaa_url, ab_url, public_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", status=\"status\", recommended_revision=\"recommended_revision\", nyaa_url=\"nyaa_url\", ab_url=\"ab_url\", public_url=\"public_url\", arr_url=\"arr_url\" | msg=`better release available` | current_tier != \"$optional\" | label_format why=`{{ if eq .status \"newer_revision\" }}{{ .recommended_revision }} available{{ else if eq .current_tier \"alt\" }}SeaDex alt{{ else if eq .current_tier \"unlisted\" }}Neither best nor alt{{ else }}Better release{{ end }}` [2h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "min by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (min_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nand on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h]))",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {
-              "Value #B": 0,
-              "title": 1,
-              "season": 2,
-              "why": 3,
-              "current_group": 4,
-              "recommended_group": 5,
-              "nyaa_url": 6,
-              "ab_url": 7,
-              "public_url": 8,
-              "al_id": 9,
-              "arr": 10
-            }
-          }
-        }
-      ]
-    },
-    {
-      "id": 21,
-      "title": "Check by hand",
-      "description": "Findings seadex-scout could not decide on its own. Several groups on disk means your files mix release groups, and Group unknown means a release group is missing. Open the title and compare it with SeaDex yourself.",
-      "type": "table",
-      "gridPos": {
-        "h": 7,
-        "w": 24,
-        "x": 0,
-        "y": 17
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "filterable": true,
-            "align": "auto"
-          },
-          "noValue": "Nothing to check"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "title"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Title"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open in Sonarr or Radarr",
-                    "url": "${__data.fields.arr_url}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 280
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "season"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Season"
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "-",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 70
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "msg"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Why"
-              },
-              {
-                "id": "custom.width",
-                "value": 170
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "series spans multiple release groups, manual review": {
-                        "text": "Several groups on disk",
-                        "index": 0
-                      },
-                      "release group unverifiable, manual review": {
-                        "text": "Group unknown",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "current_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "You have"
-              },
-              {
-                "id": "custom.width",
-                "value": 180
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "recommended_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex recommends"
-              },
-              {
-                "id": "custom.width",
-                "value": 180
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "al_id"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on releases.moe",
-                    "url": "https://releases.moe/${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "App"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "sonarr": {
-                        "text": "Sonarr",
-                        "index": 0
-                      },
-                      "radarr": {
-                        "text": "Radarr",
-                        "index": 1
-                      }
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr_url"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "^Value( #[A-Z])?$"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "noValue",
-                "value": "-"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "sortBy": [
-          {
-            "displayName": "Title",
-            "desc": false
-          }
-        ]
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h]))",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {
-              "title": 0,
-              "season": 1,
-              "msg": 2,
-              "current_group": 3,
-              "recommended_group": 4,
-              "al_id": 5,
-              "arr": 6
-            }
-          }
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Your library against SeaDex",
-      "type": "row",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 24
-      },
-      "collapsed": false
-    },
-    {
-      "id": 40,
-      "title": "Anime in your library",
-      "description": "Your anime counted per series or film, from the daily check. Not at best or alt covers the rest on SeaDex, such as an older version, another group or no file yet. Hidden by your filters counts better releases seadex-scout does not report, mostly because your filters exclude them.",
-      "type": "stat",
-      "gridPos": {
-        "h": 5,
-        "w": 24,
-        "x": 0,
-        "y": 25
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "-",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "A"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Anime in your library"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "With a SeaDex entry"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "C"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "At SeaDex best"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "D"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "At SeaDex alt"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "E"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Not at best or alt"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "F"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Hidden by your filters"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "none",
-        "graphMode": "none",
-        "textMode": "value_and_name",
-        "justifyMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", anime_items=\"anime_items\" | msg=`library summary` | unwrap anime_items [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [26h])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "E",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "F",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", hidden_by_filters=\"hidden_by_filters\" | msg=`library summary` | unwrap hidden_by_filters [26h]))",
-          "queryType": "instant"
-        }
-      ]
-    },
-    {
       "id": 41,
-      "title": "SeaDex entries by what you have",
-      "description": "SeaDex entries in your library, grouped by what you have. SeaDex alt, Older version and Neither best nor alt are where upgrades come from.",
+      "title": "Library overview",
+      "description": "SeaDex entries in your library, one per season or film SeaDex lists, grouped by what you have. Season not found means seadex-scout found no files for that season. The files are missing, or Sonarr numbers that season differently, for example under specials. Unmapped specials are films or specials in Sonarr's specials that seadex-scout cannot tie to one entry.",
       "type": "bargauge",
       "gridPos": {
-        "h": 9,
+        "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 30
+        "x": 12,
+        "y": 1
       },
       "datasource": {
         "type": "loki",
@@ -1532,7 +576,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "No file"
+                "value": "Season not found"
               },
               {
                 "id": "color",
@@ -1551,7 +595,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Group unknown"
+                "value": "Untagged release"
               },
               {
                 "id": "color",
@@ -1570,7 +614,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Offered in the feed only"
+                "value": "Unmapped specials"
               },
               {
                 "id": "color",
@@ -1693,15 +737,809 @@
       ]
     },
     {
+      "id": 2,
+      "title": "Upgrades",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "collapsed": false
+    },
+    {
+      "id": 20,
+      "title": "Upgrades available",
+      "description": "Upgrades SeaDex recommends for your library, newest first. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. The Nyaa, AnimeBytes and Other columns show only when some upgrade has a link there.",
+      "type": "table",
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          },
+          "noValue": "No upgrades available"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "First seen"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 136
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in Sonarr or Radarr",
+                    "url": "${__data.fields.arr_url}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "season"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Season"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "-",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 104
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "why"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Why"
+              },
+              {
+                "id": "custom.width",
+                "value": 176
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "current_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "You have"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "best"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex best"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "alt"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex alt"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "nyaa_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Nyaa"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on Nyaa",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".+",
+                      "result": {
+                        "text": "Open",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 88
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ab_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "AnimeBytes"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on AnimeBytes",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".+",
+                      "result": {
+                        "text": "Open",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 136
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "public_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Other"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on the tracker",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".+",
+                      "result": {
+                        "text": "Open",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 96
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "al_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on releases.moe",
+                    "url": "https://releases.moe/${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 104
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "App"
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "sonarr": {
+                        "text": "Sonarr",
+                        "index": 0
+                      },
+                      "radarr": {
+                        "text": "Radarr",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recommended_group"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "info_hash"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seadex_tags"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "First seen",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, why, best, alt, nyaa_url, ab_url, public_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", status=\"status\", current_revision=\"current_revision\", recommended_revision=\"recommended_revision\", alt_groups=\"alt_groups\", nyaa_url=\"nyaa_url\", ab_url=\"ab_url\", public_url=\"public_url\", arr_url=\"arr_url\" | msg=`better release available` | current_tier != \"$optional\" | label_format why=`{{ if eq .status \"newer_revision\" }}{{ .recommended_revision }} available{{ else if eq .current_tier \"alt\" }}SeaDex alt{{ else if eq .current_tier \"unlisted\" }}Neither best nor alt{{ else }}Better release{{ end }}`, current_group=`{{ .current_group | replace \",\" \", \" }}{{ if .current_revision }} {{ .current_revision }}{{ end }}`, best=`{{ .recommended_group }}{{ if .recommended_revision }} {{ .recommended_revision }}{{ end }}`, alt=`{{ if .alt_groups }}{{ .alt_groups | replace \",\" \", \" }}{{ else }}-{{ end }}` [2h]))",
+          "queryType": "instant"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "min by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (min_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nand on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "Value #B": 0,
+              "title": 1,
+              "season": 2,
+              "why": 3,
+              "current_group": 4,
+              "best": 5,
+              "alt": 6,
+              "nyaa_url": 7,
+              "ab_url": 8,
+              "public_url": 9,
+              "al_id": 10,
+              "arr": 11
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Check by hand",
+      "description": "Findings seadex-scout could not decide on its own. Several groups on disk means your files mix release groups, and Untagged release means your file or SeaDex's release names no group. Open the title and compare it with SeaDex yourself.",
+      "type": "table",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          },
+          "noValue": "Nothing to check"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in Sonarr or Radarr",
+                    "url": "${__data.fields.arr_url}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "season"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Season"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "-",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 104
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "msg"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Why"
+              },
+              {
+                "id": "custom.width",
+                "value": 192
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "series spans multiple release groups, manual review": {
+                        "text": "Several groups on disk",
+                        "index": 0
+                      },
+                      "release group unverifiable, manual review": {
+                        "text": "Untagged release",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "current_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "You have"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recommended_group"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex best"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "al_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "SeaDex"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open on releases.moe",
+                    "url": "https://releases.moe/${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 104
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "App"
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "sonarr": {
+                        "text": "Sonarr",
+                        "index": 0
+                      },
+                      "radarr": {
+                        "text": "Radarr",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arr_url"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Value( #[A-Z])?$"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Title",
+            "desc": false
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "title": 0,
+              "season": 1,
+              "msg": 2,
+              "current_group": 3,
+              "recommended_group": 4,
+              "al_id": 5,
+              "arr": 6
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": 42,
-      "title": "Anime at SeaDex best and alt, over time",
-      "description": "The two shares from the top row over time. It adds about one point a day, one for each daily check.",
+      "title": "Your anime against SeaDex, over time",
+      "description": "Your anime at each daily check, one point per check. The four parts add up to every anime in your library.",
       "type": "timeseries",
       "gridPos": {
         "h": 9,
-        "w": 12,
-        "x": 12,
-        "y": 30
+        "w": 24,
+        "x": 0,
+        "y": 28
       },
       "datasource": {
         "type": "loki",
@@ -1710,17 +1548,20 @@
       "interval": "1h",
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
+          "unit": "short",
           "min": 0,
-          "max": 100,
           "decimals": 0,
           "custom": {
             "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 10,
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
             "spanNulls": true,
             "showPoints": "always",
-            "pointSize": 6
+            "pointSize": 5
           }
         },
         "overrides": [
@@ -1753,6 +1594,36 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
           }
         ]
       },
@@ -1763,7 +1634,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "none"
         }
       },
       "targets": [
@@ -1773,9 +1645,9 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval])) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval])) > 0) * 100",
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval])) and max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
           "queryType": "range",
-          "legendFormat": "At best"
+          "legendFormat": "At SeaDex best"
         },
         {
           "refId": "B",
@@ -1783,34 +1655,54 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval]))) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval])) > 0) * 100",
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval]))",
           "queryType": "range",
-          "legendFormat": "At alt"
+          "legendFormat": "At SeaDex alt"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
+          "queryType": "range",
+          "legendFormat": "Not at best or alt"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", anime_items=\"anime_items\" | msg=`library summary` | unwrap anime_items [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval]))) and max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
+          "queryType": "range",
+          "legendFormat": "Not on SeaDex"
         }
       ]
     },
     {
-      "id": 5,
+      "id": 3,
       "title": "Scout health",
       "type": "row",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 37
       },
       "collapsed": true,
       "panels": [
         {
           "id": 50,
           "title": "Why",
-          "description": "What keeps Status from reading Healthy, over the last hour. A problem at SeaDex, AniList or the anime ID map needs nothing from you.",
+          "description": "What keeps Status from showing ✓, over the last hour. A problem at SeaDex, AniList or the anime ID map needs nothing from you.",
           "type": "table",
           "gridPos": {
             "h": 6,
             "w": 12,
             "x": 0,
-            "y": 40
+            "y": 38
           },
           "datasource": {
             "type": "loki",
@@ -1837,7 +1729,7 @@
                   },
                   {
                     "id": "custom.width",
-                    "value": 260
+                    "value": 272
                   },
                   {
                     "id": "mappings",
@@ -1922,6 +1814,10 @@
                   {
                     "id": "displayName",
                     "value": "Error"
+                  },
+                  {
+                    "id": "custom.minWidth",
+                    "value": 200
                   }
                 ]
               },
@@ -1937,7 +1833,7 @@
                   },
                   {
                     "id": "custom.width",
-                    "value": 120
+                    "value": 152
                   }
                 ]
               },
@@ -1953,7 +1849,7 @@
                   },
                   {
                     "id": "custom.width",
-                    "value": 120
+                    "value": 152
                   }
                 ]
               },
@@ -2025,7 +1921,7 @@
             "h": 3,
             "w": 6,
             "x": 12,
-            "y": 40
+            "y": 38
           },
           "datasource": {
             "type": "loki",
@@ -2085,7 +1981,7 @@
             "h": 3,
             "w": 6,
             "x": 18,
-            "y": 40
+            "y": 38
           },
           "datasource": {
             "type": "loki",
@@ -2145,7 +2041,7 @@
             "h": 3,
             "w": 12,
             "x": 12,
-            "y": 43
+            "y": 41
           },
           "datasource": {
             "type": "loki",
@@ -2205,7 +2101,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 46
+            "y": 44
           },
           "datasource": {
             "type": "loki",

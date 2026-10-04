@@ -106,25 +106,6 @@ func TestAuditItemTotals(t *testing.T) {
 	}
 }
 
-// TestHiddenFrom pins that only not-at-best verdicts count toward hidden_by_filters.
-func TestHiddenFrom(t *testing.T) {
-	r := &Report{Rows: []Row{
-		{AniListID: 1, Verdict: VerdictAlt},
-		{AniListID: 2, Verdict: VerdictUnlisted},
-		{AniListID: 3, Verdict: VerdictOlderRevision},
-		{AniListID: 4, Verdict: VerdictBest},
-		{AniListID: 5, Verdict: VerdictNoFile},
-		{AniListID: 6, Verdict: VerdictUnverified},
-		{AniListID: 7, Verdict: VerdictNotOnSeaDex},
-	}}
-	if got := r.HiddenFrom(map[int]struct{}{1: {}}); got != 2 {
-		t.Errorf("HiddenFrom({1}) = %d, want 2 (ids 2 and 3)", got)
-	}
-	if got := r.HiddenFrom(nil); got != 3 {
-		t.Errorf("HiddenFrom(nil) = %d, want 3", got)
-	}
-}
-
 func libraryContract(t *testing.T, msg string) []string {
 	t.Helper()
 	raw, err := os.ReadFile("../../alerts/logql.yaml")
@@ -156,7 +137,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 		},
 	}
 
-	r.LogLibrary(log, 5)
+	r.LogLibrary(log)
 
 	recs := rec.Records()
 	if len(recs) != 1 || recs[0].Message != "library summary" {
@@ -170,7 +151,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	}
 	for key, want := range map[string]int64{
 		"rows": 4, "have_best": 4, "no_file": 1, "have_alt": 1, "anime_items": 9, "items_with_entry": 7,
-		"items_all_best": 3, "items_all_best_or_alt": 5, "hidden_by_filters": 5,
+		"items_all_best": 3, "items_all_best_or_alt": 5,
 	} {
 		if summaryAttrs[key] != want {
 			t.Errorf("library summary %s = %v, want %d", key, summaryAttrs[key], want)

@@ -303,7 +303,7 @@ func TestDashboardGuardsTheBestShareDenominator(t *testing.T) {
 			}
 		}
 	}
-	for _, panel := range []string{"Anime at SeaDex best", "Anime at SeaDex alt", "Anime at SeaDex best and alt, over time"} {
+	for _, panel := range []string{"SeaDex best", "SeaDex alt"} {
 		if !ratios[panel] {
 			t.Errorf("panel %q does not divide by items_with_entry, want the best-share ratio", panel)
 		}

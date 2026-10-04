@@ -11,8 +11,8 @@ import (
 // compare and audit key alignment on, with metamorphic invariants that do not reimplement
 // the normalizer: symmetry; an empty side is always None (nothing overlaps an empty set and
 // nothing can hide behind one); appending a shared KNOWN group to both sides forces Known
-// even with whitespace padding; appending the unknown-evidence NoGroup sentinel to one side
-// never yields a divergence proof; and Known requires a known group on both sides.
+// even with whitespace padding; appending the NoGroup sentinel to both sides forces Known;
+// and appending it to one side never yields a divergence proof.
 func TestGroupsOverlapProperties(t *testing.T) {
 	group := rapid.OneOf(
 		rapid.SampledFrom([]string{"", "NOGRP", "no-group", "SubsPlease", " pmr ", "LostYears"}),
@@ -46,6 +46,10 @@ func TestGroupsOverlapProperties(t *testing.T) {
 		}
 		if got := GroupsOverlap(append(a, " "+shared+" "), append(b, shared)); got != OverlapKnown {
 			t.Fatalf("whitespace-padded shared known element %q = %v, want Known", shared, got)
+		}
+
+		if got := GroupsOverlap(append(a, NoGroup), append(b, "no-group")); got != OverlapKnown {
+			t.Fatalf("the NoGroup sentinel on both sides of %q / %q = %v, want Known", a, b, got)
 		}
 
 		if len(b) > 0 {

@@ -101,10 +101,10 @@ func TestDecideWholeSeriesNilAlt(t *testing.T) {
 }
 
 // TestDecideWholeSeriesUnknownEvidence pins the conservative propagation of
-// unverifiability: a season with unknown group evidence (release.NoGroup on either
-// side) blocks the have-best claim, while a PROVEN downgrade in another season
-// still outranks the unknown, since the proof stands regardless of what the
-// unknown season holds.
+// unverifiability: a season with unknown group evidence (release.NoGroup on one
+// side only) blocks the have-best claim, while a PROVEN downgrade in another
+// season still outranks the unknown, since the proof stands regardless of what
+// the unknown season holds. NoGroup on both sides is a match, not unknown.
 func TestDecideWholeSeriesUnknownEvidence(t *testing.T) {
 	best := []string{"a&c"}
 	alt := []string{"kh"}
@@ -129,6 +129,11 @@ func TestDecideWholeSeriesUnknownEvidence(t *testing.T) {
 			name:    "an unknown-only best set makes every filed season unverifiable",
 			seasons: map[int][]string{1: {"a&c"}, 2: {"kh"}},
 			best:    []string{"nogrp"}, want: align.StandingUnverified, outcome: align.OutcomeUnverifiable,
+		},
+		{
+			name:    "untagged seasons against an untagged best are at best",
+			seasons: map[int][]string{1: {"nogrp"}, 2: {"nogrp"}},
+			best:    []string{"nogrp"}, want: align.StandingBest, outcome: align.OutcomeAligned,
 		},
 		{
 			name:    "a proven unlisted season outranks an unknown one",

@@ -10,10 +10,10 @@ import (
 // FuzzClassify fuzzes the pure classifier over untrusted SeaDex/arr strings (release
 // names, entry notes, group, tracker, MediaInfo codec) and asserts the bounded-output and
 // cross-function invariants compare and audit rely on, each stated at its own assertion.
-// Two worth naming: the classified group is never PROVEN divergent from its own raw group
-// under GroupsOverlap (a known group matches itself, an unknown-evidence group is
-// indeterminate, never None), and no text can set DualAudio, whose only source is the
-// structured input flag left unset here.
+// Two worth naming: the classified group always matches its own raw group under
+// GroupsOverlap (a known group matches itself, and an untagged release normalizes to the
+// NoGroup sentinel on both sides, which is a match), and no text can set DualAudio, whose
+// only source is the structured input flag left unset here.
 func FuzzClassify(f *testing.F) {
 	f.Add("Show 1080p BDRemux [Dual Audio]", "best remux available", "PMR", "Nyaa", "")
 	f.Add("Show x265 crf18", "", "", "AB", "HEVC")
@@ -67,11 +67,8 @@ func FuzzClassify(f *testing.F) {
 		if NormalizeGroup(ng) != ng {
 			t.Errorf("NormalizeGroup not idempotent: %q -> %q", ng, NormalizeGroup(ng))
 		}
-		switch overlap := GroupsOverlap([]string{rel.Group}, []string{group}); {
-		case overlap == OverlapNone:
-			t.Errorf("classified group %q proven divergent from its own raw group %q", rel.Group, group)
-		case overlap == OverlapKnown && ng == noGroupNormalized:
-			t.Errorf("unknown-evidence group %q read as a proven match against %q", rel.Group, group)
+		if overlap := GroupsOverlap([]string{rel.Group}, []string{group}); overlap != OverlapKnown {
+			t.Errorf("classified group %q against its own raw group %q = %v, want OverlapKnown", rel.Group, group, overlap)
 		}
 
 		// Contract: per-file name evidence wins for the file, so a

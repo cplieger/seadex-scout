@@ -41,15 +41,16 @@
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
 #     attrs: current_tier, recommended_group, alert_recommended_group, seadex_tags,
 #     attrs: info_hash, resolution, kind, release_url, nyaa_url, public_url,
-#     attrs: public_tracker, ab_url, ab_tracker, current_revision, recommended_revision
+#     attrs: public_tracker, ab_url, ab_tracker, current_revision, recommended_revision,
+#     attrs: alt_groups
 #   msg="series spans multiple release groups, manual review"
 #                                   the mixed-group manual-review nudge
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
-#     attrs: recommended_group, alert_recommended_group, seadex_tags
+#     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups
 #   msg="release group unverifiable, manual review"
-#                                   a comparison that untagged releases left undecided
+#                                   a comparison an untagged release left undecided
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
-#     attrs: recommended_group, alert_recommended_group, seadex_tags
+#     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups
 #   msg="report written"            a report was generated
 #     attrs: anime
 #   msg="cycle complete"            \
@@ -69,7 +70,7 @@
 #                                   full pass whose library read was complete
 #     attrs: rows, have_best, have_alt, have_older_revision, have_unlisted, no_file,
 #     attrs: unverified, unattributed, not_on_seadex, anime_items, items_with_entry,
-#     attrs: items_all_best, items_all_best_or_alt, hidden_by_filters
+#     attrs: items_all_best, items_all_best_or_alt
 #
 # Every OTHER message and attribute this app logs is diagnostic, not contract:
 # it may be reworded, re-levelled, or change attribute type in any release. If

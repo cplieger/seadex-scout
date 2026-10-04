@@ -8,13 +8,15 @@ seadex-scout has no metrics endpoint. Its only output is its log, written as JSO
 
 A finding is one line at `warn` with `msg="better release available"`. It carries the title, the AniList ID, the current and recommended groups, and the release's classification. It also carries one link per source you can get it from, as `nyaa_url`, `public_url` with `public_tracker`, or `ab_url` with `ab_tracker`, so an alert can show a clickable link straight from the labels. [`alerts/logql.yaml`](../alerts/logql.yaml) names the attributes it groups by. A `better_release` finding also carries `current_tier`. It is `alt` when SeaDex lists the group you have without recommending it, and `unlisted` when SeaDex does not list it at all.
 
+Every finding line also carries `alt_groups`, the groups SeaDex lists only as alts for that entry, lower-cased and joined with commas. AnimeBytes alts are left out when `animebytes` is off. It is empty when the entry has no alt.
+
 A newer revision of a group you already hold logs the same `warn` message with `status=newer_revision`, `current_revision` and `recommended_revision`, such as `v1` and `v2`. Its `seadex_tags` value starts with `newer-revision`, so existing better-release alert rules fire on it too.
 
 Informational cases log at `info`. Their statuses are `incomplete`, `theoretical_best`, `mixed_group_manual` and `unverifiable`.
 
 Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per anime.
 
-Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best`, `items_all_best_or_alt` and `hidden_by_filters`. `items_all_best_or_alt` counts the anime where every season or film you have is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The `attrs:` lines in [`alerts/logql.yaml`](../alerts/logql.yaml) list the stable attributes of each message.
+Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season or film you have is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The `attrs:` lines in [`alerts/logql.yaml`](../alerts/logql.yaml) list the stable attributes of each message.
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
 
@@ -34,26 +36,33 @@ Every release attaches `grafana-dashboard.json` to its GitHub Release, with a `.
 
 The dashboard has three variables at the top. **Loki** picks your Loki data source. **Container** is the value of the `container` label your log collector puts on seadex-scout's lines, `seadex-scout` by default.
 
-**Optional upgrades** decides whether the upgrades list shows upgrades where you already have a SeaDex alt. **Hide** is the default and leaves them out. Pick **Show** to see them too. The Upgrades available tile follows the same setting, so the count matches the list.
+**Optional upgrades** decides whether the upgrades list shows upgrades where you already have a SeaDex alt. **Hide** is the default and leaves them out. Pick **Show** to see them too. The Upgrades count at the top follows the same setting, so the count matches the list.
 
-The dashboard has four rows:
+The dashboard has three rows:
 
-- At a glance shows one status, the number of upgrades available, the findings to check by hand, and two shares of your anime. Anime at SeaDex best is the share where everything you have is SeaDex's best release. Anime at SeaDex alt is the share where you have best or alt releases with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts as alt.
-- Upgrades lists every upgrade, newest first, with the time it was first seen. It also lists the findings seadex-scout could not decide on its own, under Check by hand.
-- Your library against SeaDex counts your anime, how many have a SeaDex entry, how many are at best and how many are at alt. Not at best or alt counts the rest on SeaDex, such as an older version, another group or no file yet. It also shows one bar per kind of release you have and a trend of the two shares, with about one point a day.
-- Scout health is collapsed. It shows why the status is not Healthy, when the last checks finished, how often Sonarr and Radarr read the Torznab feed, and how many releases the feed newly offered.
+- At a glance shows the status, the number of upgrades and of findings to check by hand, and two shares of your anime. Library overview on its right counts SeaDex entries by what you have, one per season or film SeaDex lists.
+- Upgrades lists every upgrade, newest first, with the time it was first seen. It also lists the findings seadex-scout could not decide on its own, under Check by hand. Below them, a stacked graph counts your anime at each daily check. Its four parts are at SeaDex best, at SeaDex alt, not at best or alt, and not on SeaDex, so the total is every anime in your library. Not at best or alt covers an anime with any season on another group, an older version, no files found or an untagged release.
+- Scout health is collapsed. It shows why the status is not `✓`, when the last checks finished, how often Sonarr and Radarr read the Torznab feed, and how many releases the feed newly offered.
 
-In the upgrades list, each title opens the series or film in Sonarr or Radarr. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on. The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
+The SeaDex best tile is the share of your anime where everything you have is SeaDex's best release. The SeaDex alt tile is the share where you have best or alt releases with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts as alt.
 
-The status reads Healthy, Upstream outage, Needs attention or Stalled. It is built from the same conditions as the shipped alert rules. Upstream outage means SeaDex, AniList or the anime ID map is failing, and nothing needs fixing on your side.
+Three Library overview bars need a word. Season not found means no files sit where the entry maps, either because they are missing or because Sonarr files that season elsewhere, such as under TVDB's specials. Unmapped specials are films or specials in Sonarr's specials that seadex-scout cannot tie to one entry, so it offers them in the feed and does not compare them. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.
+
+In the upgrades list, You have, SeaDex best and SeaDex alt name the release groups. On a newer version they also show the version, such as `smol v1` against `smol v2`. SeaDex alt shows `-` when SeaDex lists no alt.
+
+Each title opens the series or film in Sonarr or Radarr. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
+
+The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
+
+The status shows `✓`, `!` or `✗`, built from the same conditions as the shipped alert rules. A tick means checks run and nothing fails. An exclamation mark means SeaDex, AniList or the anime ID map is failing, and nothing needs fixing on your side. A cross means an error you can fix or checks that stopped. Scout health says which.
 
 First seen is the earliest time a finding was logged within the selected time range. A finding older than the range, or older than the logs your Loki keeps, shows the earliest time still held. Widen the range to look further back. Loki's `max_query_length` setting can refuse a very long range. If it does, the upgrades still show with First seen empty. First seen needs a Loki version whose `label_format` supports `__timestamp__`. Loki 3.7 is known to work.
 
-The library row and the two share tiles show the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available. Hidden by your filters counts the better releases seadex-scout reports nothing about, mostly because your filters exclude them or because you ignore the show. An anime whose only SeaDex entries have no file, or are only offered in the feed, has an entry but is never at best or alt.
+The two share tiles, Library overview and the graph show the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available. An anime whose only SeaDex entries have no file, or are only offered in the feed, has an entry but is never at best or alt.
 
-These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. The row then keeps the previous summary until it is 26 hours old and is empty after that, until a complete check logs a new one. The alt numbers stay empty until the first full check after you upgrade to a version that logs them.
+These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. They then keep the previous summary until it is 26 hours old and are empty after that, until a complete check logs a new one. The alt numbers and the graph stay empty until the first full check after you upgrade to a version that logs them.
 
-With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The dashboard then reads Stalled and stays mostly empty.
+With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The status then shows `✗` and the dashboard stays mostly empty.
 
 ## Alerting
 

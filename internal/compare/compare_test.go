@@ -442,7 +442,7 @@ func TestCompareBetterRelease(t *testing.T) {
 }
 
 // TestCompareUnverifiableEvidenceIsInfo pins the tri-state evidence model on the findings
-// path: unknown group evidence (the release.NoGroup sentinel) on either side yields ONE
+// path: unknown group evidence (the release.NoGroup sentinel) on one side yields ONE
 // informational `unverifiable` finding - never a silent aligned suppression, and never a
 // warn-level better_release (the live 26-NOGRP-best-torrents class, SeaDex side unknown and
 // library known). The finding carries the recommendation fields for the manual review, and
@@ -455,7 +455,6 @@ func TestCompareUnverifiableEvidenceIsInfo(t *testing.T) {
 	}{
 		{name: "unknown library evidence against a known best", diskGroup: "nogrp", bestGroup: "SubsPlease"},
 		{name: "known library group against a NOGRP-only best", diskGroup: "erai-raws", bestGroup: ""},
-		{name: "sentinel on both sides is not alignment proof", diskGroup: "nogrp", bestGroup: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

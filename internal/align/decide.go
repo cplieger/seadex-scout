@@ -19,7 +19,7 @@ const (
 	// whole-series comparison: no real season carries files).
 	StandingNoFile Standing = iota
 	// StandingUnverified means the comparison is unverifiable: the
-	// release-group evidence on at least one side is unknown (release.NoGroup)
+	// release-group evidence on exactly one side is unknown (release.NoGroup)
 	// and could hide the very membership being tested, so neither alignment
 	// nor divergence is proven. Also covers a proven-divergent best comparison
 	// whose alt placement is indeterminate (read this as "the verdict cannot
@@ -67,7 +67,7 @@ const (
 	// revision than SeaDex lists: the actionable same-group upgrade.
 	OutcomeSuperseded
 	// OutcomeUnverifiable means the comparison is indeterminate: unknown group
-	// evidence on either side could hide an alignment, so the daemon emits an
+	// evidence on one side could hide an alignment, so the daemon emits an
 	// informational finding and the audit records unverified.
 	OutcomeUnverifiable
 	// OutcomeMixed means the unit is not aligned and its group evidence spans more
