@@ -427,7 +427,7 @@ func buildIgnoreSet(raw []int) (map[int]struct{}, error) {
 	for _, id := range raw {
 		if id <= 0 {
 			return nil, fmt.Errorf(
-				"filters.ignore holds a non-positive AniList ID (%d); IDs start at 1", id,
+				"filters.ignore holds the non-positive AniList ID %d, and IDs start at 1", id,
 			)
 		}
 		out[id] = struct{}{}
@@ -468,8 +468,8 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 			)
 		case len(raw[tag]) == 0:
 			return tagfilter.Filter{}, fmt.Errorf(
-				"a filters.exclude_tags tag lists no surfaces; list at least one of %s, "+
-					"or remove the tag (an empty exclude_tags filters nothing)", valid,
+				"a filters.exclude_tags tag lists no surfaces. List at least one of %s, "+
+					"or remove the tag, because an empty exclude_tags filters nothing", valid,
 			)
 		}
 		surfaces := make([]tagfilter.Surface, 0, len(raw[tag]))
@@ -477,7 +477,7 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 			s, ok := tagfilter.ParseSurface(name)
 			if !ok {
 				return tagfilter.Filter{}, fmt.Errorf(
-					"filters.exclude_tags lists an unknown surface; valid surfaces are %s", valid,
+					"filters.exclude_tags lists an unknown surface. Valid surfaces are %s", valid,
 				)
 			}
 			surfaces = append(surfaces, s)
@@ -748,13 +748,13 @@ func (c *Config) validateFeedAPIKey() error {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
 	}
 	if !wellFormedCredential(c.IndexerAPIKey) {
-		msg := "indexer.feed_api_key is not a usable key: it must be one run of printable " +
-			"characters with no spaces and no '$' - generate one with openssl rand -hex 16"
+		msg := "indexer.feed_api_key is not a usable key. It must be one run of printable " +
+			"characters with no spaces and no '$'. Generate one with openssl rand -hex 16"
 		// Keyed on the CHARACTER, not on a reference regex: the charset rule is what
 		// refused the value, and every reference spelling contains a '$'.
 		if strings.ContainsRune(c.IndexerAPIKey, '$') {
-			msg += unexpandedRefHint + " and the feed would be gated by that literal " +
-				"placeholder - a key guessable from the public README and config.example"
+			msg += unexpandedRefHint + ". The feed would then be gated by that literal " +
+				"placeholder, which is a key guessable from the public README and config.example"
 		}
 		return errors.New(msg)
 	}
@@ -795,9 +795,9 @@ func (c *Config) validateABPasskey() error {
 		wellFormedABPasskey(c.IndexerABPasskey) {
 		return nil
 	}
-	msg := "indexer.ab_passkey is not a usable AnimeBytes passkey: it must be 32, 48, or 56 " +
-		"characters with no spaces (the lengths AnimeBytes issues, and the ones Jackett and " +
-		"Prowlarr accept for the same credential) - copy it from your AnimeBytes profile, or " +
+	msg := "indexer.ab_passkey is not a usable AnimeBytes passkey. It must be 32, 48 or 56 " +
+		"characters with no spaces, which are the lengths AnimeBytes issues and the ones Jackett and " +
+		"Prowlarr accept for the same credential. Copy it from your AnimeBytes profile, or " +
 		"leave it empty to serve the feed without AnimeBytes download links"
 	if secretref.Unexpanded(c.IndexerABPasskey) {
 		msg += unexpandedRefHint
@@ -857,11 +857,11 @@ func checkAPIKeyShape(field, v string) error {
 	if wellFormedCredential(v) {
 		return nil
 	}
-	msg := field + " is not a usable API key: it must be one run of printable characters " +
-		"with no spaces and no '$' - Sonarr, Radarr and Prowlarr generate a " +
-		"32-character hex key, shown under Settings -> General -> API Key"
+	msg := field + " is not a usable API key. It must be one run of printable characters " +
+		"with no spaces and no '$'. Sonarr, Radarr and Prowlarr generate a " +
+		"32-character hex key. To find it, open Settings, then General, and copy the API Key field"
 	if strings.ContainsRune(v, '$') {
-		msg += unexpandedRefHint + " and that literal placeholder would be sent as the credential"
+		msg += unexpandedRefHint + ". That literal placeholder would be sent as the credential"
 	}
 	return errors.New(msg)
 }
@@ -1010,7 +1010,7 @@ func validateHTTPURL(name, rawURL string) error {
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		// Field-name-only, matching the parse-error branch: u.Redacted() masks only a
 		// userinfo password, so echoing would still ship a query-string apikey.
-		return fmt.Errorf("%s must be an absolute http(s) URL with a host", name)
+		return fmt.Errorf("%s must be an absolute http or https URL with a host", name)
 	}
 	// url.Parse accepts URI shapes the base-URL consumers cannot use: a fragment
 	// survives the parse but is never sent over HTTP, and an out-of-range port fails
@@ -1069,8 +1069,8 @@ var envAllowlistSpelling = strings.Join(allowedEnvPrefixes, "/")
 
 // unexpandedRefHint is the shared clause a credential error appends when the
 // refused value carries a '$'. Callers append their own per-field tail.
-var unexpandedRefHint = "; it looks like an environment-variable reference left unexpanded, so the " +
-	"variable is unset or not allowlisted (" + envAllowlistSpelling + ")"
+var unexpandedRefHint = ". It looks like an environment-variable reference left unexpanded, so the " +
+	"variable is unset or not allowlisted. The allowlisted prefixes are " + envAllowlistSpelling
 
 func isAllowedEnvVar(key string) bool {
 	for _, prefix := range allowedEnvPrefixes {

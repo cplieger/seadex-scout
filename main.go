@@ -51,7 +51,7 @@ const (
 const modePoll = "poll"
 
 // validArgsHint lists the accepted invocations, shared by both invalid-invocation errors.
-const validArgsHint = "(valid: health, daemon, report, poll, or no argument)"
+const validArgsHint = "valid invocations are health, daemon, report, poll, or no argument"
 
 // unknownModeMarker is the fixed value logged in place of an unrecognized
 // run mode: the raw value may be an expanded ${VAR} secret from a config typo.
@@ -111,7 +111,7 @@ func main() {
 // typo can never run a real poll or report healthy. main maps the error to exit 2.
 func validateInvocation(args []string) error {
 	if len(args) > 1 {
-		return fmt.Errorf("too many arguments %q %s", args, validArgsHint)
+		return fmt.Errorf("too many arguments %q, %s", args, validArgsHint)
 	}
 	return nil
 }
@@ -219,7 +219,7 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 	if slices.Contains(runModes, args[0]) {
 		return args[0], nil
 	}
-	return "", fmt.Errorf("unknown subcommand %q %s", args[0], validArgsHint)
+	return "", fmt.Errorf("unknown subcommand %q, %s", args[0], validArgsHint)
 }
 
 // --- Report mode ---
@@ -302,12 +302,13 @@ func probeReportDir(ctx context.Context, dir string) error {
 	}
 	cause := pathredact.Err(dir, res.Err)
 	if errors.Is(res.Err, atomicfile.ErrModeNotStored) {
-		return fmt.Errorf("report.dir does not keep files owner-only (%#o), usually because "+
-			"of an inherited ACL on the mount - remove the ACL or point report.dir at a "+
-			"directory without one: %w", reportfs.FileMode, cause)
+		return fmt.Errorf("report.dir does not keep files owner-only at mode %#o, usually "+
+			"because of an inherited ACL on the mount. Remove the ACL or point report.dir at "+
+			"a directory without one: %w", reportfs.FileMode, cause)
 	}
-	return fmt.Errorf("report.dir is not writable (%s failed) - check that the mount is "+
-		"read-write, has free space and is writable by the container user: %w", res.Stage, cause)
+	return fmt.Errorf("report.dir is not writable because the %s step failed. Check that "+
+		"the mount is read-write, has free space and is writable by the container user: %w",
+		res.Stage, cause)
 }
 
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
