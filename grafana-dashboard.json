@@ -103,7 +103,7 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 5,
         "x": 0,
         "y": 1
       },
@@ -212,8 +212,8 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 5,
+        "x": 5,
         "y": 1
       },
       "datasource": {
@@ -338,7 +338,7 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 5,
         "x": 0,
         "y": 5
       },
@@ -401,8 +401,8 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 5,
+        "x": 5,
         "y": 5
       },
       "datasource": {
@@ -464,8 +464,8 @@
       "type": "bargauge",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 14,
+        "x": 10,
         "y": 1
       },
       "datasource": {
