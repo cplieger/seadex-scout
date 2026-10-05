@@ -164,7 +164,7 @@ seadex-scout writes JSON logs to standard output and has no metrics endpoint. Ni
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, the conventions, and how to run the checks locally.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
