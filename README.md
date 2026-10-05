@@ -5,6 +5,8 @@
 <!-- hub-overview BEGIN -->
 seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://releases.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
 
+![The seadex-scout Grafana dashboard showing its status, 12 upgrades and 4 checks by hand, the library's share on SeaDex best and alt releases, a breakdown of the library by verdict, and the table of upgrades available](docs/images/dashboard.png)
+
 ## What it does
 
 seadex-scout helps you keep your anime library on SeaDex's recommended releases, in four ways:
