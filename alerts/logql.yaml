@@ -22,7 +22,7 @@
 # bundled grafana-dashboard.json match on, and they are the ONLY log output
 # treated as a contract - they will not be renamed or retyped without a matching
 # change here. The attrs: line under each message names the attributes that are
-# stable ON THAT MESSAGE; msg and level are stable on every line.
+# stable on that message. msg and level are stable on every line.
 #
 #   level=ERROR with no condition   a one-off or local fault (the fault rule keys on
 #                                   the level and the absent attribute, not a message)
@@ -59,11 +59,11 @@
 #   msg="tick degraded"             /
 #   msg="reconcile started"         the start of a full pass, also in the loop deadman
 #   msg="reconcile complete"        the backstop deadman
-#   msg="indexer request"           one Torznab request from an arr; feed=true is an
+#   msg="indexer request"           one Torznab request from an arr, where feed=true is an
 #                                   RSS poll, the shape the feed rule counts
 #     attrs: scope, feed
 #   msg="indexer feed snapshot written"
-#                                   the feed was rebuilt or advanced; journal_new is
+#                                   the feed was rebuilt or advanced, and journal_new is
 #                                   the count of releases newly added to the RSS feed
 #     attrs: journal_new
 #   msg="library summary"           the daily library audit's counts, logged by each
@@ -392,8 +392,8 @@ groups:
       # Standing condition: an arr stopped reading one tracker's RSS feed. Each
       # arr polls an enabled Torznab indexer on its own RSS interval, and every
       # poll logs an `indexer request` line with feed=true. An arr that marks the
-      # indexer failed, or an indexer disabled by hand, stops polling with no
-      # error anywhere, and new SeaDex releases stop reaching the arr.
+      # indexer failed, or an indexer disabled by hand, stops polling. seadex-scout
+      # logs no error for it, and new SeaDex releases stop reaching the arr.
       #
       # The rule fires per scope (nyaa, ab) only for a tracker that WAS polled
       # in the last 7 days and has been silent for 6 hours, so a tracker you keep

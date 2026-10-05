@@ -60,7 +60,7 @@ First seen is the earliest time a finding was logged within the selected time ra
 
 The two share tiles, Library overview and the graph show the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available. An anime whose only SeaDex entries have no file, or are only offered in the feed, has an entry but is never at best or alt.
 
-These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. They then keep the previous summary until it is 26 hours old and are empty after that, until a complete check logs a new one. The alt numbers and the graph stay empty until the first full check after you upgrade to a version that logs them.
+These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. They then keep the previous summary until it is 26 hours old and are empty after that, until a complete check logs a new one.
 
 With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The status then shows `✗` and the dashboard stays mostly empty.
 
@@ -82,7 +82,7 @@ seadex-scout ships no notifier of its own, and its operational state is in its l
 
 Route `SeadexScoutUpstreamUnavailable` and `SeadexScoutLibraryDegraded` to a receiver that sends resolved notifications, with a `repeat_interval` longer than an outage lasts. Each outage then sends one message when it starts and one when it ends. The comments in `alerts/logql.yaml` explain the routing for each rule.
 
-The rules assume the default `log.level: info` and the JSON log format. At `warn`, the report rule and the mixed-group rule never fire, and both stall rules fire all the time on a healthy app. For `log.format: text`, replace each `| json` stage with `| logfmt`.
+The rules assume the default `log.level: info` and the JSON log format. At `warn`, the report rule, the mixed-group rule and the feed rule never fire. Both stall rules then fire all the time on a healthy app, and the dashboard stays mostly empty. For `log.format: text`, replace each `| json` stage with `| logfmt`.
 
 The stall window assumes a `poll_interval` of 1h or less, and the default is 15m. For a longer interval, widen the window to at least three times the interval. The error rule and the two lasting-problem rules use a 1h window, which assumes a `poll_interval` of 20m or less. Above that, widen their windows to at least three times the interval too.
 
