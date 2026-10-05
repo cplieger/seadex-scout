@@ -35,7 +35,9 @@ A trailing `not_on_seadex` section lists the library items recognized as anime, 
 
 Every other row links the Sonarr or Radarr item, the SeaDex entry, and each best release.
 
-Each run writes a timestamped pair into `report.dir`, `/config/reports` by default. `report-<UTC date+time>.md` is grouped by verdict, and `report-<UTC date+time>.json` sits beside it. The run also logs one `report item` line per anime. Runs never overwrite one another, and the app deletes no reports, so remove old pairs yourself. Each file is readable only by its owner, with mode `0600`. Before it reads the library, a report checks that it can write such a file into `report.dir`. If it cannot, the run logs `seadex-scout failed` with the cause and exits with `1`. The usual causes are a read-only or full mount, a folder the container user cannot write, or an inherited ACL that widens the mode.
+Each run writes a timestamped pair into `report.dir`, `/config/reports` by default. `report-<UTC date+time>.md` is grouped by verdict, and `report-<UTC date+time>.json` sits beside it. The run also logs one `report item` line per anime. Runs never overwrite one another, and the app deletes no reports, so remove old pairs yourself. Each file is readable only by its owner, with mode `0600`.
+
+Before it reads the library, a report checks that it can write such a file into `report.dir`. If it cannot, the run logs `seadex-scout failed` with the cause and exits with `1`. The usual causes are a read-only or full mount, a folder the container user cannot write, or an inherited ACL that widens the mode.
 
 The report shows SeaDex's best and alternative releases as they are, without the remux and dual-audio filters. It does follow `animebytes`, `filters.exclude_specials` and the `report` entries of `filters.exclude_tags`.
 
