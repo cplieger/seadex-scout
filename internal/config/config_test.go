@@ -533,6 +533,16 @@ func TestLoadBlanksUnresolvedConnectionRefs(t *testing.T) {
 			},
 		},
 		{
+			name:    "a non-allowlisted reference on a connection field stays literal",
+			content: on + "  url: http://sonarr:8989\n  api_key: ${OTHER_MISSING}\n",
+			check: func(t *testing.T, c *Config) {
+				t.Helper()
+				if c.SonarrAPIKey != "${OTHER_MISSING}" {
+					t.Errorf("SonarrAPIKey = %q, want the literal kept (only an unresolved allowlisted name blanks)", c.SonarrAPIKey)
+				}
+			},
+		},
+		{
 			name:    "a non-connection field keeps the literal",
 			content: on + "  url: http://sonarr:8989\n  api_key: k\n  public_url: ${SONARR_MISSING_PUBLIC}\nindexer:\n  prowlarr_api_key: ${SEADEX_SCOUT_MISSING}\n",
 			check: func(t *testing.T, c *Config) {
@@ -548,7 +558,7 @@ func TestLoadBlanksUnresolvedConnectionRefs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, name := range []string{"SONARR_MISSING", "SONARR_MISSING_URL", "SONARR_MISSING_PUBLIC", "RADARR_URL_MISSING", "RADARR_KEY_MISSING", "SEADEX_SCOUT_MISSING"} {
+			for _, name := range []string{"SONARR_MISSING", "SONARR_MISSING_URL", "SONARR_MISSING_PUBLIC", "RADARR_URL_MISSING", "RADARR_KEY_MISSING", "SEADEX_SCOUT_MISSING", "OTHER_MISSING"} {
 				unsetenv(t, name)
 			}
 			for k, v := range tt.env {

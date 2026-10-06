@@ -306,13 +306,21 @@ func (fc *fileConfig) blankUnresolvedConnections(unresolved []string) (blanked [
 }
 
 // unresolvedRefName returns NAME when v is exactly ${NAME} for a NAME in unresolved.
+// The name returned is unresolved's own element, never a substring of v, because v
+// may be an api_key value and the result is logged.
 func unresolvedRefName(v string, unresolved []string) (string, bool) {
 	name, ok := strings.CutPrefix(v, "${")
 	if !ok {
 		return "", false
 	}
-	name, ok = strings.CutSuffix(name, "}")
-	return name, ok && slices.Contains(unresolved, name)
+	if name, ok = strings.CutSuffix(name, "}"); !ok {
+		return "", false
+	}
+	i := slices.Index(unresolved, name)
+	if i < 0 {
+		return "", false
+	}
+	return unresolved[i], true
 }
 
 // logUnresolvedRefs reports the allowlisted ${VAR} names the environment did not
