@@ -154,11 +154,12 @@ seadex-scout writes JSON logs to standard output and has no metrics endpoint. Ni
 
 ## Documentation
 
-- [Torznab feed setup](docs/torznab-indexer.md) connects the indexer to Prowlarr, Sonarr and Radarr, step by step.
+- [Torznab feed setup](docs/torznab-indexer.md) connects the indexer to Prowlarr, Sonarr and Radarr.
 - [Configuration](docs/configuration.md) lists every setting and shows how to run checks from an outside scheduler.
-- [How seadex-scout works](docs/how-it-works.md) explains matching, the report verdicts, release versions and the indexer's behavior.
-- [Monitoring and alerts](docs/monitoring.md) describes the log lines, health, the Grafana dashboard and the Loki alert rules.
-- [Security](docs/hardening.md) has a hardened compose setup and explains how credentials are handled.
+- [How seadex-scout works](docs/how-it-works.md) explains matching, the report verdicts, release versions and the indexer.
+- [Fixing a wrong or missing match](docs/fixing-a-mapping.md) shows how to correct one.
+- [Monitoring and alerts](docs/monitoring.md) describes the log lines, health, dashboard and alert rules.
+- [Security](docs/hardening.md) has a hardened compose setup and explains credential handling.
 
 ## Credits
 
