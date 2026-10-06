@@ -47,7 +47,7 @@ var verdictDesc = map[Verdict]string{
 	VerdictUnattributed:  "A film or special filed inside Sonarr's season-0 bucket, where nothing attributes one file to one entry, so the app offers this entry in the feed and never compares it. The groups shown are what the bucket holds.",
 	VerdictNoFile:        "No file sits where this entry maps. The mapped season, movie, or specials bucket is empty, or a whole-series comparison found no real season with files. Either the files are missing, or Sonarr files that season elsewhere, such as under TVDB's specials.",
 	VerdictBest:          "You already have SeaDex's best release.",
-	VerdictNotOnSeaDex:   "In your library and recognized as anime (Fribb-mapped), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
+	VerdictNotOnSeaDex:   "In your library and recognized as anime (in the anime ID map), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
 }
 
 // verdictLabel is the plain name the Markdown shows beside a verdict key whose

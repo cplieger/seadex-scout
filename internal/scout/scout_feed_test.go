@@ -23,7 +23,7 @@ import (
 
 // TestCycleWalkFailureWithFeedStillRebuildsFeed pins the feed-vs-health split:
 // with a Torznab feed configured, a failed arr walk still refreshes the feed
-// (it needs only SeaDex + Fribb, so an arr outage must not freeze what the arrs
+// (it needs only SeaDex + animap, so an arr outage must not freeze what the arrs
 // grab) while the cycle itself stays unhealthy - logging the walk-failure
 // ERROR and still closing with exactly one "cycle degraded" completion line
 // (reason walk-failed) so the cycle deadman stays fed through an arr outage.
@@ -137,7 +137,7 @@ func TestCycleUnusableMapSkipsFeedRebuild(t *testing.T) {
 		Logger:   logger,
 		Store:    &fakeStore{},
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
-		// Empty state + unreachable Fribb: the load fails with nothing stale to
+		// Empty state + unreachable mapping: the load fails with nothing stale to
 		// fall back on, so the map is unusable (not a StaleMapError).
 		Mapping: unreachableMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
@@ -271,13 +271,13 @@ func (p *probingFeed) Advance(context.Context, []seadex.Entry, indexer.EntryInfo
 	return nil
 }
 
-// TestCycleFeedInfoClassifiesViaFribbIndex pins the per-show metadata closure
+// TestCycleFeedInfoClassifiesViaMappingIndex pins the per-show metadata closure
 // Cycle hands the feed writer: IsMovie must report true for a MOVIE record,
 // false for a TV record, and false for an unmapped id (the safe Anime
 // default) - a wrong bit silently moves entries between Radarr's Movies
 // (2000) and Sonarr's Anime (5070) RSS categories - and the TV record's
 // mapped TVDB season must ride along for the season marker.
-func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
+func TestCycleFeedInfoClassifiesViaMappingIndex(t *testing.T) {
 	logger := scoutTestLogger()
 	feed := &probingFeed{}
 	// The persisted cache echoed by fakeMapping is exactly these two records,
@@ -310,7 +310,7 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 		}
 	}
 	if got := feed.got[200]; got.Season != 2 || !got.SeasonKnown {
-		t.Errorf("info(200) season = %d (known %v), want a resolved season 2 (the Fribb season must reach the season marker)", got.Season, got.SeasonKnown)
+		t.Errorf("info(200) season = %d (known %v), want a resolved season 2 (the mapped season must reach the season marker)", got.Season, got.SeasonKnown)
 	}
 }
 
@@ -433,7 +433,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 				Logger:   logger,
 				Store:    &fakeStore{},
 				Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-				// Empty state + unreachable Fribb: the load fails with nothing
+				// Empty state + unreachable mapping: the load fails with nothing
 				// stale to fall back on, so the map is unusable.
 				Mapping: unreachableMapLoader(t, scoutTestLogger()),
 				SeaDex:  tc.seadex,
@@ -458,7 +458,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			if kept, ok := recordAttr(recorder, "mapping unusable; skipping comparison, findings re-stated unchanged this cycle", "feed_kept"); !ok || kept != "true" {
 				t.Errorf("unusable-map WARN feed_kept = %q (found=%t), want \"true\"", kept, ok)
 			}
-			// The persisted rejection streak is zero here (an unreachable Fribb is
+			// The persisted rejection streak is zero here (an unreachable mapping is
 			// not a guard rejection), and the attribute names a condition with its
 			// own remedy, so a zero must not be attached: a Loki query for the
 			// guard-rejection incident would otherwise match every network blip.

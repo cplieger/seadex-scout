@@ -47,7 +47,7 @@ func TestLoader_refreshCache_notModifiedLogsEndedRejectionStreak(t *testing.T) {
 // on the refreshed message, mirroring the 304 recovery signal.
 func TestLoader_refreshCache_acceptedRefreshLogsEndedRejectionStreak(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":2,"type":"tv","tvdb_id":200}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":2,"type":"tv","tvdb_id":200}]`))
 	}))
 	defer server.Close()
 	previous := &Cache{
@@ -101,7 +101,7 @@ func TestLoader_refreshCache_noRejectionStreakLogsNoRecoverySignal(t *testing.T)
 
 	t.Run("accepted refresh", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`[{"anilist_id":2,"type":"tv","tvdb_id":200}]`))
+			_, _ = w.Write(animapBody(`[{"anilist_id":2,"type":"tv","tvdb_id":200}]`))
 		}))
 		defer server.Close()
 		logger, logs := capture.New()

@@ -8,7 +8,7 @@ services:
     # or the container restarts in a loop. If you set PUID and PGID in .env, use those numbers.
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
-      - SONARR_URL  # from .env, the address you open Sonarr at, such as http://192.168.1.10:8989
+      - SONARR_URL  # from .env, the address you open Sonarr at, such as http://192.0.2.10:8989
       - SONARR_API_KEY  # from .env, found in Sonarr under Settings, General, API Key
       - RADARR_URL  # optional, set both RADARR_ lines in .env to add Radarr
       - RADARR_API_KEY

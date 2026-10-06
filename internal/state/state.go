@@ -1,5 +1,5 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
-// written atomically: the last library snapshot (for diffing), the cached Fribb
+// written atomically: the last library snapshot (for diffing), the cached animap
 // map plus its HTTP validators, the AniList fallback memo, and the degradation
 // streak counters with the conditions they escalated. It holds NO finding state:
 // internal/notify reports findings as STATE and rebuilds its whole set from each
@@ -46,8 +46,10 @@ const SchemaVersion = 1
 
 // State is the persisted cross-cycle cache.
 type State struct {
-	Memo    match.Memo    `json:"anilist_memo"`
-	Mapping mapping.Cache `json:"mapping"`
+	Memo match.Memo `json:"anilist_memo"`
+	// Never the key "mapping": older files hold another upstream's cache there,
+	// which must be ignored rather than served or revalidated.
+	Mapping mapping.Cache `json:"animap"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
 	// judged that arr's fresh item count a suspicious truncation and carried its prior
 	// items forward instead.

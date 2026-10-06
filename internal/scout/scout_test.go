@@ -241,7 +241,7 @@ func noNetworkClient() *http.Client {
 	return &http.Client{Transport: errTransport{}}
 }
 
-// unreachableMapLoader returns a Fribb loader whose every refresh fails at the
+// unreachableMapLoader returns a mapping loader whose every refresh fails at the
 // transport, with a per-test override path so no real overrides.json can be
 // found: with no cached records in state it is the "map unusable" fixture (a
 // plain load error, not a mapping.StaleMapError).
@@ -250,7 +250,7 @@ func unreachableMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	return mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
-// emptyRecordsMapLoader returns a Fribb loader whose upstream answers an empty
+// emptyRecordsMapLoader returns a mapping loader whose upstream answers an empty
 // record array, so a fresh 200 indexes to nothing and the map is unusable
 // through the accept path rather than the transport.
 func emptyRecordsMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {

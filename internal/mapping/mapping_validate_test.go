@@ -1,7 +1,12 @@
 package mapping
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/cplieger/httpx/v5"
 )
 
 // TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected pins the
@@ -89,5 +94,109 @@ func TestValidateRefreshedRecordsCollapseExactlyAtTheSignificanceFloorRejected(t
 
 	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
 		t.Error("movie-routed collapse 3 -> 1 with the significance floor at 3 returned nil error, want rejection")
+	}
+}
+
+// TestAcceptRefresh_mappingListCollapseRejected pins the guard over the
+// mapping-list facts: a body that keeps every record but loses most of its
+// mapping lists would drop every film's special episode and every season range
+// while each record guard stays green, so it is refused in favour of the stale
+// map; a body keeping half of them is accepted.
+func TestAcceptRefresh_mappingListCollapseRejected(t *testing.T) {
+	const records = 200
+	prev := &Cache{Mappings: map[int]Mapping{}}
+	for id := 1; id <= records; id++ {
+		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, Type: "TV", TvdbID: id})
+		if id <= 10 {
+			prev.Mappings[id] = Mapping{SpecialEpisode: 1}
+		}
+	}
+	body := func(withFacts int) []byte {
+		var b strings.Builder
+		b.WriteByte('[')
+		for id := 1; id <= records; id++ {
+			if id > 1 {
+				b.WriteByte(',')
+			}
+			if id <= withFacts {
+				fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d,"tvdb_season":0,`+
+					`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,1]]}]}`, id, id, id)
+				continue
+			}
+			fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d}`, id, id, id)
+		}
+		b.WriteByte(']')
+		return animapBody(b.String())
+	}
+	l := &Loader{log: discardLogger()}
+	next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(4)})
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
+		t.Fatalf("acceptRefresh(4 of 10 mapping lists kept) error = %v, want the stale map with stale_reason refresh validation failed", err)
+	}
+	if len(next.Mappings) != 10 {
+		t.Errorf("refused refresh kept %d mapping-list facts, want the stale 10", len(next.Mappings))
+	}
+	next, err = l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(5)})
+	if err != nil {
+		t.Fatalf("acceptRefresh(5 of 10 mapping lists kept) error = %v, want acceptance", err)
+	}
+	if len(next.Mappings) != 5 {
+		t.Errorf("accepted refresh carries %d mapping-list facts, want the body's 5", len(next.Mappings))
+	}
+}
+
+// TestAcceptRefresh_specialsOfParentFactsExtinctionRejected pins that the two
+// mapping-list populations are guarded apart: a body that keeps every
+// AniDB-keyed fact but loses every specials-of-parent fact would pass a guard
+// over their sum, and silently drop each such special's TVDB episode.
+func TestAcceptRefresh_specialsOfParentFactsExtinctionRejected(t *testing.T) {
+	const records = 200
+	prev := &Cache{Mappings: map[int]Mapping{}, ParentMappings: map[int]Mapping{}}
+	for id := 1; id <= records; id++ {
+		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, Type: "TV", TvdbID: id})
+		if id <= 10 {
+			prev.Mappings[id] = Mapping{SpecialEpisode: 1}
+		}
+	}
+	prev.Records = append(prev.Records, Record{AniListID: 1000, Type: "OVA", TvdbID: 1})
+	prev.ParentMappings[1000] = Mapping{SpecialEpisode: 2}
+	body := func(withParent bool) []byte {
+		var b strings.Builder
+		b.WriteByte('[')
+		for id := 1; id <= records; id++ {
+			if id > 1 {
+				b.WriteByte(',')
+			}
+			if id <= 10 {
+				fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d,"tvdb_season":0,`+
+					`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,1]]}]}`, id, id, id)
+				continue
+			}
+			fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d}`, id, id, id)
+		}
+		parent := `,{"anilist_id":1000,"type":"OVA","tvdb_id":1,"tvdb_season":0`
+		if withParent {
+			parent += `,"anidb_parent":{"anidb_id":1,"specials":[2]},` +
+				`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,2]]}]`
+		}
+		b.WriteString(parent + `}]`)
+		return animapBody(b.String())
+	}
+	l := &Loader{log: discardLogger()}
+	next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(false)})
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
+		t.Fatalf("acceptRefresh(every specials-of-parent fact lost) error = %v, want the stale map with stale_reason refresh validation failed", err)
+	}
+	if len(next.ParentMappings) != 1 || len(next.Mappings) != 10 {
+		t.Errorf("refused refresh kept %d parent and %d AniDB-keyed facts, want the stale 1 and 10", len(next.ParentMappings), len(next.Mappings))
+	}
+	next, err = l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(true)})
+	if err != nil {
+		t.Fatalf("acceptRefresh(specials-of-parent fact kept) error = %v, want acceptance", err)
+	}
+	if len(next.ParentMappings) != 1 {
+		t.Errorf("accepted refresh carries %d specials-of-parent facts, want the body's 1", len(next.ParentMappings))
 	}
 }

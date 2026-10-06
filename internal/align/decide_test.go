@@ -281,9 +281,9 @@ func TestDecideTriStateEvidence(t *testing.T) {
 }
 
 // TestDecideSeasonLabel pins the shared non-negative season label the
-// consumers stamp on their output (Decision.Season): a positive Fribb TVDB
-// season passes through, and a zero or negative mapping (Fribb uses -1 for
-// absolute-numbered runs) never reaches the season scope at all, so the
+// consumers stamp on their output (Decision.Season): a positive mapped TVDB
+// season passes through, and a zero or negative mapping (a negative value is
+// only ever an override's) never reaches the season scope at all, so the
 // label stays 0 instead of leaking a negative number into the daemon
 // findings and audit rows.
 func TestDecideSeasonLabel(t *testing.T) {

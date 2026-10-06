@@ -66,8 +66,8 @@ func TestAdvanceIsTheTransitionRuleForBothCadences(t *testing.T) {
 // TestCadenceThresholdsAreDistinctAndOrdered pins why there are two constants
 // rather than one reused number: the count is cadence-relative, so the same
 // integer means about 2h on the tick and 8 days on the reconcile. Collapsing
-// them is how the fleet's threshold silently became a week once the passes it
-// counted stopped running hourly.
+// them stretches the threshold to a week once the passes it counts stop running
+// hourly.
 func TestCadenceThresholdsAreDistinctAndOrdered(t *testing.T) {
 	t.Parallel()
 	if TickEscalationThreshold <= ReconcileEscalationThreshold {

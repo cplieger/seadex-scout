@@ -488,7 +488,7 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 }
 
 // parseInterval reads the poll_interval value into a built-in cadence or the external
-// (resident-idle) mode, following the fleet `*_INTERVAL` convention: off/disabled/0 ->
+// (resident-idle) mode, following the shared `*_INTERVAL` convention: off/disabled/0 ->
 // external, empty -> the default, a valid positive duration -> built-in (clamped to
 // [minPollInterval, maxPollInterval]), anything else -> the default with a warning.
 // Every scheduler warning stays field-name-only, since poll_interval can hold an

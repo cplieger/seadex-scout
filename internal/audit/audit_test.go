@@ -86,7 +86,7 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 		t.Error("expected the uncovered catalogued movie in not_on_seadex")
 	}
 	if got["UncoveredUncatalogued"] {
-		t.Error("an uncovered item absent from Fribb must not be listed")
+		t.Error("an uncovered item absent from the mapping must not be listed")
 	}
 	if got["Covered"] {
 		t.Error("a covered item must not be listed as not_on_seadex")
@@ -148,7 +148,7 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 }
 
 // TestAuditNotOnSeaDexHonorsExcludeSpecials pins the exclude_specials symmetry:
-// with the filter on, a specials-only library item (its only Fribb
+// with the filter on, a specials-only library item (its only mapping
 // record is an OVA) must not surface as not_on_seadex — matching the
 // matched-rows arm, which drops specials — while a mixed series (a sibling TV
 // record sharing the TVDB id) stays catalogued and is still listed.
@@ -1014,7 +1014,7 @@ func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
 }
 
 // TestAuditFairyTailOwnSeasonsAreTruthful is what the declined half above wanted
-// and the Anime-Lists mapping-list delivers: with each entry's OWN TVDB seasons
+// and the mapping list delivers: with each entry's OWN TVDB seasons
 // on its Match, the three Fairy Tail entries stay whole-series and comparable
 // (no not_on_seadex row) and each verdict reads its own seasons - S1-S4 best,
 // S5-S7 alt, S8 unlisted - instead of three contaminated copies of one.
@@ -1104,9 +1104,8 @@ func TestAuditPartialWalkKeepsCoverage(t *testing.T) {
 	}
 }
 
-// TestAssessClampsNegativeSeason pins the Season clamp in assess: a Fribb
-// record whose season.tvdb is negative (the -1 convention for an
-// absolute-numbered run) yields Season 0 on the row, so a negative season can
+// TestAssessClampsNegativeSeason pins the Season clamp in assess: a mapping
+// record whose season is negative (an override's value) yields Season 0 on the row, so a negative season can
 // never reach the JSON wire shape (omitempty then drops the zero).
 func TestAssessClampsNegativeSeason(t *testing.T) {
 	a := New(Config{})
@@ -1124,7 +1123,7 @@ func TestAssessClampsNegativeSeason(t *testing.T) {
 	})
 
 	if row.Season != 0 {
-		t.Errorf("Season = %d, want 0 (negative Fribb season.tvdb must clamp to zero)", row.Season)
+		t.Errorf("Season = %d, want 0 (a negative season must clamp to zero)", row.Season)
 	}
 }
 

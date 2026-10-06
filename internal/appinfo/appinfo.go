@@ -1,6 +1,6 @@
 // Package appinfo holds seadex-scout's fixed identity constants shared across
 // its outbound HTTP clients, so the app presents one consistent identity to
-// every upstream (SeaDex, Fribb, AniList, Prowlarr) from a single source rather
+// every upstream (SeaDex, animap, AniList, Prowlarr) from a single source rather
 // than each client redeclaring it.
 package appinfo
 

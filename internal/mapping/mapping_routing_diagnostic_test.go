@@ -17,7 +17,7 @@ const seriesOnlyBody = `[{"anilist_id":1,"type":"tv","tvdb_id":100}]`
 func routingBodyServer(t *testing.T, body string) *httptest.Server {
 	t.Helper()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(body))
+		_, _ = w.Write(animapBody(body))
 	}))
 	t.Cleanup(ts.Close)
 	return ts

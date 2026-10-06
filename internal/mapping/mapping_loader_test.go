@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,7 +34,7 @@ func TestLoader_refreshCache_reusesFreshCache(t *testing.T) {
 func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", "v-new")
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
@@ -51,36 +50,48 @@ func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_preservesMappingListAcrossEveryRefreshPath pins that the
-// Anime-Lists mapping-list fields on Cache (Mappings, its validators and its
-// timestamp) belong to a SECOND upstream and survive every Fribb refresh
-// outcome byte-identical. A Fribb refresh that dropped them would re-download
-// the 3.5 MB list every cycle and lose every film and pack label until it
-// arrived.
-func TestLoader_Load_preservesMappingListAcrossEveryRefreshPath(t *testing.T) {
+// TestLoader_Load_mappingListFactsTravelWithTheirRecords pins that the
+// mapping-list facts share the records' fate on every refresh path: an accepted
+// 200 replaces both with the body's, and every other outcome keeps the cached
+// pair byte-identical. Facts dropped on a stale path would lose every film's
+// special episode and pack label until the next accepted body.
+func TestLoader_Load_mappingListFactsTravelWithTheirRecords(t *testing.T) {
 	ok200 := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("ETag", "v-new")
-		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"tv","tvdb_id":200}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":1,"anidb_id":7,"type":"tv","tvdb_id":100,"tvdb_season":0,` +
+			`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,3]]}]},{"anilist_id":2,"anidb_id":8,"type":"tv","tvdb_id":200,` +
+			`"tvdb_absolute":true,"mapping_list":[{"anidb_season":1,"tvdb_season":2,"start":5}]},{"anilist_id":3,"anidb_parent":{"anidb_id":7,"specials":[5]},` +
+			`"type":"ova","tvdb_id":100,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,5]]}]}]`))
 	}
+	prevMappings := map[int]Mapping{
+		12276: {SpecialEpisode: 8},
+		69:    {Seasons: []SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 23, First: 1156}}},
+	}
+	prevParent := map[int]Mapping{21777: {SpecialEpisode: 8}}
 	tests := []struct {
-		handler http.HandlerFunc
-		name    string
-		refresh time.Duration
-		fresh   bool
+		handler    http.HandlerFunc
+		want       map[int]Mapping
+		wantParent map[int]Mapping
+		name       string
+		refresh    time.Duration
+		fresh      bool
 	}{
-		{name: "accepted_200", handler: ok200},
+		{name: "accepted_200", handler: ok200, want: map[int]Mapping{
+			7: {SpecialEpisode: 3},
+			8: {Seasons: []SeasonRange{{Season: 1, First: 1, Last: 4}, {Season: 2, First: 5}}},
+		}, wantParent: map[int]Mapping{3: {SpecialEpisode: 5}}},
 		{name: "not_modified_304", handler: func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotModified)
-		}},
+		}, want: prevMappings, wantParent: prevParent},
 		{name: "server_error_stale", handler: func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "boom", http.StatusInternalServerError)
-		}},
+		}, want: prevMappings, wantParent: prevParent},
 		{name: "persistent_refusal", handler: func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"not":"an array"}`))
-		}},
+			_, _ = w.Write([]byte(`{"not":"a document"}`))
+		}, want: prevMappings, wantParent: prevParent},
 		{name: "fresh_cache_early_return", handler: func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "must not be fetched", http.StatusTeapot)
-		}, refresh: time.Hour, fresh: true},
+		}, refresh: time.Hour, fresh: true, want: prevMappings, wantParent: prevParent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,32 +102,19 @@ func TestLoader_Load_preservesMappingListAcrossEveryRefreshPath(t *testing.T) {
 				fetchedAt = time.Now()
 			}
 			prev := &Cache{
-				FetchedAt: fetchedAt,
-				ETag:      "v1",
-				Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-				Mappings: map[int]Mapping{
-					12276: {SpecialEpisode: 8},
-					69:    {Seasons: []SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 23, First: 1156}}},
-				},
-				MappingsETag:         `W/"list-v7"`,
-				MappingsLastModified: "Mon, 02 Jan 2006 15:04:05 GMT",
-				MappingsFetchedAt:    time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC),
+				FetchedAt:      fetchedAt,
+				ETag:           "v1",
+				Records:        []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+				Mappings:       maps.Clone(prevMappings),
+				ParentMappings: maps.Clone(prevParent),
 			}
 			l := NewLoader(ts.Client(), ts.URL, WithRefresh(tc.refresh), WithLogger(discardLogger()))
 			next, _, _ := l.Load(t.Context(), prev)
-			if !maps.EqualFunc(next.Mappings, prev.Mappings, func(a, b Mapping) bool {
-				return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons)
-			}) {
-				t.Errorf("Load().Mappings = %+v, want prev's %+v", next.Mappings, prev.Mappings)
+			if !maps.EqualFunc(next.Mappings, tc.want, sameMapping) {
+				t.Errorf("Load().Mappings = %+v, want %+v", next.Mappings, tc.want)
 			}
-			if next.MappingsETag != prev.MappingsETag {
-				t.Errorf("Load().MappingsETag = %q, want %q", next.MappingsETag, prev.MappingsETag)
-			}
-			if next.MappingsLastModified != prev.MappingsLastModified {
-				t.Errorf("Load().MappingsLastModified = %q, want %q", next.MappingsLastModified, prev.MappingsLastModified)
-			}
-			if !next.MappingsFetchedAt.Equal(prev.MappingsFetchedAt) {
-				t.Errorf("Load().MappingsFetchedAt = %v, want %v", next.MappingsFetchedAt, prev.MappingsFetchedAt)
+			if !maps.EqualFunc(next.ParentMappings, tc.wantParent, sameMapping) {
+				t.Errorf("Load().ParentMappings = %+v, want %+v", next.ParentMappings, tc.wantParent)
 			}
 		})
 	}
@@ -174,7 +172,7 @@ func TestLoader_refreshCache_parseFailKeepsStale(t *testing.T) {
 // persisted Cache and the built Index.
 func TestLoader_Load_nilCacheFetches(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
@@ -206,7 +204,7 @@ func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *test
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	prev := &Cache{
@@ -237,7 +235,7 @@ func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *test
 	}
 }
 
-func TestLoader_Load_overrideWinsOverFribb(t *testing.T) {
+func TestLoader_Load_overrideWinsOverUpstream(t *testing.T) {
 	dir := t.TempDir()
 	overrides := filepath.Join(dir, "overrides.json")
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
@@ -266,7 +264,7 @@ func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 		t.Fatalf("Load with missing overrides error: %v", err)
 	}
 	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" {
-		t.Errorf("missing overrides changed the Fribb record: %+v ok=%v", rec, ok)
+		t.Errorf("missing overrides changed the mapping record: %+v ok=%v", rec, ok)
 	}
 
 	bad := filepath.Join(dir, "bad.json")
@@ -352,7 +350,7 @@ func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
 			_, _ = w.Write([]byte(`{ not-an-array`))
 		}},
 		{name: "zero records", handler: func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(`[]`))
+			_, _ = w.Write(animapBody(`[]`))
 		}},
 		{name: "fetch fail", handler: func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boom", http.StatusNotFound)
@@ -405,10 +403,10 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_noOverridesPathServesFribbUnmodified pins applyOverrides'
+// TestLoader_Load_noOverridesPathServesUpstreamUnmodified pins applyOverrides'
 // empty-path early return: a loader constructed with no overrides file
-// configured serves the Fribb map untouched (no read attempt, no overlay).
-func TestLoader_Load_noOverridesPathServesFribbUnmodified(t *testing.T) {
+// configured serves the mapping untouched (no read attempt, no overlay).
+func TestLoader_Load_noOverridesPathServesUpstreamUnmodified(t *testing.T) {
 	l := NewLoader(nil, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
 	_, idx, err := l.Load(t.Context(), freshCache())
 	if err != nil {
@@ -429,7 +427,7 @@ func TestLoader_Load_noOverridesPathServesFribbUnmodified(t *testing.T) {
 // until it drifts back into range.
 func TestLoader_refreshCache_futureFetchedAtForcesFetch(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	prev := &Cache{
@@ -488,8 +486,8 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 // refresh window disables the fresh-reuse fast path entirely, so even a
 // just-fetched cache revalidates against upstream every cycle (an unchanged
 // upstream is a cheap 304) instead of being reused until the timestamp ages.
-// Guards against the fleet's opposite convention leaking in (scheduler treats
-// 0 as "off"; here 0 must mean "always revalidate", never "never refresh").
+// Guards against the scheduler library's opposite convention leaking in (it
+// treats 0 as "off"; here 0 must mean "always revalidate", never "never refresh").
 func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
 	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -598,7 +596,7 @@ func routingFloorPrevCache() *Cache {
 // upstream body.
 func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	prev := &Cache{
@@ -631,7 +629,7 @@ func TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable(t *testing.T)
 		t.Fatal("cacheUsable = true, want false: the zero-ID record's TVDB id must not count for the dropped record")
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	prev := &Cache{
@@ -669,7 +667,7 @@ func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("ETag", tc.validator)
-				_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+				_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 			}))
 			defer ts.Close()
 
@@ -700,7 +698,7 @@ func TestLoader_refreshCache_sanitizesPersistedValidators(t *testing.T) {
 		if got := r.Header.Get("If-Modified-Since"); got != "" {
 			t.Errorf("If-Modified-Since = %q, want empty (no Last-Modified was cached)", got)
 		}
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 
@@ -773,7 +771,7 @@ func TestLoader_refreshCache_304KeepsValidSkipsPoisonedValidator(t *testing.T) {
 // to the fetch and accept the upstream body.
 func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	prev := &Cache{
@@ -792,7 +790,7 @@ func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
 
 // TestLoader_refreshCache_asksAboutTheRefusedBodyWithEitherValidator pins which
 // validators a cycle following a persistent refusal puts on the wire: the
-// REFUSED body's, so the upstream can answer 304 and the ~5.9 MB list is not
+// REFUSED body's, so the upstream can answer 304 and the ~2.3 MB document is not
 // re-downloaded for as long as the refusal lasts. Either validator alone is
 // enough to ask with, and the upstream chooses which it honours - a cycle that
 // asked with neither would download the whole refused list again every time,

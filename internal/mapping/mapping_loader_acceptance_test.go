@@ -17,7 +17,7 @@ import (
 
 func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write(animapBody(`[]`))
 	}))
 	defer ts.Close()
 
@@ -44,7 +44,7 @@ func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
 // must be treated like the zero-record branch and retain the usable stale map.
 func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"tv"},{"anilist_id":2,"type":"movie"}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":1,"type":"tv"},{"anilist_id":2,"type":"movie"}]`))
 	}))
 	defer ts.Close()
 
@@ -80,7 +80,7 @@ func TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale(t *testing.T) {
 	}
 	b.WriteByte(']')
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
+		_, _ = w.Write(animapBody(b.String()))
 	}))
 	defer ts.Close()
 
@@ -114,7 +114,7 @@ func TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor(t *testing.T) {
 	bodyBuilder.WriteByte(']')
 	body := bodyBuilder.String()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(body))
+		_, _ = w.Write(animapBody(body))
 	}))
 	defer ts.Close()
 
@@ -158,7 +158,7 @@ func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
 			}
 			b.WriteByte(']')
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(b.String()))
+				_, _ = w.Write(animapBody(b.String()))
 			}))
 			defer ts.Close()
 
@@ -192,7 +192,7 @@ func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
 // TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale.
 func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
 	}))
 	defer ts.Close()
 
@@ -231,7 +231,7 @@ func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 // length one.
 func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[` +
+		_, _ = w.Write(animapBody(`[` +
 			`{"anilist_id":9,"type":"tv","tvdb_id":900},` +
 			`{"anilist_id":9,"type":"tv","tvdb_id":901},` +
 			`{"anilist_id":9,"type":"tv","tvdb_id":902},` +
@@ -277,23 +277,23 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 	}{
 		{
 			name: "movie types renamed to FILM",
-			body: `[{"anilist_id":1,"type":"film","themoviedb_id":{"movie":[42]}},` +
-				`{"anilist_id":2,"type":"film","themoviedb_id":{"movie":[43]}},` +
+			body: `[{"anilist_id":1,"type":"film","tmdb_movie_ids":[42]},` +
+				`{"anilist_id":2,"type":"film","tmdb_movie_ids":[43]},` +
 				`{"anilist_id":3,"type":"tv","tvdb_id":300},` +
 				`{"anilist_id":4,"type":"tv","tvdb_id":400}]`,
 		},
 		{
 			name: "every record stamped MOVIE",
-			body: `[{"anilist_id":1,"type":"movie","themoviedb_id":{"movie":[42]}},` +
-				`{"anilist_id":2,"type":"movie","themoviedb_id":{"movie":[43]}},` +
-				`{"anilist_id":3,"type":"movie","themoviedb_id":{"movie":[44]}},` +
-				`{"anilist_id":4,"type":"movie","themoviedb_id":{"movie":[45]}}]`,
+			body: `[{"anilist_id":1,"type":"movie","tmdb_movie_ids":[42]},` +
+				`{"anilist_id":2,"type":"movie","tmdb_movie_ids":[43]},` +
+				`{"anilist_id":3,"type":"movie","tmdb_movie_ids":[44]},` +
+				`{"anilist_id":4,"type":"movie","tmdb_movie_ids":[45]}]`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(tc.body))
+				_, _ = w.Write(animapBody(tc.body))
 			}))
 			defer ts.Close()
 
@@ -319,11 +319,11 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 // rejection streak), not rejected on growth alone.
 func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"movie","themoviedb_id":{"movie":[42]}},` +
-			`{"anilist_id":2,"type":"movie","themoviedb_id":{"movie":[43]}},` +
+		_, _ = w.Write(animapBody(`[{"anilist_id":1,"type":"movie","tmdb_movie_ids":[42]},` +
+			`{"anilist_id":2,"type":"movie","tmdb_movie_ids":[43]},` +
 			`{"anilist_id":3,"type":"tv","tvdb_id":300},` +
 			`{"anilist_id":4,"type":"tv","tvdb_id":400},` +
-			`{"anilist_id":5,"type":"movie","themoviedb_id":{"movie":[44]}},` +
+			`{"anilist_id":5,"type":"movie","tmdb_movie_ids":[44]},` +
 			`{"anilist_id":6,"type":"tv","tvdb_id":600}]`))
 	}))
 	defer ts.Close()
@@ -349,7 +349,7 @@ func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 // records lack an anilist_id and only one is fully mapped must be rejected as
 // wholesale key loss — not reinterpreted as a healthy 1/1 map after the
 // parser drops the keyless rows. The floor validates the survivor count
-// against the top-level source-element count (parseFribbForRefresh), which
+// against the top-level source-element count (parseAnimap), which
 // destructive filtering cannot shrink.
 func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
 	var b strings.Builder
@@ -359,7 +359,7 @@ func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
 	}
 	b.WriteByte(']')
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
+		_, _ = w.Write(animapBody(b.String()))
 	}))
 	defer ts.Close()
 
@@ -389,7 +389,7 @@ func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.
 	}
 	b.WriteByte(']')
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
+		_, _ = w.Write(animapBody(b.String()))
 	}))
 	defer ts.Close()
 
@@ -418,7 +418,7 @@ func TestLoader_refreshCache_negativeOnlyCacheNotUsable(t *testing.T) {
 		t.Fatal("cacheUsable = true, want false: negative AniList IDs can never resolve a SeaDex lookup")
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	prev := &Cache{
@@ -452,7 +452,7 @@ func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
 	}
 	b.WriteByte(']')
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
+		_, _ = w.Write(animapBody(b.String()))
 	}))
 	defer ts.Close()
 
@@ -475,7 +475,7 @@ func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
 // survives is never observable.
 func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[` +
+		_, _ = w.Write(animapBody(`[` +
 			`{"anilist_id":9,"type":"tv","tvdb_id":900},` +
 			`{"anilist_id":1,"type":"tv","tvdb_id":100},` +
 			`{"anilist_id":9,"type":"tv","tvdb_id":901},` +
@@ -534,7 +534,7 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 	}
 	b.WriteByte(']')
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
+		_, _ = w.Write(animapBody(b.String()))
 	}))
 	defer ts.Close()
 
@@ -598,7 +598,7 @@ func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
 	}
 	b.WriteByte(']')
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(b.String()))
+		_, _ = w.Write(animapBody(b.String()))
 	}))
 	defer ts.Close()
 

@@ -13,7 +13,7 @@ import (
 // TestLoader_Load_logsSkippedOverrideCount pins the operator-visible skipped
 // count (non-positive-ID rows discarded during the parse stream): a zero-ID
 // and a NEGATIVE-ID override beside one valid entry must log skipped=2 - a
-// negative anilist_id is a key the tolerant Fribb decoders can never produce
+// negative anilist_id is a key the animap decoder never indexes
 // and would otherwise be indexed unreachable yet leak into the reverse
 // arr-ID catalogue.
 func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
@@ -201,7 +201,7 @@ const unroutableOverrideMessage = "mapping: overrides carry no arr identifier an
 
 // TestLoader_Load_logsUnroutableOverrideCount pins the count on applyOverrides'
 // un-mapped-entry warning. The overlay is wholesale, so an override carrying no
-// identifier its routed arr consumes REPLACES a mapped Fribb record with one
+// identifier its routed arr consumes REPLACES a mapped upstream record with one
 // that resolves to nothing - left applied by design, which makes this warning
 // the only thing standing between a mistyped id key and an entry that silently
 // stops matching. Both shapes count: an entry with no identifiers at all, and a

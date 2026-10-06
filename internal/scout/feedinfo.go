@@ -12,17 +12,16 @@ import (
 
 // feedEntryInfo builds the per-show metadata closure the indexer's feed writer
 // synthesizes RSS titles from. For each AniList id it resolves, in order: the
-// arr's OWN title from the PERSISTED library snapshot, keyed through the Fribb
+// arr's OWN title from the PERSISTED library snapshot, keyed through the mapping
 // record's routed ids (the arr parses its own title back, and a blank one counts
 // as ABSENT); then the AniList canonical title from the persisted memo, expiry
-// ignored; then nothing, leaving the writer its file-name derivation. The Fribb
+// ignored; then nothing, leaving the writer its file-name derivation. The mapping's
 // movie typing rides along for category routing and the season is RESOLVED here.
 // Only persisted state is consulted, so the rebuild stays arr-independent.
 func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) indexer.EntryInfoFunc {
-	// match.NewLibIndex applies the matcher's arr-consistent ID routing, so a
-	// movie whose Fribb record carries a TV themoviedb_id can never take a
-	// same-named Sonarr series' title. Failed placeholder items still carry their
-	// identity fields, so a partial prior walk keeps supplying titles.
+	// match.NewLibIndex applies the matcher's arr-consistent ID routing, so a film
+	// carrying its parent series' IMDb id cannot take that Sonarr series' title.
+	// Failed placeholder items keep their ids, so a partial walk still supplies titles.
 	find := match.NewLibIndex(lib).FindByID
 	return func(alID int) indexer.EntryInfo {
 		var info indexer.EntryInfo
@@ -59,7 +58,7 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 	}
 }
 
-// applyMappingList projects the Anime-Lists mapping-list's two facts onto the
+// applyMappingList projects the mapping list's two facts onto the
 // feed metadata. The entry's TVDB season ranges ride along whatever the target
 // (a pack's season token is a per-torrent decision the indexer makes over
 // them). The film's special episode is stamped only for the OFFERED class - a
@@ -104,7 +103,7 @@ func arrTarget(it *library.Item) indexer.ArrTarget {
 }
 
 // applyMemoTyping fills the media typing - and the season that typing implies -
-// from the persisted AniList memo. It runs only when Fribb supplied no ARR
+// from the persisted AniList memo. It runs only when the mapping supplied no ARR
 // ROUTING EVIDENCE at all: no record, or a record BOTH untyped and id-less. An
 // untyped record that still routes a positive TVDB id is itself evidence of a
 // series, so the caller's gate keeps it out of here - a memoized format OUTLIVES
@@ -124,13 +123,13 @@ func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
 		// it as a movie must not survive: no consumer may see IsMovie with one.
 		info.Season, info.SeasonKnown = 0, false
 	case !info.SeasonKnown:
-		// A positive Fribb season already resolved by the caller wins: the memo's
+		// A positive mapped season already resolved by the caller wins: the memo's
 		// format can only ever add the specials bucket.
 		info.Season, info.SeasonKnown = resolvedSeason(&typed)
 	}
 }
 
-// resolvedSeason resolves the season a Fribb record pins, once, for the feed: its
+// resolvedSeason resolves the season a mapping record pins, once, for the feed: its
 // positive TVDB season, or the specials bucket for a MAPPED season zero. An
 // absolute-numbered run, a title-only match and an untyped entry pin no season,
 // and so does a MOVIE, for the reason applyMemoTyping states. The rule itself is

@@ -41,14 +41,14 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			r.IMDbIDs = slices.Clone(r.IMDbIDs)
 			frozen[i] = r
 		}
-		rawIdx := buildIndex(frozen, nil)
+		rawIdx := buildIndex(frozen, nil, nil)
 
 		out := deduplicateRecords(records)
 
-		if got, want := buildIndex(out, nil).Len(), len(out); got != want {
+		if got, want := buildIndex(out, nil, nil).Len(), len(out); got != want {
 			t.Fatalf("deduplicated set indexes to %d entries, want bijective %d", got, want)
 		}
-		outIdx := buildIndex(out, nil)
+		outIdx := buildIndex(out, nil, nil)
 		if rawIdx.Len() != outIdx.Len() {
 			t.Fatalf("index size diverged: raw %d, deduplicated %d", rawIdx.Len(), outIdx.Len())
 		}
