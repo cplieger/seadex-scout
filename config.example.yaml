@@ -1,48 +1,48 @@
 # seadex-scout config.
 
 # ----------------------------------------------------------------------------
-# Connections & schedule
+# Connections and schedule
 # ----------------------------------------------------------------------------
 # An arr is on when its url is set, and then needs its api_key too. At least
 # one arr must be on. The four ${VAR} references below are read from the
-# container's environment: set SONARR_URL and SONARR_API_KEY (and the RADARR_*
-# pair for Radarr) there, or replace the references with the values. A
+# container's environment: set SONARR_URL and SONARR_API_KEY there, and the
+# RADARR_* pair for Radarr, or replace the references with the values. A
 # reference to a variable that is not set reads as empty, so Radarr stays off
 # until RADARR_URL is set. To force an arr off whatever its url says, add
 # `enabled: false` to its block.
 #
-# api_key shape: the arrs generate a 32-character hex key (under Settings, then
-# General, then API Key). A key of any other shape is accepted, because the arrs
+# api_key shape: the arrs generate a 32-character hex key, shown under Settings,
+# then General, then API Key. A key of any other shape is accepted, because the arrs
 # honour whatever key you set. Startup logs a warning that names the field.
 # A value containing a '$' is refused. It means a ${VAR} reference was never
 # expanded, and the literal placeholder would fail every call with a 401.
 # The one exception is an api_key that is exactly one unset reference, like
 # the two below. It reads as empty and fails as a missing key.
 sonarr:
-  url: "${SONARR_URL}" # where seadex-scout reaches Sonarr, for example http://sonarr:8989 (internal is fine)
+  url: "${SONARR_URL}" # where seadex-scout reaches Sonarr, for example http://sonarr:8989. An internal address is fine
   api_key: "${SONARR_API_KEY}" # 32 hex chars, from API Key under Sonarr's Settings, then General
-  public_url: "" # browser base for the report's deep-links; empty = use url
+  public_url: "" # the base address a browser uses for the report's links. Empty means use url
 radarr:
-  url: "${RADARR_URL}" # for example http://radarr:7878; unset = Radarr off
+  url: "${RADARR_URL}" # for example http://radarr:7878. Unset means Radarr is off
   api_key: "${RADARR_API_KEY}"
   public_url: ""
 
 mode: "daemon" # daemon (scheduled) | report (one-shot, exit)
-# One cadence for BOTH the alert engine and the Torznab feed, so a notification
+# One cadence for both the alert engine and the Torznab feed, so a notification
 # and what the arrs grab from the feed come from the same refresh.
 #
-# This is the FRESHNESS knob, not the cost knob. Most iterations are a cheap
-# check of what changed upstream recently (one small request, and usually one
-# tiny one when nothing changed); every 24h worth of them is a full pass that
-# re-reads the whole catalogue, re-walks Sonarr/Radarr and rebuilds the search
-# index. So upstream load tracks how often SeaDex actually changes, not how
-# often you poll. 15m matches Sonarr's own default RSS interval — polling faster
-# cannot reach the arrs any sooner. Minimum 15m.
+# This setting controls freshness, not cost. Most iterations are a cheap check
+# of what changed upstream recently: one small request, and usually one tiny
+# one when nothing changed. Once every 24h, an iteration is a full pass that
+# re-reads the whole catalogue, re-walks Sonarr and Radarr and rebuilds the
+# search index. So upstream load tracks how often SeaDex actually changes, not
+# how often you poll. 15m matches Sonarr's own default RSS interval, and polling
+# faster cannot reach the arrs any sooner. Minimum 15m.
 #
-# Runs on start (the first iteration is always a full pass);
-# off/disabled/0 = no internal timer, trigger each pass with the `poll`
-# subcommand. In that mode every `poll` is a separate process, so schedule it
-# around 24h apart rather than every 15m — each one is a full pass.
+# The first iteration runs on start and is always a full pass. Set off,
+# disabled or 0 for no internal timer, then trigger each pass with the `poll`
+# subcommand. In that mode every `poll` runs as a separate process and so is a
+# full pass. Schedule it around 24h apart rather than every 15m.
 poll_interval: "15m"
 
 log:
@@ -50,22 +50,22 @@ log:
   format: "json" # json | text
 
 # ----------------------------------------------------------------------------
-# Report / alert engine — shapes the findings + report, NOT the indexer
+# Report and alert engine: shapes the findings and the report, not the indexer
 # ----------------------------------------------------------------------------
-animebytes: false # true if you have an AnimeBytes account (adds AB releases + links)
+animebytes: false # true if you have an AnimeBytes account. Adds AnimeBytes releases and links
 
 filters:
   exclude_remux: false # true drops remuxes (default keeps them)
   require_dual_audio: false # true drops non-dual-audio releases
-  exclude_specials: false # true drops OVA/ONA/specials
+  exclude_specials: false # true drops OVAs, ONAs and specials
   # Per-tag, per-surface exclusions keyed on SeaDex's own release tags.
-  # EMPTY (the default) MEANS NOTHING IS FILTERED: a release SeaDex tagged
+  # Empty, the default, means nothing is filtered. A release SeaDex tagged
   # "Broken" is still alerted on as a better release available, still counts as a
   # best in the report, and is still served in the Torznab feed. The report
   # annotates it "(broken)" either way. List the tags you want gone, and on which
-  # surfaces — surfaces are exactly findings (the alerts), report, feed (Torznab
-  # search + RSS); an unknown surface name or a tag with no surfaces is a startup
-  # error. Tag matching is exact and case-insensitive.
+  # surfaces. The surfaces are findings for the alerts, report, and feed for
+  # Torznab search and RSS. An unknown surface name or a tag with no surfaces is
+  # a startup error. Tag matching is exact and case-insensitive.
   exclude_tags: {}
   # exclude_tags:
   #   broken: [findings, report, feed]
@@ -73,29 +73,31 @@ filters:
 
   # AniList IDs whose findings are never alerted on. Findings are reported
   # continuously for as long as they are true, so your alerting stack keeps
-  # reminding you until you act — which is what makes a lost notification
-  # recoverable. Put a show here when you have decided NOT to upgrade it and
-  # want the reminders to stop. It suppresses the alert only: the show still
-  # appears in report mode, and the RSS feed is untouched (this app never
-  # withholds a release from Sonarr/Radarr). [] = alert on everything.
+  # reminding you until you act, which is what makes a lost notification
+  # recoverable. Put a show here when you have decided not to upgrade it and
+  # want the reminders to stop. It suppresses the alert only. The show still
+  # appears in report mode, and the RSS feed is untouched, because this app
+  # never withholds a release from Sonarr or Radarr. [] means alert on everything.
   ignore: []
   # ignore: [154587, 21519]
 
 arr_tags:
-  include: [] # scan only items with one of these tags; [] = all
-  exclude: [] # skip items with any of these tags (wins over include)
+  include: [] # scan only items with one of these tags. [] means all
+  exclude: [] # skip items with any of these tags. Wins over include
 
 report:
-  dir: "/config/reports" # report-<UTC date+time>.md + .json written here
+  dir: "/config/reports" # report-<UTC date and time>.md and .json are written here
 
 # ----------------------------------------------------------------------------
-# Indexer engine — optional Torznab feed; the arrs filter it (profiles + CFs)
+# Indexer engine: an optional Torznab feed that the arrs filter with their
+# quality profiles and custom formats
 # ----------------------------------------------------------------------------
-# Served by the daemon whenever a Torznab URL is set (both empty = off, no port).
-# Its curation set + RSS feed rebuild together with the alert loop on poll_interval.
+# Served by the daemon whenever a Torznab URL is set. With both empty it is off
+# and opens no port. Its curation set and RSS feed rebuild together with the
+# alert loop on poll_interval.
 indexer:
-  feed_api_key: "" # the arrs send this, the feed checks it; no spaces and no '$'; the first-boot starter fills this with a generated key (${SEADEX_SCOUT_FEED_KEY} ref also works)
-  nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
-  ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
-  prowlarr_api_key: "" # Prowlarr API key; secret, never logged; "" is valid with Prowlarr auth disabled for local addresses, otherwise 32 hex chars (same shape rule as the arr keys) (${SEADEX_SCOUT_PROWLARR_KEY} ref works)
-  ab_passkey: "" # AnimeBytes passkey for AB RSS download links ("" = AB RSS off); 32/48/56 chars; ${SEADEX_SCOUT_AB_PASSKEY} ref works
+  feed_api_key: "" # the arrs send this and the feed checks it. No spaces and no '$'. The first-boot starter fills this with a generated key. A ${SEADEX_SCOUT_FEED_KEY} reference also works
+  nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, for example http://prowlarr:9696/1/api. "" means off
+  ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL. "" means off
+  prowlarr_api_key: "" # Prowlarr API key, a secret that is never logged. "" is valid with Prowlarr auth disabled for local addresses, otherwise 32 hex chars, the same shape rule as the arr keys. A ${SEADEX_SCOUT_PROWLARR_KEY} reference works
+  ab_passkey: "" # AnimeBytes passkey for AnimeBytes RSS download links. "" turns AnimeBytes RSS off. 32, 48 or 56 chars. A ${SEADEX_SCOUT_AB_PASSKEY} reference works

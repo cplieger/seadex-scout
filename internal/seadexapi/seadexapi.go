@@ -433,9 +433,7 @@ func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) 
 	}
 	var list pbList
 	if err := json.Unmarshal(body, &list); err != nil {
-		// Bounded for the reason maxLoggedDecodeBytes states.
-		return 0, fmt.Errorf("seadex: decode window count: %s",
-			runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes))
+		return 0, boundDecodeError("seadex: decode window count", err)
 	}
 	if list.TotalItems < 0 {
 		return 0, fmt.Errorf("seadex: window count reported a negative total (%d); "+
@@ -785,11 +783,28 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		if errors.Is(err, jsoncap.ErrElementBudget) && elemLimit < maxPageElements {
 			return pbList{}, 0, 0, errCumulativeElements
 		}
-		// Bounded HERE for both decode paths, for the reason maxLoggedDecodeBytes states.
-		return pbList{}, 0, 0, fmt.Errorf("decode page: %s",
-			runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes))
+		return pbList{}, 0, 0, boundDecodeError("decode page", err)
 	}
 	return list, len(body), elems, nil
+}
+
+// boundedDecodeError renders a decode failure's untrusted text bounded for a log
+// line, while errors.Is and errors.As still reach the cause.
+type boundedDecodeError struct {
+	cause error
+	msg   string
+}
+
+func (e *boundedDecodeError) Error() string { return e.msg }
+func (e *boundedDecodeError) Unwrap() error { return e.cause }
+
+// boundDecodeError prefixes err's text bounded by maxLoggedDecodeBytes and keeps
+// err reachable through Unwrap.
+func boundDecodeError(prefix string, err error) error {
+	return &boundedDecodeError{
+		cause: err,
+		msg:   prefix + ": " + runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes),
+	}
 }
 
 // decodePage and the decode* functions below are a schema-aware bounded decoder for one

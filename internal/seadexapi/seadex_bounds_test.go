@@ -9,6 +9,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/cplieger/jsoncap/v2"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -60,8 +61,8 @@ func distinctFillerItems(seq, count, torrents int) string {
 }
 
 // fetchHostilePage serves one fixed page body and asserts FetchEntries rejects
-// it with a nil slice and an error carrying wantErr.
-func fetchHostilePage(t *testing.T, page, wantErr string) {
+// it with a nil slice and an error that names label and reaches want.
+func fetchHostilePage(t *testing.T, page, label string, want error) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, page)
@@ -70,13 +71,16 @@ func fetchHostilePage(t *testing.T, page, wantErr string) {
 
 	entries, err := NewClient(server.Client(), server.URL).FetchEntries(t.Context(), Options{})
 	if err == nil {
-		t.Fatalf("FetchEntries returned nil error, want %q error", wantErr)
+		t.Fatalf("FetchEntries returned nil error, want errors.Is %v", want)
 	}
 	if entries != nil {
 		t.Errorf("entries = %d items, want nil on cap error", len(entries))
 	}
-	if !strings.Contains(err.Error(), wantErr) {
-		t.Errorf("error = %q, want substring %q", err.Error(), wantErr)
+	if !errors.Is(err, want) {
+		t.Errorf("FetchEntries() error = %v, want errors.Is %v", err, want)
+	}
+	if !strings.Contains(err.Error(), label) {
+		t.Errorf("FetchEntries() error = %q, want it to name %q", err.Error(), label)
 	}
 }
 
@@ -90,38 +94,43 @@ func fetchHostilePage(t *testing.T, page, wantErr string) {
 // alone cannot stop.
 func TestFetchEntriesDecodeCardinalityCapsError(t *testing.T) {
 	tests := []struct {
-		name    string
-		page    string
-		wantErr string
+		want  error
+		name  string
+		page  string
+		label string
 	}{
 		{
 			name: "many tiny items exceed perPage",
 			page: `{"totalPages":1,"items":[` +
 				repeatJSON(`{"alID":1,"expand":{"trs":[]}}`, perPage+1) + `]}`,
-			wantErr: fmt.Sprintf("page items: jsoncap: array cardinality cap exceeded: %d", perPage),
+			label: "page items",
+			want:  jsoncap.ErrArrayCap,
 		},
 		{
 			name: "oversized torrents array in one item",
 			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[` +
 				repeatJSON(`{}`, maxTorrentsPerEntry+1) + `]}}]}`,
-			wantErr: fmt.Sprintf("torrents per entry: jsoncap: array cardinality cap exceeded: %d", maxTorrentsPerEntry),
+			label: "torrents per entry",
+			want:  jsoncap.ErrArrayCap,
 		},
 		{
 			name: "oversized nested files array in one torrent",
 			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[{"files":[` +
 				repeatJSON(`{}`, maxFilesPerTorrent+1) + `]}]}}]}`,
-			wantErr: fmt.Sprintf("files per torrent: jsoncap: array cardinality cap exceeded: %d", maxFilesPerTorrent),
+			label: "files per torrent",
+			want:  jsoncap.ErrArrayCap,
 		},
 		{
 			name: "oversized tags array in one torrent",
 			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[{"tags":[` +
 				repeatJSON(`""`, maxTagsPerTorrent+1) + `]}]}}]}`,
-			wantErr: fmt.Sprintf("tags per torrent: jsoncap: array cardinality cap exceeded: %d", maxTagsPerTorrent),
+			label: "tags per torrent",
+			want:  jsoncap.ErrArrayCap,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fetchHostilePage(t, tc.page, tc.wantErr)
+			fetchHostilePage(t, tc.page, tc.label, tc.want)
 		})
 	}
 }
@@ -143,9 +152,8 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("decodePage returned nil error, want element-budget error")
 	}
-	want := fmt.Sprintf("jsoncap: element budget exceeded: %d", maxPageElements)
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("error = %q, want substring %q", err.Error(), want)
+	if !errors.Is(err, jsoncap.ErrElementBudget) {
+		t.Errorf("error = %v, want errors.Is %v", err, jsoncap.ErrElementBudget)
 	}
 }
 
@@ -327,9 +335,8 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "fetch page 1") {
 		t.Errorf("error = %q, want it to name the failed page 1", err.Error())
 	}
-	want := fmt.Sprintf("jsoncap: element budget exceeded: %d", maxPageElements)
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("error = %q, want substring %q", err.Error(), want)
+	if !errors.Is(err, jsoncap.ErrElementBudget) {
+		t.Errorf("error = %v, want errors.Is %v", err, jsoncap.ErrElementBudget)
 	}
 }
 
