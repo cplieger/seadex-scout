@@ -1,6 +1,8 @@
 package seadexapi
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -428,6 +430,21 @@ func TestCountWindowZeroTotalIsNotAnError(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("CountWindow = %d, want 0", n)
+	}
+}
+
+// TestCountWindowUndecodableBodyKeepsTheCause: the bounded message must not cut
+// the chain, or a caller can no longer tell a malformed body from a refused count.
+func TestCountWindowUndecodableBodyKeepsTheCause(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":`)
+	}))
+	defer server.Close()
+
+	_, err := NewClient(server.Client(), server.URL).CountWindow(t.Context(), windowSince)
+	if _, ok := errors.AsType[*json.SyntaxError](err); !ok {
+		t.Errorf("CountWindow(truncated body) error = %v, want a *json.SyntaxError in its chain", err)
 	}
 }
 
