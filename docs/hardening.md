@@ -16,7 +16,7 @@ The indexer saves its feed between checks as `/config/feed.json`. Each write sto
 
 ## Hardened compose setup
 
-The image is distroless, with no shell, and runs as a non-root user. For a hardened setup, add these lines to the service in `compose.yaml`:
+The image is distroless, with no shell, and runs as a non-root user. Add these lines to the service in `compose.yaml`. [Hardening a compose file](https://github.com/cplieger/docs/blob/main/docs/hardening.md) explains each setting.
 
 ```yaml
     read_only: true

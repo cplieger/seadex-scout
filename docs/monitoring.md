@@ -32,7 +32,7 @@ The container also turns unhealthy when no pass finishes within three poll inter
 
 ## Dashboard
 
-Every release attaches `grafana-dashboard.json` to its GitHub Release, with a `.sha256` file and a signature. The same file is published as `ghcr.io/cplieger/seadex-scout/dashboard:<version>`. Import it into Grafana with **Dashboards**, then **New**, then **Import**. It reads Loki only.
+Every release attaches `grafana-dashboard.json` to its GitHub Release, with a `.sha256` file and a signature. The same file is published as `ghcr.io/cplieger/seadex-scout/dashboard:<version>`. [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows how to load it. It reads Loki only.
 
 The dashboard has three variables at the top. **Loki** picks your Loki data source. **Container** is the value of the `container` label your log collector puts on seadex-scout's lines, `seadex-scout` by default.
 
@@ -66,7 +66,7 @@ With `poll_interval: off`, each check runs in a `docker exec` child whose lines 
 
 ## Alerting
 
-seadex-scout ships no notifier of its own, and its operational state is in its logs. Ship the container's logs to Loki and evaluate the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/). Grafana Alloy's Docker log discovery ships them with no extra configuration. Firing alerts go through your Alertmanager like any Prometheus alert. The rules cover:
+seadex-scout reports its findings and its own state through its log. Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. The rules cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
