@@ -9,7 +9,7 @@ seadex-scout keeps your Sonarr and Radarr anime library in sync with the best re
 
 ## What it does
 
-seadex-scout helps you keep your anime library on SeaDex's recommended releases, in four ways:
+seadex-scout helps you keep your anime library on SeaDex's recommended releases:
 
 - Tells you when SeaDex lists a better release than yours, or a newer v2 or REPACK of it.
 - Shows those upgrades, and how much of your library matches SeaDex, in Grafana.
@@ -20,9 +20,9 @@ You can leave out remuxes, require dual audio, skip specials and add AnimeBytes 
 
 ## Who it is for
 
-seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, season by season, and reports to its log, a dashboard and a report file. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
+seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, season by season. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
 
-You need a Sonarr instance, a Radarr instance or both, with anime in them. The dashboard needs Grafana with Loki collecting the container's log. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
+You need a Sonarr instance, a Radarr instance or both, with anime in them. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 
 seadex-scout is free software under the GPL-3.0-or-later license.
 <!-- hub-overview END -->
@@ -62,6 +62,7 @@ services:
 
    `SONARR_URL` is the address you open Sonarr at from another device on your network, not `localhost`. The API key is on Sonarr's Settings, General page. Add `RADARR_URL` and `RADARR_API_KEY` the same way to include Radarr.
 3. Run `docker compose up -d`.
+4. To get a message for each new upgrade, set up the [smallest monitoring stack](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) and load seadex-scout's alert rules into it, as that page shows. This step is optional.
 
 Run `docker logs seadex-scout`. You should see `sonarr reachable`. Findings then appear as `better release available` lines. If you see `sonarr ping failed at startup`, the address is wrong or Sonarr is down.
 
@@ -69,9 +70,9 @@ On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**.
 
 ## Reading the results
 
-The easiest place to read the results is the Grafana dashboard each release ships. It lists every upgrade newest first, with links to the release and to the show in Sonarr or Radarr, and shows how much of your library is at SeaDex's best or alt. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
+The Grafana dashboard each release ships lists every upgrade newest first, with links to the release and the show in Sonarr or Radarr. It shows how much of your library is at SeaDex's best or alt, and whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
 
-To get a message instead, load the shipped Loki alert rules. Your Alertmanager then sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. [Monitoring and alerts](docs/monitoring.md#alerting) shows how. To stop the messages for one show, add its `al_id` to `filters.ignore`.
+With the rules from step 4 loaded, your Alertmanager sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. To stop the messages for one show, add its `al_id` to `filters.ignore`.
 
 For a full report, run this while the container is up:
 
@@ -149,7 +150,7 @@ The healthcheck runs `seadex-scout health`, which reads a marker file each compl
 
 ## Monitoring
 
-seadex-scout writes JSON logs to standard output and has no metrics endpoint. Nine Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard ships with every release as `grafana-dashboard.json`. It lists the upgrades to act on, newest first, and shows whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md) explains both and shows how to load them.
+seadex-scout writes JSON logs to standard output and has no metrics endpoint. Nine Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard ships with every release as `grafana-dashboard.json`. [Monitoring and alerts](docs/monitoring.md) explains both.
 
 ## Documentation
 
