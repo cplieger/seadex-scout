@@ -443,13 +443,13 @@ func TestSynthesizeTitle(t *testing.T) {
 		meta EntryInfo
 	}{
 		{
-			name: "season pack labels the Fribb season with flags",
+			name: "season pack labels the mapped season with flags",
 			t:    seadex.Torrent{Files: packFiles, ReleaseGroup: "PMR", DualAudio: true},
 			meta: EntryInfo{Title: "Frieren: Beyond Journey's End", Season: 1, SeasonKnown: true},
 			want: "Frieren: Beyond Journey's End S01 1080p Dual Audio [PMR]",
 		},
 		{
-			name: "pack without a Fribb season labels the file-derived season",
+			name: "pack without a mapped season labels the file-derived season",
 			t:    seadex.Torrent{Files: packFiles, ReleaseGroup: "PMR"},
 			meta: EntryInfo{Title: "Frieren"},
 			want: "Frieren S01 1080p [PMR]",
@@ -809,7 +809,7 @@ func TestSingleEpisodeMarkerAbsoluteArmUsesLastToken(t *testing.T) {
 
 // TestDerivedTitleRelabelsCourLocalSeason pins the fallback half of the
 // season correction (episodeMarker's relabel already covers the assembled
-// path): a title-less entry Fribb maps to season 3 whose files use
+// path): a title-less entry the mapping places in season 3 whose files use
 // cour-local S01 numbering must serve S03 titles - single episodes and the
 // pack collapse alike - while an unmapped entry keeps the file's own season.
 func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {

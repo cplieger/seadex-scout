@@ -121,7 +121,7 @@ type Decision struct {
 // (internal/compare) and the audit report to Row/Verdict/Qualifier
 // (internal/audit). siblingSeasons and seasons both bound a whole-series
 // comparison to the entry's own seasons, from two sources: seasons (the entry's
-// TVDB season ranges from the Anime-Lists mapping-list) wins when present, else
+// TVDB season ranges from the mapping list) wins when present, else
 // the seasons sibling records map are dropped. Every other scope ignores both.
 func Decide(item *library.Item, rec *mapping.Record, listing *Listing, siblingSeasons []int, seasons []mapping.SeasonRange) Decision {
 	scoped := scope(item, rec)
@@ -149,7 +149,7 @@ func Decide(item *library.Item, rec *mapping.Record, listing *Listing, siblingSe
 		}
 		d.Standing = StandingUnverified
 	case scoped.Kind == ScopeWholeSeries:
-		// An absolute-numbered run has no per-season Fribb mapping, so its single
+		// An absolute-numbered run has no per-season mapping, so its single
 		// whole-series recommendation is judged against every real season on disk,
 		// conservatively: best only when every filed season provenly carries a best group.
 		s := summarizeWholeSeries(item, listing, siblingSeasons, seasons)

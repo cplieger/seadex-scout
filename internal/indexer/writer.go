@@ -460,7 +460,7 @@ type FeedWriterConfig struct {
 
 // FeedWriter builds the feed snapshot from a SeaDex fetch, persists it
 // atomically, and hands it to the in-process feed server when one runs here. It
-// holds no SeaDex/Fribb clients of its own - the compare cycle owns the shared
+// holds no SeaDex/animap clients of its own - the compare cycle owns the shared
 // fetch and hands the results to Rebuild - and no Prowlarr clients either: the
 // title harvest is its own component (harvester, see harvest.go), held here as a
 // single collaborator because Rebuild is where it runs.

@@ -40,8 +40,8 @@ func TestRecord_IsSpecial(t *testing.T) {
 	}
 }
 
-// TestRecord_HasMappedSeason pins the season predicate to a POSITIVE Fribb
-// season. Season 0 is what an unmapped record and a Fribb-typed special both
+// TestRecord_HasMappedSeason pins the season predicate to a POSITIVE
+// season. Season 0 is what an unmapped record and a mapping-typed special both
 // carry, so admitting it would relabel a pack's season half to S00 on the
 // strength of a season the upstream never stated, and would count every
 // seasonless record toward the season-scoped population.
@@ -76,7 +76,7 @@ func TestRecord_SeasonPresence(t *testing.T) {
 
 // TestNewIndex_canonicalizesSeasonKind pins the kind's normalization at the
 // INDEX boundary, which is what lets the scope dispatch read the field directly:
-// buildIndex canonicalizes every record on both the Fribb and the persisted-cache
+// buildIndex canonicalizes every record on both the animap and the persisted-cache
 // path, so an unrecognized string can never reach a consumer as a fourth state,
 // while a record's real kind round-trips untouched.
 func TestNewIndex_canonicalizesSeasonKind(t *testing.T) {
@@ -157,7 +157,7 @@ func TestParseOverrides_seasonKind(t *testing.T) {
 }
 
 // TestParseOverrides_anidbID pins the override door for the mapping-list join
-// key: an operator names WHICH Anime-Lists node an entry is (the facts stay in
+// key: an operator names WHICH AniDB entry an entry is (the facts stay in
 // the list), the key survives canonicalize, a negative value clamps to absent,
 // and the key is recognized rather than counted unknown.
 func TestParseOverrides_anidbID(t *testing.T) {
@@ -259,7 +259,7 @@ func TestIndex_nilSafe(t *testing.T) {
 	}
 }
 
-// TestIndex_MappingFor pins the one reader of the Anime-Lists join: a record with
+// TestIndex_MappingFor pins the AniDB join: a record with
 // no AniDB id never joins (0 is absent, not a key), an id the list lacks is
 // false, a known id returns the stored value, and the served map is the one
 // handed to the index rather than anything derived from Record.
@@ -296,9 +296,24 @@ func TestIndex_MappingFor(t *testing.T) {
 	}
 }
 
+// TestIndex_MappingForJoinsAParentRecordOnItsAniListID pins the second join: a
+// record with no AniDB id reads the facts kept under its AniList id, and a
+// record with an AniDB id never does, whatever its AniList id.
+func TestIndex_MappingForJoinsAParentRecordOnItsAniListID(t *testing.T) {
+	parent := Mapping{SpecialEpisode: 8}
+	idx := buildIndex([]Record{{AniListID: 21777, Type: "SPECIAL"}}, nil, map[int]Mapping{21777: parent})
+	if got, ok := idx.MappingFor(&Record{AniListID: 21777}); !ok || !sameMapping(got, parent) {
+		t.Errorf("MappingFor(no AniDB id, AniList 21777) = %+v ok=%v, want %+v", got, ok, parent)
+	}
+	if got, ok := idx.MappingFor(&Record{AniListID: 21777, AniDBID: 5}); ok {
+		t.Errorf("MappingFor(AniDB 5, AniList 21777) = %+v ok=true, want the AniDB join only", got)
+	}
+}
+
 // TestLoader_Load_overrideAniDBIDJoinsTheSameList pins the override rule: an
-// override that names an anidb_id joins the SAME persisted list the Fribb
-// records join, so the operator supplies the key and never the facts.
+// override that names an anidb_id joins the facts animap publishes for that id,
+// an AniDB-keyed record's included, so the operator supplies the key and never
+// the facts.
 func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
 	dir := t.TempDir()
 	overrides := filepath.Join(dir, "overrides.json")
@@ -306,16 +321,12 @@ func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
 		t.Fatalf("write overrides: %v", err)
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100},` +
+			`{"anidb_id":12276,"tvdb_id":100,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]}]`))
 	}))
 	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 42, Type: "TV", TvdbID: 100}},
-		Mappings:  map[int]Mapping{12276: {SpecialEpisode: 8}},
-	}
 	l := NewLoader(ts.Client(), ts.URL, WithOverridesPath(overrides), WithLogger(discardLogger()))
-	_, idx, err := l.Load(t.Context(), prev)
+	_, idx, err := l.Load(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -325,7 +336,46 @@ func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
 	}
 	m, ok := idx.MappingFor(&rec)
 	if !ok || m.SpecialEpisode != 8 {
-		t.Errorf("MappingFor(override) = %+v ok=%v, want the persisted list's episode 8", m, ok)
+		t.Errorf("MappingFor(override) = %+v ok=%v, want the published episode 8", m, ok)
+	}
+}
+
+// TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts pins that the
+// facts a specials-of-parent record carries under its AniList id go with the
+// record an override replaces: the override reaches facts only through an
+// anidb_id it names, exactly as for every other record.
+func TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts(t *testing.T) {
+	body := animapBody(`[{"anilist_id":21777,"anidb_parent":{"anidb_id":11500,"specials":[1]},"type":"SPECIAL",` +
+		`"tvdb_id":303073,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]},` +
+		`{"anilist_id":2,"type":"tv","tvdb_id":200}]`)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	defer ts.Close()
+
+	cache, idx, err := NewLoader(ts.Client(), ts.URL, WithLogger(discardLogger())).Load(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	rec, _ := idx.Lookup(21777)
+	if m, ok := idx.MappingFor(&rec); !ok || m.SpecialEpisode != 8 {
+		t.Fatalf("MappingFor(21777) = %+v ok=%v, want the record's own episode 8", m, ok)
+	}
+
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":21777,"type":"special","tvdb_id":303073,"season_tvdb":0,"season_kind":"present"}]`), 0o600); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	fresh := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
+	cache.FetchedAt = time.Now()
+	_, idx, err = fresh.Load(t.Context(), &cache)
+	if err != nil {
+		t.Fatalf("Load(with override) error: %v", err)
+	}
+	rec, _ = idx.Lookup(21777)
+	if m, ok := idx.MappingFor(&rec); ok {
+		t.Errorf("MappingFor(overridden 21777) = %+v ok=true, want no facts: the override names no anidb_id", m)
+	}
+	if len(cache.ParentMappings) != 1 {
+		t.Errorf("the override deleted %d persisted parent facts, want the cache left intact", 1-len(cache.ParentMappings))
 	}
 }
 
@@ -347,14 +397,14 @@ func TestParseOverrides(t *testing.T) {
 	if len(set.records) != 1 || set.records[0].Type != "MOVIE" {
 		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", set.records)
 	}
-	// IMDb ids must be normalized like Fribb's (trimmed, blanks dropped) so
+	// IMDb ids must be normalized like animap's (trimmed, blanks dropped) so
 	// HasArrIdentifier, findMovie, and the report catalogue agree on the
 	// exact lookup key.
 	if got := set.records[0].IMDbIDs; !slices.Equal(got, []string{"tt2222222"}) {
 		t.Errorf("IMDbIDs = %v, want [tt2222222] (trimmed, blank dropped)", got)
 	}
 	// TMDB movie ids likewise: non-positive entries are dropped to match the
-	// canonical form flexInt+intSlice guarantee on the Fribb path, so an
+	// canonical form the animap decoder guarantees, so an
 	// override cannot introduce a phantom zero/negative lookup key.
 	if got := set.records[0].TmdbMovies; !slices.Equal(got, []int{42}) {
 		t.Errorf("TmdbMovies = %v, want [42] (non-positive entries dropped)", got)
@@ -374,7 +424,7 @@ func TestParseOverrides(t *testing.T) {
 }
 
 // TestParseOverridesReportsUnknownKeys pins the unknown-key detection: an
-// operator writing the upstream Fribb field names (imdb_id, themoviedb_id,
+// operator writing upstream-style field names (imdb_id, themoviedb_id,
 // season) instead of the override names gets them counted while the records
 // still parse.
 func TestParseOverridesReportsUnknownKeys(t *testing.T) {
@@ -663,55 +713,55 @@ func TestBuildIndexCanonicalizesRecords(t *testing.T) {
 	}
 }
 
-// overIdentifierBudgetFribbBody builds the smallest valid Fribb array that
-// exceeds the aggregate identifier budget: every record retains both capped
-// identifier lists (maxFribbIdentifiers each), so one record past
-// maxFribbIdentifiersTotal/(2*maxFribbIdentifiers) trips the budget while the
-// element count (16385 records) stays well under maxFribbRecords (65536) - the
-// per-record caps and the record cap must not be what refuses this body.
-func overIdentifierBudgetFribbBody() []byte {
-	perRecord := 2 * maxFribbIdentifiers
+// overIdentifierBudgetBody builds the smallest valid document that exceeds the
+// aggregate retained budget: every record retains both capped identifier lists
+// (maxRecordIdentifiers each), so one record past
+// maxRetainedTotal/(2*maxRecordIdentifiers) trips the budget while the element
+// count (16385 records) stays well under maxRecords (65536) - the per-record
+// caps and the record cap must not be what refuses this body.
+func overIdentifierBudgetBody() []byte {
+	perRecord := 2 * maxRecordIdentifiers
 	var b strings.Builder
 	b.WriteByte('[')
-	for i := range maxFribbIdentifiersTotal/perRecord + 1 {
+	for i := range maxRetainedTotal/perRecord + 1 {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"MOVIE","imdb_id":[`, i+1)
-		for j := range maxFribbIdentifiers {
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"MOVIE","imdb_ids":[`, i+1)
+		for j := range maxRecordIdentifiers {
 			if j > 0 {
 				b.WriteByte(',')
 			}
 			fmt.Fprintf(&b, `"tt%d"`, j+1)
 		}
-		b.WriteString(`],"themoviedb_id":{"movie":[`)
-		for j := range maxFribbIdentifiers {
+		b.WriteString(`],"tmdb_movie_ids":[`)
+		for j := range maxRecordIdentifiers {
 			if j > 0 {
 				b.WriteByte(',')
 			}
 			fmt.Fprintf(&b, `%d`, j+1)
 		}
-		b.WriteString(`]}}`)
+		b.WriteString(`]}`)
 	}
 	b.WriteByte(']')
-	return []byte(b.String())
+	return animapBody(b.String())
 }
 
 // TestAcceptRefresh_identifierBudgetFailsClosed pins the fail-closed contract of
 // the aggregate identifier budget across the whole decode-to-acceptance path,
-// which the counter-level fribbDecodeCounts.add test cannot reach: a body that
+// which the counter-level decodeCounts.add test cannot reach: a body that
 // trips the budget is refused WHOLE (the truncated prefix is never published)
 // with errIdentifierBudgetExceeded, and acceptRefresh routes that sentinel
 // through rejectRefresh - a first boot publishes no index, a usable previous
 // cache is returned stale rather than replaced, and the persisted rejection
 // streak advances instead of staying frozen as a transient parse failure would.
 func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
-	body := overIdentifierBudgetFribbBody()
+	body := overIdentifierBudgetBody()
 
 	t.Run("parse refuses the whole body", func(t *testing.T) {
-		parsed, err := parseFribbForRefresh(body, discardLogger())
+		parsed, err := parseAnimap(body, discardLogger())
 		if !errors.Is(err, errIdentifierBudgetExceeded) {
-			t.Fatalf("parseFribbForRefresh error = %v, want errIdentifierBudgetExceeded", err)
+			t.Fatalf("parseAnimap error = %v, want errIdentifierBudgetExceeded", err)
 		}
 		if len(parsed.records) != 0 {
 			t.Errorf("budget breach retained %d records, want the whole body refused", len(parsed.records))
@@ -760,15 +810,15 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 // TestAcceptRefresh_staleReasonClassVocabulary pins stale_reason as the
 // fixed-cardinality degradation CLASS the operator queries in Loki (the
 // discriminator StaleMapError deliberately keeps live counts out of, so the
-// attribute stays equality-queryable). Five of the classes acceptRefresh can emit
+// attribute stays equality-queryable). Six of the classes acceptRefresh can emit
 // have no assertion anywhere, so a swapped or merged reason string would silently
 // file a never-self-heals refusal (record cap, identifier budget, validation
-// floor, moved schema) under the transient vocabulary, and the escalation runbook
+// floor, moved schema, schema version) under the transient vocabulary, and the escalation runbook
 // keys on exactly that distinction.
 func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
 	var capBody strings.Builder
 	capBody.WriteByte('[')
-	for i := 0; i <= maxFribbRecords; i++ {
+	for i := 0; i <= maxRecords; i++ {
 		if i > 0 {
 			capBody.WriteByte(',')
 		}
@@ -781,11 +831,12 @@ func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
 		body []byte
 		want string
 	}{
-		{name: "record cap", body: []byte(capBody.String()), want: "refresh exceeded record cap"},
-		{name: "identifier budget", body: overIdentifierBudgetFribbBody(), want: "refresh exceeded identifier budget"},
-		{name: "validation floor", body: []byte(`[{"anilist_id":1,"type":"tv"}]`), want: "refresh validation failed"},
-		{name: "non-array document", body: []byte(`{"data":[]}`), want: "refresh not a JSON array"},
-		{name: "malformed body", body: []byte(`[{"anilist_id":1,`), want: "parse failed"},
+		{name: "record cap", body: animapBody(capBody.String()), want: "refresh exceeded record cap"},
+		{name: "identifier budget", body: overIdentifierBudgetBody(), want: "refresh exceeded identifier budget"},
+		{name: "validation floor", body: animapBody(`[{"anilist_id":1,"type":"tv"}]`), want: "refresh validation failed"},
+		{name: "not an animap document", body: []byte(`{"data":[]}`), want: "refresh not an animap document"},
+		{name: "unsupported schema version", body: []byte(`{"version":2,"records":[]}`), want: "refresh unsupported schema version"},
+		{name: "malformed body", body: animapBody(`[{"anilist_id":1,`), want: "parse failed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -807,7 +858,7 @@ func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
 // before the download size cap becomes a hard refusal. It is a Loki-queryable
 // log contract (the class is the message, the facts ride as structured
 // fields), so the test pins it verbatim.
-const approachingSizeCapMessage = "mapping: Fribb body approaching the download size cap; " +
+const approachingSizeCapMessage = "mapping: animap body approaching the download size cap; " +
 	"a body past it refuses every refresh and freezes the map stale"
 
 // TestAcceptRefresh_approachingDownloadSizeCapWarns pins the operator's only
@@ -822,8 +873,8 @@ func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
 	// The threshold is hardcoded rather than recomputed from the shared fraction:
 	// a fixture derived from the expression under test moves with it, and this
 	// test's whole subject is which byte count the warning starts at.
-	// 13421768 is maxMapBytes/10*8 (16 MiB), truncated down.
-	const warnThresholdBytes = 13_421_768
+	// 10066328 is maxMapBytes/10*8 (12 MiB), truncated down.
+	const warnThresholdBytes = 10_066_328
 	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
 
 	logger, rec := capture.New()
@@ -855,14 +906,14 @@ func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
 	}
 }
 
-// censusBody is a four-record Fribb body whose populations are all distinct, so
+// censusBody is a four-record records array whose populations are all distinct, so
 // a count attributed to the wrong population is visible: three records carry a
 // type, one carries a positive TVDB season, one is a special, three resolve in
 // their routed arr (one movie, two series), and the last record carries neither
 // a type nor an identifier.
 const censusBody = `[{"anilist_id":10,"type":"tv","tvdb_id":200},` +
-	`{"anilist_id":11,"type":"movie","themoviedb_id":{"movie":[5]}},` +
-	`{"anilist_id":12,"type":"ova","tvdb_id":300,"season":{"tvdb":2}},` +
+	`{"anilist_id":11,"type":"movie","tmdb_movie_ids":[5]},` +
+	`{"anilist_id":12,"anidb_id":30,"type":"ova","tvdb_id":300,"tvdb_season":2,"mapping_list":[{"anidb_season":1,"tvdb_season":2,"start":1}]},` +
 	`{"anilist_id":13}]`
 
 // TestAcceptRefresh_logsTheCandidateCensus pins the population census the
@@ -874,7 +925,7 @@ func TestAcceptRefresh_logsTheCandidateCensus(t *testing.T) {
 	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
 	logger, rec := capture.New()
 	at := &Loader{log: logger}
-	if _, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: []byte(censusBody)}); err != nil {
+	if _, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: animapBody(censusBody)}); err != nil {
 		t.Fatalf("acceptRefresh(census body) = %v, want the refresh accepted", err)
 	}
 	if n := rec.CountExact("mapping: refreshed"); n != 1 {
@@ -888,6 +939,7 @@ func TestAcceptRefresh_logsTheCandidateCensus(t *testing.T) {
 		"routed_identifiers":    "3",
 		"movie_routed":          "1",
 		"series_routed":         "2",
+		"mapping_list_records":  "1",
 	} {
 		got, ok := rec.AttrValueExact("mapping: refreshed", key)
 		if !ok {
@@ -917,7 +969,7 @@ func TestAcceptRefresh_revalidatableReportsAPersistedValidator(t *testing.T) {
 			prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
 			logger, rec := capture.New()
 			at := &Loader{log: logger}
-			res := httpx.ConditionalResult{Body: []byte(censusBody), Validators: tc.validators}
+			res := httpx.ConditionalResult{Body: animapBody(censusBody), Validators: tc.validators}
 			if _, err := at.acceptRefresh(prev, res); err != nil {
 				t.Fatalf("acceptRefresh(%+v) = %v, want the refresh accepted", tc.validators, err)
 			}
@@ -950,7 +1002,7 @@ func fourRecordCache() *Cache {
 // TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators pins the
 // suppression the refusal memory buys: a body the acceptance pipeline refuses
 // persistently is remembered by its validators, so the next cycle asks about
-// that body with a conditional GET instead of re-downloading ~5.9 MB for as
+// that body with a conditional GET instead of re-downloading ~2.3 MB for as
 // long as the refusal lasts. Both validators are remembered, since either one
 // alone is enough for the upstream to answer 304.
 func TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators(t *testing.T) {
@@ -958,7 +1010,7 @@ func TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators(t *testing
 	prev := fourRecordCache()
 	at := &Loader{log: discardLogger()}
 	res := httpx.ConditionalResult{
-		Body:       []byte(shrinkingBody),
+		Body:       animapBody(shrinkingBody),
 		Validators: httpx.Validators{ETag: `"v9"`, LastModified: lastModified},
 	}
 	next, err := at.acceptRefresh(prev, res)
@@ -986,7 +1038,7 @@ func TestAcceptRefresh_transientRefusalDoesNotRememberValidators(t *testing.T) {
 	prev := fourRecordCache()
 	at := &Loader{log: discardLogger()}
 	res := httpx.ConditionalResult{
-		Body:       []byte(`[{"anilist_id":1,`), // truncated mid-record
+		Body:       animapBody(`[{"anilist_id":1,`), // truncated mid-record
 		Validators: httpx.Validators{ETag: `"v9"`, LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"},
 	}
 	next, err := at.acceptRefresh(prev, res)

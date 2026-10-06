@@ -32,12 +32,12 @@ type ScopeKind int
 
 const (
 	// ScopeWholeSeries is a whole-series comparison: a Sonarr item with no
-	// positive Fribb TVDB season and not a special (an absolute-numbered run
+	// positive mapped TVDB season and not a special (an absolute-numbered run
 	// like One Piece, or a title-only match).
 	ScopeWholeSeries ScopeKind = iota
 	// ScopeMovie is a Radarr movie compared against its own groups.
 	ScopeMovie
-	// ScopeSeason is a series scoped to a positive Fribb TVDB season (exact).
+	// ScopeSeason is a series scoped to a positive mapped TVDB season (exact).
 	ScopeSeason
 	// ScopeOffered is a unit the app OFFERS in the feed and never compares: a
 	// film or special whose upstream season is a mapped zero, so it lands in
@@ -61,7 +61,7 @@ type scopeResult struct {
 	Approx    bool
 }
 
-// RecordSeason resolves, from a Fribb record ALONE, which season the record pins
+// RecordSeason resolves, from a mapping record ALONE, which season the record pins
 // and which scope kind pins it: a mapped zero is offered, an absent season is a
 // whole-series comparison, a positive season keeps its season.
 //
@@ -174,7 +174,7 @@ func ClaimsCoverage(item *library.Item, rec *mapping.Record) bool {
 }
 
 // ItemKind resolves the comparison scope kind of a library item that has no
-// SeaDex-associated Fribb record (an item enumerated by the audit's reverse
+// SeaDex-associated mapping record (an item enumerated by the audit's reverse
 // catalogue, not matched to a SeaDex entry): a Radarr movie scopes to the
 // movie, a Sonarr series has no per-season mapping and reads as the
 // whole-series comparison.

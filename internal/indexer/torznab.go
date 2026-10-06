@@ -46,7 +46,7 @@ type item struct {
 	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
 	// SonarrTitle and SonarrGUID are the film twin's two facts, set on a film
 	// filed under a Sonarr series whose holders agree on the season-0 episode the
-	// Anime-Lists mapping-list names: the "<Series> S00Exx <flags>" title Sonarr's
+	// mapping list names: the "<Series> S00Exx <flags>" title Sonarr's
 	// parser can match, and the original GUID with a fragment. The render expands
 	// a stored item carrying them into a second wire item (sonarrTwin); nothing is
 	// journaled twice. Additive and omitempty, re-derived every reconcile, so an

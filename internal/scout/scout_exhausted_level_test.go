@@ -13,7 +13,7 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// exhaustingMapLoader returns a Fribb loader whose upstream answers 503 to every
+// exhaustingMapLoader returns a mapping loader whose upstream answers 503 to every
 // attempt, so the refresh runs the retry budget to exhaustion (as opposed to
 // unreachableMapLoader's transport refusal, which is terminal on the first
 // attempt and never reaches httpx's exhausted verdict).
@@ -39,7 +39,7 @@ func staleMappingState() state.State {
 	}
 }
 
-// TestMappingExhaustionWarnsOnceWithAppContext pins the other half of the Fribb
+// TestMappingExhaustionWarnsOnceWithAppContext pins the other half of the mapping
 // door's terminal-level demotion: the generic httpx verdict is gone from WARN, and
 // the contextual caller record that replaces it is still there. Both log sites are
 // covered because the demotion is on the shared request option and so affects the
@@ -56,7 +56,7 @@ func TestMappingExhaustionWarnsOnceWithAppContext(t *testing.T) {
 				t.Helper()
 				s := New(&Deps{Logger: logger, Mapping: loader})
 				if _, _, err := s.loadMapping(t.Context(), st); err == nil {
-					t.Fatal("loadMapping against a permanently-503 Fribb upstream = nil error, want a degraded error")
+					t.Fatal("loadMapping against a permanently-503 mapping upstream = nil error, want a degraded error")
 				}
 			},
 			wantMsg: "mapping degraded",

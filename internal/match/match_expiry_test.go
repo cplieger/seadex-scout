@@ -591,7 +591,7 @@ func TestLookupServesExpiredMemoDuringOutage(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 5, Title: "Clannad", TvdbID: 700, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil) // no Fribb record: the entry needs the title fallback
+	idx := mapping.NewIndex(nil) // no mapping record: the entry needs the title fallback
 	expired := memoTestClock.Add(-time.Hour)
 
 	t.Run("expired positive is served", func(t *testing.T) {

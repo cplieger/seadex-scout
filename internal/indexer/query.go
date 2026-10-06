@@ -293,7 +293,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 
 	if stats.feed {
 		// The category filter applies to the SYNTHESIZED feed only: those items carry
-		// the app's own Fribb-typed vocabulary, so the client's cat list is meaningful
+		// the app's own mapping-typed vocabulary, so the client's cat list is meaningful
 		// against them. Proxied results carry the TRACKER's categories and cat was
 		// already forwarded upstream, so re-filtering would empty every Movies search.
 		cats := parseCats(q.Get("cat"))

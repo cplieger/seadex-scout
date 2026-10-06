@@ -7,7 +7,7 @@ import (
 )
 
 // FuzzParseOverrides exercises the operator-overrides parse boundary against
-// arbitrary file bytes. Seeds cover the accepted array form, upstream-Fribb
+// arbitrary file bytes. Seeds cover the accepted array form, upstream-style
 // key spellings, case-variant canonical keys, the rejected null/object/scalar
 // top levels, and typed-decode failures. Invariants hold for any input: an
 // error yields a zero result (never a partial one); a success returns

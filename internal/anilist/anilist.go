@@ -1,5 +1,5 @@
 // Package anilist is a minimal AniList GraphQL client used only as a fallback
-// when the Fribb map plus operator overrides miss an AniList ID. It fetches an
+// when the mapping plus operator overrides miss an AniList ID. It fetches an
 // entry's titles, format, and year so the match package can attempt a
 // conservative title-plus-year match against the library.
 //

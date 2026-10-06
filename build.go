@@ -27,7 +27,7 @@ import (
 // Outbound HTTP timeouts, sized to each upstream's payload.
 const (
 	seadexTimeout  = 90 * time.Second  // large paged responses
-	mappingTimeout = 180 * time.Second // multi-MB Fribb file
+	mappingTimeout = 180 * time.Second // multi-MB animap file
 	anilistTimeout = 30 * time.Second  // small GraphQL replies
 	// prowlarrTimeout is a transport BACKSTOP on the shared Prowlarr client,
 	// not the per-attempt budget: internal/indexer derives each Torznab
@@ -57,7 +57,7 @@ type builtReporter struct {
 }
 
 // scoutCore is the wiring BOTH entry points need: the persisted store, the arr
-// walk, the Fribb mapping loader, the SeaDex client and the matcher, plus the
+// walk, the mapping loader, the SeaDex client and the matcher, plus the
 // cleanup releasing the HTTP and arr clients it opened. Each role builder adds
 // only its own components on top, so the report never constructs the notifier,
 // the comparer, or the feed writer and its Prowlarr client.
@@ -86,6 +86,7 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 
 	seadexHTTP := httpx.NewClient(seadexTimeout)
 	mappingHTTP := httpx.NewClient(mappingTimeout)
+	mappingHTTP.CheckRedirect = mapping.RedirectPolicy
 	anilistHTTP := httpx.NewClient(anilistTimeout)
 	pingArrs(ctx, sonarr, radarr)
 
@@ -111,8 +112,7 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 		}),
 		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL,
 			mapping.WithOverridesPath(config.DefaultMappingOverrides),
-			mapping.WithRefresh(mapping.DefaultRefresh), mapping.WithLogger(log),
-			mapping.WithMappingList(mapping.NewListLoader(mappingHTTP, mapping.DefaultListURL, log))),
+			mapping.WithRefresh(mapping.DefaultRefresh), mapping.WithLogger(log)),
 		seadex: seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL,
 			seadexapi.WithPageDelay(seadexapi.DefaultPageDelay), seadexapi.WithLogger(log)),
 		matcher: match.New(anilistClient, log),

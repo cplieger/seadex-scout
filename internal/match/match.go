@@ -1,5 +1,5 @@
 // Package match links SeaDex entries to library items. It resolves an entry's
-// AniList ID to arr IDs through the Fribb mapping (overrides already applied),
+// AniList ID to arr IDs through the animap mapping (overrides already applied),
 // and on a miss falls back to an AniList title lookup plus a conservative
 // normalized-title-plus-year match against the library.
 package match
@@ -25,7 +25,7 @@ const arrUnknown = "unknown"
 type Source string
 
 const (
-	// SourceID means the AniList ID resolved to an arr ID via the Fribb map.
+	// SourceID means the AniList ID resolved to an arr ID via the mapping.
 	SourceID Source = "id"
 	// SourceTitle means the AniList title fallback matched a library item.
 	SourceTitle Source = "title"
@@ -36,13 +36,13 @@ const (
 // Match is the result of linking one SeaDex entry.
 type Match struct {
 	Item *library.Item
-	// SiblingSeasons are the positive TVDB seasons OTHER Fribb records sharing
+	// SiblingSeasons are the positive TVDB seasons OTHER mapping records sharing
 	// this record's tvdb id map (mapping.Index.SiblingSeasons), resolved here
 	// because the matcher is where the record and the index meet. A whole-series
 	// comparison drops them from its aggregate; every other scope ignores them.
 	// Nil for a record with no tvdb id and for an unmapped entry.
 	SiblingSeasons []int
-	// Seasons are the entry's OWN TVDB seasons from the Anime-Lists mapping-list
+	// Seasons are the entry's OWN TVDB seasons from the mapping list
 	// (mapping.Index.MappingFor), nil when the list names none. A whole-series
 	// comparison judges exactly these seasons when present, so a split show's
 	// entries are each judged against their own run.
@@ -233,7 +233,7 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 	return r.matchUnmappedEntry(ctx, e)
 }
 
-// matchMappedEntry links an entry whose Fribb record resolved, tracking
+// matchMappedEntry links an entry whose mapping record resolved, tracking
 // coverage per outcome (ID hit, id-less title fallback, or library miss).
 func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, item *library.Item, needsLookup bool) Match {
 	arr := recordArr(rec)
@@ -262,8 +262,8 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	return Match{SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
 }
 
-// seasonsOf reads the entry's own TVDB season ranges off the Anime-Lists
-// mapping-list, nil when the list names none for this record.
+// seasonsOf reads the entry's own TVDB season ranges off the record's
+// mapping list, nil when the list names none for this record.
 func (r *matchRun) seasonsOf(rec *mapping.Record) []mapping.SeasonRange {
 	m, ok := r.idx.MappingFor(rec)
 	if !ok {
@@ -272,7 +272,7 @@ func (r *matchRun) seasonsOf(rec *mapping.Record) []mapping.SeasonRange {
 	return m.Seasons
 }
 
-// matchUnmappedEntry links an entry with no Fribb record through the AniList
+// matchUnmappedEntry links an entry with no mapping record through the AniList
 // title fallback, counting it as unmapped coverage either way.
 func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Match {
 	media, ok := r.lookupAniList(ctx, e.AniListID)
@@ -289,7 +289,7 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 	return Match{Item: item, Entry: *e, Record: mapping.RecordFromFormat(media.Format), Arr: item.Arr, Source: SourceTitle}
 }
 
-// matchIDLessEntry links an entry whose Fribb record exists but carries no arr
+// matchIDLessEntry links an entry whose mapping record exists but carries no arr
 // id (a split AniList<->arr mapping), where the AniList title is the only
 // remaining link to the arr item. It resolves AniList once: the format types an
 // untyped record and picks the search arr, then the normalized title + year
@@ -316,8 +316,8 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 		arr = formatArr(media.Format)
 		// Typing can make identifiers the record ALREADY carried usable, so
 		// the record may no longer be id-less: RoutedIDs only routes the
-		// TMDB-movie/IMDb fields once the type says MOVIE, and both Fribb
-		// (the object-form themoviedb_id movie list) and an operator override
+		// TMDB-movie/IMDb fields once the type says MOVIE, and both animap
+		// (tmdb_movie_ids / imdb_ids) and an operator override
 		// (tmdb_movies / imdb_ids) can carry them on an untyped record.
 		if rec.HasArrIdentifier() {
 			return r.matchMappedEntry(ctx, e, rec, r.lib.FindByID(rec), false)

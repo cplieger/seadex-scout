@@ -60,7 +60,7 @@ func (r *Reporter) reportSnapshot(ctx context.Context) (library.Snapshot, error)
 	return snap, nil
 }
 
-// reportMapping loads the Fribb map for a one-shot report. An unusable map (no
+// reportMapping loads the mapping for a one-shot report. An unusable map (no
 // stale cache either) fails the report: ID matching, season scoping and the
 // not_on_seadex catalogue all depend on it. A stale-but-usable map proceeds with
 // a single degraded WARN, and a cancelled load is the shutdown, not a fault.

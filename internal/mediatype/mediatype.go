@@ -1,12 +1,12 @@
-// Package mediatype owns the AniList/Fribb media-type token vocabulary: the
+// Package mediatype owns the AniList/animap media-type token vocabulary: the
 // canonical comparison form, the set of tokens that name a real media type, and
 // the movie/special classification over them.
 package mediatype
 
 import "strings"
 
-// The AniList MediaFormat enum as it applies to anime, which is also Fribb's
-// `type` vocabulary. AniList's MANGA/NOVEL/ONE_SHOT members cannot appear on a
+// The AniList MediaFormat enum as it applies to anime; animap's `type`
+// vocabulary is a subset of it plus UNKNOWN. AniList's MANGA/NOVEL/ONE_SHOT members cannot appear on a
 // SeaDex entry and are deliberately absent.
 const (
 	Movie   = "MOVIE"

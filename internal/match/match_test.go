@@ -59,7 +59,7 @@ func batchVerdictsAbsentAs(ids []int, media map[int]anilist.Media, absent anilis
 
 // TestFindByIDArrConsistency covers the arr-gate: a MOVIE record must resolve
 // only to a Radarr movie and a series record only to a Sonarr series, so a movie
-// whose Fribb record shares an IMDb id with a same-named Sonarr series (TVDB
+// whose mapping record shares an IMDb id with a same-named Sonarr series (TVDB
 // conflates them) does not silently mis-link.
 func TestFindByIDArrConsistency(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
@@ -212,7 +212,7 @@ func TestFindByIDNoWrongArrShadowing(t *testing.T) {
 }
 
 // TestMatchTitleFallbackOnIdlessRecord covers the gap-fill fallthrough: when
-// Fribb has the AniList entry but its record carries no arr id (a split
+// the mapping has the AniList entry but its record carries no arr id (a split
 // mapping), the matcher falls back to the AniList title match and still links
 // the entry to the library item - yet the entry counts as Unmapped coverage,
 // not a Hit: the ID bridge by definition could not resolve an arr id, so
@@ -388,7 +388,7 @@ func (degradedAniList) FetchMany(context.Context, []int) (anilist.BatchResult, e
 // rather than cached as a permanent miss).
 func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil) // no Fribb record: the entry resolves via AniList
+	idx := mapping.NewIndex(nil) // no mapping record: the entry resolves via AniList
 	m := New(degradedAniList{}, nil)
 
 	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
@@ -411,14 +411,14 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 }
 
 // TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr is the same outage
-// against an entry Fribb DOES have a record for, only an id-less one: the arr is
+// against an entry the mapping DOES have a record for, only an id-less one: the arr is
 // already known from the record's type, so the failed lookup must count under
 // THAT arr rather than the unknown bucket the record-less twin above uses. The
 // per-arr unmapped counts are what an operator reads to tell "Sonarr coverage is
 // incomplete" from "these entries map nowhere at all", and a count moving the
 // wrong way makes a degraded cycle read as an improving one.
 func TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr(t *testing.T) {
-	// TvdbID 0 on a series record: Fribb knows the entry but carries no arr id.
+	// TvdbID 0 on a series record: the mapping knows the entry but carries no arr id.
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 42, Type: "TV"}})
 
 	res := New(degradedAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, &library.Snapshot{}, idx, Memo{})
@@ -441,7 +441,7 @@ func TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr(t *testing.T) {
 }
 
 // TestMatchTitleFallbackAmbiguousIsUnmapped covers the conservative-match
-// invariant plus the no-Fribb-record resolution path: an entry with no mapping
+// invariant plus the no-mapping-record resolution path: an entry with no mapping
 // record is resolved through the AniList title fallback (exercising matchEntry's
 // record-miss branch and formatArr), and when the normalized title matches more
 // than one library item in the same arr the ambiguous set is treated as a miss
@@ -556,7 +556,7 @@ func TestMatchInvalidAniListIDSkipsLookupWithoutDegrading(t *testing.T) {
 }
 
 // TestMatchResolvesByIDWithoutAniList pins the primary happy path through
-// Matcher.Match: an entry whose Fribb record carries the arr id resolves to the
+// Matcher.Match: an entry whose mapping record carries the arr id resolves to the
 // library item as SourceID, counts a coverage hit for its arr, and spends zero
 // AniList requests (neither batch nor single).
 func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
@@ -592,7 +592,7 @@ func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
 	}
 }
 
-// TestMatchTitleFallbackSucceedsWithoutRecord pins the no-Fribb-record success
+// TestMatchTitleFallbackSucceedsWithoutRecord pins the no-mapping-record success
 // path: an entry with no mapping record resolves through the AniList lookup and
 // links to the single title+year library candidate as SourceTitle, with the arr
 // taken from the matched item and the record type normalized from the AniList
@@ -601,7 +601,7 @@ func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 3, Title: "Clannad", TvdbID: 555, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil) // no Fribb record: matchEntry resolves via AniList
+	idx := mapping.NewIndex(nil) // no mapping record: matchEntry resolves via AniList
 	fake := fakeAniList{media: map[int]anilist.Media{
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
@@ -1116,7 +1116,7 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 // TestFindByIDResolvesMovieIDOnANonMovieRecord covers FindByID's secondary
 // movie lookup: a record whose type label is not MOVIE but which routes
 // no series id still resolves its Radarr movie through its unambiguous movie
-// TMDB ids - the live Fribb shape (non-MOVIE type, no tvdb_id, a positive
+// TMDB ids - the live animap shape (non-MOVIE type, no tvdb_id, a positive
 // themoviedb_id.movie) that the type label alone lost. The three negative arms
 // pin how narrow it is: a record that routes a TVDB id keeps series routing, a
 // non-MOVIE record's IMDb id still claims nothing (TVDB reuses a film's IMDb id
@@ -1198,7 +1198,7 @@ func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	}
 }
 
-// TestMatchStampsSiblingSeasons pins the producer rule: Fribb
+// TestMatchStampsSiblingSeasons pins the producer rule: mapping
 // semantics are resolved once, where the record and the index meet, so align
 // never reads the map a second time. The matcher stamps the seasons OTHER records
 // on the same tvdb id map positively; a record whose siblings map nothing, and an
@@ -1230,8 +1230,8 @@ func TestMatchStampsSiblingSeasons(t *testing.T) {
 	}
 }
 
-// TestMatchStampsOwnSeasons pins the same producer rule for the Anime-Lists
-// mapping-list: the matcher is where the record and the index meet, so it stamps
+// TestMatchStampsOwnSeasons pins the same producer rule for the record's
+// mapping list: the matcher is where the record and the index meet, so it stamps
 // the entry's own TVDB season ranges onto the Match; a record the list knows
 // nothing about carries nil.
 func TestMatchStampsOwnSeasons(t *testing.T) {

@@ -1225,7 +1225,7 @@ func TestCompareFindingSeasonField(t *testing.T) {
 		}
 	})
 
-	t.Run("negative Fribb season clamps to 0", func(t *testing.T) {
+	t.Run("negative mapped season clamps to 0", func(t *testing.T) {
 		item := &library.Item{Title: "Negative Season", Arr: library.ArrSonarr, Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
 		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{Type: "TV", SeasonTvdb: -1}}
 		got := comparer(filter.Options{}, false).Compare([]match.Match{m})

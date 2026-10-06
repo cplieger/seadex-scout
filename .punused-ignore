@@ -41,20 +41,12 @@
 # --- (a) json.Unmarshaler ---------------------------------------------------
 # encoding/json type-asserts json.Unmarshaler and calls these; there is no call
 # site to find, only a DECODE site whose target embeds the type.
-# internal/mapping/fribb.go: fribbRecord's fields (Type flexString, IMDbID
-# stringList, TmdbID tmdbID, Season seasonObject) are decoded by
-# decodeFribbRecord's json.Unmarshal(msg, &fr) on the production refresh path
-# (parseFribbForRefresh -> decodeFribbRecords -> decodeNextFribbRecord).
 # internal/anilist/anilist.go: gqlPage.Media (boundedMediaList) is decoded by
 # parseMediaPage's json.Unmarshal(raw, &r) on the FetchMany batch path, and
 # gqlErrors by envelopeErrors' json.Unmarshal plus the errors[] field of the
 # Fetch and batch envelopes. Each of these methods IS the tolerance or the
 # cardinality bound on an untrusted upstream body, so deleting one is a
 # parsing/resource-exhaustion regression.
-method (*seasonObject).UnmarshalJSON is
-method (*flexString).UnmarshalJSON is
-method (*tmdbID).UnmarshalJSON is
-method (*stringList).UnmarshalJSON is
 method (*boundedMediaList).UnmarshalJSON is
 method (*gqlErrors).UnmarshalJSON is
 #
@@ -88,13 +80,6 @@ method (*RevisionMarker).UnmarshalText is
 method (*channelXML).UnmarshalXML is
 method (*itemXML).UnmarshalXML is
 method (*errorXML).UnmarshalXML is
-# internal/mapping/animelist.go: parseMappingList's xml.Unmarshal decodes the
-# Anime-Lists document through listXML, whose walk runs DecodeElement on an
-# animeXML per <anime> node. Both methods carry the shared *xmlx.Budget bound
-# and the root-element refusal; both fold nodes as they are read so the
-# retained graph is the answer, never the document.
-method (*listXML).UnmarshalXML is
-method (*animeXML).UnmarshalXML is
 #
 # --- (b) httpx.Transient (cross-module interface dispatch) ------------------
 # httpx/v4 declares `type Transient interface { IsTransient() bool }` and
@@ -163,7 +148,7 @@ method (*StaleMapError).Unwrap is
 # or routing the call sites through the network-backed Loader, which would stop
 # those tests pinning match/audit/scout behavior against a real index.
 function NewIndex is
-# NewIndexWithMappings is the same wrapper with the Anime-Lists mapping-list
+# NewIndexWithMappings is the same wrapper with AniDB-keyed mapping-list facts
 # attached (Loader.Load attaches it through buildIndex on the production path),
 # and exists for the same reason: Index's mappings field is unexported, so the
 # _test.go callers in internal/audit, internal/match and internal/scout have no
@@ -182,7 +167,7 @@ method (*Contract).Allows is used in test only
 
 #
 # (*sanitizedError).Unwrap — same errors-chain class as the wrappers above.
-# sanitizedError (internal/mapping/mapping.go) exists so a Fribb-refresh failure
+# sanitizedError (internal/mapping/mapping.go) exists so a mapping-refresh failure
 # can reach a log boundary as pre-sanitized, length-bounded text while the
 # original cause stays reachable for classification: Error() returns the safe
 # text, Unwrap() returns the cause. It is constructed in non-test code

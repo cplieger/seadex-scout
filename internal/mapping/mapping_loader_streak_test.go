@@ -24,11 +24,11 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 	var accept atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if accept.Load() {
-			_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"tv","tvdb_id":200},{"anilist_id":3,"type":"tv","tvdb_id":300},{"anilist_id":4,"type":"tv","tvdb_id":400}]`))
+			_, _ = w.Write(animapBody(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"tv","tvdb_id":200},{"anilist_id":3,"type":"tv","tvdb_id":300},{"anilist_id":4,"type":"tv","tvdb_id":400}]`))
 			return
 		}
 		// One record replacing four trips the below-half-size shrink guard.
-		_, _ = w.Write([]byte(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
+		_, _ = w.Write(animapBody(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
 	}))
 	defer ts.Close()
 
@@ -94,7 +94,7 @@ func TestLoader_refreshCache_notModifiedResetsRejectionStreak(t *testing.T) {
 // transient outage is not a persistent refusal: a transport failure (no response
 // at all) neither advances the persisted streak nor resets it, so the scout never
 // escalates on an outage. The subject is the one fetch failure carrying no HTTP
-// status; a 404 or 410 on the fixed Fribb URL is PERSISTENT instead (see
+// status; a 404 or 410 on the fixed mapping URL is PERSISTENT instead (see
 // TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak).
 func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) {
 	prev := &Cache{
@@ -113,7 +113,7 @@ func TestLoader_refreshCache_transportFailureKeepsRejectionStreak(t *testing.T) 
 }
 
 // TestLoader_refreshCache_operatorRemedyStatusAdvancesRejectionStreak pins the
-// persistent half: a status on the FIXED Fribb URL whose only remedy is the
+// persistent half: a status on the FIXED mapping URL whose only remedy is the
 // operator (a 404 or 410 on a URL that is a package constant) is a persistent
 // refusal, not a transient outage. A status that failed to advance the streak
 // would warn forever from zero and the scout's WARN would never escalate.
@@ -172,7 +172,7 @@ func TestLoader_refreshCache_comeBackLaterStatusKeepsRejectionStreak(t *testing.
 }
 
 // TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold pins the
-// operator-visible half: a permanently 404ing Fribb URL escalates the
+// operator-visible half: a permanently 404ing mapping URL escalates the
 // scout's mapping log from WARN to ERROR only once the streak reaches
 // degradation.TickEscalationThreshold consecutive cycles, so the first refusals
 // stay a WARN.
@@ -204,7 +204,7 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 
 // TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak pins the
 // record-cap exception to the "parse failures don't advance the streak" rule:
-// an over-cap body is a persistent guard refusal (an over-cap upstream list
+// an over-cap body is a persistent guard refusal (an over-cap upstream document
 // re-downloads and rejects every cycle, never self-healing), so acceptRefresh
 // must route it through rejectRefresh — the errors.Is-matchable sentinel survives
 // the *StaleMapError wrap, the stale map is kept, and the persisted streak
@@ -213,7 +213,7 @@ func TestLoader_refreshCache_terminalNon2xxReachesEscalationThreshold(t *testing
 func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T) {
 	var b strings.Builder
 	b.WriteByte('[')
-	for i := 0; i <= maxFribbRecords; i++ {
+	for i := 0; i <= maxRecords; i++ {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -222,7 +222,7 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 	b.WriteByte(']')
 	body := b.String()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(body))
+		_, _ = w.Write(animapBody(body))
 	}))
 	defer ts.Close()
 
@@ -255,7 +255,7 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 // consecutive rejections — the scout must never escalate to ERROR on it.
 func TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"anilist_id":1,`)) // truncated mid-record
+		_, _ = w.Write(animapBody(`[{"anilist_id":1,`)) // truncated mid-record
 	}))
 	defer ts.Close()
 
@@ -426,7 +426,8 @@ func TestIsPersistentRefreshFailure(t *testing.T) {
 		// Persistent: each one re-downloads or re-refuses identically forever.
 		"parse-time record cap":   {fmt.Errorf("parse: %w", errRecordCapExceeded), failureParse, true},
 		"identifier budget":       {fmt.Errorf("parse: %w", errIdentifierBudgetExceeded), failureParse, true},
-		"non-array document":      {logSafeCause(fmt.Errorf("%w (got null)", errNotJSONArray)), failureParse, true},
+		"not an animap document":  {logSafeCause(fmt.Errorf("%w (got null)", errNotAnimapDocument)), failureParse, true},
+		"unsupported version":     {logSafeCause(fmt.Errorf("%w 2, want 1", errUnsupportedVersion)), failureParse, true},
 		"download size cap":       {&httpx.ResponseTooLargeError{Limit: maxMapBytes}, failureFetch, true},
 		"validator-less 304":      {nil, failureNotModifiedUnusable, true},
 		"acceptance invariant":    {errors.New("arr identifier coverage 1/200 is below minimum 2"), failureValidation, true},
@@ -437,6 +438,7 @@ func TestIsPersistentRefreshFailure(t *testing.T) {
 		"operator-remedy 400":     {&httpx.HTTPStatusError{Code: http.StatusBadRequest}, failureFetch, true},
 		"terminal 401":            {&httpx.AuthError{Msg: "invalid API key (401)"}, failureFetch, true},
 		"wrapped operator status": {fmt.Errorf("fetch: %w", &httpx.HTTPStatusError{Code: http.StatusNotFound}), failureFetch, true},
+		"refused redirect hop":    {fmt.Errorf("fetch: %w", fmt.Errorf("%w: refusing redirect to example.net", errRedirectRefused)), failureFetch, true},
 		// Transient: can succeed on the next attempt.
 		"mid-stream truncation":      {logSafeCause(errors.New("unexpected EOF at element 4")), failureParse, false},
 		"transport error":            {errors.New("transport refused by test"), failureFetch, false},

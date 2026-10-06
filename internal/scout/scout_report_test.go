@@ -78,7 +78,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 // carry its own count. The scenario separates the two pairs a swap could hide:
 // seadex_entries (2) from library_items (1), and rows (1) from
 // incomplete_mappings (0). library_items and rows are both 1 here, so a swap
-// of THAT pair stays invisible - a second Fribb-catalogued library item would
+// of THAT pair stays invisible - a second mapping-catalogued library item would
 // add its own not_on_seadex row and move both together.
 func TestReportSummaryLineCarriesCounts(t *testing.T) {
 	logger, recorder := capture.New()
@@ -89,7 +89,7 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
-	// A second entry with no Fribb record keeps seadex_entries (2) distinct
+	// A second entry with no mapping record keeps seadex_entries (2) distinct
 	// from library_items (1) and rows (1); its definitive not-found answer
 	// leaves incomplete_mappings at 0.
 	entries := append(seadexFrierenEntry(), seadex.Entry{AniListID: 999})
@@ -278,7 +278,7 @@ func TestReportMappingUnusableErrors(t *testing.T) {
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := NewReporter(&ReportDeps{
 		Logger: logger,
-		// Empty state + unreachable Fribb: the load fails with nothing stale
+		// Empty state + unreachable mapping: the load fails with nothing stale
 		// to fall back on, so the map is unusable (not a StaleMapError).
 		Store:   &fakeStore{},
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
@@ -303,7 +303,7 @@ func TestReportMappingUnusableErrors(t *testing.T) {
 func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	logger, recorder := capture.New()
 	// Records present but fetched beyond the 1h refresh window, with the
-	// Fribb URL unreachable: Load returns the cached index wrapped in a
+	// mapping URL unreachable: Load returns the cached index wrapped in a
 	// *mapping.StaleMapError.
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
@@ -370,7 +370,7 @@ func TestReportDegradedMatching(t *testing.T) {
 		if rep.Incomplete[0].SeaDexURL != "https://releases.moe/999" {
 			t.Errorf("incomplete entry SeaDexURL = %q, want the releases.moe link", rep.Incomplete[0].SeaDexURL)
 		}
-		// The unaffected majority still audits: the Fribb-catalogued library
+		// The unaffected majority still audits: the mapping-catalogued library
 		// item (covered by no SeaDex match) renders as its not_on_seadex row.
 		if len(rep.Rows) != 1 || rep.Rows[0].Verdict != audit.VerdictNotOnSeaDex {
 			t.Errorf("rows = %+v, want the one not_on_seadex row for the unaffected library item", rep.Rows)
@@ -405,7 +405,7 @@ func TestReportDegradedMatching(t *testing.T) {
 
 // TestReportShutdownDuringMappingLoadNotMisattributed pins Report's half of
 // the shutdown-misattribution contract: a SIGTERM landing during the report's
-// Fribb refresh must neither log "report: mapping degraded" (blaming a healthy
+// mapping refresh must neither log "report: mapping degraded" (blaming a healthy
 // upstream; the WARN backs a Loki query) nor fail with "mapping unusable" -
 // the report proceeds on the cached map and the cancellation surfaces from the
 // SeaDex fetch instead.
@@ -433,7 +433,7 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 		t.Errorf("error = %q, want the cancelled load NOT misattributed to an unusable map", err.Error())
 	}
 	if n := recorder.CountExact("report: mapping degraded"); n != 0 {
-		t.Errorf("'report: mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
+		t.Errorf("'report: mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a mapping fault)", n)
 	}
 }
 

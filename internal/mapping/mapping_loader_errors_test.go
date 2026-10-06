@@ -112,7 +112,7 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 
 // TestLoader_Load_directoryOverridesIgnored pins the unreadable-overrides warn
 // branch through a root-safe injection (a directory at the overrides path, not
-// a permission bit): the read error is logged and ignored, and the Fribb
+// a permission bit): the read error is logged and ignored, and the upstream
 // record survives unmodified.
 func TestLoader_Load_directoryOverridesIgnored(t *testing.T) {
 	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(t.TempDir()), WithRefresh(time.Hour), WithLogger(discardLogger()))

@@ -10,12 +10,12 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestConditionalGetExhaustedTerminalRecordIsDemoted pins the Fribb door's
+// TestConditionalGetExhaustedTerminalRecordIsDemoted pins the mapping door's
 // terminal log level. httpx's retry loop publishes its own generic "http retries
 // exhausted" verdict, and the caller republishes the SAME event with strictly more
 // context - scout.loadMapping's "mapping degraded" carries usable_records, the
 // stale-cache reason and the persisted rejection streak - so httpx's verdict sits
-// at Debug rather than putting two warnings in Loki for one Fribb outage. Demoted
+// at Debug rather than putting two warnings in Loki for one mapping outage. Demoted
 // rather than dropped (WithLogger stays) because the per-attempt retry diagnostics
 // are the half worth keeping.
 func TestConditionalGetExhaustedTerminalRecordIsDemoted(t *testing.T) {

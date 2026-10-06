@@ -24,8 +24,8 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		{AniListID: 3, Type: "MOVIE", IMDbIDs: []string{"tt0000001"}},
 		{AniListID: 4, Type: "TV", TvdbID: 999},
 		{AniListID: 5, Type: "OVA", TvdbID: 777},
-		// A MAPPED record with no Fribb typing at all: the tolerant Fribb
-		// decoder and an override omitting `type` both produce this shape.
+		// A MAPPED record with no mapping type at all: an animap record with
+		// no type and an override omitting `type` both produce this shape.
 		{AniListID: 20},
 		// The same untyped shape, but carrying a positive season.tvdb and no
 		// routed arr id: the memo's MOVIE format must win the season too.
@@ -87,13 +87,13 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	if film := info(8); film.Title != "Memo Only Film" || !film.IsMovie || film.SeasonKnown {
 		t.Errorf("info(8) = %+v, want the memo title typed as a movie", film)
 	}
-	// A memo-typed special resolves its season the same way a Fribb-typed one
+	// A memo-typed special resolves its season the same way a mapping-typed one
 	// does, so an unmapped OVA still labels S00 instead of losing its season.
 	if ova := info(9); ova.Title != "Memo Only OVA" || ova.IsMovie || ova.Season != 0 || !ova.SeasonKnown {
 		t.Errorf("info(9) = %+v, want the memo title typed as a special resolved to season 0", ova)
 	}
 
-	// A MAPPED record whose Fribb `type` is empty carries no typing either, so
+	// A MAPPED record whose mapping `type` is empty carries no typing either, so
 	// the memo's format types it: without this the app knew the entry was a
 	// movie and still published it under Anime/5070, where Radarr never sees
 	// it, which is the mapped-but-untyped shape.
@@ -124,7 +124,7 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 
 // TestFeedEntryInfoArrConsistentRouting pins the arr-consistency rule
 // inherited from the matcher: a MOVIE record resolves only against Radarr
-// items, so a movie whose Fribb record carries a TV-colliding id must not
+// items, so a movie whose mapping record carries a TV-colliding id must not
 // take a same-keyed Sonarr item's title (it falls through to the memo).
 func TestFeedEntryInfoArrConsistentRouting(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{
@@ -219,8 +219,8 @@ func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
 	}
 }
 
-// TestResolvedSeason pins the Fribb season-semantics rule at its one home for the
-// feed: a positive TVDB season wins, a Fribb-typed special with no positive season
+// TestResolvedSeason pins the mapped season-semantics rule at its one home for the
+// feed: a positive TVDB season wins, a mapping-typed special with no positive season
 // resolves to the specials bucket (a MAPPED season zero, which the feed must tell
 // apart from an absent season), and anything else - an absolute-numbered run, a
 // title-only match, an untyped record - resolves nothing. The precedence row matters
@@ -271,21 +271,21 @@ func TestFeedEntryInfoArrTitleWinsOverMemo(t *testing.T) {
 	}
 }
 
-// TestFeedEntryInfoFribbTypingWinsOverMemoFormat pins the documented gate on
-// the memo-format tier: it applies ONLY when Fribb had nothing to say.
+// TestFeedEntryInfoMappingTypingWinsOverMemoFormat pins the documented gate on
+// the memo-format tier: it applies ONLY when the mapping had nothing to say.
 // A mapped record's own typing and resolved season must survive a memo entry
 // carrying a contradicting AniList format, or a mapped series would route to
 // Movies/2000 and lose its season - Sonarr filters on Anime/5070, so it would
 // never see the show in the RSS feed. The existing format rows use unmapped
 // ids only, so dropping the record-absent guard passes them all.
-func TestFeedEntryInfoFribbTypingWinsOverMemoFormat(t *testing.T) {
+func TestFeedEntryInfoMappingTypingWinsOverMemoFormat(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2}})
 	memo := match.Memo{Entries: map[int]match.MemoEntry{
 		1: {Titles: []string{"Memo Title"}, Year: 2021, Format: "MOVIE"},
 	}}
 	got := feedEntryInfo(idx, &library.Snapshot{}, memo)(1)
 	if got.IsMovie {
-		t.Errorf("info(1) = %+v, want IsMovie=false: a mapped record's Fribb typing wins over the memo format", got)
+		t.Errorf("info(1) = %+v, want IsMovie=false: a mapped record's mapping type wins over the memo format", got)
 	}
 	if got.Season != 2 || !got.SeasonKnown {
 		t.Errorf("info(1) = %+v, want the record's resolved season 2 intact", got)
@@ -296,7 +296,7 @@ func TestFeedEntryInfoFribbTypingWinsOverMemoFormat(t *testing.T) {
 }
 
 // TestFeedEntryInfoLibraryHitKeepsSeriesTyping pins the precedence between the
-// library-hit early return and the memo-format typing tier: an UNTYPED Fribb record
+// library-hit early return and the memo-format typing tier: an UNTYPED mapping record
 // still routes a positive TVDB id through RoutedIDs' series arm, so it can HIT a
 // Sonarr item, and that hit is the stronger typing evidence whatever format the memo
 // carries. Re-typing such an entry from a memoized MOVIE format would publish a show
@@ -324,7 +324,7 @@ func TestFeedEntryInfoLibraryHitKeepsSeriesTyping(t *testing.T) {
 }
 
 // TestFeedEntryInfoRoutedUntypedRecordIgnoresMemoMovieFormat pins the gate at
-// feedinfo.go:70: an UNTYPED Fribb record that still routes a positive TVDB id
+// feedinfo.go:70: an UNTYPED mapping record that still routes a positive TVDB id
 // through RoutedIDs' series arm is series evidence, so a retained (expired)
 // memo entry carrying a MOVIE format must not re-type it - that would publish a
 // Sonarr-routed show under Movies/2000, where Sonarr never sees it. The memo's
@@ -402,8 +402,8 @@ func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
 	}
 }
 
-// TestFeedEntryInfoProjectsTheMappingList pins the projection of the Anime-Lists
-// mapping-list onto the feed metadata. The special episode is stamped ONLY for
+// TestFeedEntryInfoProjectsTheMappingList pins the projection of the record's
+// mapping list onto the feed metadata. The special episode is stamped ONLY for
 // the offered class on a Sonarr series (a MOVIE record with a mapped season zero
 // resolved to a titled Sonarr item), beside the series title, while the film
 // keeps its own name; the same record on a Radarr item, a TV record with a

@@ -10,7 +10,7 @@ import (
 
 // TestItemKind pins the record-less classification align owns for a library
 // item the audit's reverse catalogue enumerated (no SeaDex entry, hence no
-// Fribb record): a Radarr item is a movie, a Sonarr item reads as the
+// mapping record): a Radarr item is a movie, a Sonarr item reads as the
 // whole-series comparison.
 func TestItemKind(t *testing.T) {
 	tests := []struct {

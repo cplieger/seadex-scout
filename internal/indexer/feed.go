@@ -53,7 +53,7 @@ type EntryInfo struct {
 	// labeled with, since Title keeps the film's own name.
 	SeriesTitle string
 	// Seasons are the TVDB seasons this entry's absolute-numbered episodes fall
-	// into, from the Anime-Lists mapping-list; nil when the list names none. The
+	// into, from the mapping list; nil when the list names none. The
 	// RANGES, never a scalar: three measured entries need 6, 8 and 2 distinct
 	// seasons across their packs, so one season per entry mislabels most of them.
 	Seasons []SeasonRange
@@ -65,7 +65,7 @@ type EntryInfo struct {
 	// none. It feeds the rendered tvdbid attribute, which is what lets Sonarr
 	// resolve a series it could not parse out of the release title.
 	TvdbID int
-	// SpecialEpisode is the TVDB season-0 episode the Anime-Lists mapping-list
+	// SpecialEpisode is the TVDB season-0 episode the mapping list
 	// files this film as, 0 when it names none or the entry is not an offered
 	// film on a Sonarr series. It is what lets the feed serve the film a second
 	// time as "<SeriesTitle> S00Exx", a title Sonarr's parser can match.
@@ -118,7 +118,7 @@ func entryInfoFunc(info EntryInfoFunc) EntryInfoFunc {
 	return func(int) EntryInfo { return EntryInfo{} }
 }
 
-// categoriesFor maps a show's Fribb typing and its resolved arr to its Torznab
+// categoriesFor maps a show's mapping type and its resolved arr to its Torznab
 // categories: a movie to Movies (Radarr), a movie whose library item is a SONARR
 // series to BOTH, and everything else to Anime. BOTH rather than whichever arr won,
 // because a film not owned in Radarr still needs Radarr discovery while its parent
@@ -418,11 +418,11 @@ func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
 }
 
 // derivedTitle is the file-name derivation with the entry's known mapping
-// applied: when the entry pins a season (a positive Fribb TVDB season, or a
-// Fribb-typed special's mapped season 0), the pack's collapsed season label
+// applied: when the entry pins a season (a positive mapped TVDB season, or a
+// mapping-typed special's mapped season 0), the pack's collapsed season label
 // (SxxExx and absolute arms alike) and a single release's LAST SxxExx season
 // half are relabeled to it - the same cour-local correction episodeMarker
-// applies on the assembled path, with the same precedence (the Fribb season
+// applies on the assembled path, with the same precedence (the mapped season
 // beats file evidence; a SINGLE release's absolute "- NN" or marker-less name
 // is never relabeled).
 func derivedTitle(t *seadex.Torrent, meta *EntryInfo) string {

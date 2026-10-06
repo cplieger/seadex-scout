@@ -1187,13 +1187,13 @@ func TestUpstreamForScope(t *testing.T) {
 // a port routes correctly and malformed authorities no longer route at all.
 func TestScopeFromHost(t *testing.T) {
 	tests := []struct{ host, want string }{
-		{"nyaa.cplieger.com", "nyaa"},
-		{"nyaa.cplieger.com:443", "nyaa"}, // port ignored
-		{"AB.example.com", "ab"},          // case-insensitive
+		{"nyaa.example.org", "nyaa"},
+		{"nyaa.example.org:443", "nyaa"}, // port ignored
+		{"AB.example.com", "ab"},         // case-insensitive
 		{"ab.example.com", "ab"},
-		{"seadex.cplieger.com", ""}, // non-tracker subdomain -> 404
-		{"seadex-scout:9118", ""},   // internal docker name + port
-		{"seadex-scout", ""},        // internal docker name
+		{"seadex.example.org", ""}, // non-tracker subdomain -> 404
+		{"seadex-scout:9118", ""},  // internal docker name + port
+		{"seadex-scout", ""},       // internal docker name
 		{"", ""},
 		// A bare tracker host with a port: the raw first-dot split left the port
 		// inside the label ("ab:9118"), so this failed to select any scope.
@@ -1216,13 +1216,13 @@ func TestScopeFromHost(t *testing.T) {
 
 func TestScopeFor(t *testing.T) {
 	tests := []struct{ host, path, want string }{
-		{"seadex-scout:9118", "/nyaa/api", "nyaa"},   // path (internal direct use)
-		{"seadex-scout:9118", "/ab", "ab"},           // path
-		{"seadex-scout:9118", "/api", ""},            // neither names a tracker -> 404
-		{"nyaa.cplieger.com", "/api", "nyaa"},        // host fallback (proxy subdomain)
-		{"ab.cplieger.com", "/api", "ab"},            // host fallback
-		{"seadex.cplieger.com", "/nyaa/api", "nyaa"}, // path over aggregate host
-		{"nyaa.cplieger.com", "/ab/api", "ab"},       // explicit path wins over host
+		{"seadex-scout:9118", "/nyaa/api", "nyaa"},  // path (internal direct use)
+		{"seadex-scout:9118", "/ab", "ab"},          // path
+		{"seadex-scout:9118", "/api", ""},           // neither names a tracker -> 404
+		{"nyaa.example.org", "/api", "nyaa"},        // host fallback (proxy subdomain)
+		{"ab.example.org", "/api", "ab"},            // host fallback
+		{"seadex.example.org", "/nyaa/api", "nyaa"}, // path over aggregate host
+		{"nyaa.example.org", "/ab/api", "ab"},       // explicit path wins over host
 	}
 	for _, tc := range tests {
 		if got := scopeFor(tc.host, tc.path); got != tc.want {
@@ -1940,9 +1940,9 @@ func TestNewCopiesConfig(t *testing.T) {
 }
 
 // TestRejectionLinesNameTheClientIP pins the Loki-visible contract of the two
-// request-rejection lines: the caller is identified by the fleet-standard
-// `client_ip` attribute (every webhttp consumer's spelling, so one shared query
-// over the fleet's security lines includes this app), resolved through
+// request-rejection lines: the caller is identified by the `client_ip`
+// attribute (every webhttp consumer's spelling, so one shared query over
+// every webhttp app's security lines includes this one), resolved through
 // webhttp.ClientIP - which strips the port, so the value is an address the
 // operator can match against a firewall or DHCP lease rather than an
 // ephemeral-port socket string.

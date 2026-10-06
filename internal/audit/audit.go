@@ -51,7 +51,7 @@ const (
 	// entry.
 	VerdictUnattributed Verdict = "unattributed"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
-	// (present in the Fribb map) but SeaDex lists no entry for it.
+	// (present in the mapping) but SeaDex lists no entry for it.
 	VerdictNotOnSeaDex Verdict = "not_on_seadex"
 )
 
@@ -309,7 +309,7 @@ func incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
 }
 
 // uncoveredRows lists library items that are recognized anime (present in the
-// Fribb map) but were not covered by any SeaDex match, plus each row's item key.
+// mapping) but were not covered by any SeaDex match, plus each row's item key.
 func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) (rows []Row, keys []string) {
 	if snap == nil {
 		return nil, nil

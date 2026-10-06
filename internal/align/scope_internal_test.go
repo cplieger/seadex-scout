@@ -29,7 +29,7 @@ func TestScope(t *testing.T) {
 			wantGroups: []string{"arid"}, wantKind: ScopeMovie, wantFile: true,
 		},
 		{
-			name:       "radarr movie with a positive Fribb season still scopes to the movie",
+			name:       "radarr movie with a positive mapped season still scopes to the movie",
 			item:       library.Item{Arr: library.ArrRadarr, Groups: []string{"arid"}, HasFile: true, SeasonGroups: map[int][]string{2: {"seasongrp"}}},
 			rec:        mapping.Record{Type: "MOVIE", SeasonTvdb: 2},
 			wantGroups: []string{"arid"}, wantKind: ScopeMovie, wantFile: true,
@@ -74,7 +74,7 @@ func TestScope(t *testing.T) {
 			wantGroups: nil, wantKind: ScopeWholeSeries, wantFile: false,
 		},
 		{
-			// Heya Camp's shape: Fribb types it TV and maps it to season 0, so the
+			// Heya Camp's shape: the mapping types it TV and maps it to season 0, so the
 			// type label would send it to a whole-series comparison against every
 			// real season while the season presence says offered.
 			name:       "a TV-typed mapped zero is offered, and reads the bucket",

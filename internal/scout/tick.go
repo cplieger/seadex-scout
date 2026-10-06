@@ -102,7 +102,7 @@ func (s *Scout) tick(ctx context.Context) bool {
 
 // tickInterrupted closes a tick a shutdown cancelled - CAUSE: shutdown. No
 // streak advances, because a redeploy is not an upstream fault. It ALWAYS
-// persists what the pass already learned (the revalidated Fribb validators, the
+// persists what the pass already learned (the revalidated mapping validators, the
 // memo entries that did resolve, the persisted refresh-rejection streak - never
 // the library snapshot, since a tick performs no walk). It emits NO completion
 // line and no re-statement, because its match set is truncated. st and mapCache
@@ -134,7 +134,7 @@ func (s *Scout) tickOversizeWindow(ctx context.Context, count int) bool {
 	return s.closeDegradedTick(ctx, "window-oversize", nil, nil, "window_entries", count)
 }
 
-// tickMappingUnusable closes a tick with no usable Fribb index - CAUSE: mapping
+// tickMappingUnusable closes a tick with no usable mapping index - CAUSE: mapping
 // unusable. No upstream streak advances (the mapping loader's own persisted
 // streak was already advanced by the load), the refreshed cache IS persisted so
 // that streak survives a restart, and the line carries reason=mapping-unusable.
@@ -256,8 +256,8 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 			// SeaDex. The symmetric sibling of the probe's arm in tick.
 			return s.tickInterrupted(ctx, "during the change window fetch", &st, &mapCache)
 		}
-		// The mapping load above may have accepted a freshly revalidated Fribb body;
-		// the outcome persists it, because discarding it re-downloads ~5.9 MB.
+		// The mapping load above may have accepted a freshly revalidated animap body;
+		// the outcome persists it, because discarding it re-downloads ~2.3 MB.
 		return s.tickUnreadableUpstream(ctx,
 			"change window fetch failed; skipping tick", "window-fetch-failed", err,
 			&st, &mapCache, "window_entries", count)
@@ -311,21 +311,15 @@ func (s *Scout) saveTick(ctx context.Context, st *state.State, mapCache *mapping
 }
 
 // mappingWorthPersisting reports whether a refreshed mapping cache differs from
-// the persisted one in a way a future load would miss. Both upstreams are tested
-// the same way - validators plus a size, plus RejectedRefreshes for a refusal -
-// and BOTH fetch timestamps are excluded, which is the whole reason this exists:
+// the persisted one in a way a future load would miss: the validators plus a
+// size, plus RejectedRefreshes for a refusal. The fetch timestamp is excluded:
 // almost every tick gets a 304 and a fresh timestamp, so comparing whole Cache
-// values would report a change every tick and the skip would never fire. Omitting
-// the list's own two validators instead would leave a tick that accepted the XML
-// re-downloading it every cycle until the reconcile persisted it.
+// values would persist on every tick.
 func mappingWorthPersisting(prev, next *mapping.Cache) bool {
 	return prev.ETag != next.ETag ||
 		prev.LastModified != next.LastModified ||
 		len(prev.Records) != len(next.Records) ||
-		prev.RejectedRefreshes != next.RejectedRefreshes ||
-		prev.MappingsETag != next.MappingsETag ||
-		prev.MappingsLastModified != next.MappingsLastModified ||
-		len(prev.Mappings) != len(next.Mappings)
+		prev.RejectedRefreshes != next.RejectedRefreshes
 }
 
 // evaluatedIDs is the tick's deletion-authority set: the AniList IDs this window

@@ -543,7 +543,7 @@ func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.
 	snap := library.Snapshot{}
 
 	handled, healthy, shrunkArrs := s.handlePreCompareGate(t.Context(), &st, &snap, &mapCache, nil,
-		cycleOutcomes{mapping: errors.New("fribb down"), seadex: errors.New("seadex down")})
+		cycleOutcomes{mapping: errors.New("mapping down"), seadex: errors.New("seadex down")})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
@@ -675,7 +675,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 // cycle-completion save: the memo is what makes a cold rebuild a rare one-time
 // event (a cold cycle costs ~9 batched requests against ~1704 unmemoized), so
 // a completed cycle must persist the lookups it resolved. The entry with no
-// Fribb record is the one that consults AniList, and its definitive answer
+// mapping record is the one that consults AniList, and its definitive answer
 // must be in the persisted memo afterwards.
 func TestCycleCompletedCyclePersistsAniListMemo(t *testing.T) {
 	logger := scoutTestLogger()
@@ -987,7 +987,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 	feed := &fakeFeed{}
 	store := &fakeStore{st: state.State{
 		// Records present but fetched beyond the 1h refresh window, with the
-		// Fribb URL unreachable: Load returns the cached index wrapped in a
+		// mapping URL unreachable: Load returns the cached index wrapped in a
 		// *mapping.StaleMapError.
 		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
 	}}
@@ -1399,7 +1399,7 @@ func reportSummaryCounter(recorder *capture.Recorder, key string) (int64, bool) 
 
 // cancellingMappingTransport cancels the shared cycle context from inside the
 // mapping loader's refresh request and fails it, modelling a SIGTERM/redeploy
-// landing while the Fribb conditional GET is in flight.
+// landing while the mapping conditional GET is in flight.
 type cancellingMappingTransport struct{ cancel context.CancelFunc }
 
 func (c cancellingMappingTransport) RoundTrip(*http.Request) (*http.Response, error) {
@@ -1407,12 +1407,12 @@ func (c cancellingMappingTransport) RoundTrip(*http.Request) (*http.Response, er
 	return nil, context.Canceled
 }
 
-// TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb pins the mapping arm
+// TestCycleShutdownDuringMappingLoadWarnsShutdownNotMapping pins the mapping arm
 // of the misattribution contract: when the cycle context is cancelled while
-// the Fribb refresh is in flight (a redeploy), the cycle must log the shutdown
+// the mapping refresh is in flight (a redeploy), the cycle must log the shutdown
 // interruption instead of "mapping degraded" (which would blame a healthy
 // upstream), stay healthy, emit no completion line, and preserve findings.
-func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
+func TestCycleShutdownDuringMappingLoadWarnsShutdownNotMapping(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logger, recorder := capture.New()
@@ -1434,7 +1434,7 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 		t.Fatal("Cycle healthy=false, want true (a shutdown during the mapping load is not an arr failure)")
 	}
 	if n := recorder.CountExact("mapping degraded"); n != 0 {
-		t.Errorf("'mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
+		t.Errorf("'mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a mapping fault)", n)
 	}
 	if n := recorder.CountExact("mapping unusable; skipping comparison, findings re-stated unchanged this cycle"); n != 0 {
 		t.Errorf("shutdown misattributed to an unusable map %d times, want 0", n)
@@ -1743,7 +1743,7 @@ func TestCycleAniListDegradedWinsMappingStaleCompletionLine(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
 		// Records present but fetched beyond the 1h refresh window, with the
-		// Fribb URL unreachable: the map loads stale-but-usable (a
+		// mapping URL unreachable: the map loads stale-but-usable (a
 		// *mapping.StaleMapError), while the unmapped SeaDex entry's needed
 		// AniList lookup fails transiently in the same cycle.
 		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
@@ -1878,7 +1878,7 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 }
 
 // TestLoadMappingEscalatesOnTerminalNon2xxStreak pins the operator boundary: a
-// status whose only remedy is the operator (a 404 or 410 on the fixed Fribb URL)
+// status whose only remedy is the operator (a 404 or 410 on the fixed mapping URL)
 // advances the persisted rejection streak, so a permanently refusing upstream
 // escalates the mapping log from WARN to ERROR once the streak reaches
 // degradation.TickEscalationThreshold consecutive cycles. The come-back-later row

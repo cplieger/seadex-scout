@@ -7,7 +7,7 @@ This page explains how seadex-scout checks your library, matches shows to SeaDex
 seadex-scout runs one full pass when it starts and every 24 hours after that. A full pass has four steps:
 
 1. It reads the Sonarr and Radarr anime library, honouring the `arr_tags` include and exclude lists, and records each item's current release. That record holds the release group, resolution, codec, whether it is a remux or an encode, and whether it has dual audio.
-2. It matches each SeaDex entry to a library item by AniList ID, through the [Fribb anime-lists](https://github.com/Fribb/anime-lists) ID mapping. Entries that do not map fall back to an AniList title match.
+2. It matches each SeaDex entry to a library item by AniList ID, through the [animap](https://github.com/cplieger/animap) ID map. Entries that do not map fall back to an AniList title match.
 3. It filters SeaDex's recommended releases by your settings for remuxes, AnimeBytes and dual audio.
 4. It compares the recommendation that is left with what you have, and logs a `warn` line when SeaDex has something better.
 
@@ -19,7 +19,7 @@ When the indexer is configured, the same pass rebuilds it from the same SeaDex d
 
 For every anime with a SeaDex match, the report says which release you have. It also says whether that is SeaDex's best, a listed alternative, or neither.
 
-The report works per season. Each SeaDex entry covers one AniList ID, which is one cour, movie or special. seadex-scout places the entry in its TVDB season through the Fribb mapping. It then compares the entry with the groups on disk for that season. Each row gets one of these verdicts:
+The report works per season. Each SeaDex entry covers one AniList ID, which is one cour, movie or special. seadex-scout places the entry in its TVDB season through the animap ID map. It then compares the entry with the groups on disk for that season. Each row gets one of these verdicts:
 
 | Verdict | Meaning |
 | --- | --- |
@@ -31,7 +31,7 @@ The report works per season. Each SeaDex entry covers one AniList ID, which is o
 | `unverified` | Files are present, but one side has no release group, or the files could not be read. Two untagged sides count as a match. |
 | `unattributed` | Unmapped specials. A film or special in Sonarr's season 0 that no file is tied to. The indexer offers it, and your profile decides. |
 
-A trailing `not_on_seadex` section lists the library items recognized as anime, through the Fribb list, that no comparable SeaDex entry covers. It shows which of your titles have no recommendation to compare against. That includes an item whose only SeaDex entries are films or specials the app offers without comparing. A row there means nothing comparable covers those files, which is not always the same as SeaDex never having heard of the show. A `not_on_seadex` row links only the library item, because it has no comparable SeaDex entry.
+A trailing `not_on_seadex` section lists the library items recognized as anime, through the animap ID map, that no comparable SeaDex entry covers. It shows which of your titles have no recommendation to compare against. That includes an item whose only SeaDex entries are films or specials the app offers without comparing. A row there means nothing comparable covers those files, which is not always the same as SeaDex never having heard of the show. A `not_on_seadex` row links only the library item, because it has no comparable SeaDex entry.
 
 Every other row links the Sonarr or Radarr item, the SeaDex entry, and each best release.
 
@@ -51,15 +51,17 @@ SeaDex keys everything on AniList IDs. Sonarr keys on TVDB IDs, and Radarr on TM
 
 ### ID mapping
 
-The Fribb `anime-list-mini.json` file maps each `anilist_id` to a `type`, TV or movie, and to `tvdb_id`, `themoviedb_id` and `imdb_id`. The `type` decides which app is tried first. A movie is looked up by TMDB movie ID, then IMDb ID, in Radarr. Anything else is looked up by TVDB ID in Sonarr. A film you do not have in Radarr then falls back to its `tvdb_id`, which is the series TVDB files the film under, so it links in Sonarr instead of being lost.
+The [animap](https://github.com/cplieger/animap) file `animap.json` maps each `anilist_id` to a `type`, such as TV or movie, and to a TVDB ID, TMDB movie IDs and IMDb IDs. The `type` decides which app is tried first. A movie is looked up by TMDB movie ID, then IMDb ID, in Radarr. Anything else is looked up by TVDB ID in Sonarr. A film you do not have in Radarr then falls back to its TVDB ID, which is the series TVDB files the film under, so it links in Sonarr instead of being lost.
+
+Every full pass and every quick check that downloads SeaDex changes asks GitHub whether a new `animap.json` was released, and downloads the file only when it changed. A quick check that downloads none does not ask, so seadex-scout picks up a new release within 24 hours at most. The last good copy is kept in `state.json`, so seadex-scout keeps matching through a GitHub outage. A new file that fails its safety checks, such as one that lost most of its records, is refused and the last good copy stays in use.
 
 ### Episode mapping
 
-The Anime-Lists `anime-list-master.xml` mapping list, joined on the record's `anidb_id`, adds two facts Fribb drops. The first is which TVDB season 0 episode a film filed under a series is. That lets the indexer offer such a film to Sonarr under a title it can match. The second is which TVDB seasons an absolute-numbered run's episodes fall in. That lets a pack with no season in its file names carry its season, and lets the report judge a split show against its own seasons.
+Each record's mapping list in `animap.json` adds two facts. A record finds its list by its AniDB ID. A special that AniDB files under another anime has no AniDB ID of its own, so it finds its list by its AniList ID. The first is which TVDB season 0 episode a film filed under a series is. That lets the indexer offer such a film to Sonarr under a title it can match. The second is which TVDB seasons an absolute-numbered run's episodes fall in. That lets a pack with no season in its file names carry its season, and lets the report judge a split show against its own seasons.
 
 ### Overrides
 
-To pin the entries Fribb misses, put a `/config/overrides.json` beside the config. It is a JSON array of records keyed by `anilist_id`, applied ahead of Fribb, and the file is optional. Each record takes these fields:
+To pin an entry the ID map misses or gets wrong, put a `/config/overrides.json` beside the config. It is a JSON array of records keyed by `anilist_id`, applied ahead of animap, and the file is optional. Each record takes these fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -68,17 +70,17 @@ To pin the entries Fribb misses, put a `/config/overrides.json` beside the confi
 | `tvdb_id` | The TVDB series ID. |
 | `tmdb_movies` | An array of TMDB movie IDs, as numbers. |
 | `imdb_ids` | An array of IMDb IDs, as strings. |
-| `anidb_id` | The key that joins the Anime-Lists mapping list. The episode and season facts still come from that list. |
+| `anidb_id` | The AniDB ID whose mapping list the entry uses. The episode and season facts still come from animap. |
 | `season_tvdb` | The TVDB season to compare against. |
 | `season_kind` | Whether upstream maps a TVDB season for the entry at all, `present` or `absent`. |
 
 With `season_kind: present`, a positive `season_tvdb` compares against that season. A `season_tvdb` of 0 means the entry lands in Sonarr's season 0, where the indexer offers it but nothing compares it. With `season_kind: absent`, the entry is judged against the whole series. Leave `season_kind` out and a positive `season_tvdb` still picks that season. Only an entry without one is routed by its `type`.
 
-These are not the Fribb field names. Fribb's `imdb_id`, `themoviedb_id` and `season` are ignored with a warning naming the key. An override replaces the whole mapping record for its `anilist_id`, with no field-by-field merge. When you correct an entry Fribb already has, restate every field the entry needs.
+These are the only field names read. Other spellings, such as `imdb_id`, `themoviedb_id` and `season`, are ignored with a warning naming the key. An override replaces the whole mapping record for its `anilist_id`, with no field-by-field merge. When you correct an entry animap already has, restate every field the entry needs.
 
 ### Title fallback
 
-When an entry maps through neither list, seadex-scout fetches its titles and format from AniList and tries a careful title-plus-year match against your library. The match must be exact and have a single candidate. An ambiguous match is skipped rather than guessed.
+When an entry is not in the ID map, seadex-scout fetches its titles and format from AniList and tries a careful title-plus-year match against your library. The match must be exact and have a single candidate. An ambiguous match is skipped rather than guessed.
 
 ## Release classification
 

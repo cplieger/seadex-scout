@@ -41,7 +41,7 @@ services:
     # or the container restarts in a loop. If you set PUID and PGID in .env, use those numbers.
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
-      - SONARR_URL  # from .env, the address you open Sonarr at, such as http://192.168.1.10:8989
+      - SONARR_URL  # from .env, the address you open Sonarr at, such as http://192.0.2.10:8989
       - SONARR_API_KEY  # from .env, found in Sonarr under Settings, General, API Key
       - RADARR_URL  # optional, set both RADARR_ lines in .env to add Radarr
       - RADARR_API_KEY
@@ -56,7 +56,7 @@ services:
 2. Create a file named `.env` beside `compose.yaml` with these two lines:
 
    ```sh
-   SONARR_URL=http://192.168.1.10:8989
+   SONARR_URL=http://192.0.2.10:8989
    SONARR_API_KEY=your-sonarr-api-key
    ```
 
@@ -162,6 +162,7 @@ seadex-scout writes JSON logs to standard output and has no metrics endpoint. Ni
 
 ## Credits
 
+- The anime ID map comes from [animap](https://github.com/cplieger/animap). `animap.json` is made available under the [Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/), and its contents under the [Database Contents License (DbCL) 1.0](https://opendatacommons.org/licenses/dbcl/1-0/). It contains information from [anime-offline-database](https://github.com/cedya77/anime-offline-database), made available under the ODbL 1.0 and the DbCL 1.0, from [Anime-Lists](https://github.com/Anime-Lists/anime-lists), and episode counts from [AniDB](https://anidb.net), read through [AnimeAggregations](https://github.com/notseteve/AnimeAggregations).
 - The way seadex-scout compares the release groups in a Sonarr or Radarr anime library with SeaDex follows [seadexarr](https://github.com/bbtufty/seadexarr).
 - The indexer reads a release's tracker ID from its page URL and accepts only an ID made of digits. Both rules follow [seadexerr](https://github.com/Ryder-C/seadexerr), a Prowlarr indexer for SeaDex releases.
 

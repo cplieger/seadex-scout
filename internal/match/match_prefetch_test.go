@@ -42,7 +42,7 @@ func TestPrefetchNegativelyMemoizesOnCompleteBatch(t *testing.T) {
 	}
 }
 
-// TestMatchNoRecordEntryRidesBatchPrefetch pins that an entry with NO Fribb
+// TestMatchNoRecordEntryRidesBatchPrefetch pins that an entry with NO mapping
 // record (the other batch trigger, beside the id-less record
 // TestMatchBatchesAniListLookups pins) is resolved through the batch prefetch:
 // one FetchMany pre-warms the memo and the per-entry pass makes zero single
@@ -51,7 +51,7 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 5, Title: "Clannad", TvdbID: 700, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil) // no Fribb record at all: the no-record trigger
+	idx := mapping.NewIndex(nil) // no mapping record at all: the no-record trigger
 	fake := &batchCountingAniList{media: map[int]anilist.Media{
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}

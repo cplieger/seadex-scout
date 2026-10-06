@@ -4,13 +4,13 @@ This page shows how to turn on seadex-scout's optional indexer, a [Torznab feed]
 
 ## 1. Point the feed at Prowlarr
 
-In Prowlarr, add **Nyaa** and **AnimeBytes** as indexers if you have not. Each indexer's page shows its **Torznab Url**, such as `http://192.168.1.10:9696/1/api`. Its host must be an address seadex-scout can reach, such as Prowlarr's LAN address, not `localhost`. Copy both, and copy Prowlarr's API key from Prowlarr, Settings, General. Fill in the `indexer` section of `config.yaml` and restart:
+In Prowlarr, add **Nyaa** and **AnimeBytes** as indexers if you have not. Each indexer's page shows its **Torznab Url**, such as `http://192.0.2.10:9696/1/api`. Its host must be an address seadex-scout can reach, such as Prowlarr's LAN address, not `localhost`. Copy both, and copy Prowlarr's API key from Prowlarr, Settings, General. Fill in the `indexer` section of `config.yaml` and restart:
 
 ```yaml
 indexer:
   feed_api_key: "a-random-string"                     # generate with: openssl rand -hex 16
-  nyaa_torznab_url: "http://192.168.1.10:9696/1/api"  # "" disables Nyaa
-  ab_torznab_url: "http://192.168.1.10:9696/2/api"    # "" disables AnimeBytes
+  nyaa_torznab_url: "http://192.0.2.10:9696/1/api"  # "" disables Nyaa
+  ab_torznab_url: "http://192.0.2.10:9696/2/api"    # "" disables AnimeBytes
   prowlarr_api_key: "${SEADEX_SCOUT_PROWLARR_KEY}"    # secret, never logged
   ab_passkey: "${SEADEX_SCOUT_AB_PASSKEY}"            # AnimeBytes passkey; required for the AB RSS feed, "" leaves it off
 ```
@@ -34,7 +34,7 @@ The RSS check lists only releases SeaDex picks after seadex-scout first starts. 
 
 In Sonarr or Radarr, open Settings, Indexers, Add, and pick **Torznab** under Custom. Fill in these fields:
 
-- The feed is per tracker. Set **URL** to the address Sonarr reaches seadex-scout at, with `/nyaa` for Nyaa and `/ab` for AnimeBytes, such as `http://192.168.1.10:9118/nyaa` and `http://192.168.1.10:9118/ab`, as two Torznab indexers. If Sonarr shares a Docker network with seadex-scout, `http://seadex-scout:9118/nyaa` works too. There is no combined endpoint. A path per tracker lets you choose each tracker's search types on its own, as [Per-tracker search gating](#per-tracker-search-gating) shows.
+- The feed is per tracker. Set **URL** to the address Sonarr reaches seadex-scout at, with `/nyaa` for Nyaa and `/ab` for AnimeBytes, such as `http://192.0.2.10:9118/nyaa` and `http://192.0.2.10:9118/ab`, as two Torznab indexers. If Sonarr shares a Docker network with seadex-scout, `http://seadex-scout:9118/nyaa` works too. There is no combined endpoint. A path per tracker lets you choose each tracker's search types on its own, as [Per-tracker search gating](#per-tracker-search-gating) shows.
 - Set **API Key** to the `indexer.feed_api_key` from step 1.
 - Set **Categories** to `5070` (Anime) in Sonarr and `2000` (Movies) in Radarr.
 - Tick **Anime Standard Format Search**. This is required. It makes Sonarr send the whole-season search the feed answers. Without it, Sonarr sends only single-episode searches, which the feed ignores, and you get nothing.

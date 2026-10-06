@@ -616,7 +616,7 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 // ReportScoped's deletion authority from exactly that set: publishing it would
 // tell the notifier that entries the tick never finished evaluating are resolved.
 // No completion line either, since an interrupted pass did not complete. It must
-// still persist: discarding the revalidated Fribb validators re-downloads ~5.9 MB
+// still persist: discarding the revalidated mapping validators re-downloads ~2.3 MB
 // on the next boot, and the refresh-rejection streak must survive a restart.
 func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) {
 	logger, recorder := capture.New()
@@ -662,7 +662,7 @@ func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) 
 		t.Errorf("the interrupted tick emitted %d new 'findings reported' summaries, want 0: publishing a truncated match set would resolve rows for entries it never finished evaluating", n)
 	}
 	if store.saves != savesAfterSeed+1 {
-		t.Errorf("saves = %d, want %d: a shutdown declines the completion line, never the persistence - the revalidated Fribb validators and the rejection streak the mapping escalation reads must survive the restart",
+		t.Errorf("saves = %d, want %d: a shutdown declines the completion line, never the persistence - the revalidated mapping validators and the rejection streak the mapping escalation reads must survive the restart",
 			store.saves, savesAfterSeed+1)
 	}
 	// The one thing a tick must never write, on this exit as on every other.
@@ -1230,11 +1230,11 @@ func (m *rejectingAfterFirstMapping) Load(_ context.Context, prev *mapping.Cache
 	}
 	c := *prev
 	c.RejectedRefreshes = prev.RejectedRefreshes + 1
-	return c, nil, errors.New("fribb refresh refused: indexes to no usable records")
+	return c, nil, errors.New("mapping refresh refused: indexes to no usable records")
 }
 
 // TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow pins three contracts
-// that are all silent when they break. With no usable Fribb index nothing can be
+// that are all silent when they break. With no usable mapping index nothing can be
 // matched, so comparing anyway would hand ReportScoped an empty finding set with
 // authority over every entry the window carried and resolve conditions still true.
 // The scan deadman needs the degraded completion line with
@@ -1260,7 +1260,7 @@ func TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow(t *testing.T) {
 	savesAfterSeed := store.saves
 
 	if healthy := s.Cycle(t.Context()); !healthy {
-		t.Fatal("tick healthy=false, want true (a restart cannot fix a Fribb outage)")
+		t.Fatal("tick healthy=false, want true (a restart cannot fix a mapping outage)")
 	}
 
 	if reasons := tickDegradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
@@ -1299,7 +1299,7 @@ func (revalidatingMapping) Load(_ context.Context, prev *mapping.Cache) (mapping
 }
 
 // refreshingMapping is a mapping loader that reports a NEW validator on every
-// call, i.e. an accepted Fribb refresh rather than a 304. It is the real trigger
+// call, i.e. an accepted mapping refresh rather than a 304. It is the real trigger
 // for the write the skip below must not suppress.
 type refreshingMapping struct{ calls int }
 
@@ -1369,19 +1369,17 @@ func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 	}
 }
 
-// TestMappingWorthPersistingReadsTheMappingListValidators pins the second
-// upstream's half of the skip: a changed mapping-list validator alone is worth a
-// write (otherwise a tick that accepted the 3.5 MB list re-downloads it every
-// cycle until the reconcile), while a bumped MappingsFetchedAt alone is the 304
-// case and is not.
-func TestMappingWorthPersistingReadsTheMappingListValidators(t *testing.T) {
+// TestMappingWorthPersisting pins the tick's write skip: a changed validator, a
+// changed record count or a moved rejection streak is worth a write (otherwise
+// a tick that accepted a new body re-downloads it every cycle until the
+// reconcile), while a bumped FetchedAt alone is the 304 case and is not.
+func TestMappingWorthPersisting(t *testing.T) {
 	base := func() mapping.Cache {
 		return mapping.Cache{
-			ETag:              "fribb-v1",
-			Records:           []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-			Mappings:          map[int]mapping.Mapping{7: {SpecialEpisode: 2}},
-			MappingsETag:      "list-v1",
-			MappingsFetchedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+			FetchedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+			ETag:      "animap-v1",
+			Records:   []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+			Mappings:  map[int]mapping.Mapping{7: {SpecialEpisode: 2}},
 		}
 	}
 	tests := []struct {
@@ -1390,10 +1388,11 @@ func TestMappingWorthPersistingReadsTheMappingListValidators(t *testing.T) {
 		want   bool
 	}{
 		{name: "unchanged", mutate: func(*mapping.Cache) {}, want: false},
-		{name: "only_mappings_fetched_at_moved", mutate: func(c *mapping.Cache) { c.MappingsFetchedAt = time.Now() }, want: false},
-		{name: "mappings_etag_changed", mutate: func(c *mapping.Cache) { c.MappingsETag = "list-v2" }, want: true},
-		{name: "mappings_last_modified_changed", mutate: func(c *mapping.Cache) { c.MappingsLastModified = "Mon, 02 Jan 2006 15:04:05 GMT" }, want: true},
-		{name: "mappings_size_changed", mutate: func(c *mapping.Cache) { c.Mappings[8] = mapping.Mapping{SpecialEpisode: 1} }, want: true},
+		{name: "only_fetched_at_moved", mutate: func(c *mapping.Cache) { c.FetchedAt = time.Now() }, want: false},
+		{name: "etag_changed", mutate: func(c *mapping.Cache) { c.ETag = "animap-v2" }, want: true},
+		{name: "last_modified_changed", mutate: func(c *mapping.Cache) { c.LastModified = "Mon, 02 Jan 2006 15:04:05 GMT" }, want: true},
+		{name: "record_count_changed", mutate: func(c *mapping.Cache) { c.Records = append(c.Records, mapping.Record{AniListID: 2}) }, want: true},
+		{name: "rejection_streak_moved", mutate: func(c *mapping.Cache) { c.RejectedRefreshes = 1 }, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

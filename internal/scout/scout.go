@@ -72,14 +72,14 @@ type StateStore interface {
 // The concrete file-backed store must keep satisfying the cycle's seam.
 var _ StateStore = (*state.Store)(nil)
 
-// MappingSource supplies the Fribb mapping cache and index a cycle (or a one-shot
+// MappingSource supplies the mapping cache and index a cycle (or a one-shot
 // report) loads from the persisted cache. It is the consumer-side seam over
 // *mapping.Loader, so orchestration tests can supply mapping outcomes with a fake.
 type MappingSource interface {
 	Load(ctx context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error)
 }
 
-// The concrete Fribb loader must keep satisfying the cycle's seam.
+// The concrete mapping loader must keep satisfying the cycle's seam.
 var _ MappingSource = (*mapping.Loader)(nil)
 
 // Deps are the assembled components a Scout runs a compare CYCLE with. Every
@@ -335,7 +335,7 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		return false
 	}
 
-	// The shared SeaDex + Fribb snapshot feeds BOTH halves: the Torznab feed and
+	// The shared SeaDex + animap snapshot feeds BOTH halves: the Torznab feed and
 	// the compare pass, so a notification and what the arrs see stay on one fetch.
 	mapCache, idx, mapErr := s.loadMapping(ctx, &st)
 	entries, seaErr := s.seadex.FetchEntries(ctx, seadexapi.Options{Mode: seadexapi.FetchFull})
@@ -415,7 +415,7 @@ func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 	s.log.Error("library walk failed; cycle unhealthy", attrs...)
 	// Alert-only (no Torznab feed): a failed walk is unhealthy and nothing else
 	// remains, so emit the completion line here - the ERROR above carries the
-	// fault. With a feed configured, fall through to refresh it from SeaDex + Fribb.
+	// fault. With a feed configured, fall through to refresh it from SeaDex + animap.
 	if s.feed == nil {
 		s.cycleGateDegraded("walk-failed", attrs...)
 		return true
@@ -458,12 +458,12 @@ func logSafeUpstreamError(err error) error {
 	return errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
 }
 
-// loadMapping refreshes the Fribb map from the persisted cache, logging a
-// degraded load once. A cancelled load is the shutdown, not a Fribb fault. The
+// loadMapping refreshes the mapping from the persisted cache, logging a
+// degraded load once. A cancelled load is the shutdown, not a mapping fault. The
 // degraded log is WARN, escalating to ERROR once the loader's acceptance guards
 // have rejected degradation.TickEscalationThreshold consecutive refreshes: that
-// state re-downloads the ~5.9MB body every cycle and never self-heals. The streak
-// is read off the returned Cache, so this stays the single log site.
+// state never self-heals. The streak is read off the returned Cache, so this
+// stays the single log site.
 func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache, *mapping.Index, error) {
 	mapCache, idx, mapErr := s.mapping.Load(ctx, &st.Mapping)
 	key := standingKey{cond: degradation.MappingRefreshRejected}
@@ -761,7 +761,7 @@ func mapUsable(mapErr error) bool {
 }
 
 // rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared SeaDex
-// snapshot, independent of the arr walk (the feed needs only SeaDex + Fribb +
+// snapshot, independent of the arr walk (the feed needs only SeaDex + animap +
 // persisted state, so an arr outage must not freeze it). It is a no-op when no
 // feed is configured, the SeaDex fetch failed, or the map is unusable - the
 // last-good feed is then kept, because rebuilding against an unusable map would
@@ -865,7 +865,7 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, mapCache *mapping.Cache, errs cycleOutcomes) (handled, healthy bool) {
 	if errs.walk != nil {
 		// Persist only the refreshed mapping cache: discarding it re-downloads an
-		// updated Fribb body next cycle. Findings, memo and the prior snapshot stay.
+		// updated animap body next cycle. Findings, memo and the prior snapshot stay.
 		st.Mapping = *mapCache
 		s.save(ctx, st)
 		// The cycle ran to its degraded end, so emit the completion line the deadman

@@ -10,7 +10,7 @@ With no connection variable set, the first start still writes the file and then 
 
 An unknown or misplaced key stops the start with an error that names it, such as `unknown configuration key "anime_bytes"`. A typo fails at once instead of being silently ignored.
 
-The addresses of SeaDex, Fribb, Anime-Lists and AniList, how often they are asked, and the file locations under `/config` are fixed. They are not config keys, so the file holds only what you tune.
+The addresses of SeaDex, animap and AniList, how often they are asked, and the file locations under `/config` are fixed. They are not config keys, so the file holds only what you tune.
 
 ## Environment variables
 
@@ -51,7 +51,7 @@ Defaults are the values the starter file ships.
 | `arr_tags.exclude` | `[]` | Never check items with one of these tags. An exclude wins over an include. |
 | `report.dir` | `/config/reports` | Where each report pair is written. |
 | `indexer.feed_api_key` | _(generated on first start)_ | The key Sonarr and Radarr send and the feed checks. No spaces and no `$`. |
-| `indexer.nyaa_torznab_url` | _(unset)_ | Prowlarr's Nyaa Torznab URL, such as `http://192.168.1.10:9696/1/api`. Empty turns Nyaa off. |
+| `indexer.nyaa_torznab_url` | _(unset)_ | Prowlarr's Nyaa Torznab URL, such as `http://192.0.2.10:9696/1/api`. Empty turns Nyaa off. |
 | `indexer.ab_torznab_url` | _(unset)_ | Prowlarr's AnimeBytes Torznab URL. Empty turns AnimeBytes off. |
 | `indexer.prowlarr_api_key` | _(unset)_ | Prowlarr's API key. Secret, never logged. |
 | `indexer.ab_passkey` | _(unset)_ | AnimeBytes passkey for the AnimeBytes RSS download links, 32, 48 or 56 characters. Empty turns AnimeBytes RSS off. Nyaa needs none. |

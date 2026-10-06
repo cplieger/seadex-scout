@@ -1,8 +1,8 @@
 // Package mapping bridges AniList IDs (what SeaDex keys on) to the arr IDs
-// Sonarr and Radarr key on (TVDB, TMDB, IMDb), using the Fribb anime-lists
-// dataset plus a local overrides file the operator can pin misses in.
+// Sonarr and Radarr key on (TVDB, TMDB, IMDb), using the animap dataset plus a
+// local overrides file the operator can pin misses in.
 //
-// The Fribb file is fetched with a conditional GET and cached; overrides are
+// animap.json is fetched with a conditional GET and cached; overrides are
 // re-read every load and overlaid on top, so an operator entry always wins.
 package mapping
 
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,38 +30,34 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
-// DefaultURL is the Fribb anime-list-mini.json endpoint - the AniList<->arr ID bridge.
-const DefaultURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
-
 const (
-	// DefaultRefresh is the reuse-if-fresh window for the Fribb map. 0 revalidates
-	// every cycle: a conditional GET makes an unchanged map a cheap 304, while a
-	// change is picked up within one cycle. A failed revalidation is harmless -
-	// the persisted cache is reused stale-on-error and the next cycle retries.
+	// DefaultRefresh is the reuse-if-fresh window for the map. 0 revalidates on
+	// every Loader.Load: a conditional GET makes an unchanged map a cheap 304, and
+	// a new release is picked up on the next load. A failed revalidation is
+	// harmless - the persisted cache is reused stale-on-error and the next load
+	// retries.
 	DefaultRefresh = 0
 
-	// maxMapBytes bounds the Fribb download before decode (~2.7x the real ~5.9MB body).
-	maxMapBytes = 16 << 20
+	// maxMapBytes bounds the download before decode: ~5x the real 2.3 MB body,
+	// and animap's own encode bound, so no document animap can publish is refused.
+	maxMapBytes = 12 << 20
 	// maxOverrideBytes bounds the local overrides file.
 	maxOverrideBytes = 4 << 20
 	maxAttempts      = 3
 	baseDelay        = time.Second
 )
 
-// Loader fetches and caches the Fribb map and overlays the overrides file. With
-// a ListLoader attached (WithMappingList) it also revalidates the Anime-Lists
-// mapping-list on every Load and attaches it to the served Index.
+// Loader fetches and caches animap.json and overlays the overrides file.
 type Loader struct {
 	http          *http.Client
 	log           *slog.Logger
-	list          *ListLoader
 	url           string
 	overridesPath string
 	refresh       time.Duration
 }
 
-// SeasonKind reports whether the upstream row carried a season.tvdb member at
-// all, which is a different question from which season it names: an absent member
+// SeasonKind reports whether the upstream record carried a TVDB season at all,
+// which is a different question from which season it names: an absent season
 // and a mapped zero mean opposite things and both decode to SeasonTvdb 0.
 //
 // Three constants, so the pair (mapped-positive, SeasonTvdb 0) is unrepresentable
@@ -68,14 +65,15 @@ type Loader struct {
 type SeasonKind string
 
 const (
-	// SeasonUnknown is the zero value, and exactly one producer reaches it: a
-	// Record persisted before this field existed. The Fribb decoder sets the kind
-	// explicitly on both arms, so unknown never means "the upstream was odd".
+	// SeasonUnknown is the zero value: a Record no upstream record produced (an
+	// override naming no season_kind, a format-only Record). The animap decoder
+	// sets the kind explicitly on both arms, so unknown never means "the
+	// upstream was odd".
 	SeasonUnknown SeasonKind = ""
-	// SeasonPresent means the row carried season.tvdb as a JSON number >= 0, so
-	// SeasonTvdb is what Fribb said - zero included.
+	// SeasonPresent means the record carried tvdb_season >= 0, so SeasonTvdb is
+	// what animap said - zero included.
 	SeasonPresent SeasonKind = "present"
-	// SeasonAbsent means the row carried no usable season.tvdb member.
+	// SeasonAbsent means the record carried no tvdb_season.
 	SeasonAbsent SeasonKind = "absent"
 )
 
@@ -87,13 +85,10 @@ const (
 // decodeOverrideRecord, whose switch restates these eight names as literals.
 // Adding, renaming or removing a field here REQUIRES the matching edit there.
 type Record struct {
-	Type string `json:"type"`
-	// SeasonKind is additive under a NEW json key, per the retired-key rule: its
-	// zero value reads unknown, which is what every record in a state.json
-	// written before this field existed carries.
+	Type       string     `json:"type"`
 	SeasonKind SeasonKind `json:"season_kind,omitempty"`
 	IMDbIDs    []string   `json:"imdb_ids,omitempty"`
-	// TmdbMovies is the record's themoviedb_id.movie list, decoded for EVERY
+	// TmdbMovies is the record's tmdb_movie_ids list, decoded for EVERY
 	// record type and read by the ID bridge regardless of the type label: a TMDB
 	// movie id is a Radarr id by construction. Deliberately NOT the IMDb list,
 	// since TVDB reuses a film's IMDb id on the parent series. Canonical form
@@ -101,14 +96,14 @@ type Record struct {
 	TmdbMovies []int `json:"tmdb_movies,omitempty"`
 	AniListID  int   `json:"anilist_id"`
 	TvdbID     int   `json:"tvdb_id,omitempty"`
-	// AniDBID is the join key into the Anime-Lists mapping-list (Cache.Mappings),
-	// additive under a NEW json key; 0 means absent. It routes nothing: an
-	// override naming it points at the list's facts, it never carries them.
+	// AniDBID is the join key into the mapping-list facts (Cache.Mappings); 0
+	// means absent. It routes nothing: an override naming it points at the
+	// list's facts, it never carries them.
 	AniDBID    int `json:"anidb_id,omitempty"`
 	SeasonTvdb int `json:"season_tvdb,omitempty"`
 }
 
-// IsMovie reports whether the entry maps to a Radarr movie (Fribb type MOVIE).
+// IsMovie reports whether the entry maps to a Radarr movie (type MOVIE).
 // Every other type maps to a Sonarr series.
 func (r *Record) IsMovie() bool { return mediatype.IsMovie(r.Type) }
 
@@ -152,7 +147,7 @@ func (r *Record) HasArrIdentifier() bool {
 // turns specials off. A match with no type is treated as non-special.
 func (r *Record) IsSpecial() bool { return mediatype.IsSpecial(r.Type) }
 
-// HasMappedSeason reports whether the record carries a positive Fribb TVDB
+// HasMappedSeason reports whether the record carries a positive TVDB
 // season - the predicate season-exact comparison and the season floor key on.
 func (r *Record) HasMappedSeason() bool { return r.SeasonTvdb > 0 }
 
@@ -177,7 +172,7 @@ func canonicalSeasonKind(k SeasonKind) SeasonKind {
 // canonicalize applies Record's canonical field forms - the single home of the
 // rule both producers must agree on, so exact-key lookups and the reverse
 // arr-ID catalogue cannot see two differently-shaped Records for one anime.
-// Idempotent: on the Fribb path the tolerant decoders already emit these forms.
+// Idempotent.
 func (r *Record) canonicalize() {
 	r.Type = mediatype.Normalize(r.Type)
 	r.IMDbIDs = trimmed(r.IMDbIDs)
@@ -191,30 +186,29 @@ func (r *Record) canonicalize() {
 	r.SeasonKind = canonicalSeasonKind(r.SeasonKind)
 }
 
-// Cache is the persisted mapping state: the parsed Fribb records plus the HTTP
-// validators and timestamp needed for the next conditional GET.
+// Cache is the persisted mapping state: the parsed animap records and their
+// mapping-list facts, plus the HTTP validators and timestamp needed for the
+// next conditional GET. One document supplies all of it, so every accepted
+// refresh replaces records and facts together.
 type Cache struct {
 	FetchedAt time.Time `json:"fetched_at"`
-	// MappingsFetchedAt, Mappings, MappingsETag and MappingsLastModified are the
-	// Anime-Lists mapping-list, keyed by AniDB id, with its own validators and
-	// timestamp: a SECOND upstream on its own cadence, so a Fribb refresh never
-	// touches these four fields and a list refresh never touches Records. Never a
-	// field on Record, which every accepted Fribb 200 rebuilds wholesale. All four
-	// are additive under NEW json keys. Ordered for govet fieldalignment.
-	MappingsFetchedAt time.Time       `json:"mappings_fetched_at,omitzero"`
-	Mappings          map[int]Mapping `json:"mappings,omitempty"`
-	ETag              string          `json:"etag,omitempty"`
-	LastModified      string          `json:"last_modified,omitempty"`
+	// Mappings holds the mapping-list facts keyed by AniDB id: every record that
+	// carries one, AniList-keyed or not, so an override naming an AniDB id joins
+	// the facts animap publishes for it.
+	Mappings map[int]Mapping `json:"mappings,omitempty"`
+	// ParentMappings holds the facts of a record AniDB files as another anime's
+	// specials, keyed by AniList id: such a record carries no AniDB id of its own.
+	ParentMappings map[int]Mapping `json:"parent_mappings,omitempty"`
+	ETag           string          `json:"etag,omitempty"`
+	LastModified   string          `json:"last_modified,omitempty"`
 	// RefusedETag / RefusedLastModified are the validators of the last body a
 	// refresh REFUSED. While they are set the conditional GET asks about THAT
-	// body, so a persistent refusal costs one 304 per cycle instead of a ~5.9 MB
+	// body, so a persistent refusal costs one 304 per cycle instead of a ~2.3 MB
 	// download. Cleared by any accepted refresh and by a 304 that revalidates the
 	// accepted body; empty when the refusal carried no validators.
-	RefusedETag          string   `json:"refused_etag,omitempty"`
-	RefusedLastModified  string   `json:"refused_last_modified,omitempty"`
-	MappingsETag         string   `json:"mappings_etag,omitempty"`
-	MappingsLastModified string   `json:"mappings_last_modified,omitempty"`
-	Records              []Record `json:"records,omitempty"`
+	RefusedETag         string   `json:"refused_etag,omitempty"`
+	RefusedLastModified string   `json:"refused_last_modified,omitempty"`
+	Records             []Record `json:"records,omitempty"`
 	// RejectedRefreshes is the persisted streak of consecutive persistent refresh
 	// refusals, reset by any accepted refresh or a 304 that revalidates a USABLE
 	// cache. It is the ONE carrier: escalation and the logged
@@ -233,20 +227,27 @@ type Index struct {
 	// "does a SIBLING map this season" for a record that maps it too, which is
 	// the cour-split shape.
 	seasonsByTvdb map[int]map[int]int
-	// mappings is the Anime-Lists mapping-list keyed by AniDB id, reached only
-	// through MappingFor so the join key (Record.AniDBID) has one reader.
-	mappings map[int]Mapping
+	// mappings and parentMappings are Cache's two fact maps, reached only through
+	// MappingFor so the join keys have one reader. parentMappings is the index's
+	// own copy, because an override deletes its entry.
+	mappings       map[int]Mapping
+	parentMappings map[int]Mapping
 }
 
-// MappingFor returns what the Anime-Lists mapping-list says about rec, joined on
-// its AniDB id, and false for a record with no AniDB id or none the list knows.
-// An override record joins the same map: the override names the KEY and the
-// facts stay in the list.
+// MappingFor returns what the mapping list says about rec, and false when it
+// says nothing. A record with an AniDB id joins on it; one without joins on its
+// AniList id, which only a specials-of-parent record has facts under. An
+// override joins through the AniDB id it names: it replaces the upstream record
+// wholesale, its facts included.
 func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
-	if i == nil || rec == nil || rec.AniDBID <= 0 {
+	if i == nil || rec == nil {
 		return Mapping{}, false
 	}
-	m, ok := i.mappings[rec.AniDBID]
+	if rec.AniDBID > 0 {
+		m, ok := i.mappings[rec.AniDBID]
+		return m, ok
+	}
+	m, ok := i.parentMappings[rec.AniListID]
 	return m, ok
 }
 
@@ -318,14 +319,14 @@ func (i *Index) ForEachRecord(fn func(Record)) {
 // decodes and indexes in one pass. This exists so a test can index a handful of
 // hand-written Records without a file.
 func NewIndex(records []Record) *Index {
-	return buildIndex(records, nil)
+	return buildIndex(records, nil, nil)
 }
 
-// NewIndexWithMappings is NewIndex with the Anime-Lists mapping-list attached,
+// NewIndexWithMappings is NewIndex with AniDB-keyed mapping-list facts attached,
 // for the same reason NewIndex exists: a test of a MappingFor consumer needs an
 // Index carrying a hand-written map without a Loader or a file.
 func NewIndexWithMappings(records []Record, mappings map[int]Mapping) *Index {
-	return buildIndex(records, mappings)
+	return buildIndex(records, mappings, nil)
 }
 
 // deduplicateRecords returns one effective record per AniList ID, preserving
@@ -350,8 +351,8 @@ func deduplicateRecords(records []Record) []Record {
 // SeaDex lookups use positive AniList IDs, so a zero or negative key could
 // never resolve an entry). A later record with the same ID overwrites an
 // earlier one; overrides are applied on top afterwards. mappings is stored as
-// given (nil is a valid empty list).
-func buildIndex(records []Record, mappings map[int]Mapping) *Index {
+// given and parentMappings copied (nil is a valid empty map for either).
+func buildIndex(records []Record, mappings, parentMappings map[int]Mapping) *Index {
 	byAniList := make(map[int]Record, len(records))
 	for _, r := range records {
 		if r.AniListID > 0 {
@@ -376,7 +377,7 @@ func buildIndex(records []Record, mappings map[int]Mapping) *Index {
 		}
 		seasons[r.SeasonTvdb]++
 	}
-	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: mappings}
+	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: mappings, parentMappings: maps.Clone(parentMappings)}
 }
 
 // indexedRecordCount returns how many records survive into the served index
@@ -443,7 +444,6 @@ func populationCollapsed(prevCount, count, previousMinimum int) bool {
 // cfg holds the resolved tuning knobs for a Loader.
 type cfg struct {
 	logger        *slog.Logger
-	list          *ListLoader
 	overridesPath string
 	refresh       time.Duration
 }
@@ -452,7 +452,7 @@ type cfg struct {
 type Option func(*cfg)
 
 // WithOverridesPath points the loader at the local operator override file,
-// whose entries win over the Fribb map. Defaults to empty, which loads no
+// whose entries win over the animap records. Defaults to empty, which loads no
 // overrides; a configured path that is absent is not an error.
 func WithOverridesPath(path string) Option {
 	return func(c *cfg) { c.overridesPath = path }
@@ -470,15 +470,7 @@ func WithLogger(l *slog.Logger) Option {
 	return func(c *cfg) { c.logger = l }
 }
 
-// WithMappingList attaches the Anime-Lists mapping-list loader: every Load
-// revalidates the list after the Fribb refresh and the served Index answers
-// MappingFor from it. Defaults to nil, which loads no list and serves whatever
-// Mappings the persisted cache already carries. Last one wins.
-func WithMappingList(list *ListLoader) Option {
-	return func(c *cfg) { c.list = list }
-}
-
-// NewLoader returns a mapping loader reading the Fribb JSON source at url.
+// NewLoader returns a mapping loader reading the animap.json document at url.
 // httpClient must be non-nil for any loader that will fetch.
 func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
 	c := &cfg{refresh: DefaultRefresh}
@@ -493,7 +485,6 @@ func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
 	return &Loader{
 		http:          httpClient,
 		log:           c.logger,
-		list:          c.list,
 		url:           url,
 		overridesPath: c.overridesPath,
 		refresh:       c.refresh,
@@ -507,7 +498,7 @@ func NewLoader(httpClient *http.Client, url string, opts ...Option) *Loader {
 // record set (cacheUsable), it returns the stale index with a *StaleMapError
 // (match with errors.As); any other non-nil error means no usable map at all.
 // Records are canonicalized on a private copy here, so every refresh decision
-// and the served Index read ONE representation. An attached list never errors.
+// and the served Index read ONE representation.
 func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 	canonicalPrev := prev
 	if prev != nil {
@@ -519,10 +510,7 @@ func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 		canonicalPrev = &clone
 	}
 	next, err := l.refreshCache(ctx, canonicalPrev)
-	if l.list != nil {
-		l.list.refresh(ctx, &next)
-	}
-	idx := buildIndex(next.Records, next.Mappings)
+	idx := buildIndex(next.Records, next.Mappings, next.ParentMappings)
 	l.applyOverrides(ctx, idx)
 	return next, idx, err
 }
@@ -636,13 +624,13 @@ const (
 )
 
 // isPersistentRefreshFailure is the ONE home of the transient-vs-persistent
-// refresh classification: every failure arm of refreshCache reaches the streak
-// through it (via degradeRefresh), so the documented set and the code cannot
-// drift apart. PERSISTENT (advances Cache.RejectedRefreshes), because each
-// re-refuses identically every cycle: a record-cap or identifier-budget breach,
-// a body over the size cap, a non-array document, either 304 failure class, an
-// acceptance or shrink refusal, and any status whose remedy is the OPERATOR.
-// Everything else is TRANSIENT and neither advances nor resets the streak.
+// refresh classification; every failure arm reaches the streak through it. A
+// PERSISTENT failure re-refuses identically on every load and advances
+// Cache.RejectedRefreshes: a record-cap or retained-budget breach, an oversize
+// body, a body that is not an animap document or is of another schema version,
+// a refused redirect hop, either 304 failure class, an acceptance or shrink
+// refusal, and any status whose remedy is the OPERATOR. Everything else is
+// TRANSIENT.
 func isPersistentRefreshFailure(class refreshFailureClass, cause error) bool {
 	switch class {
 	case failureValidation, failureShrunk, failureNotModifiedUnusable, failureRefusedUnchanged:
@@ -650,7 +638,8 @@ func isPersistentRefreshFailure(class refreshFailureClass, cause error) bool {
 	case failureFetch:
 		return isPersistentFetchFailure(cause)
 	case failureParse:
-		return errors.Is(cause, errRecordCapExceeded) || errors.Is(cause, errIdentifierBudgetExceeded) || errors.Is(cause, errNotJSONArray)
+		return errors.Is(cause, errRecordCapExceeded) || errors.Is(cause, errIdentifierBudgetExceeded) ||
+			errors.Is(cause, errNotAnimapDocument) || errors.Is(cause, errUnsupportedVersion)
 	}
 	return false
 }
@@ -660,6 +649,9 @@ func isPersistentRefreshFailure(class refreshFailureClass, cause error) bool {
 // 401/403 to *AuthError, 429 to *RateLimitError, and every other non-2xx to
 // *HTTPStatusError. Split out so isPersistentRefreshFailure stays a dispatcher.
 func isPersistentFetchFailure(cause error) bool {
+	if errors.Is(cause, errRedirectRefused) {
+		return true
+	}
 	if _, ok := errors.AsType[*httpx.ResponseTooLargeError](cause); ok {
 		return true
 	}
@@ -708,7 +700,7 @@ type sanitizedError struct {
 func (e *sanitizedError) Error() string { return e.text }
 func (e *sanitizedError) Unwrap() error { return e.err }
 
-// refreshCache decides whether to reuse, re-validate, or re-download the Fribb
+// refreshCache decides whether to reuse, re-validate, or re-download the
 // map and returns the cache to persist. Validator hygiene lives in
 // httpx.DoConditional, both directions: a poisoned persisted validator is
 // skipped at replay, and captured validators arrive pre-sanitized.
@@ -754,7 +746,7 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 	if !cacheUsable(prev.Records) {
 		// A protocol violation rather than a transient outage: no validators were sent,
-		// so it repeats identically every cycle.
+		// so it repeats identically on every load.
 		return degradeRefresh(prev, failureNotModifiedUnusable, "not modified without a usable cache", nil,
 			errors.New("mapping: not modified but no cache available"))
 	}
@@ -791,29 +783,12 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 	// self-heals, so warn while refreshes still succeed. It cannot fold into the
 	// record-cap warning: body size and record count move independently.
 	if n := len(res.Body); degradation.ApproachingLimit(int64(n), maxMapBytes) {
-		l.log.Warn("mapping: Fribb body approaching the download size cap; a body past it refuses every refresh and freezes the map stale",
+		l.log.Warn("mapping: animap body approaching the download size cap; a body past it refuses every refresh and freezes the map stale",
 			"bytes", n, "cap", maxMapBytes)
 	}
-	parsed, err := parseFribbForRefresh(res.Body, l.log)
+	parsed, err := parseAnimap(res.Body, l.log)
 	if err != nil {
-		if errors.Is(err, errRecordCapExceeded) {
-			return degradeRefresh(prev, failureParse, "refresh exceeded record cap", err,
-				fmt.Errorf("%w and no cache available", err))
-		}
-		if errors.Is(err, errIdentifierBudgetExceeded) {
-			return degradeRefresh(prev, failureParse, "refresh exceeded identifier budget", err,
-				fmt.Errorf("%w and no cache available", err))
-		}
-		// The no-first-token case (an empty or whitespace-only body) never reaches
-		// here: parseFribbForRefresh classifies it as a transient parse failure.
-		if errors.Is(err, errNotJSONArray) {
-			err = logSafeCause(err)
-			return degradeRefresh(prev, failureParse, "refresh not a JSON array", err,
-				fmt.Errorf("mapping: %w and no cache available", err))
-		}
-		err = logSafeCause(err)
-		return degradeRefresh(prev, failureParse, "parse failed", err,
-			fmt.Errorf("mapping: parse failed and no cache available: %w", err))
+		return degradeParse(prev, err)
 	}
 	// Collapse duplicate AniList IDs BEFORE any acceptance invariant runs:
 	// buildIndex keeps only the last record per ID, so size-comparing the raw row
@@ -824,7 +799,7 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 			fmt.Errorf("mapping: %w and no cache available", validationErr))
 	}
 	// A syntactically valid but sharply truncated refresh (one record replacing
-	// ~40k) can pass the coverage floor above yet silently erase most mappings, so
+	// ~21k) can pass the coverage floor above yet silently erase most mappings, so
 	// a below-half refresh (degradation.Shrunk) keeps the stale map.
 	if prevCount := indexedRecordCount(prev.Records); cacheUsable(prev.Records) && degradation.Shrunk(len(records), prevCount) {
 		// The noCache argument is unreachable here (cacheUsable guarantees the stale
@@ -835,6 +810,10 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 			stale.shrunkReturned, stale.shrunkPrevious = len(records), prevCount
 		}
 		return next, err
+	}
+	if factsErr := validateListFacts(prev, &parsed); factsErr != nil {
+		return degradeRefresh(prev, failureValidation, "refresh validation failed", factsErr,
+			fmt.Errorf("mapping: %w and no cache available", factsErr))
 	}
 	// previous_records is the baseline the absolute count needs: degradation.Shrunk
 	// rejects only BELOW half, so an accepted refresh may legitimately retain exactly
@@ -852,35 +831,56 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		"typed_records", pop.typed,
 		"season_scoped_records", pop.positiveSeason,
 		"special_records", pop.special,
+		"mapping_list_records", parsed.listFacts(),
 		"revalidatable", res.Validators.ETag != "" || res.Validators.LastModified != "",
 	}
 	if prev.RejectedRefreshes > 0 {
 		attrs = append(attrs, "ended_rejection_streak", prev.RejectedRefreshes)
 	}
 	l.log.Info("mapping: refreshed", attrs...)
-	// The literal resets exactly THREE fields (RejectedRefreshes, RefusedETag,
-	// RefusedLastModified - the rules are on Cache) and carries every other sibling,
-	// the four mapping-list fields included: they belong to an upstream this refresh
-	// did not consult. A field added to Cache is added HERE or every accepted 200
-	// erases it.
+	// The zero RejectedRefreshes, RefusedETag and RefusedLastModified are the
+	// accepted refresh's resets; the rules are on Cache.
 	return Cache{
-		FetchedAt:            time.Now(),
-		Records:              records,
-		ETag:                 res.Validators.ETag,
-		LastModified:         res.Validators.LastModified,
-		Mappings:             prev.Mappings,
-		MappingsETag:         prev.MappingsETag,
-		MappingsLastModified: prev.MappingsLastModified,
-		MappingsFetchedAt:    prev.MappingsFetchedAt,
+		FetchedAt:      time.Now(),
+		Records:        records,
+		Mappings:       parsed.mappings,
+		ParentMappings: parsed.parentMappings,
+		ETag:           res.Validators.ETag,
+		LastModified:   res.Validators.LastModified,
 	}, nil
+}
+
+// degradeParse degrades a body parseAnimap refused, naming its fixed
+// stale_reason class. The no-first-token case (an empty or whitespace-only
+// body) reaches the transient "parse failed" class.
+func degradeParse(prev *Cache, err error) (Cache, error) {
+	switch {
+	case errors.Is(err, errRecordCapExceeded):
+		return degradeRefresh(prev, failureParse, "refresh exceeded record cap", err,
+			fmt.Errorf("%w and no cache available", err))
+	case errors.Is(err, errIdentifierBudgetExceeded):
+		return degradeRefresh(prev, failureParse, "refresh exceeded identifier budget", err,
+			fmt.Errorf("%w and no cache available", err))
+	}
+	err = logSafeCause(err)
+	switch {
+	case errors.Is(err, errNotAnimapDocument):
+		return degradeRefresh(prev, failureParse, "refresh not an animap document", err,
+			fmt.Errorf("%w and no cache available", err))
+	case errors.Is(err, errUnsupportedVersion):
+		return degradeRefresh(prev, failureParse, "refresh unsupported schema version", err,
+			fmt.Errorf("%w and no cache available", err))
+	}
+	return degradeRefresh(prev, failureParse, "parse failed", err,
+		fmt.Errorf("mapping: parse failed and no cache available: %w", err))
 }
 
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
 // 200 body: it rejects a refresh below the AniList-key or arr-identifier
 // coverage floors, and one whose routing populations collapse below half of the
 // previously accepted cache's (populationCollapsed) or vanish entirely
-// (populationExtinct). The conservative 1% floor has ~19x headroom against the
-// real body (8279/~42868 measured 2026-07). records MUST already be
+// (populationExtinct). The conservative 1% floor has ~35x headroom against the
+// real body (7885 routed of 22169 elements, 2026-10). records MUST already be
 // deduplicated, and sourceElements is the body's top-level element count, so
 // destructive filtering cannot shrink numerator and denominator together.
 func validateRefreshedRecords(previous, records []Record, sourceElements int) error {
@@ -981,6 +981,23 @@ func validateRoutingCoverage(previous, candidate populations, previousMinimum in
 	return validatePopulation("series-routed", previous.seriesRouted, candidate.seriesRouted, previousMinimum)
 }
 
+// validateListFacts is the extinction and below-half shrink guard over each
+// mapping-list fact population: a document that keeps its records while losing
+// most of its mapping lists would silently drop every film's special episode
+// and every season range. The two populations are guarded apart, because the
+// AniDB-keyed one is large enough to hide the loss of every specials-of-parent
+// fact. The significance gate is the record guards' own 1% floor.
+func validateListFacts(prev *Cache, parsed *animapParseResult) error {
+	if !cacheUsable(prev.Records) {
+		return nil
+	}
+	previousMinimum := coverageFloor(indexedRecordCount(prev.Records))
+	if err := validatePopulation("mapping-list", len(prev.Mappings), len(parsed.mappings), previousMinimum); err != nil {
+		return err
+	}
+	return validatePopulation("specials-of-parent mapping-list", len(prev.ParentMappings), len(parsed.parentMappings), previousMinimum)
+}
+
 // arrIdentifierCount returns how many records retain an arr identifier the
 // lookup paths actually consume (per HasArrIdentifier). It backs acceptRefresh's
 // acceptance guard: the tolerant decoders never fail a record for a missing id.
@@ -1014,7 +1031,7 @@ func refusedValidators(prev *Cache) httpx.Validators {
 // are sent only when there is a usable cached record set (cacheUsable).
 func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.ConditionalResult, error) {
 	// Ask about the REFUSED body when there is one: sending the accepted
-	// validators re-downloads the whole ~5.9 MB list for as long as the refusal
+	// validators re-downloads the whole ~2.3 MB document for as long as the refusal
 	// lasts.
 	validators := refusedValidators(prev)
 	if validators == (httpx.Validators{}) && cacheUsable(prev.Records) {
@@ -1046,7 +1063,7 @@ const maxLoggedErrorBytes = 200
 // each effective record onto the index, keyed by AniList ID. A missing file is
 // not an error; an unreadable or malformed file is logged at ERROR and ignored.
 // The overlay is WHOLESALE, not a merge, so a record carrying no identifier its
-// routed arr consumes replaces a mapped Fribb record with one that resolves to
+// routed arr consumes replaces a mapped upstream record with one that resolves to
 // nothing. That is left applied - an operator entry wins by design - but it is
 // reported, because a mistyped id key is otherwise invisible.
 func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
@@ -1064,6 +1081,7 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 			unroutable++
 		}
 		idx.byAniList[record.AniListID] = record
+		delete(idx.parentMappings, record.AniListID)
 	}
 	if set.skipped > 0 {
 		l.log.Warn("mapping: overrides with missing or invalid anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
@@ -1140,7 +1158,7 @@ type overrideSet struct {
 }
 
 // maxOverrideRecords caps the effective records parseOverrides retains,
-// mirroring the Fribb parser's maxFribbRecords: the 4 MiB wire bound caps the
+// mirroring the document parser's maxRecords: the 4 MiB wire bound caps the
 // file, not the retained amplification of ~250k tiny distinct-ID records. An
 // over-cap file routes through readOverrides' malformed-file ERROR, refusing
 // the whole overlay.
@@ -1211,9 +1229,19 @@ func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) 
 	return nil
 }
 
+func trimmed(in []string) []string {
+	var out []string
+	for _, v := range in {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // positiveInts returns in with non-positive entries dropped, matching the
-// canonical TmdbMovies form the Fribb decoders guarantee, so an override record
-// and a Fribb record agree on the exact TMDB keys downstream lookups use.
+// canonical TmdbMovies form, so an override record and an animap record agree
+// on the exact TMDB keys downstream lookups use.
 func positiveInts(in []int) []int {
 	var out []int
 	for _, v := range in {

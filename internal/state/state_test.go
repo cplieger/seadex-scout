@@ -843,85 +843,71 @@ func TestStoreLoadIgnoresRetiredLibraryFilteredEmpty(t *testing.T) {
 	}
 }
 
-// TestStoreLoadAcceptsMappingRecordsWithoutSeasonKind is the same compatibility
-// property for the season-kind field's ADDITION rather than a retirement: every
-// deployed state.json carries mapping records written before the key existed, and
-// a 304 window can leave them that way for a week.
-//
-// The property the dispatch depends on is the last assertion: an absent key reads
-// UNKNOWN, not absent. Reading it as absent would send every mapped-zero special
-// to a whole-series comparison for that window.
-func TestStoreLoadAcceptsMappingRecordsWithoutSeasonKind(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	legacy := `{"version":1,"mapping":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"abc\"",` +
-		`"records":[{"type":"TV","imdb_ids":["tt001"],"anilist_id":104461,"tvdb_id":344974},` +
-		`{"type":"MOVIE","anilist_id":11577,"tvdb_id":78964,"season_tvdb":0}]},` +
-		`"anilist_memo":{"entries":{"154587":{"titles":["Frieren"],"format":"TV","year":2023}}}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
-		t.Fatalf("write legacy state: %v", err)
-	}
-	store := NewStore(path, testLogger())
-	got, err := store.Load(t.Context())
-	if err != nil {
-		t.Fatalf("Load of a file whose mapping records predate season_kind returned error: %v (an additive key must never quarantine)", err)
-	}
-	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
-		t.Errorf("quarantine stat = %v, want not exist (an additive key is not corruption)", statErr)
-	}
-	if got.Mapping.ETag != `W/"abc"` {
-		t.Errorf("Mapping.ETag = %q, want the persisted validator (the sibling members are unaffected)", got.Mapping.ETag)
-	}
-	if len(got.Mapping.Records) != 2 {
-		t.Fatalf("Mapping.Records = %+v, want the two persisted records", got.Mapping.Records)
-	}
-	if len(got.Memo.Entries) != 1 {
-		t.Errorf("memo entries = %d, want 1 (the memo is the member a quarantine would cost ~25 minutes to rebuild)", len(got.Memo.Entries))
-	}
-	for _, rec := range got.Mapping.Records {
-		if got := rec.SeasonPresence(); got != mapping.SeasonUnknown {
-			t.Errorf("record %d SeasonPresence() = %q, want %q", rec.AniListID, got, mapping.SeasonUnknown)
-		}
-	}
-}
+// legacyMappingState is a state file written by the release that read the
+// previous mapping upstream: its cache sits under "mapping", with that
+// upstream's validators, refusal, streak and second-list members.
+const legacyMappingState = `{
+"anilist_memo":{"entries":{"154587":{"expiry":"2026-10-31T12:00:00Z","format":"TV","titles":["Frieren"],"year":2023}}},
+"mapping":{"fetched_at":"2026-10-01T12:00:00Z","mappings_fetched_at":"2026-10-01T12:00:00Z","mappings":{"12276":{"special_episode":8},"69":{"seasons":[{"season":1,"first":1,"last":8}]}},"etag":"W/\"fribb-v7\"","last_modified":"Wed, 30 Sep 2026 12:00:00 GMT","refused_etag":"W/\"fribb-v8\"","mappings_etag":"W/\"list-v3\"","mappings_last_modified":"Wed, 30 Sep 2026 11:00:00 GMT","records":[{"type":"TV","season_kind":"present","anilist_id":154587,"tvdb_id":424536,"anidb_id":17617,"season_tvdb":1},{"type":"MOVIE","season_kind":"present","imdb_ids":["tt0000001"],"tmdb_movies":[12345],"anilist_id":12276,"tvdb_id":79151,"anidb_id":12276}],"rejected_refreshes":3},
+"shrunk_walks_by_arr":{"sonarr":1},
+"standing":[{"condition":"library-walk-shrunk","arr":"sonarr"}],
+"library":{"taken_at":"2026-10-01T12:00:00Z","items":[{"arr":"sonarr","title":"Frieren","groups":["SubsPlease"],"current":{},"arr_id":7,"tvdb_id":424536,"has_file":true}]},
+"seadex_failures":2,
+"anilist_degraded":1,
+"partial_walks":1,
+"version":1
+}`
 
-// TestStoreLoadAcceptsMappingRecordsWithoutAniDBID is the same additive-key
-// property for the Anime-Lists join key: a state.json whose records predate
-// anidb_id loads with 0 (absent), no error, no quarantine, siblings intact. The
-// mapping-list sibling fields on the cache are absent too and read as their zero
-// values, so the first refresh after the upgrade populates them.
-func TestStoreLoadAcceptsMappingRecordsWithoutAniDBID(t *testing.T) {
+// TestStoreLoadIgnoresALegacyMappingCache pins the move of the mapping cache to
+// a new key: a file carrying only the old "mapping" member loads with no error
+// and no quarantine, the old cache is ignored whole (its validators belong to
+// another upstream, so sending them would be wrong and serving its records
+// stale would be too), every other member survives, and the next Save writes
+// the old key no more.
+func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	legacy := `{"version":1,"mapping":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"abc\"",` +
-		`"records":[{"type":"TV","anilist_id":104461,"tvdb_id":344974,"season_kind":"present","season_tvdb":1},` +
-		`{"type":"MOVIE","anilist_id":11577,"tvdb_id":78964,"season_kind":"present"}]},` +
-		`"anilist_memo":{"entries":{"154587":{"titles":["Frieren"],"format":"TV","year":2023}}}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(legacyMappingState), 0o600); err != nil {
 		t.Fatalf("write legacy state: %v", err)
 	}
 	store := NewStore(path, testLogger())
 	got, err := store.Load(t.Context())
 	if err != nil {
-		t.Fatalf("Load of a file whose mapping records predate anidb_id returned error: %v (an additive key must never quarantine)", err)
+		t.Fatalf("Load(legacy state) error: %v, want a clean load", err)
 	}
 	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
-		t.Errorf("quarantine stat = %v, want not exist (an additive key is not corruption)", statErr)
+		t.Errorf("quarantine stat = %v, want not exist", statErr)
 	}
-	if got.Mapping.ETag != `W/"abc"` {
-		t.Errorf("Mapping.ETag = %q, want the persisted validator (the sibling members are unaffected)", got.Mapping.ETag)
+	if m := got.Mapping; m.ETag != "" || m.LastModified != "" || m.RefusedETag != "" || m.RejectedRefreshes != 0 ||
+		len(m.Records) != 0 || len(m.Mappings) != 0 || !m.FetchedAt.IsZero() {
+		t.Errorf("Load(legacy state).Mapping = %+v, want the zero cache", m)
 	}
-	if len(got.Mapping.Records) != 2 {
-		t.Fatalf("Mapping.Records = %+v, want the two persisted records", got.Mapping.Records)
+	if e, ok := got.Memo.Entries[154587]; !ok || len(e.Titles) != 1 || e.Titles[0] != "Frieren" {
+		t.Errorf("Load(legacy state) memo entry 154587 = %+v ok=%v, want the Frieren lookup", e, ok)
 	}
-	if len(got.Memo.Entries) != 1 {
-		t.Errorf("memo entries = %d, want 1", len(got.Memo.Entries))
+	if len(got.Library.Items) != 1 || got.Library.Items[0].Title != "Frieren" {
+		t.Errorf("Load(legacy state) library = %+v, want the one Frieren item", got.Library.Items)
 	}
-	for _, rec := range got.Mapping.Records {
-		if rec.AniDBID != 0 {
-			t.Errorf("record %d AniDBID = %d, want 0 (absent key reads absent)", rec.AniListID, rec.AniDBID)
-		}
+	wantStanding := []StandingCondition{{Condition: "library-walk-shrunk", Arr: "sonarr"}}
+	if !slices.Equal(got.Standing, wantStanding) {
+		t.Errorf("Load(legacy state) standing = %+v, want %+v", got.Standing, wantStanding)
 	}
-	if len(got.Mapping.Mappings) != 0 || got.Mapping.MappingsETag != "" || !got.Mapping.MappingsFetchedAt.IsZero() {
-		t.Errorf("mapping-list fields on a legacy cache = (%d, %q, %v), want all zero", len(got.Mapping.Mappings), got.Mapping.MappingsETag, got.Mapping.MappingsFetchedAt)
+	if got.ShrunkWalksByArr["sonarr"] != 1 || got.SeadexFailures != 2 || got.AniListDegraded != 1 || got.PartialWalks != 1 {
+		t.Errorf("Load(legacy state) streaks = (%v, %d, %d, %d), want (sonarr 1, 2, 1, 1)",
+			got.ShrunkWalksByArr, got.SeadexFailures, got.AniListDegraded, got.PartialWalks)
+	}
+	if err := store.Save(t.Context(), &got); err != nil {
+		t.Fatalf("Save after a legacy load: %v", err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved state: %v", err)
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(saved, &members); err != nil {
+		t.Fatalf("decode saved state: %v", err)
+	}
+	if _, ok := members["mapping"]; ok {
+		t.Error("Save after a legacy load still wrote the old \"mapping\" member")
 	}
 }
 
@@ -1154,7 +1140,7 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 
 func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	body := `{"mapping":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"fribb-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
+	body := `{"animap":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"animap-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write state fixture: %v", err)
 	}
@@ -1162,8 +1148,8 @@ func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if got.Mapping.ETag != `W/"fribb-v7"` {
-		t.Errorf("Mapping.ETag from persisted envelope = %q, want %q (a json-tag drift silently drops the conditional-GET validator on restart)", got.Mapping.ETag, `W/"fribb-v7"`)
+	if got.Mapping.ETag != `W/"animap-v7"` {
+		t.Errorf("Mapping.ETag from persisted envelope = %q, want %q (a json-tag drift silently drops the conditional-GET validator on restart)", got.Mapping.ETag, `W/"animap-v7"`)
 	}
 	if got.Mapping.LastModified != "Wed, 01 Jul 2026 12:00:00 GMT" {
 		t.Errorf("Mapping.LastModified from persisted envelope = %q, want the fixture's validator", got.Mapping.LastModified)

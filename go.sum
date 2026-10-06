@@ -10,8 +10,6 @@ github.com/cplieger/httpx/v5 v5.0.3 h1:bMtqn9nQXCD/0AdS2eEsl4K7QjYdANyM3ZyksDxKS
 github.com/cplieger/httpx/v5 v5.0.3/go.mod h1:3LKMRNjhTYJM9lwDfGpyjtpL4umH6wSMpeD2vanUYlk=
 github.com/cplieger/jsoncap/v2 v2.0.1 h1:22SjgtumpOmYet3Uc5Dvb0e557ffyfLGkJmp27h4e1o=
 github.com/cplieger/jsoncap/v2 v2.0.1/go.mod h1:n/oSQh7c3HykYI3oh0GmBF2Hk6N1ore1fNemL/CvZHo=
-github.com/cplieger/jsonx/v2 v2.0.1 h1:RBOyIVhmJi7DvGEnz8lldzuBTwWTOHYZxpBmWAsuhSA=
-github.com/cplieger/jsonx/v2 v2.0.1/go.mod h1:P6XfEtjkHlmqkmfVCcvs7TTSzEpTx+yKEHDcDXL9BBk=
 github.com/cplieger/keyenc v1.0.9 h1:4XgfVc8i7h81Ik2GGhs62FXrYUfHHHWmMmcvSv2WY00=
 github.com/cplieger/keyenc v1.0.9/go.mod h1:7T7DG6yK2b+DJWmQxXfbMADV5h3fWLFTnbXpAWVaKa4=
 github.com/cplieger/runesafe/v2 v2.1.0 h1:MTFMH5VDk9+bhbUces9LweBAO9Bsayy/hKLFBOqewj8=

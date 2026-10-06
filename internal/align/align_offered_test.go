@@ -70,8 +70,8 @@ func TestRecordSeasonDispatchesOnTheSeasonNotTheType(t *testing.T) {
 }
 
 // TestRecordSeasonUnknownKindIsAUnion pins the transition arm on BOTH populations,
-// because every revision of this dispatch fixed one and broke the other. Through a
-// 304 window - up to the week Fribb takes to regenerate - every persisted record
+// because every revision of this dispatch fixed one and broke the other. Wherever the
+// kind is unknown - an override naming no season_kind - a record
 // reads unknown, so the 48 films must still scope offered via IsMovie AND the 66
 // mapped-zero specials via IsSpecial. Stranding the specials costs ~10 false WARNs
 // plus 32 false info rows for a week.
