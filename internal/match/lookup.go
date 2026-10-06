@@ -18,9 +18,9 @@ type AniListClient interface {
 	FetchMany(ctx context.Context, ids []int) (anilist.BatchResult, error)
 }
 
-// The assertion sits at the DECLARATION, not at *anilist.Client's own package as
-// go.md's default prescribes: internal/match imports internal/anilist, so an
-// assertion there would close an import cycle. internal/scout pins its three
+// The assertion sits at the DECLARATION, not at *anilist.Client's own package:
+// internal/match imports internal/anilist, so an assertion there would close an
+// import cycle. internal/scout pins its three
 // consumer-side interfaces (SeaDexSource, StateStore, MappingSource) the same way
 // for the same reason.
 var _ AniListClient = (*anilist.Client)(nil)

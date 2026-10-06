@@ -1,14 +1,10 @@
 // Package config loads seadex-scout configuration from a single YAML file
-// (default /config/config.yaml). The file is the whole settings surface;
-// string values may reference SONARR_*, RADARR_*, or SEADEX_SCOUT_* environment
-// variables via ${VAR} expansion, so secrets can stay in an .env or Docker
-// secret rather than in the file.
-//
-// The file exposes only user-facing settings; the upstream endpoints, cadences and
-// internal /config paths are fixed package constants. The on-disk shape (fileConfig)
-// is loaded onto a defaults baseline, ${VAR}-expanded, then flattened into the
-// runtime Config. Call Validate to check the result is runnable. There is no hot
-// reload: the file is read once at startup.
+// (default /config/config.yaml), the whole settings surface. String values may
+// reference SONARR_*, RADARR_* or SEADEX_SCOUT_* environment variables via
+// ${VAR} expansion, so secrets can stay in an .env file. Upstream endpoints,
+// cadences and internal /config paths are fixed package constants. The file is
+// loaded onto a defaults baseline, ${VAR}-expanded and flattened into Config
+// once at startup, with no hot reload. Call Validate to check it is runnable.
 package config
 
 import (

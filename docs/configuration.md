@@ -14,7 +14,7 @@ The addresses of SeaDex, animap and AniList, how often they are asked, and the f
 
 ## Environment variables
 
-Any string value in the file can name a `SONARR_*`, `RADARR_*` or `SEADEX_SCOUT_*` environment variable as `${VAR}`, so secrets can live in an `.env` file or a Docker secret instead of the file. The file is the source of truth. A variable is read only where the file names it, and the starter file does that for the four connection values below.
+Any string value in the file can name a `SONARR_*`, `RADARR_*` or `SEADEX_SCOUT_*` environment variable as `${VAR}`, so secrets can stay in an `.env` file instead of the file. The file is the source of truth. A variable is read only where the file names it, and the starter file does that for the four connection values below.
 
 A connection value that names an unset variable reads as empty, so Radarr stays off until `RADARR_URL` is set. Anywhere else, a reference to an unset variable stays as written. API keys are never logged, only whether each one is set.
 
