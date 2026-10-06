@@ -121,7 +121,7 @@ method (*redactedError).Unwrap is
 #
 # --- (a) errors.Unwrap, traversed but not excavated ------------------------
 # Same invisible mechanism, weaker case, stated plainly: no non-test site reads
-# the wrapped cause of these four. They ARE traversed at runtime - httpx's
+# the wrapped cause of these five. They ARE traversed at runtime - httpx's
 # classifier probes errors.As(&AuthError), errors.As(&RateLimitError) and
 # errors.Is(context.Canceled/DeadlineExceeded) over the whole chain before it
 # checks Transient - and they are kept because a wrapper that hides its cause
@@ -141,6 +141,11 @@ method (*redactedError).Unwrap is
 #    every production consumer - scout's mappingDegradedAttrs and mapUsable,
 #    mapping's own rejectRefresh - matches the TYPE via errors.AsType, so only
 #    the mapping tests unwrap it, which is why this one reports EU1001.
+#  - *boundedDecodeError (internal/seadexapi/seadexapi.go, built by
+#    boundDecodeError) bounds a page or count-window decode failure's text and
+#    wraps the jsoncap or encoding/json cause; the retry classifier traverses it,
+#    and the seadexapi tests match jsoncap's sentinels through it with errors.Is.
+method (*boundedDecodeError).Unwrap is
 method (*transientUpstreamError).Unwrap is
 method (*torznabLimitError).Unwrap is
 method (*StaleMapError).Unwrap is
