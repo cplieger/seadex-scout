@@ -1,2179 +1,2776 @@
 {
-  "title": "SeaDex Scout",
-  "uid": "seadex-scout",
-  "description": "Upgrades SeaDex recommends for your anime library, findings to check by hand, how your library compares with SeaDex, and whether seadex-scout is healthy.",
-  "tags": [
-    "anime",
-    "seadex",
-    "sonarr",
-    "radarr"
-  ],
-  "timezone": "browser",
-  "editable": true,
-  "graphTooltip": 0,
-  "refresh": "5m",
-  "schemaVersion": 42,
-  "version": 1,
-  "time": {
-    "from": "now-7d",
-    "to": "now"
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "seadex-scout"
   },
-  "templating": {
-    "list": [
+  "spec": {
+    "annotations": [
       {
-        "name": "datasource",
-        "label": "Loki",
-        "type": "datasource",
-        "query": "loki",
-        "current": {
-          "text": "Loki",
-          "value": "loki"
-        },
-        "hide": 0,
-        "refresh": 1
-      },
-      {
-        "name": "container",
-        "label": "Container",
-        "type": "textbox",
-        "description": "The value of the container label your log collector puts on seadex-scout's lines.",
-        "query": "seadex-scout",
-        "current": {
-          "text": "seadex-scout",
-          "value": "seadex-scout"
-        },
-        "options": [
-          {
-            "selected": true,
-            "text": "seadex-scout",
-            "value": "seadex-scout"
-          }
-        ],
-        "hide": 0
-      },
-      {
-        "name": "optional",
-        "label": "Optional upgrades",
-        "type": "custom",
-        "description": "Hide leaves out upgrades where you already have a SeaDex alt. Show lists them too.",
-        "query": "Hide : alt, Show : none",
-        "current": {
-          "text": "Hide",
-          "value": "alt"
-        },
-        "options": [
-          {
-            "selected": true,
-            "text": "Hide",
-            "value": "alt"
+        "kind": "AnnotationQuery",
+        "spec": {
+          "query": {
+            "kind": "DataQuery",
+            "group": "grafana",
+            "version": "v0",
+            "datasource": {
+              "name": "-- Grafana --"
+            },
+            "spec": {}
           },
-          {
-            "selected": false,
-            "text": "Show",
-            "value": "none"
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "builtIn": true,
+          "legacyOptions": {
+            "type": "dashboard"
           }
-        ],
-        "multi": false,
-        "includeAll": false,
-        "hide": 0
+        }
       }
-    ]
-  },
-  "annotations": {
-    "list": []
-  },
-  "links": [],
-  "panels": [
-    {
-      "id": 1,
-      "title": "At a glance",
-      "type": "row",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      },
-      "collapsed": false
-    },
-    {
-      "id": 10,
-      "title": "Status",
-      "description": "✓ means checks run and nothing fails. ! means SeaDex, AniList or the anime ID map is down, so there is nothing for you to fix. ✗ means an error you can fix or checks that stopped, and Scout health at the bottom says why.",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 0,
-        "y": 1
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "Unknown",
-          "color": {
-            "mode": "thresholds"
+    ],
+    "cursorSync": "Off",
+    "description": "Upgrades SeaDex recommends for your anime library, findings to check by hand, how your library compares with SeaDex, and whether seadex-scout is healthy.",
+    "editable": true,
+    "elements": {
+      "panel-10": {
+        "kind": "Panel",
+        "spec": {
+          "id": 10,
+          "title": "Status",
+          "description": "✓ means checks run and nothing fails. ! means SeaDex, AniList or the anime ID map is down, so there is nothing for you to fix. ✗ means an error you can fix or checks that stopped, and Scout health at the bottom says why.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "8 * (sum(absent_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded|reconcile started` [3h])) or vector(0))\n+ 4 * (sum(absent_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` [72h])) or vector(0))\n+ 2 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition!~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))\n+ 1 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition=~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 2
-              }
-            ]
-          },
-          "mappings": [
-            {
-              "type": "value",
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
               "options": {
-                "0": {
-                  "text": "✓",
-                  "color": "green",
-                  "index": 0
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
                 },
-                "1": {
-                  "text": "!",
-                  "color": "orange",
-                  "index": 1
-                }
-              }
-            },
-            {
-              "type": "range",
-              "options": {
-                "from": 2,
-                "to": 3,
-                "result": {
-                  "text": "✗",
-                  "color": "red",
-                  "index": 2
-                }
-              }
-            },
-            {
-              "type": "range",
-              "options": {
-                "from": 4,
-                "to": 15,
-                "result": {
-                  "text": "✗",
-                  "color": "red",
-                  "index": 3
-                }
-              }
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "8 * (sum(absent_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded|reconcile started` [3h])) or vector(0))\n+ 4 * (sum(absent_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` [72h])) or vector(0))\n+ 2 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition!~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))\n+ 1 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition=~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))",
-          "queryType": "instant"
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "title": "Upgrades and checks",
-      "description": "Upgrades counts the upgrades SeaDex recommends for what you have, after your filters. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. Check by hand counts the findings seadex-scout could not decide on its own.",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 5,
-        "y": 1
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "0",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "A"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Upgrades"
+                "textMode": "value"
               },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "mappings": [
                     {
-                      "color": "green",
-                      "value": null
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "✓",
+                          "color": "green",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "!",
+                          "color": "orange",
+                          "index": 1
+                        }
+                      }
                     },
                     {
-                      "color": "blue",
-                      "value": 1
-                    }
-                  ]
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Check by hand"
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
+                      "type": "range",
+                      "options": {
+                        "from": 2,
+                        "to": 3,
+                        "result": {
+                          "text": "✗",
+                          "color": "red",
+                          "index": 2
+                        }
+                      }
                     },
                     {
-                      "color": "yellow",
-                      "value": 1
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value_and_name",
-        "justifyMode": "center",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "count(sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h])))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "count(sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h])))",
-          "queryType": "instant"
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "title": "SeaDex best",
-      "description": "Share of your anime on SeaDex where every season or film you have is SeaDex's best release. It updates once a day.",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 0,
-        "y": 5
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "noValue": "No summary yet",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0,
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h])) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) > 0) * 100",
-          "queryType": "instant"
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "title": "SeaDex alt",
-      "description": "Share of your anime on SeaDex where you have SeaDex's best or an alt, with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts here. It updates once a day.",
-      "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 5,
-        "y": 5
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "noValue": "No summary yet",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "yellow",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0,
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [26h])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]))) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) > 0) * 100",
-          "queryType": "instant"
-        }
-      ]
-    },
-    {
-      "id": 41,
-      "title": "Library overview",
-      "description": "SeaDex entries in your library, one per season or film SeaDex lists, grouped by what you have. Season not found means seadex-scout found no files for that season. The files are missing, or Sonarr numbers that season differently, for example under specials. Unmapped specials are films or specials in Sonarr's specials that seadex-scout cannot tie to one entry.",
-      "type": "bargauge",
-      "gridPos": {
-        "h": 8,
-        "w": 14,
-        "x": 10,
-        "y": 1
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "noValue": "-",
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "text"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "A"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex best"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex alt"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "C"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Older version"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "D"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Neither best nor alt"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "E"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Season not found"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "blue"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "F"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Untagged release"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "purple"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "G"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Unmapped specials"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "text"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "H"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Not on SeaDex"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "text"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "left",
-        "sizing": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_alt=\"have_alt\" | msg=`library summary` | unwrap have_alt [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_older_revision=\"have_older_revision\" | msg=`library summary` | unwrap have_older_revision [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_unlisted=\"have_unlisted\" | msg=`library summary` | unwrap have_unlisted [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "E",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", no_file=\"no_file\" | msg=`library summary` | unwrap no_file [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "F",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", unverified=\"unverified\" | msg=`library summary` | unwrap unverified [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "G",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", unattributed=\"unattributed\" | msg=`library summary` | unwrap unattributed [26h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "H",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", not_on_seadex=\"not_on_seadex\" | msg=`library summary` | unwrap not_on_seadex [26h]))",
-          "queryType": "instant"
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "title": "Upgrades",
-      "type": "row",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 9
-      },
-      "collapsed": false
-    },
-    {
-      "id": 20,
-      "title": "Upgrades available",
-      "description": "Upgrades SeaDex recommends for your library, newest first. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. The Nyaa, AnimeBytes and Other columns show only when some upgrade has a link there.",
-      "type": "table",
-      "gridPos": {
-        "h": 11,
-        "w": 24,
-        "x": 0,
-        "y": 10
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "filterable": true,
-            "align": "auto"
-          },
-          "noValue": "No upgrades available"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #B"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "First seen"
-              },
-              {
-                "id": "unit",
-                "value": "dateTimeFromNow"
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "blue"
-                }
-              },
-              {
-                "id": "custom.width",
-                "value": 136
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #A"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "title"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Title"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open in Sonarr or Radarr",
-                    "url": "${__data.fields.arr_url}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 280
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "season"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Season"
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "-",
-                        "index": 0
+                      "type": "range",
+                      "options": {
+                        "from": 4,
+                        "to": 15,
+                        "result": {
+                          "text": "✗",
+                          "color": "red",
+                          "index": 3
+                        }
                       }
                     }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 104
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "why"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Why"
-              },
-              {
-                "id": "custom.width",
-                "value": 176
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "current_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "You have"
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 140
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "best"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex best"
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "alt"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex alt"
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "nyaa_url"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Nyaa"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on Nyaa",
-                    "url": "${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".+",
-                      "result": {
-                        "text": "Open",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 88
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "ab_url"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "AnimeBytes"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on AnimeBytes",
-                    "url": "${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".+",
-                      "result": {
-                        "text": "Open",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 136
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "public_url"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Other"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on the tracker",
-                    "url": "${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".+",
-                      "result": {
-                        "text": "Open",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 96
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "al_id"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on releases.moe",
-                    "url": "https://releases.moe/${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 104
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "App"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "sonarr": {
-                        "text": "Sonarr",
-                        "index": 0
+                  ],
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
                       },
-                      "radarr": {
-                        "text": "Radarr",
-                        "index": 1
+                      {
+                        "value": 1,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 2,
+                        "color": "red"
                       }
-                    }
-                  }
-                ]
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Unknown"
+                },
+                "overrides": []
               }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "recommended_group"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr_url"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "info_hash"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "seadex_tags"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "noValue",
-                "value": "-"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "sortBy": [
-          {
-            "displayName": "First seen",
-            "desc": true
-          }
-        ]
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, why, best, alt, nyaa_url, ab_url, public_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", status=\"status\", current_revision=\"current_revision\", recommended_revision=\"recommended_revision\", alt_groups=\"alt_groups\", nyaa_url=\"nyaa_url\", ab_url=\"ab_url\", public_url=\"public_url\", arr_url=\"arr_url\" | msg=`better release available` | current_tier != \"$optional\" | label_format why=`{{ if eq .status \"newer_revision\" }}{{ .recommended_revision }} available{{ else if eq .current_tier \"alt\" }}SeaDex alt{{ else if eq .current_tier \"unlisted\" }}Neither best nor alt{{ else }}Better release{{ end }}`, current_group=`{{ .current_group | replace \",\" \", \" }}{{ if .current_revision }} {{ .current_revision }}{{ end }}`, best=`{{ .recommended_group }}{{ if .recommended_revision }} {{ .recommended_revision }}{{ end }}`, alt=`{{ if .alt_groups }}{{ .alt_groups | replace \",\" \", \" }}{{ else }}-{{ end }}` [2h]))",
-          "queryType": "instant"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "min by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (min_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nand on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h]))",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {
-              "Value #B": 0,
-              "title": 1,
-              "season": 2,
-              "why": 3,
-              "current_group": 4,
-              "best": 5,
-              "alt": 6,
-              "nyaa_url": 7,
-              "ab_url": 8,
-              "public_url": 9,
-              "al_id": 10,
-              "arr": 11
             }
           }
         }
-      ]
-    },
-    {
-      "id": 21,
-      "title": "Check by hand",
-      "description": "Findings seadex-scout could not decide on its own. Several groups on disk means your files mix release groups, and Untagged release means your file or SeaDex's release names no group. Open the title and compare it with SeaDex yourself.",
-      "type": "table",
-      "gridPos": {
-        "h": 7,
-        "w": 24,
-        "x": 0,
-        "y": 21
       },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "filterable": true,
-            "align": "auto"
-          },
-          "noValue": "Nothing to check"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "title"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Title"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open in Sonarr or Radarr",
-                    "url": "${__data.fields.arr_url}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 280
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "season"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Season"
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "-",
-                        "index": 0
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 104
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "msg"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Why"
-              },
-              {
-                "id": "custom.width",
-                "value": 192
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "series spans multiple release groups, manual review": {
-                        "text": "Several groups on disk",
-                        "index": 0
+      "panel-11": {
+        "kind": "Panel",
+        "spec": {
+          "id": 11,
+          "title": "Upgrades and checks",
+          "description": "Upgrades counts the upgrades SeaDex recommends for what you have, after your filters, and turns blue from 1 to show there is something to grab, not a fault. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. Check by hand counts the findings seadex-scout could not decide on its own, and turns yellow from 1 because each one waits for you to look. Both stay green at 0.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
                       },
-                      "release group unverifiable, manual review": {
-                        "text": "Untagged release",
-                        "index": 1
+                      "spec": {
+                        "expr": "count(sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h])))",
+                        "queryType": "instant"
                       }
-                    }
+                    },
+                    "refId": "A",
+                    "hidden": false
                   }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "current_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "You have"
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "recommended_group"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex best"
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 150
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "al_id"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "SeaDex"
-              },
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "Open on releases.moe",
-                    "url": "https://releases.moe/${__value.raw}",
-                    "targetBlank": true
-                  }
-                ]
-              },
-              {
-                "id": "custom.width",
-                "value": 104
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "App"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "sonarr": {
-                        "text": "Sonarr",
-                        "index": 0
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
                       },
-                      "radarr": {
-                        "text": "Radarr",
-                        "index": 1
+                      "spec": {
+                        "expr": "count(sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h])))",
+                        "queryType": "instant"
                       }
-                    }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value_and_name"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Upgrades"
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": null
+                            },
+                            {
+                              "color": "blue",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Check by hand"
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": null
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      }
+                    ]
                   }
                 ]
               }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arr_url"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "^Value( #[A-Z])?$"
-            },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*"
-            },
-            "properties": [
-              {
-                "id": "noValue",
-                "value": "-"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "sortBy": [
-          {
-            "displayName": "Title",
-            "desc": false
-          }
-        ]
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h]))",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {
-              "title": 0,
-              "season": 1,
-              "msg": 2,
-              "current_group": 3,
-              "recommended_group": 4,
-              "al_id": 5,
-              "arr": 6
             }
           }
         }
-      ]
-    },
-    {
-      "id": 42,
-      "title": "Your anime against SeaDex, over time",
-      "description": "Your anime at each daily check, one point per check. The four parts add up to every anime in your library.",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 28
       },
-      "datasource": {
-        "type": "loki",
-        "uid": "${datasource}"
-      },
-      "interval": "1h",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "decimals": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 40,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            },
-            "spanNulls": true,
-            "showPoints": "always",
-            "pointSize": 5
+      "panel-14": {
+        "kind": "Panel",
+        "spec": {
+          "id": 14,
+          "title": "SeaDex best",
+          "description": "Share of your anime on SeaDex where every season or film you have is SeaDex's best release. It updates once a day. No summary yet means no daily library summary has arrived in the last 26 hours, or none of your anime is on SeaDex.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h])) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) > 0) * 100",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "decimals": 0,
+                  "min": 0,
+                  "max": 100,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "blue"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No summary yet"
+                },
+                "overrides": []
+              }
+            }
           }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "A"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "blue"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "C"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "D"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "text"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
         }
       },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
+      "panel-15": {
+        "kind": "Panel",
+        "spec": {
+          "id": 15,
+          "title": "SeaDex alt",
+          "description": "Share of your anime on SeaDex where you have SeaDex's best or an alt, with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts here. It updates once a day. No summary yet means no daily library summary has arrived in the last 26 hours, or none of your anime is on SeaDex.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [26h])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]))) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h])) > 0) * 100",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
           },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval])) and max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
-          "queryType": "range",
-          "legendFormat": "At SeaDex best"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval]))",
-          "queryType": "range",
-          "legendFormat": "At SeaDex alt"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
-          "queryType": "range",
-          "legendFormat": "Not at best or alt"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", anime_items=\"anime_items\" | msg=`library summary` | unwrap anime_items [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval]))) and max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
-          "queryType": "range",
-          "legendFormat": "Not on SeaDex"
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "decimals": 0,
+                  "min": 0,
+                  "max": 100,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "yellow"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No summary yet"
+                },
+                "overrides": []
+              }
+            }
+          }
         }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Scout health",
-      "type": "row",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 37
       },
-      "collapsed": true,
-      "panels": [
-        {
+      "panel-20": {
+        "kind": "Panel",
+        "spec": {
+          "id": 20,
+          "title": "Upgrades available",
+          "description": "Upgrades SeaDex recommends for your library, newest first. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. The Nyaa, AnimeBytes and Other columns show only when some upgrade has a link there.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title, current_group, why, best, alt, nyaa_url, ab_url, public_url, arr_url) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_group=\"current_group\", current_tier=\"current_tier\", status=\"status\", current_revision=\"current_revision\", recommended_revision=\"recommended_revision\", alt_groups=\"alt_groups\", nyaa_url=\"nyaa_url\", ab_url=\"ab_url\", public_url=\"public_url\", arr_url=\"arr_url\" | msg=`better release available` | current_tier != \"$optional\" | label_format why=`{{ if eq .status \"newer_revision\" }}{{ .recommended_revision }} available{{ else if eq .current_tier \"alt\" }}SeaDex alt{{ else if eq .current_tier \"unlisted\" }}Neither best nor alt{{ else }}Better release{{ end }}`, current_group=`{{ .current_group | replace \",\" \", \" }}{{ if .current_revision }} {{ .current_revision }}{{ end }}`, best=`{{ .recommended_group }}{{ if .recommended_revision }} {{ .recommended_revision }}{{ end }}`, alt=`{{ if .alt_groups }}{{ .alt_groups | replace \",\" \", \" }}{{ else }}-{{ end }}` [2h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "min by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (min_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [$__range])) * 1000\nand on (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) sum by (al_id, arr, season, recommended_group, seadex_tags, info_hash, title) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", recommended_group=\"recommended_group\", seadex_tags=\"seadex_tags\", info_hash=\"info_hash\", title=\"title\", current_tier=\"current_tier\" | msg=`better release available` | current_tier != \"$optional\" [2h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "merge",
+                  "spec": {
+                    "options": {}
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true
+                      },
+                      "indexByName": {
+                        "Value #B": 0,
+                        "ab_url": 8,
+                        "al_id": 10,
+                        "alt": 6,
+                        "arr": 11,
+                        "best": 5,
+                        "current_group": 4,
+                        "nyaa_url": 7,
+                        "public_url": 9,
+                        "season": 2,
+                        "title": 1,
+                        "why": 3
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "First seen"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "noValue": "No upgrades available",
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "First seen"
+                      },
+                      {
+                        "id": "unit",
+                        "value": "dateTimeFromNow"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "blue",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 136
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "title"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Title"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open in Sonarr or Radarr",
+                            "url": "${__data.fields.arr_url}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 280
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "season"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Season"
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "index": 0,
+                                "text": "-"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 104
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "why"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Why"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 176
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "current_group"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "You have"
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 140
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "best"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex best"
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 150
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "alt"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex alt"
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 150
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "nyaa_url"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Nyaa"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open on Nyaa",
+                            "url": "${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": ".+",
+                              "result": {
+                                "index": 0,
+                                "text": "Open"
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "ab_url"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "AnimeBytes"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open on AnimeBytes",
+                            "url": "${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": ".+",
+                              "result": {
+                                "index": 0,
+                                "text": "Open"
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 136
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "public_url"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Other"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open on the tracker",
+                            "url": "${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": ".+",
+                              "result": {
+                                "index": 0,
+                                "text": "Open"
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 96
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "al_id"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open on releases.moe",
+                            "url": "https://releases.moe/${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 104
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "arr"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "App"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 80
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "radarr": {
+                                "index": 1,
+                                "text": "Radarr"
+                              },
+                              "sonarr": {
+                                "index": 0,
+                                "text": "Sonarr"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "recommended_group"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "arr_url"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "info_hash"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "seadex_tags"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": ".*"
+                    },
+                    "properties": [
+                      {
+                        "id": "noValue",
+                        "value": "-"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-21": {
+        "kind": "Panel",
+        "spec": {
+          "id": 21,
+          "title": "Check by hand",
+          "description": "Findings seadex-scout could not decide on its own. Several groups on disk means your files mix release groups, and Untagged release means your file or SeaDex's release names no group. Open the title and compare it with SeaDex yourself.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum by (al_id, arr, season, title, current_group, recommended_group, msg, arr_url) (count_over_time({container=\"$container\"} |= `manual review` | json msg=\"msg\", al_id=\"al_id\", arr=\"arr\", season=\"season\", title=\"title\", current_group=\"current_group\", recommended_group=\"recommended_group\", arr_url=\"arr_url\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` [2h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "merge",
+                  "spec": {
+                    "options": {}
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true
+                      },
+                      "indexByName": {
+                        "al_id": 5,
+                        "arr": 6,
+                        "current_group": 3,
+                        "msg": 2,
+                        "recommended_group": 4,
+                        "season": 1,
+                        "title": 0
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": false,
+                    "displayName": "Title"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "noValue": "Nothing to check",
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "title"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Title"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open in Sonarr or Radarr",
+                            "url": "${__data.fields.arr_url}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 280
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "season"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Season"
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "index": 0,
+                                "text": "-"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 104
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "msg"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Why"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 192
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "release group unverifiable, manual review": {
+                                "index": 1,
+                                "text": "Untagged release"
+                              },
+                              "series spans multiple release groups, manual review": {
+                                "index": 0,
+                                "text": "Several groups on disk"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "current_group"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "You have"
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 150
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "recommended_group"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex best"
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 150
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "al_id"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex"
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "Open on releases.moe",
+                            "url": "https://releases.moe/${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 104
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "arr"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "App"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 80
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "radarr": {
+                                "index": 1,
+                                "text": "Radarr"
+                              },
+                              "sonarr": {
+                                "index": 0,
+                                "text": "Sonarr"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "arr_url"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": "^Value( #[A-Z])?$"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": ".*"
+                    },
+                    "properties": [
+                      {
+                        "id": "noValue",
+                        "value": "-"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-41": {
+        "kind": "Panel",
+        "spec": {
+          "id": 41,
+          "title": "Library overview",
+          "description": "SeaDex entries in your library, one per season or film SeaDex lists, grouped by what you have. Season not found means seadex-scout found no files for that season, because they are missing or Sonarr numbers that season differently, for example under specials. Unmapped specials are films or specials in Sonarr's specials that seadex-scout cannot tie to one entry. No summary yet means no daily library summary has arrived in the last 26 hours.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_alt=\"have_alt\" | msg=`library summary` | unwrap have_alt [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_older_revision=\"have_older_revision\" | msg=`library summary` | unwrap have_older_revision [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", have_unlisted=\"have_unlisted\" | msg=`library summary` | unwrap have_unlisted [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "D",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", no_file=\"no_file\" | msg=`library summary` | unwrap no_file [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "E",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", unverified=\"unverified\" | msg=`library summary` | unwrap unverified [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "F",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", unattributed=\"unattributed\" | msg=`library summary` | unwrap unattributed [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "G",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", not_on_seadex=\"not_on_seadex\" | msg=`library summary` | unwrap not_on_seadex [26h]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "H",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "bargauge",
+            "version": "",
+            "spec": {
+              "options": {
+                "displayMode": "basic",
+                "namePlacement": "left",
+                "orientation": "horizontal",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showUnfilled": true,
+                "sizing": "auto",
+                "valueMode": "color",
+                "text": {
+                  "titleSize": 10
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "text"
+                  },
+                  "noValue": "No summary yet"
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex best"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "green",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "SeaDex alt"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "yellow",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "C"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Older version"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "yellow",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "D"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Neither best nor alt"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "red",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "E"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Season not found"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "blue",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "F"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Untagged release"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "purple",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "G"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Unmapped specials"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "text",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "H"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Not on SeaDex"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "text",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-42": {
+        "kind": "Panel",
+        "spec": {
+          "id": 42,
+          "title": "Your anime against SeaDex, over time",
+          "description": "Your anime at each daily check, one point per check. The four parts add up to every anime in your library. A missing point means that day's check did not finish with a complete library read.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval])) and max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
+                        "legendFormat": "At SeaDex best",
+                        "queryType": "range"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [$__interval]))",
+                        "legendFormat": "At SeaDex alt",
+                        "queryType": "range"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
+                        "legendFormat": "Not at best or alt",
+                        "queryType": "range"
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", anime_items=\"anime_items\" | msg=`library summary` | unwrap anime_items [$__interval])) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [$__interval]))) and max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [$__interval]))",
+                        "legendFormat": "Not on SeaDex",
+                        "queryType": "range"
+                      }
+                    },
+                    "refId": "D",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "interval": "1h"
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "min": 0,
+                  "custom": {
+                    "drawStyle": "line",
+                    "fillOpacity": 40,
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "showPoints": "always",
+                    "spanNulls": true,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "normal"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "A"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "blue",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "B"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "yellow",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "C"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "red",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "D"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "text",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-50": {
+        "kind": "Panel",
+        "spec": {
           "id": 50,
           "title": "Why",
           "description": "What keeps Status from showing ✓, over the last hour. A problem at SeaDex, AniList or the anime ID map needs nothing from you.",
-          "type": "table",
-          "gridPos": {
-            "h": 6,
-            "w": 12,
-            "x": 0,
-            "y": 38
-          },
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "custom": {
-                "filterable": true,
-                "align": "auto"
-              },
-              "noValue": "No problems"
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "condition"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Problem"
-                  },
-                  {
-                    "id": "custom.width",
-                    "value": 272
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "seadex-unreachable": {
-                            "text": "SeaDex unreachable",
-                            "index": 0
-                          },
-                          "seadex-window-oversize": {
-                            "text": "Too many SeaDex changes to fetch",
-                            "index": 1
-                          },
-                          "seadex-catalogue-fetch-failing": {
-                            "text": "SeaDex list fails to load",
-                            "index": 2
-                          },
-                          "anilist-lookups-failing": {
-                            "text": "AniList lookups failing",
-                            "index": 3
-                          },
-                          "mapping-refresh-rejected": {
-                            "text": "Anime ID map update refused",
-                            "index": 4
-                          },
-                          "library-walk-shrunk": {
-                            "text": "Library much smaller than before",
-                            "index": 5
-                          },
-                          "library-walk-partial": {
-                            "text": "Library read incomplete",
-                            "index": 6
-                          }
-                        }
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum by (condition, arr) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", arr=\"arr\" | level=`ERROR` | condition!=`` [1h]))",
+                        "queryType": "instant"
                       }
-                    ]
+                    },
+                    "refId": "A",
+                    "hidden": false
                   }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "arr"
                 },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "App"
-                  },
-                  {
-                    "id": "custom.width",
-                    "value": 80
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "sonarr": {
-                            "text": "Sonarr",
-                            "index": 0
-                          },
-                          "radarr": {
-                            "text": "Radarr",
-                            "index": 1
-                          }
-                        }
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum by (msg) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", msg=\"msg\" | level=`ERROR` | condition=`` [1h]))",
+                        "queryType": "instant"
                       }
-                    ]
+                    },
+                    "refId": "B",
+                    "hidden": false
                   }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "msg"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Error"
-                  },
-                  {
-                    "id": "custom.minWidth",
-                    "value": 200
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Value #A"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Times logged"
-                  },
-                  {
-                    "id": "custom.width",
-                    "value": 152
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Value #B"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Times logged"
-                  },
-                  {
-                    "id": "custom.width",
-                    "value": 152
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": ".*"
-                },
-                "properties": [
-                  {
-                    "id": "noValue",
-                    "value": "-"
-                  }
-                ]
-              }
-            ]
-          },
-          "options": {
-            "showHeader": true,
-            "cellHeight": "sm",
-            "sortBy": []
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "loki",
-                "uid": "${datasource}"
-              },
-              "expr": "sum by (condition, arr) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", arr=\"arr\" | level=`ERROR` | condition!=`` [1h]))",
-              "queryType": "instant"
-            },
-            {
-              "refId": "B",
-              "datasource": {
-                "type": "loki",
-                "uid": "${datasource}"
-              },
-              "expr": "sum by (msg) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", msg=\"msg\" | level=`ERROR` | condition=`` [1h]))",
-              "queryType": "instant"
-            }
-          ],
-          "transformations": [
-            {
-              "id": "merge",
-              "options": {}
-            },
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true
-                },
-                "indexByName": {
-                  "condition": 0,
-                  "arr": 1,
-                  "msg": 2
                 }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "merge",
+                  "spec": {
+                    "options": {}
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true
+                      },
+                      "indexByName": {
+                        "arr": 1,
+                        "condition": 0,
+                        "msg": 2
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "sortBy": []
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "noValue": "No problems",
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "condition"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Problem"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 272
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "anilist-lookups-failing": {
+                                "index": 3,
+                                "text": "AniList lookups failing"
+                              },
+                              "library-walk-partial": {
+                                "index": 6,
+                                "text": "Library read incomplete"
+                              },
+                              "library-walk-shrunk": {
+                                "index": 5,
+                                "text": "Library much smaller than before"
+                              },
+                              "mapping-refresh-rejected": {
+                                "index": 4,
+                                "text": "Anime ID map update refused"
+                              },
+                              "seadex-catalogue-fetch-failing": {
+                                "index": 2,
+                                "text": "SeaDex list fails to load"
+                              },
+                              "seadex-unreachable": {
+                                "index": 0,
+                                "text": "SeaDex unreachable"
+                              },
+                              "seadex-window-oversize": {
+                                "index": 1,
+                                "text": "Too many SeaDex changes to fetch"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "arr"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "App"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 80
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "radarr": {
+                                "index": 1,
+                                "text": "Radarr"
+                              },
+                              "sonarr": {
+                                "index": 0,
+                                "text": "Sonarr"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "msg"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Error"
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 200
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Times logged"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 152
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Times logged"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 152
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": ".*"
+                    },
+                    "properties": [
+                      {
+                        "id": "noValue",
+                        "value": "-"
+                      }
+                    ]
+                  }
+                ]
               }
             }
-          ]
-        },
-        {
+          }
+        }
+      },
+      "panel-51": {
+        "kind": "Panel",
+        "spec": {
           "id": 51,
           "title": "Last full check",
-          "description": "When the last full check finished. It runs once a day.",
-          "type": "stat",
-          "gridPos": {
-            "h": 3,
-            "w": 6,
-            "x": 12,
-            "y": 38
-          },
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "dateTimeFromNow",
-              "noValue": "Over 72 hours ago",
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
+          "description": "When the last full check finished. It runs once a day. Over 72 hours ago means the daily check has stopped, so the Upgrades table can be out of date and Status shows ✗.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(max_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [72h])) * 1000",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
                   }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
+                }
               ],
-              "fields": "",
-              "values": false
-            },
-            "colorMode": "none",
-            "graphMode": "none",
-            "textMode": "value",
-            "justifyMode": "auto",
-            "orientation": "auto"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "loki",
-                "uid": "${datasource}"
-              },
-              "expr": "max(max_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [72h])) * 1000",
-              "queryType": "instant"
+              "transformations": [],
+              "queryOptions": {}
             }
-          ]
-        },
-        {
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "none",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "dateTimeFromNow",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Over 72 hours ago"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-52": {
+        "kind": "Panel",
+        "spec": {
           "id": 52,
           "title": "Last check",
-          "description": "When the last check of any kind finished. It runs every 15 minutes by default.",
-          "type": "stat",
-          "gridPos": {
-            "h": 3,
-            "w": 6,
-            "x": 18,
-            "y": 38
-          },
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "dateTimeFromNow",
-              "noValue": "Over 3 hours ago",
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
+          "description": "When the last check of any kind finished. It runs every 15 minutes by default. Over 3 hours ago means seadex-scout has stopped checking, so look at its container and its logs.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "max(max_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [3h])) * 1000",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
                   }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
+                }
               ],
-              "fields": "",
-              "values": false
-            },
-            "colorMode": "none",
-            "graphMode": "none",
-            "textMode": "value",
-            "justifyMode": "auto",
-            "orientation": "auto"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "loki",
-                "uid": "${datasource}"
-              },
-              "expr": "max(max_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [3h])) * 1000",
-              "queryType": "instant"
+              "transformations": [],
+              "queryOptions": {}
             }
-          ]
-        },
-        {
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "none",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "dateTimeFromNow",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Over 3 hours ago"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-53": {
+        "kind": "Panel",
+        "spec": {
           "id": 53,
           "title": "New feed releases in this range",
-          "description": "Releases the Torznab feed newly offered Sonarr and Radarr in this time range. It reads 0 when the feed is not set up.",
-          "type": "stat",
-          "gridPos": {
-            "h": 3,
-            "w": 12,
-            "x": 12,
-            "y": 41
-          },
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "noValue": "0",
-              "color": {
-                "mode": "thresholds"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "text",
-                    "value": null
+          "description": "Releases the Torznab feed newly offered Sonarr and Radarr in this time range. It reads 0 when the feed is not set up. A 0 is also normal while SeaDex has curated nothing new.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum(sum_over_time({container=\"$container\"} |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
                   }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
+                }
               ],
-              "fields": "",
-              "values": false
-            },
-            "colorMode": "none",
-            "graphMode": "none",
-            "textMode": "value",
-            "justifyMode": "auto",
-            "orientation": "auto"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "loki",
-                "uid": "${datasource}"
-              },
-              "expr": "sum(sum_over_time({container=\"$container\"} |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
-              "queryType": "instant"
+              "transformations": [],
+              "queryOptions": {}
             }
-          ]
-        },
-        {
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "none",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-54": {
+        "kind": "Panel",
+        "spec": {
           "id": 54,
           "title": "Feed polls per tracker",
-          "description": "How often Sonarr and Radarr read the Torznab feed, per tracker. A tracker whose bars stop was turned off or marked failing in Sonarr or Radarr.",
-          "type": "timeseries",
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 44
+          "description": "How often Sonarr and Radarr read the Torznab feed, per tracker. Steady bars are normal, one count per RSS check. A tracker whose bars stop was turned off or marked failing in Sonarr or Radarr.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum by (scope) (count_over_time({container=\"$container\"} |= `indexer request` | json msg=\"msg\", scope=\"scope\", feed=\"feed\" | msg=`indexer request` | feed=`true` [$__interval]))",
+                        "legendFormat": "{{scope}}",
+                        "queryType": "range"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
           },
-          "datasource": {
-            "type": "loki",
-            "uid": "${datasource}"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "min": 0,
-              "custom": {
-                "drawStyle": "bars",
-                "fillOpacity": 80,
-                "lineWidth": 1,
-                "stacking": {
-                  "mode": "normal"
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [
+                    "sum"
+                  ],
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true
+                },
+                "tooltip": {
+                  "mode": "multi"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "min": 0,
+                  "custom": {
+                    "drawStyle": "bars",
+                    "fillOpacity": 80,
+                    "lineWidth": 1,
+                    "stacking": {
+                      "mode": "normal"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "ab"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "AnimeBytes"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "nyaa"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Nyaa"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "RowsLayout",
+      "spec": {
+        "rows": [
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "At a glance",
+              "collapse": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 5,
+                        "height": 4,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-10"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 5,
+                        "y": 0,
+                        "width": 5,
+                        "height": 4,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-11"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 10,
+                        "y": 0,
+                        "width": 14,
+                        "height": 8,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-41"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 4,
+                        "width": 5,
+                        "height": 4,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-14"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 5,
+                        "y": 4,
+                        "width": 5,
+                        "height": 4,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-15"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "ab"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "AnimeBytes"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "nyaa"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Nyaa"
-                  }
-                ]
+            }
+          },
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Upgrades",
+              "collapse": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 24,
+                        "height": 11,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-20"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 11,
+                        "width": 24,
+                        "height": 7,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-21"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 18,
+                        "width": 24,
+                        "height": 9,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-42"
+                        }
+                      }
+                    }
+                  ]
+                }
               }
-            ]
-          },
-          "options": {
-            "legend": {
-              "displayMode": "table",
-              "placement": "right",
-              "calcs": [
-                "sum"
-              ],
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi"
             }
           },
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "loki",
-                "uid": "${datasource}"
-              },
-              "expr": "sum by (scope) (count_over_time({container=\"$container\"} |= `indexer request` | json msg=\"msg\", scope=\"scope\", feed=\"feed\" | msg=`indexer request` | feed=`true` [$__interval]))",
-              "queryType": "range",
-              "legendFormat": "{{scope}}"
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Scout health",
+              "collapse": true,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 12,
+                        "height": 6,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-50"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 12,
+                        "y": 0,
+                        "width": 6,
+                        "height": 3,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-51"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 18,
+                        "y": 0,
+                        "width": 6,
+                        "height": 3,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-52"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 12,
+                        "y": 3,
+                        "width": 12,
+                        "height": 3,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-53"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 6,
+                        "width": 24,
+                        "height": 8,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-54"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
             }
-          ]
+          }
+        ]
+      }
+    },
+    "links": [],
+    "liveNow": false,
+    "preload": false,
+    "tags": [
+      "anime",
+      "seadex",
+      "sonarr",
+      "radarr"
+    ],
+    "timeSettings": {
+      "timezone": "browser",
+      "from": "now-7d",
+      "to": "now",
+      "autoRefresh": "5m",
+      "autoRefreshIntervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "1d"
+      ],
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0
+    },
+    "title": "SeaDex Scout",
+    "variables": [
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "datasource",
+          "pluginId": "loki",
+          "refresh": "onDashboardLoad",
+          "regex": "",
+          "current": {
+            "text": "Loki",
+            "value": "loki"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "label": "Data source",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": true
         }
-      ]
-    }
-  ]
+      },
+      {
+        "kind": "TextVariable",
+        "spec": {
+          "name": "container",
+          "current": {
+            "text": "seadex-scout",
+            "value": "seadex-scout"
+          },
+          "query": "seadex-scout",
+          "label": "Container",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "description": "The value of the container label your log collector puts on seadex-scout's lines."
+        }
+      },
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "optional",
+          "query": "Hide : alt, Show : none",
+          "current": {
+            "text": "Hide",
+            "value": "alt"
+          },
+          "options": [
+            {
+              "selected": true,
+              "text": "Hide",
+              "value": "alt"
+            },
+            {
+              "selected": false,
+              "text": "Show",
+              "value": "none"
+            }
+          ],
+          "multi": false,
+          "includeAll": false,
+          "label": "Optional upgrades",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "description": "Hide leaves out upgrades where you already have a SeaDex alt. Show lists them too.",
+          "allowCustomValue": false
+        }
+      }
+    ]
+  }
 }
