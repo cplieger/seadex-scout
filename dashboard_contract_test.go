@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -43,8 +44,9 @@ var (
 var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "26h", "72h"}
 
 type dashTarget struct {
-	panel string
-	expr  string
+	datasource any
+	panel      string
+	expr       string
 }
 
 func loadContract(t *testing.T) logcontract.Contract {
@@ -73,26 +75,29 @@ func loadDashboard(t *testing.T) map[string]any {
 	return d
 }
 
+func field(v any, keys ...string) any {
+	for _, k := range keys {
+		m, _ := v.(map[string]any)
+		v = m[k]
+	}
+	return v
+}
+
+// dashboardTargets keeps a query with no expr as an empty one, so the
+// contract checks report it instead of skipping it.
 func dashboardTargets(d map[string]any) []dashTarget {
+	elements, _ := field(d, "spec", "elements").(map[string]any)
 	var out []dashTarget
-	var walk func(ps []any)
-	walk = func(ps []any) {
-		for _, p := range ps {
-			pm, _ := p.(map[string]any)
-			title, _ := pm["title"].(string)
-			ts, _ := pm["targets"].([]any)
-			for _, tg := range ts {
-				tm, _ := tg.(map[string]any)
-				if expr, ok := tm["expr"].(string); ok {
-					out = append(out, dashTarget{panel: title, expr: expr})
-				}
-			}
-			nested, _ := pm["panels"].([]any)
-			walk(nested)
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		el := elements[name]
+		title, _ := field(el, "spec", "title").(string)
+		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
+		for _, q := range queries {
+			query := field(q, "spec", "query")
+			expr, _ := field(query, "spec", "expr").(string)
+			out = append(out, dashTarget{panel: title, expr: expr, datasource: field(query, "datasource")})
 		}
 	}
-	panels, _ := d["panels"].([]any)
-	walk(panels)
 	return out
 }
 
@@ -215,46 +220,54 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 }
 
 // TestDashboardShape pins what makes the file importable into any deployment:
-// a string uid, a datasource variable first and used by every query, a
-// container variable, the optional-upgrades switch defaulting to Hide, no fixed
-// number of days, and no host but the SeaDex site.
+// a schema v2 resource whose metadata.name is seadex-scout, a datasource
+// variable first and used by every query, a container variable, the
+// optional-upgrades switch defaulting to Hide, no fixed number of days, and no
+// host but the SeaDex site.
 func TestDashboardShape(t *testing.T) {
 	raw, err := os.ReadFile(dashboardPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", dashboardPath, err)
 	}
 	d := loadDashboard(t)
-	if uid, _ := d["uid"].(string); uid != "seadex-scout" {
-		t.Errorf("uid = %v, want the string seadex-scout", d["uid"])
+	if d["apiVersion"] != "dashboard.grafana.app/v2" || d["kind"] != "Dashboard" {
+		t.Errorf("apiVersion, kind = %v, %v, want dashboard.grafana.app/v2, Dashboard", d["apiVersion"], d["kind"])
 	}
-	tmpl, _ := d["templating"].(map[string]any)
-	vars, _ := tmpl["list"].([]any)
+	if name := field(d, "metadata", "name"); name != "seadex-scout" {
+		t.Errorf("metadata.name = %v, want seadex-scout", name)
+	}
+	vars, _ := field(d, "spec", "variables").([]any)
 	var names []string
 	for _, v := range vars {
-		vm, _ := v.(map[string]any)
-		name, _ := vm["name"].(string)
+		name, _ := field(v, "spec", "name").(string)
 		names = append(names, name)
 	}
 	if !slices.Equal(names, []string{"datasource", "container", "optional"}) {
-		t.Errorf("template variables = %v, want [datasource container optional]", names)
+		t.Errorf("variables = %v, want [datasource container optional]", names)
 	}
 	if len(vars) == 3 {
-		opt, _ := vars[2].(map[string]any)
-		cur, _ := opt["current"].(map[string]any)
-		if opt["query"] != "Hide : alt, Show : none" || cur["text"] != "Hide" || cur["value"] != "alt" {
-			t.Errorf("optional variable query = %v, current = %v, want options Hide : alt, Show : none with Hide selected",
-				opt["query"], cur)
+		opt := vars[2]
+		kind, query, cur := field(opt, "kind"), field(opt, "spec", "query"), field(opt, "spec", "current")
+		if kind != "CustomVariable" || query != "Hide : alt, Show : none" ||
+			field(cur, "text") != "Hide" || field(cur, "value") != "alt" {
+			t.Errorf("optional variable kind = %v, query = %v, current = %v, want a CustomVariable with options Hide : alt, Show : none and Hide selected",
+				kind, query, cur)
 		}
 	}
-	text := string(raw)
-	if n, m := strings.Count(text, `"expr"`), strings.Count(text, `"uid": "${datasource}"`); m < n {
-		t.Errorf("%d queries but %d datasource references to ${datasource}, want every panel and target on it", n, m)
+	targets := dashboardTargets(d)
+	if len(targets) == 0 {
+		t.Fatalf("%s carries no query", dashboardPath)
 	}
-	for _, tg := range dashboardTargets(d) {
+	want := map[string]any{"name": "${datasource}"}
+	for _, tg := range targets {
+		if ds, _ := tg.datasource.(map[string]any); !maps.Equal(ds, want) {
+			t.Errorf("panel %q query datasource = %v, want %v", tg.panel, tg.datasource, want)
+		}
 		if !strings.Contains(tg.expr, `container="$container"`) {
 			t.Errorf("panel %q does not select on $container: %s", tg.panel, tg.expr)
 		}
 	}
+	text := string(raw)
 	if m := regexp.MustCompile(`\b\d+ ?days?\b|\[\d+d\]|offset \d+d`).FindString(text); m != "" {
 		t.Errorf("dashboard carries %q, want no fixed number of days anywhere", m)
 	}

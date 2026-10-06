@@ -11,4 +11,5 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 
 - When a field `state.json` persists changes type, give it a new JSON key and a test loading the old key. Retyped in place, the old key fails the decode, so the app moves the file aside and loses its state.
 - The messages and attributes listed atop `alerts/logql.yaml` are a public contract. Add an attribute rather than rename one. Operators run copies of the rules and the dashboard, so a rename passes every test here and silences their alerts.
+- Save a `grafana-dashboard.json` change made in the Grafana UI with Export, then Export as code, choosing the V2 Resource model.
 - A new config key needs its default and check in `internal/config`, an entry in `config.example.yaml` and a row in `docs/configuration.md`. A first start writes the embedded example, so a key missing there stays hidden from a new install.

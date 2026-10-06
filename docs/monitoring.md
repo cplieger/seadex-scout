@@ -32,9 +32,11 @@ The container also turns unhealthy when no pass finishes within three poll inter
 
 ## Dashboard
 
-Every release attaches `grafana-dashboard.json` to its GitHub Release, with a `.sha256` file and a signature. The same file is published as `ghcr.io/cplieger/seadex-scout/dashboard:<version>`. [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows how to load it. It reads Loki only.
+`grafana-dashboard.json` needs Grafana 13.2 or newer and reads Loki only. Every release attaches it to its GitHub Release, with a `.sha256` file and a signature. The same file is published as `ghcr.io/cplieger/seadex-scout/dashboard:<version>`, with the artifact type `application/vnd.grafana.dashboard.v2+json`. [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows how to load it. The file sets `metadata.name` to `seadex-scout`, which Grafana uses as the dashboard UID, so importing a newer copy and choosing **Import (Overwrite)** updates it in place.
 
-The dashboard has three variables at the top. **Loki** picks your Loki data source. **Container** is the value of the `container` label your log collector puts on seadex-scout's lines, `seadex-scout` by default.
+On Grafana 13.1 or older, use the `grafana-dashboard.json` of release [v2.12.1](https://github.com/cplieger/seadex-scout/releases/tag/v2.12.1), the last one in the older dashboard format. That file gets no further changes, so you maintain it yourself.
+
+The dashboard has three variables at the top. **Data source** picks your Loki data source. **Container** is the value of the `container` label your log collector puts on seadex-scout's lines, `seadex-scout` by default.
 
 **Optional upgrades** decides whether the upgrades list shows upgrades where you already have a SeaDex alt. **Hide** is the default and leaves them out. Pick **Show** to see them too. The Upgrades count at the top follows the same setting, so the count matches the list.
 
