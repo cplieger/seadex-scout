@@ -4,7 +4,6 @@ import (
 	"slices"
 
 	"github.com/cplieger/seadex-scout/internal/library"
-	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -104,11 +103,15 @@ type Decision struct {
 	// revision, the NEWEST revision held across them, and the NEWEST revision
 	// SeaDex lists across them.
 	SupersededGroups []string
-	HeldRevision     release.Revision
-	ListedRevision   release.Revision
-	Kind             ScopeKind
-	Standing         Standing
-	Outcome          Outcome
+	// Episodes and MissingEpisodes are set only for ScopeEpisodes: the placed
+	// season-0 episodes judged, and those of them with no file.
+	Episodes        []int
+	MissingEpisodes []int
+	HeldRevision    release.Revision
+	ListedRevision  release.Revision
+	Kind            ScopeKind
+	Standing        Standing
+	Outcome         Outcome
 	// Season is the shared non-negative TVDB season label both consumers stamp on
 	// their output: Record.SeasonTvdb for a ScopeSeason comparison, else 0.
 	Season int
@@ -119,18 +122,22 @@ type Decision struct {
 // Decide resolves the one comparison decision both align consumers project
 // their vocabulary from: the daemon's compare pass maps it to Finding/Status
 // (internal/compare) and the audit report to Row/Verdict/Qualifier
-// (internal/audit). siblingSeasons and seasons both bound a whole-series
-// comparison to the entry's own seasons, from two sources: seasons (the entry's
-// TVDB season ranges from the mapping list) wins when present, else
-// the seasons sibling records map are dropped. Every other scope ignores both.
-func Decide(item *library.Item, rec *mapping.Record, listing *Listing, siblingSeasons []int, seasons []mapping.SeasonRange) Decision {
-	scoped := scope(item, rec)
+// (internal/audit). The entry's SiblingSeasons and Seasons both bound a
+// whole-series comparison to its own seasons, from two sources: Seasons (its
+// TVDB season ranges from the mapping list) wins when present, else the seasons
+// sibling records map are dropped. Its Specials decide the episodes scope.
+func Decide(item *library.Item, e *Entry, listing *Listing) Decision {
+	rec := e.Record
+	scoped := scope(item, rec, e.Specials)
 	d := Decision{Kind: scoped.Kind, NoBest: len(listing.Best) == 0}
-	if scoped.Kind == ScopeSeason {
+	switch scoped.Kind {
+	case ScopeSeason:
 		// scope only returns ScopeSeason for rec.HasMappedSeason(), which IS
 		// SeasonTvdb > 0, so the label is positive by construction; every
 		// other scope leaves it 0.
 		d.Season = rec.SeasonTvdb
+	case ScopeEpisodes:
+		d.Episodes, d.MissingEpisodes = slices.Clone(e.Specials), scoped.Missing
 	}
 	switch {
 	case !item.Comparable():
@@ -152,7 +159,7 @@ func Decide(item *library.Item, rec *mapping.Record, listing *Listing, siblingSe
 		// An absolute-numbered run has no per-season mapping, so its single
 		// whole-series recommendation is judged against every real season on disk,
 		// conservatively: best only when every filed season provenly carries a best group.
-		s := summarizeWholeSeries(item, listing, siblingSeasons, seasons)
+		s := summarizeWholeSeries(item, listing, e.SiblingSeasons, e.Seasons)
 		d.Groups, d.Approx = s.Groups, s.Approx
 		d.Standing = wholeSeriesStanding(&s)
 		if d.Standing == StandingBestSuperseded {
@@ -194,11 +201,12 @@ func heldReadings(groups []string, held map[string]release.Revision) []release.R
 	return out
 }
 
-// unitStanding derives the group-ladder standing of a single-unit scope (a movie
-// or a mapped season; the offered kind takes its own arm in Decide ahead of
-// this): file presence first, then the current groups matched against the best
-// then the alt sets under the three-valued release.GroupsOverlap. It also
-// returns the superseded groups when the standing is StandingBestSuperseded.
+// unitStanding derives the group-ladder standing of a single-unit scope (a
+// movie, a mapped season or placed episodes; the offered kind takes its own
+// arm in Decide ahead of this): file presence first, then the current groups
+// matched against the best then the alt sets under the three-valued
+// release.GroupsOverlap. It also returns the superseded groups when the
+// standing is StandingBestSuperseded.
 func unitStanding(scoped *scopeResult, listing *Listing) (standing Standing, behind []string) {
 	switch {
 	case !scoped.HasFile:

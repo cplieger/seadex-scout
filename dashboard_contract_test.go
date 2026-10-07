@@ -382,3 +382,42 @@ func leadingOperand(s string) string {
 	}
 	return ""
 }
+
+func TestDashboardNamesTheUncomparedSpecialsPlainly(t *testing.T) {
+	const label = "Episode not known"
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	found := false
+	for _, el := range elements {
+		if title, _ := field(el, "spec", "title").(string); title != "Library overview" {
+			continue
+		}
+		refID := ""
+		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
+		for _, q := range queries {
+			if expr, _ := field(q, "spec", "query", "spec", "expr").(string); strings.Contains(expr, "unwrap unattributed ") {
+				refID, _ = field(q, "spec", "refId").(string)
+			}
+		}
+		overrides, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "overrides").([]any)
+		for _, o := range overrides {
+			if opt, _ := field(o, "matcher", "options").(string); opt != refID || refID == "" {
+				continue
+			}
+			props, _ := field(o, "properties").([]any)
+			for _, p := range props {
+				if id, _ := field(p, "id").(string); id == "displayName" {
+					found = true
+					if v, _ := field(p, "value").(string); v != label {
+						t.Errorf("Library overview names the unattributed bar %q, want %q", v, label)
+					}
+				}
+			}
+		}
+		if desc, _ := field(el, "spec", "description").(string); !strings.Contains(desc, label+" means") {
+			t.Errorf("Library overview description = %q, want it to define %q", desc, label)
+		}
+	}
+	if !found {
+		t.Fatalf("%s has no Library overview bar unwrapping unattributed with a display name", dashboardPath)
+	}
+}

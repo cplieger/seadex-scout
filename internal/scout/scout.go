@@ -573,7 +573,7 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, p *completedPass) bool
 	// Findings are reported as STATE: the whole set is re-emitted and a condition
 	// resolves by absence. The preserve set scopes what replacement may DELETE, so
 	// an entry with incomplete evidence keeps its prior rows.
-	s.notifier.Report(findings, unionIDs(failedItems, result.IncompleteIDs))
+	s.notifier.Report(findings, preserved(failedItems, result))
 	// The in-memory set is now authoritative for the whole catalogue, so ticks may
 	// publish it (see Scout.ready). This is the ONLY site that sets it: every other
 	// reconcile exit gated before the compare or was interrupted.
@@ -581,13 +581,14 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, p *completedPass) bool
 	s.logLibrary(p)
 
 	diff := library.DiffSnapshots(&st.Library, snap)
-	attrs := make([]any, 0, 26)
+	attrs := make([]any, 0, 28)
 	attrs = append(attrs,
 		"seadex_entries", len(p.entries),
 		"library_items", len(snap.Items),
 		"findings", len(findings),
 		"mapped", sumCounts(result.Coverage.Hits),
 		"unmapped", sumCounts(result.Coverage.Unmapped),
+		"specials_unread", specialsUnread(snap.Items),
 	)
 	attrs = append(attrs, s.aniListCycleAttrs(p.startStats)...)
 	attrs = append(attrs,
@@ -673,7 +674,7 @@ func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 // "cycle complete", or "cycle degraded" with the most severe applicable
 // reason (a shrink-guarded arr, then a partial walk, then AniList degradation,
 // then a stale-but-usable map, then an arr side emptied by its tag filter).
-func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems map[int]struct{}, aniListStreak int, shrunkArrs []string, attrs []any) {
+func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems notify.Preserve, aniListStreak int, shrunkArrs []string, attrs []any) {
 	switch {
 	case len(shrunkArrs) > 0:
 		// An arr's walk shrank suspiciously, so the compare ran against that side's
@@ -710,19 +711,33 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 	}
 }
 
+// specialsUnread counts the series whose season-0 files the walk could not
+// tie to episodes (library.Item.SpecialsUnknown). Their placed entries keep
+// their prior findings, so a count that never falls back to 0 is how a
+// persistent read failure shows.
+func specialsUnread(items []library.Item) int {
+	n := 0
+	for i := range items {
+		if items[i].SpecialsUnknown() {
+			n++
+		}
+	}
+	return n
+}
+
 // splitFailedMatches partitions the match set around the model's placeholder rule
 // (library.Item.Comparable): a match linked to an item whose file data the walk
 // could not establish is excluded from the compare (its file state is missing,
 // not empty, so comparing would misread every recommendation as unmet), and those
-// items' AniList IDs are returned so resolution can preserve their prior findings.
-func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems map[int]struct{}) {
+// copies are returned so resolution can preserve their prior findings.
+func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems notify.Preserve) {
 	clean = make([]match.Match, 0, len(matches))
 	for i := range matches {
 		if m := &matches[i]; m.InLibrary() && !m.Item.Comparable() {
 			if failedItems == nil {
-				failedItems = make(map[int]struct{})
+				failedItems = make(notify.Preserve)
 			}
-			failedItems[m.Entry.AniListID] = struct{}{}
+			failedItems[copyOwner(m)] = struct{}{}
 			continue
 		}
 		clean = append(clean, matches[i])
@@ -733,20 +748,31 @@ func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems
 	return clean, failedItems
 }
 
-// unionIDs returns the union of two AniList-id sets for the finding
-// preservation scope, reusing one side unchanged when the other is empty (the
-// common cases: a clean walk, or a non-degraded match) and nil when both are.
-func unionIDs(a, b map[int]struct{}) map[int]struct{} {
-	if len(b) == 0 {
-		return a
+func copyOwner(m *match.Match) notify.Owner {
+	return notify.Owner{Arr: m.Item.Arr, AniListID: m.Entry.AniListID}
+}
+
+// preserved is the finding-preservation scope: the owners whose evidence this
+// pass could not establish. A failed item and a placed entry whose season-0
+// files the walk could not read preserve their own arr copy; a failed AniList
+// lookup preserves every copy of its entry.
+func preserved(failedItems notify.Preserve, result *match.Result) notify.Preserve {
+	p := maps.Clone(failedItems)
+	add := func(o notify.Owner) {
+		if p == nil {
+			p = make(notify.Preserve)
+		}
+		p[o] = struct{}{}
 	}
-	if len(a) == 0 {
-		return b
+	for id := range result.IncompleteIDs {
+		add(notify.Owner{AniListID: id})
 	}
-	u := make(map[int]struct{}, len(a)+len(b))
-	maps.Copy(u, a)
-	maps.Copy(u, b)
-	return u
+	for i := range result.Matches {
+		if m := &result.Matches[i]; m.SpecialsUnknown() {
+			add(copyOwner(m))
+		}
+	}
+	return p
 }
 
 // mapUsable reports whether a compare or feed rebuild can proceed on the loaded

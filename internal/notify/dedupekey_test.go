@@ -14,15 +14,22 @@ func TestDedupeKey(t *testing.T) {
 	h2 := strings.Repeat("b", 40)
 	f := &compare.Finding{
 		AniListID:         42,
+		Arr:               "sonarr",
 		Status:            compare.StatusBetter,
 		RecommendedGroups: []string{"b", "a"},
 		CurrentGroup:      "x",
 		InfoHash:          h1,
 	}
 	got := dedupeKey(f)
-	want := `42:better_release:a\:b:x:hash\:` + h1
+	want := `42:sonarr:better_release:a\:b:x:hash\:` + h1
 	if got != want {
 		t.Errorf("dedupeKey() = %q, want %q", got, want)
+	}
+
+	radarrCopy := *f
+	radarrCopy.Arr = "radarr"
+	if dedupeKey(&radarrCopy) == got {
+		t.Error("a finding on the entry's Radarr copy must not share its Sonarr copy's dedupe key")
 	}
 
 	swap := *f

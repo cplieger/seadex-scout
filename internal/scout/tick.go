@@ -285,7 +285,7 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 	// preserves every row whose entry had incomplete evidence, which is what makes
 	// a partial pass safe here at all.
 	s.notifier.ReportScoped(findings, evaluatedIDs(result.Matches),
-		unionIDs(failedItems, result.IncompleteIDs))
+		preserved(failedItems, &result))
 	st.Memo = result.Memo
 	return s.tickComplete(ctx, len(entries), len(findings), &st, &mapCache)
 }

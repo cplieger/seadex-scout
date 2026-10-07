@@ -10,16 +10,18 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// dedupeKey keys a finding by AniList ID, status, recommended-group set, current
-// group, release identity, and the full obtainable-source link set, so a
+// dedupeKey keys a finding by AniList ID, arr, status, recommended-group set,
+// current group, release identity, and the full obtainable-source link set, so a
 // same-group quality swap (new identity), a changed library state, or ANY change
 // to the recommended sources becomes a DIFFERENT row - the old one resolves and
-// the new one is announced - while an unchanged finding keeps its row.
+// the new one is announced - while an unchanged finding keeps its row. The arr
+// keeps apart a film's Radarr copy and its Sonarr special.
 func dedupeKey(f *compare.Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
 	parts := []string{
 		strconv.Itoa(f.AniListID),
+		f.Arr,
 		string(f.Status),
 		keyenc.Join(groups...),
 		currentGroupKey(f),

@@ -26,16 +26,19 @@
 #     attrs: current_tier, recommended_group, alert_recommended_group, seadex_tags,
 #     attrs: info_hash, resolution, kind, release_url, nyaa_url, public_url,
 #     attrs: public_tracker, ab_url, ab_tracker, current_revision, recommended_revision,
-#     attrs: alt_groups
+#     attrs: alt_groups, episodes
 #   msg="series spans multiple release groups, manual review"
 #                                   the mixed-group manual-review nudge
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
-#     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups
+#     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups,
+#     attrs: episodes
 #   msg="release group unverifiable, manual review"
 #                                   a comparison an untagged release left undecided
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
-#     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups
-#   msg="report written"            a report was generated
+#     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups,
+#     attrs: episodes
+#   msg="report written"            a report was generated, and anime is the
+#                                   number of rows it holds
 #     attrs: anime
 #   msg="cycle complete"            \
 #   msg="cycle degraded"             | the loop deadman, matched as
@@ -283,6 +286,6 @@ groups:
         annotations:
           summary: "seadex-scout report generated"
           description: >
-            seadex-scout wrote a season-level report covering {{$labels.anime}}
-            anime. Read the timestamped report-<UTC>.md and .json pair in the
-            `report.dir` folder.
+            seadex-scout wrote a report with {{$labels.anime}} rows. Read the
+            timestamped report-<UTC>.md and .json pair in the `report.dir`
+            folder.

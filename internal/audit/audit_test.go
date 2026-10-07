@@ -543,7 +543,7 @@ func TestRowQualifier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
-			d := align.Decide(item, &rec, &align.Listing{Best: tt.best, Alt: tt.alt}, nil, nil)
+			d := align.Decide(item, &align.Entry{Record: &rec}, &align.Listing{Best: tt.best, Alt: tt.alt})
 			if got := rowQualifier(&tt.entry, &d); got != tt.want {
 				t.Errorf("rowQualifier() = %q, want %q", got, tt.want)
 			}

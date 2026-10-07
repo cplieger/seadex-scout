@@ -3,6 +3,7 @@ package mapping
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -198,5 +199,56 @@ func TestAcceptRefresh_specialsOfParentFactsExtinctionRejected(t *testing.T) {
 	}
 	if len(next.ParentMappings) != 1 {
 		t.Errorf("accepted refresh carries %d specials-of-parent facts, want the body's 1", len(next.ParentMappings))
+	}
+}
+
+func TestAcceptRefresh_placedSpecialsExtinctionRejected(t *testing.T) {
+	const records = 200
+	prev := &Cache{Mappings: map[int]Mapping{}}
+	for id := 1; id <= records; id++ {
+		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, Type: "TV", TvdbID: id})
+		switch {
+		case id <= 10:
+			prev.Mappings[id] = Mapping{SpecialEpisode: 1}
+		case id <= 20:
+			prev.Mappings[id] = Mapping{Specials: []int{id}, SpecialsTvdb: id}
+		}
+	}
+	body := func(withPlacement bool) []byte {
+		var b strings.Builder
+		b.WriteByte('[')
+		for id := 1; id <= records; id++ {
+			if id > 1 {
+				b.WriteByte(',')
+			}
+			switch {
+			case id <= 10:
+				fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d,"tvdb_season":0,`+
+					`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,1]]}]}`, id, id, id)
+			case id <= 20 && withPlacement:
+				fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"OVA","tvdb_id":%d,"tvdb_season":0,"episodes":1,`+
+					`"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":%d}]}`, id, id, id, id)
+			default:
+				fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d}`, id, id, id)
+			}
+		}
+		b.WriteByte(']')
+		return animapBody(b.String())
+	}
+	l := &Loader{log: discardLogger()}
+	next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(false)})
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
+		t.Fatalf("acceptRefresh(every placement dropped) error = %v, want the stale map with stale_reason refresh validation failed", err)
+	}
+	if got := next.Mappings[15].Specials; !slices.Equal(got, []int{15}) {
+		t.Errorf("refused refresh kept Mappings[15].Specials = %v, want the stale [15]", got)
+	}
+	next, err = l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(true)})
+	if err != nil {
+		t.Fatalf("acceptRefresh(placements kept) error = %v, want acceptance", err)
+	}
+	if got := next.Mappings[15].Specials; !slices.Equal(got, []int{15}) {
+		t.Errorf("accepted refresh Mappings[15].Specials = %v, want the body's [15]", got)
 	}
 }

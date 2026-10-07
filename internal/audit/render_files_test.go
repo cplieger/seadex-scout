@@ -123,17 +123,18 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 // TestWriteFilesReportWrittenLineCarriesAlertAttributes pins the success
 // record's wire shape, which alerts/logql.yaml keys on: SeadexScoutReportWritten
 // selects msg="report written", groups on sum by (anime), and renders
-// {{ $labels.anime }} in its description. Renaming or dropping the anime
+// {{ $labels.anime }} rows in its description. Renaming or dropping the anime
 // attribute (or the message) leaves the rule grouping on an absent label and
-// the operator reading "( ) anime", and no other test looks at either.
+// the operator reading "( ) rows", and no other test looks at either. The
+// fixture is one film held in both arrs, so anime counts rows, not AniList ids.
 func TestWriteFilesReportWrittenLineCarriesAlertAttributes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	var buf strings.Builder
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Rows: []Row{
-			{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest},
-			{Title: "Bocchi", Arr: "sonarr", Verdict: VerdictAlt},
+			{Title: "Sound! Euphonium the Movie", AniListID: 101992, Arr: "radarr", Verdict: VerdictBest},
+			{Title: "Sound! Euphonium the Movie", AniListID: 101992, Arr: "sonarr", Verdict: VerdictAlt},
 		},
 	}
 

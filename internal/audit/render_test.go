@@ -360,7 +360,7 @@ func TestRenderMarkdownCountsNotOnSeaDexSeparately(t *testing.T) {
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNotOnSeaDex): 2},
 		Rows: []Row{
-			{Title: "Matched", Arr: library.ArrSonarr, Verdict: VerdictBest},
+			{Title: "Matched", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 1},
 			{Title: "GapA", Arr: library.ArrSonarr, Verdict: VerdictNotOnSeaDex},
 			{Title: "GapB", Arr: library.ArrSonarr, Verdict: VerdictNotOnSeaDex},
 		},
@@ -368,11 +368,29 @@ func TestRenderMarkdownCountsNotOnSeaDexSeparately(t *testing.T) {
 
 	md := renderMarkdown(r)
 
-	if !strings.Contains(md, "1 anime with a SeaDex match") {
-		t.Errorf("header must count only matched rows, got: %s", md[:120])
+	if !strings.Contains(md, "1 anime with a SeaDex match;") {
+		t.Errorf("header must count only matched anime, got: %s", md[:120])
 	}
 	if !strings.Contains(md, "2 more in your library that SeaDex does not list") {
 		t.Errorf("header must mention the not_on_seadex count, got: %s", md[:200])
+	}
+}
+
+// One AniList entry kept in both arrs is two rows but one anime.
+func TestRenderMarkdownCountsAnArrPairAsOneAnime(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 2},
+		Rows: []Row{
+			{Title: "Film", Arr: library.ArrRadarr, Verdict: VerdictBest, AniListID: 101992},
+			{Title: "Series", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 101992},
+		},
+	}
+
+	md := renderMarkdown(r)
+
+	if want := "1 anime with a SeaDex match in 2 rows."; !strings.Contains(md, want) {
+		t.Errorf("renderMarkdown header = %q, want it to contain %q", md[:120], want)
 	}
 }
 
@@ -1042,8 +1060,8 @@ func TestRenderMarkdownLabelsMisleadingVerdictKeys(t *testing.T) {
 	for _, want := range []string{
 		"| no_file (season not found) | 1 |\n",
 		"## no_file (season not found) (1)\n",
-		"| unattributed (unmapped specials) | 1 |\n",
-		"## unattributed (unmapped specials) (1)\n",
+		"| unattributed (episode not known) | 1 |\n",
+		"## unattributed (episode not known) (1)\n",
 		"| have_best | 1 |\n",
 		"## have_best (1)\n",
 	} {
@@ -1083,7 +1101,7 @@ func TestRenderMarkdownLegendsStateTheOfferedClass(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		"unverified is narrowed to unknown evidence": "The release-group evidence is unknown on one side",
-		"unattributed names the offered class":       "the app offers this entry in the feed and never compares it",
+		"unattributed names the offered class":       "the anime ID map does not tie to an episode Sonarr lists, or whose season-0 episodes could not be read, so it is not compared",
 		"not_on_seadex keys on comparability":        "no SeaDex entry the app can compare covers this item's files",
 		"approx on an offered row":                   "on an `offered` row it means the bucket was never attributed at all",
 	} {

@@ -2,6 +2,7 @@ package library
 
 import (
 	"encoding/json"
+	"maps"
 	"slices"
 	"testing"
 
@@ -299,5 +300,58 @@ func TestItemRevisionsRoundTrip(t *testing.T) {
 	}
 	if out.SeasonRevisions[0]["udf"] != repack || out.Revisions["udf"] != repack || out.Current.Revision != repack {
 		t.Errorf("round trip of %s = %+v / %+v / %+v, want %+v everywhere", b, out.SeasonRevisions, out.Revisions, out.Current.Revision, repack)
+	}
+}
+
+func TestDiffSnapshotsDetectsSeasonZeroEpisodeChange(t *testing.T) {
+	base := func() Item {
+		return Item{
+			Arr: ArrSonarr, ArrID: 1, Groups: []string{"g"}, HasFile: true,
+			SeasonGroups: map[int][]string{0: {"g"}},
+			Specials:     map[int]SpecialEpisode{5: {Group: "g", HasFile: true}, 6: {}},
+		}
+	}
+	moved := base()
+	moved.Specials = map[int]SpecialEpisode{5: {}, 6: {Group: "g", HasFile: true}}
+	unread := base()
+	unread.Specials = nil
+	for _, tc := range []struct {
+		desc string
+		cur  Item
+		want int
+	}{
+		{"a file moved to another special", moved, 1},
+		{"the specials became unknown", unread, 1},
+		{"unchanged", base(), 0},
+	} {
+		d := DiffSnapshots(&Snapshot{Items: []Item{base()}}, &Snapshot{Items: []Item{tc.cur}})
+		if d.Changed != tc.want || d.Added != 0 || d.Removed != 0 {
+			t.Errorf("DiffSnapshots [%s] = %+v, want Changed=%d only", tc.desc, d, tc.want)
+		}
+	}
+}
+
+func TestItemSpecialsRoundTripAndLegacyReadsUnknown(t *testing.T) {
+	in := Item{Arr: ArrSonarr, ArrID: 1, Specials: map[int]SpecialEpisode{
+		9:  {Group: "mtbb", Revision: release.Revision{Version: 2, Marker: release.RevisionVersion}, HasFile: true},
+		10: {},
+	}}
+	b, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var out Item
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("json.Unmarshal(%s): %v", b, err)
+	}
+	if !maps.Equal(out.Specials, in.Specials) {
+		t.Errorf("round trip of %s = %+v, want %+v", b, out.Specials, in.Specials)
+	}
+	var legacy Item
+	if err := json.Unmarshal([]byte(`{"arr":"sonarr","arr_id":1,"title":"T","season_groups":{"0":["g"]},"has_file":true,"current":{}}`), &legacy); err != nil {
+		t.Fatalf("decoding an item written before season-0 episodes were read: %v", err)
+	}
+	if legacy.Specials != nil {
+		t.Errorf("legacy item Specials = %+v, want nil (unknown)", legacy.Specials)
 	}
 }

@@ -317,7 +317,7 @@
         "spec": {
           "id": 14,
           "title": "SeaDex best",
-          "description": "Share of your anime on SeaDex where every season or film you have is SeaDex's best release. It updates once a day. No summary yet means no daily library summary has arrived in the last 26 hours, or none of your anime is on SeaDex.",
+          "description": "Share of your anime on SeaDex where every season, film or special you have that seadex-scout compares is SeaDex's best release. It updates once a day. No summary yet means no daily library summary has arrived in the last 26 hours, or none of your anime is on SeaDex.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1313,7 +1313,7 @@
         "spec": {
           "id": 41,
           "title": "Library overview",
-          "description": "SeaDex entries in your library, one per season or film SeaDex lists, grouped by what you have. Season not found means seadex-scout found no files for that season, because they are missing or Sonarr numbers that season differently, for example under specials. Unmapped specials are films or specials in Sonarr's specials that seadex-scout cannot tie to one entry. No summary yet means no daily library summary has arrived in the last 26 hours.",
+          "description": "SeaDex entries in your library, one per season, film or special SeaDex lists and once per copy when Sonarr and Radarr both hold it, grouped by what you have. Season not found means seadex-scout found no files for that season, because they are missing or Sonarr numbers that season differently, for example under specials. Episode not known means seadex-scout does not compare a film or special in Sonarr's specials, because the anime ID map does not tie it to a listed episode or the specials could not be read. No summary yet means no daily library summary has arrived in the last 26 hours.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1641,7 +1641,7 @@
                     "properties": [
                       {
                         "id": "displayName",
-                        "value": "Unmapped specials"
+                        "value": "Episode not known"
                       },
                       {
                         "id": "color",

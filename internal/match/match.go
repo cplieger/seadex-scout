@@ -8,9 +8,11 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -47,14 +49,33 @@ type Match struct {
 	// comparison judges exactly these seasons when present, so a split show's
 	// entries are each judged against their own run.
 	Seasons []mapping.SeasonRange
-	Arr     string
-	Source  Source
-	Entry   seadex.Entry
-	Record  mapping.Record
+	// Specials are the TVDB season-0 episodes the entry IS
+	// (mapping.Index.MappingFor), nil when the map does not place it there or
+	// its record is not offered on season 0 (align.ScopeOffered).
+	Specials []int
+	// Uncompared is the entry's copy in the other arr when copies judged only
+	// one: it holds no file for the entry, yet the entry still covers it.
+	Uncompared *library.Item
+	Arr        string
+	Source     Source
+	Entry      seadex.Entry
+	Record     mapping.Record
 }
 
 // InLibrary reports whether the entry was matched to a library item.
 func (m *Match) InLibrary() bool { return m.Item != nil }
+
+// SpecialsUnknown reports whether the entry is placed on season-0 episodes of
+// a series whose season-0 files are unknown (library.Item.SpecialsUnknown):
+// such an entry has no verdict this pass, which is not a resolved one.
+func (m *Match) SpecialsUnknown() bool {
+	return len(m.Specials) > 0 && m.InLibrary() && m.Item.SpecialsUnknown()
+}
+
+// AlignEntry is the match as align.Decide reads it. It aliases m.Record.
+func (m *Match) AlignEntry() *align.Entry {
+	return &align.Entry{Record: &m.Record, SiblingSeasons: m.SiblingSeasons, Seasons: m.Seasons, Specials: m.Specials}
+}
 
 // Coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
 // log line. Hits counts entries whose record carries a usable arr id - the ID
@@ -139,7 +160,8 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 			m.log.Debug("match interrupted; remaining entries skipped", "matched", len(matches), "total", len(entries))
 			break
 		}
-		matches = append(matches, run.matchEntry(ctx, &entries[i]))
+		m := run.matchEntry(ctx, &entries[i])
+		matches = append(matches, run.copies(&m)...)
 	}
 	// Cancellation can arrive while the final entry is being matched, after
 	// the loop's boundary check.
@@ -240,6 +262,9 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	if needsLookup {
 		return r.matchIDLessEntry(ctx, e, rec, arr)
 	}
+	if item == nil {
+		item = r.placedFilmInRadarr(rec)
+	}
 	// The record carries a usable arr id: the ID mapping resolved, so this
 	// is a coverage hit whether or not the item is in the library.
 	if item != nil {
@@ -251,7 +276,7 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 		// already routed correctly this is the same value recordArr returned.
 		arr = item.Arr
 		r.cov.Hits[arr]++
-		return Match{Item: item, SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceID}
+		return r.mapped(&Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: SourceID})
 	}
 	r.cov.Hits[arr]++
 	// A record that carries its arr id but missed FindByID is simply not in
@@ -259,17 +284,69 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	// keeps the fallback off the ~thousands of SeaDex entries the operator
 	// does not have, which otherwise dominate a cold cycle's AniList
 	// traffic.
-	return Match{SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped})
 }
 
-// seasonsOf reads the entry's own TVDB season ranges off the record's
-// mapping list, nil when the list names none for this record.
-func (r *matchRun) seasonsOf(rec *mapping.Record) []mapping.SeasonRange {
-	m, ok := r.idx.MappingFor(rec)
-	if !ok {
+func (r *matchRun) mapped(m *Match) Match {
+	m.SiblingSeasons = r.idx.SiblingSeasons(&m.Record)
+	if facts, ok := r.idx.MappingFor(&m.Record); ok {
+		m.Seasons = facts.Seasons
+		if kind, _ := align.RecordSeason(&m.Record); kind == align.ScopeOffered {
+			m.Specials = facts.Specials
+		}
+	}
+	return *m
+}
+
+// placedFilmInRadarr is the Radarr film a record names, when the map places
+// the record on season-0 episodes: such an entry may be held in either arr,
+// while FindByID stops at a non-MOVIE record's TVDB id.
+func (r *matchRun) placedFilmInRadarr(rec *mapping.Record) *library.Item {
+	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
 		return nil
 	}
-	return m.Seasons
+	if facts, ok := r.idx.MappingFor(rec); !ok || len(facts.Specials) == 0 {
+		return nil
+	}
+	return r.lib.filmCopy(rec, "")
+}
+
+// copies is m plus the entry's copy in the other arr, for a film or special
+// the map places on season-0 episodes: each copy that holds a file is judged
+// on its own. When neither holds one, m alone says no_file.
+func (r *matchRun) copies(m *Match) []Match {
+	if !m.InLibrary() || len(m.Specials) == 0 {
+		return []Match{*m}
+	}
+	other := r.lib.otherCopy(&m.Record, m.Item)
+	if other == nil {
+		return []Match{*m}
+	}
+	second := *m
+	second.Item, second.Arr = other, other.Arr
+	switch mine, theirs := holdsCopy(m.Item, m.Specials), holdsCopy(other, m.Specials); {
+	case mine && theirs:
+		return []Match{*m, second}
+	case theirs:
+		second.Uncompared = m.Item
+		return []Match{second}
+	default:
+		m.Uncompared = other
+		return []Match{*m}
+	}
+}
+
+// holdsCopy reports whether it may hold the entry's file: a Radarr film with a
+// file, a Sonarr series with a file on a placed episode, or an item whose file
+// data is unknown.
+func holdsCopy(it *library.Item, specials []int) bool {
+	switch {
+	case it.Failed, it.SpecialsUnknown():
+		return true
+	case it.Arr == library.ArrRadarr:
+		return it.HasFile
+	}
+	return slices.ContainsFunc(specials, func(ep int) bool { return it.Specials[ep].HasFile })
 }
 
 // matchUnmappedEntry links an entry with no mapping record through the AniList
@@ -325,9 +402,9 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	}
 	r.cov.Unmapped[arr]++
 	if matched := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log); matched != nil {
-		return Match{Item: matched, SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: matched.Arr, Source: SourceTitle}
+		return r.mapped(&Match{Item: matched, Entry: *e, Record: *rec, Arr: matched.Arr, Source: SourceTitle})
 	}
-	return Match{SiblingSeasons: r.idx.SiblingSeasons(rec), Seasons: r.seasonsOf(rec), Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped})
 }
 
 // recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).
@@ -380,10 +457,9 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 	return li
 }
 
-// indexIDs adds an item's external IDs to the ID indexes of its arr.
-// Each ID index has exactly one arr-gated consumer (byTvdb only via the
-// Sonarr branch of FindByID, byTmdb/byImdb only via findMovie's Radarr
-// gate), so index each map only with items of the arr that consumes it.
+// indexIDs adds an item's external IDs to the ID indexes of its arr: byTvdb
+// holds only Sonarr items, byTmdb and byImdb only Radarr items, so for every
+// reader a map miss is the arr gate.
 func (li *LibIndex) indexIDs(it *library.Item) {
 	switch it.Arr {
 	case library.ArrSonarr:
@@ -420,9 +496,9 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 // TVDB id; every other type tries its TVDB id, then the movie TMDB ids, and its
 // IMDb ids never reach Radarr (TVDB reuses a film's IMDb id on its parent series).
 //
-// The ONE licensed reader of mapping.Record.AllIDs, because it holds both
-// indexes: byTvdb is Sonarr-only and byTmdb/byImdb Radarr-only, so a map miss IS
-// the arr gate.
+// A licensed reader of mapping.Record.AllIDs (with otherCopy and filmCopy),
+// because it holds both indexes: byTvdb is Sonarr-only and
+// byTmdb/byImdb Radarr-only, so a map miss IS the arr gate.
 func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	if rec.IsMovie() {
 		return li.findMovie(rec)
@@ -461,9 +537,40 @@ func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	return nil
 }
 
+// otherCopy is the entry's item in the arr primary is not in: for a Radarr
+// film the Sonarr series its TVDB id names, for a Sonarr series its filmCopy.
+func (li *LibIndex) otherCopy(rec *mapping.Record, primary *library.Item) *library.Item {
+	if primary.Arr == library.ArrRadarr {
+		if tvdb, _, _ := rec.AllIDs(); tvdb > 0 {
+			return li.byTvdb[tvdb]
+		}
+		return nil
+	}
+	return li.filmCopy(rec, imdbKey(primary.ImdbID))
+}
+
+// filmCopy is the Radarr film rec's TMDB movie ids, then its IMDb ids, name.
+// seriesImdb, the IMDb id of the entry's Sonarr series ("" when it has none),
+// never names the film: TVDB reuses a film's IMDb id on its parent series.
+func (li *LibIndex) filmCopy(rec *mapping.Record, seriesImdb string) *library.Item {
+	_, tmdbMovies, imdbIDs := rec.AllIDs()
+	if it := li.findMovieByTMDB(tmdbMovies); it != nil {
+		return it
+	}
+	for _, imdb := range imdbIDs {
+		if imdb == seriesImdb {
+			continue
+		}
+		if it := li.byImdb[imdb]; it != nil {
+			return it
+		}
+	}
+	return nil
+}
+
 // findMovieByTMDB resolves the first of ids that names an indexed Radarr movie.
-// Shared by findMovie (a MOVIE record's routed ids) and FindByID's secondary
-// cross-type lookup, so the movie-id half of the ID bridge has one lookup.
+// Shared by findMovie, FindByID's secondary lookup and filmCopy, so the
+// movie-id half of the ID bridge has one lookup.
 func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 	for _, id := range ids { // callers pass only usable (positive) ids
 		if it := li.byTmdb[id]; it != nil { // byTmdb holds only Radarr items

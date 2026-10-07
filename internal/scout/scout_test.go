@@ -46,6 +46,10 @@ func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
+func (f *fakeSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
+	return nil, nil
+}
+
 // flakySonarr wraps fakeSonarr but fails EpisodeFiles for the listed series
 // IDs, so a walk succeeds while marking the snapshot partial.
 type flakySonarr struct {

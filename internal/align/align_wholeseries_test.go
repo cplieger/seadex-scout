@@ -20,7 +20,7 @@ var wholeRec = mapping.Record{Type: "TV", SeasonTvdb: 0}
 // per-season groups.
 func decideWhole(seasons map[int][]string, best, alt []string) align.Decision {
 	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: seasons, HasFile: true}
-	return align.Decide(item, &wholeRec, &align.Listing{Best: best, Alt: alt}, nil, nil)
+	return align.Decide(item, &align.Entry{Record: &wholeRec}, &align.Listing{Best: best, Alt: alt})
 }
 
 // TestDecideWholeSeriesConservative pins the conservative per-real-season
@@ -259,7 +259,7 @@ func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
 			}
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{season: groups}}
 			rec := mapping.Record{Type: "TV", SeasonTvdb: season}
-			single := align.Decide(item, &rec, &align.Listing{Best: best, Alt: alt}, nil, nil)
+			single := align.Decide(item, &align.Entry{Record: &rec}, &align.Listing{Best: best, Alt: alt})
 			if !filed || standingConservativeness[single.Standing] > standingConservativeness[want] {
 				want = single.Standing
 			}
@@ -323,7 +323,7 @@ func TestDecideWholeSeriesDropsSiblingMappedSeasons(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
-			d := align.Decide(item, &wholeRec, &align.Listing{Best: best}, tt.siblings, nil)
+			d := align.Decide(item, &align.Entry{Record: &wholeRec, SiblingSeasons: tt.siblings}, &align.Listing{Best: best})
 			if d.Standing != tt.want {
 				t.Errorf("Standing = %v, want %v (groups %v)", d.Standing, tt.want, d.Groups)
 			}
@@ -345,12 +345,12 @@ func TestDecideSiblingSeasonsOnlyReachTheWholeSeriesAggregate(t *testing.T) {
 	best := []string{"cbt"}
 	seasonItem := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{3: {"cbt"}}}
 	seasonRec := mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent, SeasonTvdb: 3}
-	if d := align.Decide(seasonItem, &seasonRec, &align.Listing{Best: best}, []int{3}, nil); d.Standing != align.StandingBest {
+	if d := align.Decide(seasonItem, &align.Entry{Record: &seasonRec, SiblingSeasons: []int{3}}, &align.Listing{Best: best}); d.Standing != align.StandingBest {
 		t.Errorf("season-scoped Standing = %v, want %v (a cour-split sibling must not blank the entry's own season)", d.Standing, align.StandingBest)
 	}
 	movieItem := &library.Item{Arr: library.ArrRadarr, Groups: []string{"cbt"}, HasFile: true}
 	movieRec := mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent}
-	if d := align.Decide(movieItem, &movieRec, &align.Listing{Best: best}, []int{1, 2}, nil); d.Standing != align.StandingBest {
+	if d := align.Decide(movieItem, &align.Entry{Record: &movieRec, SiblingSeasons: []int{1, 2}}, &align.Listing{Best: best}); d.Standing != align.StandingBest {
 		t.Errorf("movie Standing = %v, want %v", d.Standing, align.StandingBest)
 	}
 }
@@ -389,7 +389,7 @@ func TestDecideOwnSeasonsJudgeASplitShowPerEntry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := align.Decide(item, &wholeRec, &align.Listing{Best: best, Alt: alt}, nil, tt.seasons)
+			d := align.Decide(item, &align.Entry{Record: &wholeRec, Seasons: tt.seasons}, &align.Listing{Best: best, Alt: alt})
 			if d.Kind != align.ScopeWholeSeries {
 				t.Fatalf("Kind = %v, want %v", d.Kind, align.ScopeWholeSeries)
 			}
@@ -403,12 +403,12 @@ func TestDecideOwnSeasonsJudgeASplitShowPerEntry(t *testing.T) {
 	}
 	// Without the ranges the same item is contaminated for every entry: the
 	// sibling rule has nothing to drop, and every season votes.
-	if d := align.Decide(item, &wholeRec, &align.Listing{Best: best, Alt: alt}, nil, nil); d.Standing != align.StandingUnlisted || len(d.Groups) != 3 {
+	if d := align.Decide(item, &align.Entry{Record: &wholeRec}, &align.Listing{Best: best, Alt: alt}); d.Standing != align.StandingUnlisted || len(d.Groups) != 3 {
 		t.Errorf("without ranges Standing = %v groups %v, want %v over all three groups", d.Standing, d.Groups, align.StandingUnlisted)
 	}
 	// Ranges win over the sibling set when both are present: a season a range
 	// names is judged even if a sibling also maps it.
-	if d := align.Decide(item, &wholeRec, &align.Listing{Best: best, Alt: alt}, []int{1, 2, 3, 4}, tests[0].seasons); d.Standing != align.StandingBest {
+	if d := align.Decide(item, &align.Entry{Record: &wholeRec, SiblingSeasons: []int{1, 2, 3, 4}, Seasons: tests[0].seasons}, &align.Listing{Best: best, Alt: alt}); d.Standing != align.StandingBest {
 		t.Errorf("ranges plus siblings Standing = %v, want %v (the ranges are the one source)", d.Standing, align.StandingBest)
 	}
 }

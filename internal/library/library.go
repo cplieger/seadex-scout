@@ -35,9 +35,13 @@ type Item struct {
 	// Revisions is the same fold over all of the item's files per group; it is
 	// the movie scope's source.
 	Revisions map[string]release.Revision `json:"revisions,omitempty"`
-	Arr       string                      `json:"arr"`
-	ImdbID    string                      `json:"imdb_id,omitempty"`
-	Title     string                      `json:"title"`
+	// Specials is, per Sonarr season-0 episode number, the file on it. It is
+	// read only for a series holding a season-0 file, so nil means unknown,
+	// never "no specials".
+	Specials map[int]SpecialEpisode `json:"specials,omitempty"`
+	Arr      string                 `json:"arr"`
+	ImdbID   string                 `json:"imdb_id,omitempty"`
+	Title    string                 `json:"title"`
 	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
 	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
 	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an
@@ -58,6 +62,14 @@ type Item struct {
 	Failed bool `json:"failed,omitempty"`
 }
 
+// SpecialEpisode is one season-0 episode of a series: whether a file sits on
+// it, and that file's normalized group and revision.
+type SpecialEpisode struct {
+	Group    string           `json:"group,omitempty"`
+	Revision release.Revision `json:"revision,omitzero"`
+	HasFile  bool             `json:"has_file,omitempty"`
+}
+
 // Key identifies the item by its arr source and arr ID ("arr:id") - the
 // item's semantic identity across snapshots and packages. Snapshot diffing
 // (indexByKey) and the audit's covered-item map both key on it, so the
@@ -72,6 +84,14 @@ func (it *Item) Key() string {
 // Comparable reports whether the item's file state may be compared against a
 // recommendation.
 func (it *Item) Comparable() bool { return !it.Failed }
+
+// SpecialsUnknown reports whether the series holds a season-0 file whose
+// episode is not known: the season-0 read failed or gave no usable episode
+// list, or the snapshot predates the field. A series with no season-0 file is
+// known to hold none.
+func (it *Item) SpecialsUnknown() bool {
+	return it.Specials == nil && len(it.SeasonGroups[0]) > 0
+}
 
 // Snapshot is one library walk.
 type Snapshot struct {
@@ -100,7 +120,8 @@ type Diff struct {
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its file presence, group set, per-season group
-// attribution, revision readings, or current fingerprint differs.
+// attribution, revision readings, season-0 episode files, or current
+// fingerprint differs.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey, prevFailed := indexByKey(prev)
 	curByKey, curFailed := indexByKey(cur)
@@ -172,11 +193,12 @@ func indexByKey(s *Snapshot) (byKey map[string]*Item, failed map[string]struct{}
 
 // sameItem reports whether two items have the same current release state
 // (file presence, group set, per-season group attribution, revision readings,
-// and fingerprint), for diff change detection.
+// season-0 episode files, and fingerprint), for diff change detection.
 func sameItem(a, b *Item) bool {
 	return a.HasFile == b.HasFile && a.Current == b.Current &&
 		slices.Equal(a.Groups, b.Groups) &&
 		maps.EqualFunc(a.SeasonGroups, b.SeasonGroups, slices.Equal) &&
 		maps.EqualFunc(a.SeasonRevisions, b.SeasonRevisions, maps.Equal) &&
-		maps.Equal(a.Revisions, b.Revisions)
+		maps.Equal(a.Revisions, b.Revisions) &&
+		maps.Equal(a.Specials, b.Specials)
 }

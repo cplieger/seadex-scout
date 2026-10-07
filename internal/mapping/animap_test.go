@@ -1,12 +1,14 @@
 package mapping
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -172,6 +174,100 @@ func TestParseAnimap_seasonRanges(t *testing.T) {
 	}
 }
 
+func TestParseAnimap_specialEpisodes(t *testing.T) {
+	tests := []struct {
+		name      string
+		season    string
+		placement string
+		want      []int
+		episodes  int
+		tvdb      string
+	}{
+		{name: "one film on one special", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":8}]`, want: []int{8}},
+		{
+			name: "runs, a span and an episode with no counterpart", season: `0`, episodes: 4,
+			placement: `[{"start":1,"end":2,"season":0,"episode":9},{"start":3,"end":3},{"start":4,"end":4,"season":0,"episode":12},{"start":4,"end":4,"season":0,"episode":13}]`,
+			want:      []int{9, 10, 12, 13},
+		},
+		{
+			name: "overlapping runs of episodes that each span two", season: `0`, episodes: 2,
+			placement: `[{"start":1,"end":1,"season":0,"episode":1},{"start":1,"end":2,"season":0,"episode":2},{"start":2,"end":2,"season":0,"episode":4}]`,
+			want:      []int{1, 2, 3, 4},
+		},
+		{name: "runs out of order", season: `0`, episodes: 2, placement: `[{"start":2,"end":2,"season":0,"episode":10},{"start":1,"end":1,"season":0,"episode":9}]`, want: []int{9, 10}},
+		{name: "two episodes on one special count once", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":3},{"start":2,"end":2,"season":0,"episode":3}]`, want: []int{3}},
+		{name: "no counterpart at all", season: `0`, episodes: 2, placement: `[{"start":1,"end":2}]`},
+		{name: "a run on a real season", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":3},{"start":2,"end":2,"season":2,"episode":54}]`},
+		{name: "a series filed under a real season", season: `1`, episodes: 12, placement: `[{"start":1,"end":12,"season":1,"episode":1}]`},
+		{name: "a real-season record placed wholly in season 0", season: `1`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":3}]`},
+		{name: "no placement", season: `0`, episodes: 1},
+		{name: "no tvdb id", tvdb: `0`, season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":3}]`},
+		{name: "no episode count", season: `0`, placement: `[{"start":1,"end":1,"season":0,"episode":3}]`},
+		{name: "an episode left unplaced", season: `0`, episodes: 2, placement: `[{"start":2,"end":2,"season":0,"episode":9}]`},
+		{name: "the last episode left unplaced", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":9}]`},
+		{name: "a gap between runs", season: `0`, episodes: 3, placement: `[{"start":1,"end":1,"season":0,"episode":9},{"start":3,"end":3,"season":0,"episode":11}]`},
+		{name: "a run past the last episode", season: `0`, episodes: 1, placement: `[{"start":1,"end":2,"season":0,"episode":9}]`},
+		{name: "an episode both placed and without a counterpart", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":9},{"start":1,"end":1}]`},
+		{name: "a run without a counterpart overlapping a placed one", season: `0`, episodes: 2, placement: `[{"start":1,"end":2},{"start":2,"end":2,"season":0,"episode":9}]`},
+		{name: "a season without an episode", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0}]`},
+		{name: "an episode without a season", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":9},{"start":2,"end":2,"episode":4}]`},
+		{name: "a run ending before it starts", season: `0`, episodes: 3, placement: `[{"start":1,"end":3,"season":0,"episode":1},{"start":3,"end":2,"season":0,"episode":4}]`},
+		{name: "a run starting below episode 1", season: `0`, episodes: 1, placement: `[{"start":0,"end":1,"season":0,"episode":4}]`},
+		{name: "a target below episode 1", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":0}]`},
+		{name: "a run past the cap", season: `0`, episodes: 1025, placement: `[{"start":1,"end":1025,"season":0,"episode":1}]`},
+		{name: "a run too long to expand", season: `0`, episodes: 1000000000000, placement: `[{"start":1,"end":1000000000000,"season":0,"episode":1}]`},
+		{name: "runs past the cap together", season: `0`, episodes: 1100, placement: `[{"start":1,"end":1000,"season":0,"episode":1},{"start":1001,"end":1100,"season":0,"episode":2001}]`},
+		{
+			name: "repeated runs on the same targets past the cap", season: `0`, episodes: 1000,
+			placement: `[{"start":1,"end":1000,"season":0,"episode":1},{"start":1,"end":1000,"season":0,"episode":1}]`,
+		},
+		{name: "a target at the integer ceiling", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":9223372036854775807}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			record := `{"anidb_id":7,"tvdb_id":` + cmp.Or(tc.tvdb, `1`) + `,"tvdb_season":` + tc.season + `,"episodes":` + strconv.Itoa(tc.episodes)
+			if tc.placement != "" {
+				record += `,"tvdb_placement":` + tc.placement
+			}
+			record += `}`
+			parsed, err := parseAnimap(animapBody(`[`+record+`]`), discardLogger())
+			if err != nil {
+				t.Fatalf("parseAnimap(%s) error: %v", record, err)
+			}
+			if got := parsed.mappings[7].Specials; !slices.Equal(got, tc.want) {
+				t.Errorf("parseAnimap(%s) specials = %v, want %v", record, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAnimap_placementReachesBothJoins(t *testing.T) {
+	placed := `"tvdb_id":1,"tvdb_season":0,"tvdb_episode_offset":4,"episodes":2,"tvdb_placement":[{"start":1,"end":2,"season":0,"episode":5}]`
+	body := animapBody(`[` +
+		`{"anilist_id":10,"anidb_id":100,` + placed + `},` +
+		`{"anilist_id":11,"anidb_parent":{"anidb_id":500,"specials":[1,2]},` + placed + `}]`)
+	parsed, err := parseAnimap(body, discardLogger())
+	if err != nil {
+		t.Fatalf("parseAnimap error: %v", err)
+	}
+	if got := parsed.mappings[100].Specials; !slices.Equal(got, []int{5, 6}) {
+		t.Errorf("parseAnimap mappings[100].Specials = %v, want [5 6]", got)
+	}
+	if got := parsed.parentMappings[11].Specials; !slices.Equal(got, []int{5, 6}) {
+		t.Errorf("parseAnimap parentMappings[11].Specials = %v, want [5 6]", got)
+	}
+	if got := parsed.listFacts(); got != 0 {
+		t.Errorf("parseAnimap listFacts() = %d, want 0: a placement is not a mapping list", got)
+	}
+	idx := buildIndex(parsed.records, parsed.mappings, parsed.parentMappings)
+	for _, id := range []int{10, 11} {
+		rec, _ := idx.Lookup(id)
+		if got, _ := idx.MappingFor(&rec); !slices.Equal(got.Specials, []int{5, 6}) {
+			t.Errorf("MappingFor(AniList %d) Specials = %v, want [5 6] on the record's own series", id, got.Specials)
+		}
+	}
+}
+
 // TestParseAnimap_keysFactsByTheirJoin pins where each record's facts land: under
 // its AniDB id whether or not it carries an AniList id, under its AniList id
 // when it is a specials-of-parent record with no AniDB id, and nowhere for an
@@ -200,7 +296,7 @@ func TestParseAnimap_keysFactsByTheirJoin(t *testing.T) {
 }
 
 func sameMapping(a, b Mapping) bool {
-	return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons)
+	return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons) && slices.Equal(a.Specials, b.Specials)
 }
 
 func TestParseAnimap_refusesWhatIsNotAVersionOneDocument(t *testing.T) {
@@ -293,10 +389,7 @@ func TestParseAnimap_recordCap(t *testing.T) {
 	}
 }
 
-// TestParseAnimap_retainedBudgetCountsSeasonRanges pins that season ranges join
-// the identifiers in the retained budget: a document whose ids alone fit but
-// whose ranges push it over must be refused.
-func TestParseAnimap_retainedBudgetCountsSeasonRanges(t *testing.T) {
+func TestParseAnimap_retainedBudgetCountsListFacts(t *testing.T) {
 	const idsPerRecord = maxRecordIdentifiers
 	n := maxRetainedTotal / idsPerRecord
 	var b strings.Builder
@@ -316,5 +409,10 @@ func TestParseAnimap_retainedBudgetCountsSeasonRanges(t *testing.T) {
 		`,{"anidb_id":1,"tvdb_id":1,"mapping_list":[{"anidb_season":1,"tvdb_season":1,"start":1}]}]`
 	if _, err := parseAnimap(animapBody(withRange), discardLogger()); !errors.Is(err, errIdentifierBudgetExceeded) {
 		t.Fatalf("parseAnimap(budget plus one season range) error = %v, want errIdentifierBudgetExceeded", err)
+	}
+	withPlaced := strings.TrimSuffix(b.String(), "]") +
+		`,{"anidb_id":1,"tvdb_id":1,"tvdb_season":0,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":3}]}]`
+	if _, err := parseAnimap(animapBody(withPlaced), discardLogger()); !errors.Is(err, errIdentifierBudgetExceeded) {
+		t.Fatalf("parseAnimap(budget plus one placed special) error = %v, want errIdentifierBudgetExceeded", err)
 	}
 }

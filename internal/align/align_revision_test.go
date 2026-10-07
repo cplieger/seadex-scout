@@ -118,7 +118,7 @@ func TestDecideSeasonRevision(t *testing.T) {
 			SeasonGroups:    map[int][]string{1: tc.groups},
 			SeasonRevisions: map[int]map[string]release.Revision{1: tc.held},
 		}
-		checkRevisionDecision(t, "season", &tc, align.Decide(&item, &rec, &tc.listing, nil, nil))
+		checkRevisionDecision(t, "season", &tc, align.Decide(&item, &align.Entry{Record: &rec}, &tc.listing))
 	}
 }
 
@@ -126,7 +126,7 @@ func TestDecideMovieRevision(t *testing.T) {
 	rec := mapping.Record{Type: "MOVIE"}
 	for _, tc := range revisionCases() {
 		item := library.Item{Arr: library.ArrRadarr, HasFile: true, Groups: tc.groups, Revisions: tc.held}
-		checkRevisionDecision(t, "movie", &tc, align.Decide(&item, &rec, &tc.listing, nil, nil))
+		checkRevisionDecision(t, "movie", &tc, align.Decide(&item, &align.Entry{Record: &rec}, &tc.listing))
 	}
 }
 
@@ -154,12 +154,12 @@ func TestDecideRevisionNeverOverridesPlaceholderOrOffered(t *testing.T) {
 	held := map[int]map[string]release.Revision{0: {"g": none1}, 1: {"g": none1}}
 	failed := library.Item{Arr: library.ArrSonarr, Failed: true, SeasonGroups: map[int][]string{1: {"g"}}, SeasonRevisions: held}
 	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
-	if d := align.Decide(&failed, &seasonRec, &listing, nil, nil); d.Outcome != align.OutcomeUnverifiable {
+	if d := align.Decide(&failed, &align.Entry{Record: &seasonRec}, &listing); d.Outcome != align.OutcomeUnverifiable {
 		t.Errorf("Decide(placeholder).Outcome = %v, want unverifiable", d.Outcome)
 	}
 	offered := library.Item{Arr: library.ArrSonarr, HasFile: true, SeasonGroups: map[int][]string{0: {"g"}}, SeasonRevisions: held}
 	offeredRec := mapping.Record{Type: "MOVIE", TvdbID: 1, SeasonKind: mapping.SeasonPresent}
-	if d := align.Decide(&offered, &offeredRec, &listing, nil, nil); d.Standing != align.StandingUnverified || d.Kind != align.ScopeOffered {
+	if d := align.Decide(&offered, &align.Entry{Record: &offeredRec}, &listing); d.Standing != align.StandingUnverified || d.Kind != align.ScopeOffered {
 		t.Errorf("Decide(offered bucket) = %v/%v, want unverified offered", d.Kind, d.Standing)
 	}
 }
@@ -225,7 +225,7 @@ func TestDecideWholeSeriesRevision(t *testing.T) {
 	}
 	for _, tc := range tests {
 		item := library.Item{Arr: library.ArrSonarr, HasFile: true, SeasonGroups: tc.groups, SeasonRevisions: tc.held}
-		d := align.Decide(&item, &wholeRec, &listing, tc.siblings, nil)
+		d := align.Decide(&item, &align.Entry{Record: &wholeRec, SiblingSeasons: tc.siblings}, &listing)
 		if d.Standing != tc.want {
 			t.Errorf("Decide(whole series, %s).Standing = %v, want %v", tc.desc, d.Standing, tc.want)
 			continue
@@ -248,7 +248,7 @@ func TestDecideSupersededReportsNewestOnBothSides(t *testing.T) {
 		SeasonRevisions: map[int]map[string]release.Revision{1: {"g": none1, "k": v2}},
 	}
 	listing := align.Listing{Best: []string{"G", "K"}, BestRevisions: map[string]release.Revision{"g": v2, "k": v3}}
-	d := align.Decide(&item, &rec, &listing, nil, nil)
+	d := align.Decide(&item, &align.Entry{Record: &rec}, &listing)
 	if d.Outcome != align.OutcomeSuperseded || !slices.Equal(d.SupersededGroups, []string{"g", "k"}) {
 		t.Fatalf("Decide(g v1 under v2, k v2 under v3) = outcome %v, groups %v; want superseded over [g k]", d.Outcome, d.SupersededGroups)
 	}

@@ -215,7 +215,7 @@ func TestReportCarriesForwardIncompleteItems(t *testing.T) {
 	resolvable := findingWithID("clean", "Aligned Now", 333)
 
 	notifier.Report([]compare.Finding{carried, resolvable}, nil)
-	notifier.Report(nil, map[int]struct{}{incompleteID: {}})
+	notifier.Report(nil, Preserve{{AniListID: incompleteID}: {}})
 
 	if got := titleCount(recorder, "Broken Series"); got != 2 {
 		t.Errorf("the incomplete item's row was emitted %d times, want one per pass (carried forward)", got)
@@ -244,7 +244,7 @@ func TestReportCarriesForwardOnlyWhileEvidenceIsIncomplete(t *testing.T) {
 	carried := findingWithID("carried", "Broken Series", incompleteID)
 
 	notifier.Report([]compare.Finding{carried}, nil)
-	notifier.Report(nil, map[int]struct{}{incompleteID: {}})
+	notifier.Report(nil, Preserve{{AniListID: incompleteID}: {}})
 	notifier.Report(nil, nil)
 
 	if got := titleCount(recorder, "Broken Series"); got != 2 {
@@ -296,7 +296,7 @@ func TestReportSummaryLineCarriesEveryCounter(t *testing.T) {
 	notifier.Report([]compare.Finding{
 		findingWithID("ignored", "Ignored", ignoredID),
 		findingWithID("fresh", "Fresh", 1),
-	}, map[int]struct{}{incompleteID: {}})
+	}, Preserve{{AniListID: incompleteID}: {}})
 
 	// total: ignored + carried + fresh; emitted: carried + fresh;
 	// suppressed: ignored; preserved: carried.

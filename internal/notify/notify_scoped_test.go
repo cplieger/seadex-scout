@@ -116,7 +116,7 @@ func TestReportScopedPreservesIncompleteWithinAuthority(t *testing.T) {
 
 	// Entry 1 WAS examined (it is in the authority set) but its evidence was
 	// incomplete, so its row must survive anyway.
-	notifier.ReportScoped(nil, ids(1, 2), ids(1))
+	notifier.ReportScoped(nil, ids(1, 2), Preserve{{AniListID: 1}: {}})
 
 	if _, ok := notifier.current[dedupeKey(&incomplete)]; !ok {
 		t.Error("an incomplete-evidence row inside the authority set was deleted; incompleteness must outrank authority")

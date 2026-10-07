@@ -44,8 +44,8 @@ var verdictDesc = map[Verdict]string{
 	VerdictAlt:           "You have a listed alt; SeaDex marks a different release best.",
 	VerdictOlderRevision: "You have SeaDex's best group, but an older revision of it: SeaDex lists a newer version, PROPER or REPACK from the same group.",
 	VerdictUnverified:    "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
-	VerdictUnattributed:  "A film or special filed inside Sonarr's season-0 bucket, where nothing attributes one file to one entry, so the app offers this entry in the feed and never compares it. The groups shown are what the bucket holds.",
-	VerdictNoFile:        "No file sits where this entry maps. The mapped season, movie, or specials bucket is empty, or a whole-series comparison found no real season with files. Either the files are missing, or Sonarr files that season elsewhere, such as under TVDB's specials.",
+	VerdictUnattributed:  "A film or special in Sonarr's season 0 that the anime ID map does not tie to an episode Sonarr lists, or whose season-0 episodes could not be read, so it is not compared. The groups shown are everything in season 0.",
+	VerdictNoFile:        "No file sits where this entry maps. The mapped season, movie, special episodes or specials bucket is empty, or a whole-series comparison found no real season with files. Either the files are missing, or Sonarr files that season elsewhere, such as under TVDB's specials.",
 	VerdictBest:          "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex:   "In your library and recognized as anime (in the anime ID map), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
 }
@@ -54,7 +54,19 @@ var verdictDesc = map[Verdict]string{
 // key alone misleads a reader; the key stays as the machine name.
 var verdictLabel = map[Verdict]string{
 	VerdictNoFile:       "season not found",
-	VerdictUnattributed: "unmapped specials",
+	VerdictUnattributed: "episode not known",
+}
+
+// matchedAnime counts the distinct AniList entries behind the matched rows. It
+// is not the matched row count: an entry kept in both arrs has a row per arr.
+func matchedAnime(rows []Row) int {
+	seen := make(map[int]struct{}, len(rows))
+	for i := range rows {
+		if rows[i].Verdict != VerdictNotOnSeaDex {
+			seen[rows[i].AniListID] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 // verdictHeading is a verdict's Markdown name: the key, plus its label if any.
@@ -80,9 +92,13 @@ func renderMarkdown(r *Report) string {
 	var b strings.Builder
 	b.WriteString("# SeaDex alignment report\n\n")
 	notOnSeaDex := r.Totals[string(VerdictNotOnSeaDex)]
-	matched := len(r.Rows) - notOnSeaDex
+	matchedRows := len(r.Rows) - notOnSeaDex
+	anime := matchedAnime(r.Rows)
 	fmt.Fprintf(&b, "Generated %s. %d anime with a SeaDex match",
-		r.GeneratedAt.UTC().Format(time.RFC3339), matched)
+		r.GeneratedAt.UTC().Format(time.RFC3339), anime)
+	if matchedRows != anime {
+		fmt.Fprintf(&b, " in %d rows", matchedRows)
+	}
 	if notOnSeaDex > 0 {
 		fmt.Fprintf(&b, "; %d more in your library that SeaDex does not list", notOnSeaDex)
 	}
@@ -123,6 +139,8 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"so the verdict means \"present somewhere in the series\" rather than an exact per-season attribution; " +
 	"on an `offered` row it means the bucket was never attributed at all, since nothing ties one file in the " +
 	"season-0 bucket to one entry; " +
+	"a scope such as `S00E09-E10` means the film or special was compared on exactly those season-0 episodes, " +
+	"and `missing S00E10` names the ones with no file; " +
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete; " +
@@ -255,6 +273,9 @@ func scopeCell(row *Row) string {
 	if row.CurrentRevision.Known() && row.BestRevision.Known() {
 		notes = append(notes, "revision "+row.CurrentRevision.String()+", SeaDex "+row.BestRevision.String())
 	}
+	if len(row.MissingEpisodes) > 0 {
+		notes = append(notes, "missing "+align.EpisodeLabel(row.MissingEpisodes))
+	}
 	if row.Approx {
 		notes = append(notes, "approx")
 	}
@@ -268,13 +289,17 @@ func scopeCell(row *Row) string {
 }
 
 // scopeLabel renders the comparison scope recorded on the row at build time:
-// "movie", "offered", the TVDB season ("S2"), or "series" for a whole-series
-// comparison. A pure reader of Row.Scope, so the label cannot drift from the
-// comparison actually performed; the JSON renderer publishes the same value
-// through align.ScopeKind.MarshalJSON, keeping kind and number separable.
+// "movie", "offered", the TVDB season ("S2"), the season-0 episodes
+// ("S00E09-E10"), or "series" for a whole-series comparison. A pure reader of
+// Row.Scope, so the label cannot drift from the comparison actually performed;
+// the JSON renderer publishes the same value through
+// align.ScopeKind.MarshalJSON, keeping kind and numbers separable.
 func scopeLabel(row *Row) string {
-	if row.Scope == align.ScopeSeason {
+	switch {
+	case row.Scope == align.ScopeSeason:
 		return "S" + strconv.Itoa(row.Season)
+	case row.Scope == align.ScopeEpisodes && len(row.Episodes) > 0:
+		return align.EpisodeLabel(row.Episodes)
 	}
 	return row.Scope.String()
 }
@@ -614,13 +639,14 @@ const markdownWriteGrace = 2 * time.Second
 // of the alert-keyed "report written" message: markdown is the empty string when
 // only the JSON half landed, and durable reports whether the last published
 // half's directory entry is crash-durable. Basenames only, so the record never
-// ships the secret-capable report.dir value.
-func reportWritten(log *slog.Logger, mdPath, jsonPath string, anime int, durable bool) {
+// ships the secret-capable report.dir value. The anime attribute carries the
+// row count the alert renders.
+func reportWritten(log *slog.Logger, mdPath, jsonPath string, rows int, durable bool) {
 	markdown := ""
 	if mdPath != "" {
 		markdown = filepath.Base(mdPath)
 	}
-	log.Info("report written", "markdown", markdown, "json", filepath.Base(jsonPath), "anime", anime, "durable", durable)
+	log.Info("report written", "markdown", markdown, "json", filepath.Base(jsonPath), "anime", rows, "durable", durable)
 }
 
 // redactReportURLs returns a shallow copy of the report whose rows carry
