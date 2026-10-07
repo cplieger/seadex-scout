@@ -14,9 +14,10 @@ A newer revision of a group you already hold logs the same `warn` message with `
 
 Informational cases log at `info`. Their statuses are `incomplete`, `theoretical_best`, `mixed_group_manual` and `unverifiable`.
 
-Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per anime.
+Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per report row. A film or special both Sonarr and Radarr hold has a row for each copy, so it logs two.
 
-Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season or film you have is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The `attrs:` lines in [`alerts/logql.yaml`](../alerts/logql.yaml) list the stable attributes of each message.
+When the library read was partial, `cycle degraded` has `reason=partial-walk` and `failed_items`, the number of SeaDex entries matched to an item that could not be read. A film both Sonarr and Radarr hold counts once for each.
+Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The `attrs:` lines in [`alerts/logql.yaml`](../alerts/logql.yaml) list the stable attributes of each message.
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
 
@@ -42,13 +43,15 @@ The dashboard has three variables at the top. **Data source** picks your Loki da
 
 The dashboard has three rows:
 
-- At a glance shows the status, the number of upgrades and of findings to check by hand, and two shares of your anime. Library overview on its right counts SeaDex entries by what you have, one per season or film SeaDex lists.
+- At a glance shows the status, the number of upgrades and of findings to check by hand, and two shares of your anime. Library overview on its right counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy.
 - Upgrades lists every upgrade, newest first, with the time it was first seen. It also lists the findings seadex-scout could not decide on its own, under Check by hand. Below them, a stacked graph counts your anime at each daily check. Its four parts are at SeaDex best, at SeaDex alt, not at best or alt, and not on SeaDex, so the total is every anime in your library. Not at best or alt covers an anime with any season on another group, an older version, no files found or an untagged release.
 - Scout health is collapsed. It shows why the status is not `✓`, when the last checks finished, how often Sonarr and Radarr read the Torznab feed, and how many releases the feed newly offered.
 
 The SeaDex best tile is the share of your anime where everything you have is SeaDex's best release. The SeaDex alt tile is the share where you have best or alt releases with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts as alt.
 
-Three Library overview bars need a word. Season not found means no files sit where the entry maps, either because they are missing or because Sonarr files that season elsewhere, such as under TVDB's specials. Unmapped specials are films or specials in Sonarr's specials that seadex-scout cannot tie to one entry, so it offers them in the feed and does not compare them. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.
+Three Library overview bars need a word. Season not found means no files sit where the entry maps. They are missing, or Sonarr files that season elsewhere, such as under TVDB's specials. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.
+
+Episode not known means a film or special in Sonarr's specials that seadex-scout does not compare. The anime ID map does not tie it to an episode Sonarr lists, or Sonarr's specials could not be read. seadex-scout still offers it in the feed. A film or special the map places is counted like a season. Each `cycle complete` line counts the series whose specials could not be read as `specials_unread`. A count that stays above 0 means Sonarr keeps failing that read, and those films and specials keep their last findings.
 
 In the upgrades list, You have, SeaDex best and SeaDex alt name the release groups. On a newer version they also show the version, such as `smol v1` against `smol v2`. SeaDex alt shows `-` when SeaDex lists no alt.
 
@@ -80,7 +83,7 @@ seadex-scout reports its findings and its own state through its log. Load the ru
 | `SeadexScoutFeedNotPolled` | no arr has read one tracker's RSS feed in 6h, though one did in the last 7 days | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommends a better release than the one on disk, or a newer revision of the group on disk | info |
 | `SeadexScoutMixedGroupManual` | the files on disk span more than one release group, so the app cannot say which one you have | info |
-| `SeadexScoutReportWritten` | a report run wrote a season-level report | info |
+| `SeadexScoutReportWritten` | a report run wrote its Markdown and JSON report pair | info |
 
 Route `SeadexScoutUpstreamUnavailable` and `SeadexScoutLibraryDegraded` to a receiver that sends resolved notifications, with a `repeat_interval` longer than an outage lasts. Each outage then sends one message when it starts and one when it ends. [Notes on each alert](#notes-on-each-alert) explains the routing for every rule.
 
@@ -169,6 +172,8 @@ This rule is an announcement and the app's activity signal. Keep it at `info` or
 
 Each alert names one title with clickable links, because the rule groups by the finding's labels. `nyaa_url` only ever holds a Nyaa link. A public release from another tracker, such as AnimeTosho or RuTracker, arrives as `public_url` named by `public_tracker`, so a finding carries one public link at most. `ab_url` holds an AnimeBytes link, or a link that might be one, because a doubtful link is treated as private. `ab_tracker` names the link's own tracker, so a link labelled AnimeBytes whose URL is a public tracker page shows under that tracker's name.
 
+A film or special that TVDB files under a series' specials alerts like a season once the map says which special episodes it is. Its line carries the series title, `season` 0 and `episodes`, such as `S00E09-E10`. The rules group by `al_id`, so each film or special is its own alert.
+
 `info_hash` is in the grouping so that a new encode by the same group is a new announcement. A release only on a private tracker publishes no info hash, so that one change cannot be told apart. `seadex_tags` covers that gap. seadex-scout builds it from the recommendation's status, kind, resolution and dual audio, such as `best · remux · 1080p · dual-audio`, so it moves only when the recommendation really changes. On an AnimeBytes-only release, a move from a 1080p encode to a 2160p remux therefore still fires a new alert.
 
 A newer revision of the group you have shares the message, with `seadex_tags` starting `newer-revision · v2`, so it is its own announcement. The annotations can show `seadex_tags` only because it is in the grouping, since `sum by` drops every label it does not list. If a later version of seadex-scout classifies a release differently, that release is announced once more.
@@ -189,10 +194,10 @@ A receiver that echoes an alert's labels, for example in a footer, lists every l
 
 #### `SeadexScoutMixedGroupManual`
 
-This rule fires for a season or film whose files span more than one release group, so seadex-scout cannot name the one you have. Like a better release, it is logged again on every pass and uses the same 12h window. `arr` is in the grouping because one AniList entry can own an item in each arr. It does not cover a film or special filed in Sonarr's season 0. seadex-scout is silent for those on purpose, because that folder cannot tie a file to one entry, as the `unattributed` verdict in [How seadex-scout works](how-it-works.md) explains.
+This rule fires for a season or film whose files span more than one release group, so seadex-scout cannot name the one you have. Like a better release, it is logged again on every pass and uses the same 12h window. `arr` is in the grouping because one AniList entry can own an item in each arr. It covers a film or special in Sonarr's season 0 only when the map says which special episodes it is. seadex-scout is silent for the others on purpose, because that folder alone cannot tie a file to one entry. The `unattributed` verdict in [How seadex-scout works](how-it-works.md) explains why.
 
 #### `SeadexScoutReportWritten`
 
 This rule fires once per report run. It is a one-time event, so route it to a receiver with `send_resolved: false`, or it sends a resolved message that means nothing. The default selector sees a report only when it runs as the container's command, with `mode: report` or `report` as the container's argument. A report started with `docker exec` logs to the exec session, and a scheduler's `job-exec`, such as Ofelia's, keeps the output in the scheduler's own log. For those runs, point the selector at the runner's log stream or skip this rule.
 
-An empty `markdown` field on the `report written` line means only the `.json` half of the pair was written. The JSON file was renamed into place, but the folder holding it could not be synced to disk. The run stopped there to keep the two files in order. The `.json` is complete, and running the report again writes a fresh pair.
+The `anime` field on the `report written` line is the number of rows in the report, which the alert shows. An empty `markdown` field on that line means only the `.json` half of the pair was written. The JSON file was renamed into place, but the folder holding it could not be synced to disk. The run stopped there to keep the two files in order. The `.json` is complete, and running the report again writes a fresh pair.

@@ -44,11 +44,11 @@ const (
 	// item's file data at all, so neither alignment nor a divergence can
 	// honestly be claimed.
 	VerdictUnverified Verdict = "unverified"
-	// VerdictUnattributed means the item has files on disk but the app never
-	// COMPARES this entry: it is an OFFERED unit, a film or special filed in
-	// Sonarr's season-0 bucket, where nothing ties one file to one entry. The
-	// bucket's groups are reported for what it holds; the feed still serves the
-	// entry.
+	// VerdictUnattributed means the item has files on disk but the app does not
+	// compare this entry: it is an OFFERED unit, a film or special filed in
+	// Sonarr's season-0 bucket that the map does not place on episodes the item
+	// lists. The bucket's groups are reported for what it holds; the feed still
+	// serves the entry.
 	VerdictUnattributed Verdict = "unattributed"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
 	// (present in the mapping) but SeaDex lists no entry for it.
@@ -118,6 +118,10 @@ type Row struct {
 	MatchSource   string    `json:"match_source"`
 	CurrentGroups []string  `json:"current_groups,omitempty"`
 	Releases      []Release `json:"releases,omitempty"`
+	// Episodes and MissingEpisodes are set only on an "episodes" row: the
+	// season-0 episodes the entry is, and those of them with no file.
+	Episodes        []int `json:"episodes,omitempty"`
+	MissingEpisodes []int `json:"missing_episodes,omitempty"`
 	// CurrentRevision and BestRevision are set only on a have_older_revision
 	// row: the newest revision held of the superseded best groups and the
 	// newest revision SeaDex lists for them.
@@ -229,6 +233,9 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		// moves only by the comparability rule.
 		if align.ClaimsCoverage(m.Item, &m.Record) {
 			covered[m.Item.Key()] = struct{}{}
+		}
+		if u := m.Uncompared; u != nil && align.ClaimsCoverage(u, &m.Record) {
+			covered[u.Key()] = struct{}{}
 		}
 		if a.excludeSpecials && m.Record.IsSpecial() {
 			continue
@@ -369,9 +376,10 @@ func (a *Auditor) assess(m *match.Match) Row {
 		}
 	}
 	listing := align.Listing{Best: best, Alt: alt, BestRevisions: classify.BestRevisions(&m.Entry)}
-	d := align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons)
+	d := align.Decide(m.Item, m.AlignEntry(), &listing)
 	row.Scope = d.Kind
 	row.Season = d.Season
+	row.Episodes, row.MissingEpisodes = d.Episodes, d.MissingEpisodes
 	row.GroupsUnknown = !m.Item.Comparable()
 	// align.Decision.Groups is caller-owned, so the row can take it without cloning.
 	row.CurrentGroups, row.Approx = d.Groups, d.Approx
@@ -386,7 +394,7 @@ func (a *Auditor) assess(m *match.Match) Row {
 // verdictFor renders the shared decision core's group-ladder standing in the
 // report's verdict vocabulary. Every standing maps 1:1 except unverified, which
 // the report splits by origin: an OFFERED unit whose file data was read is
-// unattributed (the app never compares it), while a NOGRP side or a placeholder
+// unattributed (the app does not compare it), while a NOGRP side or a placeholder
 // whose files could not be read (groupsUnknown, which is also what separates an
 // unreadable film from an offered one, since the two decisions are identical)
 // stays unverified.

@@ -13,14 +13,14 @@ seadex-scout helps you keep your anime library on SeaDex's recommended releases:
 
 - Tells you when SeaDex lists a better release than yours, or a newer v2 or REPACK of it.
 - Shows those upgrades, and how much of your library matches SeaDex, in Grafana.
-- Writes an on-demand report comparing each season you have with SeaDex.
+- Writes an on-demand report comparing each season, film and special you have with SeaDex.
 - Can offer SeaDex's picks to Sonarr and Radarr as an indexer, so they download them under your quality rules.
 
 You can leave out remuxes, require dual audio, skip specials and add AnimeBytes releases.
 
 ## Who it is for
 
-seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, season by season. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
+seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
 
 You need a Sonarr instance, a Radarr instance or both, with anime in them. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 
@@ -80,7 +80,7 @@ For a full report, run this while the container is up:
 docker exec seadex-scout /seadex-scout report
 ```
 
-It writes a timestamped Markdown and JSON pair into `config/reports`, with a verdict for each season. [How seadex-scout works](docs/how-it-works.md#the-report) explains every verdict.
+It writes a timestamped Markdown and JSON pair into `config/reports`, with a verdict for each season, film and special. [How seadex-scout works](docs/how-it-works.md#the-report) explains every verdict.
 
 ## Adding the indexer
 

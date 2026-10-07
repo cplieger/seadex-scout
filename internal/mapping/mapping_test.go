@@ -296,6 +296,29 @@ func TestIndex_MappingFor(t *testing.T) {
 	}
 }
 
+func TestIndex_MappingForKeepsThePlacementOnItsSeries(t *testing.T) {
+	idx := NewIndexWithMappings(nil, map[int]Mapping{
+		70: {SpecialEpisode: 9, Specials: []int{9}, SpecialsTvdb: 500},
+		71: {Specials: []int{3}, SpecialsTvdb: 500},
+	})
+	for _, tc := range []struct {
+		rec          Record
+		wantSpecials []int
+		wantSpecial  int
+		wantHit      bool
+	}{
+		{rec: Record{AniDBID: 70, TvdbID: 500}, wantSpecials: []int{9}, wantSpecial: 9, wantHit: true},
+		{rec: Record{AniDBID: 70, TvdbID: 600}, wantSpecial: 9, wantHit: true},
+		{rec: Record{AniDBID: 71, TvdbID: 600}},
+	} {
+		got, ok := idx.MappingFor(&tc.rec)
+		if ok != tc.wantHit || got.SpecialEpisode != tc.wantSpecial || !slices.Equal(got.Specials, tc.wantSpecials) {
+			t.Errorf("MappingFor(anidb %d, tvdb %d) = %+v, %v, want specials %v special episode %d, %v",
+				tc.rec.AniDBID, tc.rec.TvdbID, got, ok, tc.wantSpecials, tc.wantSpecial, tc.wantHit)
+		}
+	}
+}
+
 // TestIndex_MappingForJoinsAParentRecordOnItsAniListID pins the second join: a
 // record with no AniDB id reads the facts kept under its AniList id, and a
 // record with an AniDB id never does, whatever its AniList id.

@@ -125,9 +125,10 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 // the TVDB id when positive, the movie TMDB ids, the IMDb ids. TVDB files anime
 // films under their parent series, so a MOVIE record's TVDB id is evidence.
 //
-// The ONE licensed consumer is match.LibIndex.FindByID, which holds both arr
-// indexes so the map miss is still the arr gate. RoutedIDs must NOT widen:
-// NewCatalogue has no index gate, HasArrIdentifier has five consumers.
+// The licensed consumers are match.LibIndex's findMovie (FindByID's MOVIE arm),
+// otherCopy and filmCopy, which hold both arr indexes so the map miss is still
+// the arr gate. RoutedIDs must NOT widen: NewCatalogue has no index gate,
+// HasArrIdentifier has five consumers.
 func (r *Record) AllIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	return max(0, r.TvdbID), r.TmdbMovies, r.IMDbIDs
 }
@@ -234,21 +235,26 @@ type Index struct {
 	parentMappings map[int]Mapping
 }
 
-// MappingFor returns what the mapping list says about rec, and false when it
-// says nothing. A record with an AniDB id joins on it; one without joins on its
-// AniList id, which only a specials-of-parent record has facts under. An
-// override joins through the AniDB id it names: it replaces the upstream record
-// wholesale, its facts included.
+// MappingFor returns what the mapping list and placement say about rec, and
+// false when they say nothing. A record with an AniDB id joins on it; one
+// without joins on its AniList id, which only a specials-of-parent record has
+// facts under. An override joins through the AniDB id it names: it replaces the
+// upstream record wholesale, its facts included, and an override naming another
+// tvdb_id drops the placement, whose episodes belong to animap's series.
 func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
 	if i == nil || rec == nil {
 		return Mapping{}, false
 	}
+	var m Mapping
 	if rec.AniDBID > 0 {
-		m, ok := i.mappings[rec.AniDBID]
-		return m, ok
+		m = i.mappings[rec.AniDBID]
+	} else {
+		m = i.parentMappings[rec.AniListID]
 	}
-	m, ok := i.parentMappings[rec.AniListID]
-	return m, ok
+	if m.SpecialsTvdb != rec.TvdbID {
+		m.Specials, m.SpecialsTvdb = nil, 0
+	}
+	return m, !m.empty()
 }
 
 // Lookup returns the record for an AniList ID and whether it was present.
@@ -832,6 +838,7 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		"season_scoped_records", pop.positiveSeason,
 		"special_records", pop.special,
 		"mapping_list_records", parsed.listFacts(),
+		"placed_special_records", placedSpecials(parsed.mappings, parsed.parentMappings),
 		"revalidatable", res.Validators.ETag != "" || res.Validators.LastModified != "",
 	}
 	if prev.RejectedRefreshes > 0 {
@@ -984,18 +991,35 @@ func validateRoutingCoverage(previous, candidate populations, previousMinimum in
 // validateListFacts is the extinction and below-half shrink guard over each
 // mapping-list fact population: a document that keeps its records while losing
 // most of its mapping lists would silently drop every film's special episode
-// and every season range. The two populations are guarded apart, because the
+// and every season range. The populations are guarded apart, because the
 // AniDB-keyed one is large enough to hide the loss of every specials-of-parent
-// fact. The significance gate is the record guards' own 1% floor.
+// fact, and both to hide the loss of every placed special. The significance
+// gate is the record guards' own 1% floor.
 func validateListFacts(prev *Cache, parsed *animapParseResult) error {
 	if !cacheUsable(prev.Records) {
 		return nil
 	}
 	previousMinimum := coverageFloor(indexedRecordCount(prev.Records))
-	if err := validatePopulation("mapping-list", len(prev.Mappings), len(parsed.mappings), previousMinimum); err != nil {
+	if err := validatePopulation("mapping-list", listFactCount(prev.Mappings), listFactCount(parsed.mappings), previousMinimum); err != nil {
 		return err
 	}
-	return validatePopulation("specials-of-parent mapping-list", len(prev.ParentMappings), len(parsed.parentMappings), previousMinimum)
+	if err := validatePopulation("specials-of-parent mapping-list", listFactCount(prev.ParentMappings), listFactCount(parsed.parentMappings), previousMinimum); err != nil {
+		return err
+	}
+	return validatePopulation("special-episode placement", placedSpecials(prev.Mappings, prev.ParentMappings),
+		placedSpecials(parsed.mappings, parsed.parentMappings), previousMinimum)
+}
+
+func placedSpecials(fact ...map[int]Mapping) int {
+	n := 0
+	for _, m := range fact {
+		for _, f := range m {
+			if len(f.Specials) > 0 {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // arrIdentifierCount returns how many records retain an arr identifier the

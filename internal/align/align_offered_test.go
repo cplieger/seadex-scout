@@ -115,7 +115,7 @@ func TestDecideOfferedStanding(t *testing.T) {
 	rec := mapping.Record{Type: "MOVIE", TvdbID: 78964, SeasonKind: mapping.SeasonPresent}
 	t.Run("empty bucket is no_file", func(t *testing.T) {
 		item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"koala"}}}
-		d := align.Decide(&item, &rec, &align.Listing{Best: []string{"subsplease"}}, nil, nil)
+		d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"subsplease"}})
 		if d.Kind != align.ScopeOffered {
 			t.Fatalf("Kind = %v, want %v", d.Kind, align.ScopeOffered)
 		}
@@ -128,7 +128,7 @@ func TestDecideOfferedStanding(t *testing.T) {
 	})
 	t.Run("populated bucket is unverified and approximate", func(t *testing.T) {
 		item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"erai-raws"}}}
-		d := align.Decide(&item, &rec, &align.Listing{Best: []string{"subsplease"}}, nil, nil)
+		d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"subsplease"}})
 		if d.Standing != align.StandingUnverified {
 			t.Errorf("Standing = %v, want %v (the verdict MOVES to unverified rather than claiming a divergence)", d.Standing, align.StandingUnverified)
 		}
@@ -143,7 +143,7 @@ func TestDecideOfferedStanding(t *testing.T) {
 		// The group ladder is not consulted at all: a bucket holding the best
 		// group does not prove THIS entry's file is the one carrying it.
 		item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"subsplease"}}}
-		d := align.Decide(&item, &rec, &align.Listing{Best: []string{"subsplease"}}, nil, nil)
+		d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"subsplease"}})
 		if d.Standing != align.StandingUnverified {
 			t.Errorf("Standing = %v, want %v", d.Standing, align.StandingUnverified)
 		}

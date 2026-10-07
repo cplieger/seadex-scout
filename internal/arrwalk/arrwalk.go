@@ -34,12 +34,16 @@ const episodeFailureBudget = 5
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
 // interface; *arrapi.Sonarr satisfies it). EpisodeFiles lists exactly the
 // episodes that have a file on disk - the walker only consumes episodes WITH
-// files, so it needs no episode rows to skip.
+// files, so it needs no episode rows to skip. SeasonEpisodes is read for
+// season 0 only, where a file must be tied to its episode.
 type SonarrClient interface {
 	Series(ctx context.Context) ([]arrapi.Series, error)
 	EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error)
+	SeasonEpisodes(ctx context.Context, seriesID int, season arrapi.SeasonNumber) ([]arrapi.Episode, error)
 	Tags(ctx context.Context) ([]arrapi.Tag, error)
 }
+
+const specialsSeason = 0
 
 // RadarrClient is the arrapi Radarr surface the walker needs.
 type RadarrClient interface {
@@ -321,6 +325,7 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 		return &item, true
 	}
 	item := w.seriesItem(s, files)
+	item.Specials = w.fetchSpecials(ctx, s, files)
 	// A declared-but-empty episode list makes the item compare as genuinely
 	// fileless (seriesItem's HasFile is len(files) > 0), so record the
 	// degradation rather than let it look like a real no-file series. Stays a
@@ -332,6 +337,61 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 			"series", logattr.Cap(s.Title), "id", s.ID, "declared_files", s.Statistics.EpisodeFileCount)
 	}
 	return &item, false
+}
+
+// fetchSpecials reads which file sits on each season-0 episode, for a series
+// holding a season-0 file; nil otherwise and on a failed read. A failed read
+// leaves the series' films and specials uncompared rather than the series
+// failed, because nothing is compared on the missing data.
+func (w *Walker) fetchSpecials(ctx context.Context, s *arrapi.Series, files []arrapi.EpisodeFile) map[int]library.SpecialEpisode {
+	if !slices.ContainsFunc(files, func(f arrapi.EpisodeFile) bool { return f.SeasonNumber == specialsSeason }) {
+		return nil
+	}
+	eps, err := w.sonarr.SeasonEpisodes(ctx, s.ID, specialsSeason)
+	if err != nil {
+		if ctx.Err() == nil {
+			w.log.Warn("sonarr specials episode fetch failed; the series' films and specials stay uncompared",
+				"series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+		}
+		return nil
+	}
+	specials, ok := specialEpisodes(eps)
+	switch {
+	case !ok:
+		w.log.Warn("sonarr specials episode list marks a file it does not send; the series' films and specials stay uncompared",
+			"series", logattr.Cap(s.Title), "id", s.ID)
+	case specials == nil:
+		w.log.Warn("sonarr specials episode list names no season-0 episode beside a season-0 file; the series' films and specials stay uncompared",
+			"series", logattr.Cap(s.Title), "id", s.ID)
+	}
+	return specials
+}
+
+// specialEpisodes maps each listed season-0 episode to its file. A file
+// spanning several episodes is embedded on each, so each carries it. ok is
+// false, and the map nil, when an episode has a file but no file payload: its
+// file state is unknown, not absent.
+func specialEpisodes(eps []arrapi.Episode) (specials map[int]library.SpecialEpisode, ok bool) {
+	out := make(map[int]library.SpecialEpisode, len(eps))
+	for i := range eps {
+		ep := &eps[i]
+		if ep.SeasonNumber != specialsSeason || ep.EpisodeNumber <= 0 {
+			continue
+		}
+		if ep.HasFile && ep.EpisodeFile == nil {
+			return nil, false
+		}
+		var se library.SpecialEpisode
+		if ep.EpisodeFile != nil {
+			fi := fileFromEpisode(ep.EpisodeFile)
+			se = library.SpecialEpisode{Group: fi.group, Revision: fi.revision, HasFile: true}
+		}
+		out[ep.EpisodeNumber] = se
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, true
 }
 
 // walkRadarr lists movies, applies tag filters, and builds an item per movie. A

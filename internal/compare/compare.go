@@ -99,7 +99,7 @@ type Finding struct {
 	Tier Tier
 	// Scope is the comparison scope the shared decision resolved
 	// (align.Decision.Kind, rendered via its String): "season", "movie",
-	// "offered" or "series".
+	// "episodes" or "series".
 	Scope             string
 	RecommendedGroups []string
 	// AltGroups is the sorted set of groups the entry lists only as alts:
@@ -111,6 +111,9 @@ type Finding struct {
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
 	CurrentGroups []string
+	// Episodes are the season-0 episodes an "episodes" scope judged
+	// (align.Decision.Episodes).
+	Episodes []int
 	// CurrentRevision and RecommendedRevision are set only for a same-group
 	// revision gap (StatusNewerRevision, or StatusIncomplete downgraded from
 	// it): the newest revision held of the superseded groups and the newest
@@ -197,7 +200,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	// The daemon only distinguishes best-vs-not, so alt is nil: an on-disk
 	// unit lacking a recommended group reads as unlisted (not aligned).
 	listing := align.Listing{Best: recGroups, BestRevisions: classify.BestRevisions(entry)}
-	d := align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons)
+	d := align.Decide(m.Item, m.AlignEntry(), &listing)
 	// The gate must stay ahead of the outcome switch: an offered kind linearizes
 	// to OutcomeUnverifiable, or to OutcomeNoBest on an empty best set, and that
 	// arm's emptyResult would publish a theoretical_best row carrying a bucket
@@ -277,7 +280,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 // divergence into an unverifiable comparison, which would change the emission.
 func (c *Comparer) tier(m *match.Match, recGroups, listed []string) Tier {
 	listing := align.Listing{Best: recGroups, Alt: listed}
-	switch align.Decide(m.Item, &m.Record, &listing, m.SiblingSeasons, m.Seasons).Standing {
+	switch align.Decide(m.Item, m.AlignEntry(), &listing).Standing {
 	case align.StandingAlt:
 		return TierAlt
 	case align.StandingUnlisted:
@@ -383,6 +386,7 @@ func baseFinding(m *match.Match, d *align.Decision) Finding {
 		CurrentGroups: d.Groups,
 		AniListID:     m.Entry.AniListID,
 		Season:        d.Season,
+		Episodes:      d.Episodes,
 		Scope:         d.Kind.String(),
 		Approx:        d.Approx,
 	}

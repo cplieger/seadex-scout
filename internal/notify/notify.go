@@ -1,7 +1,7 @@
 // Package notify emits the current finding SET as structured slog events,
 // re-stating every row on every pass - the daemon's NOTIFICATION path. Nothing
 // is persisted and nothing is deduped across cycles; see Notifier for why. It
-// is distinct from the report FEATURE (the `report` subcommand's season-level
+// is distinct from the report FEATURE (the `report` subcommand's per-entry
 // audit), which lives in internal/audit.
 package notify
 
@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
@@ -39,22 +40,42 @@ func NewNotifier(logger *slog.Logger, ignore map[int]struct{}) *Notifier {
 	return &Notifier{log: logger, ignore: ignore, current: map[string]compare.Finding{}}
 }
 
+// Owner is the copy of a SeaDex entry a finding belongs to: the entry in one
+// arr. An empty Arr stands for every arr's copy of the entry.
+type Owner struct {
+	Arr       string
+	AniListID int
+}
+
+// Preserve is the set of owners whose evidence a pass could not establish;
+// replacement keeps their prior findings rather than resolving them. A nil
+// Preserve keeps nothing.
+type Preserve map[Owner]struct{}
+
+// keeps reports whether f's owner is preserved, as its own arr copy or as
+// every copy of its entry.
+func (p Preserve) keeps(f *compare.Finding) bool {
+	_, entry := p[Owner{AniListID: f.AniListID}]
+	_, arrCopy := p[Owner{Arr: f.Arr, AniListID: f.AniListID}]
+	return entry || arrCopy
+}
+
 // Report replaces the current finding set with findings and emits the whole
-// set. incompleteIDs scopes what replacement may DELETE.
-func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]struct{}) {
-	n.report(findings, nil, incompleteIDs)
+// set. preserve scopes what replacement may DELETE.
+func (n *Notifier) Report(findings []compare.Finding, preserve Preserve) {
+	n.report(findings, nil, preserve)
 }
 
 // ReportScoped is Report for a PARTIAL pass: only the rows owned by an AniList
 // ID in comparedIDs may be deleted, and every other row is carried forward
 // untouched.
-func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
+func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs map[int]struct{}, preserve Preserve) {
 	if comparedIDs == nil {
 		// report overloads a nil set as FULL deletion authority, so forwarding nil would
 		// make this partial pass delete every row outside its window.
 		comparedIDs = map[int]struct{}{}
 	}
-	n.report(findings, comparedIDs, incompleteIDs)
+	n.report(findings, comparedIDs, preserve)
 }
 
 // Reemit re-emits the current finding set unchanged, comparing nothing.
@@ -69,7 +90,7 @@ func (n *Notifier) Reemit() {
 
 // report is the shared body. comparedIDs nil means FULL deletion authority
 // (every row may be deleted by omission); non-nil bounds it to those owners.
-func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
+func (n *Notifier) report(findings []compare.Finding, comparedIDs map[int]struct{}, preserve Preserve) {
 	next := make(map[string]compare.Finding, len(findings))
 	// Last-payload-wins per key.
 	for i := range findings {
@@ -83,9 +104,9 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 		if _, present := next[key]; present {
 			continue
 		}
-		owner := n.current[key].AniListID
-		if _, incomplete := incompleteIDs[owner]; incomplete {
-			next[key] = n.current[key]
+		prior := n.current[key]
+		if preserve.keeps(&prior) {
+			next[key] = prior
 			preserved++
 			continue
 		}
@@ -94,8 +115,8 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 			resolved++
 			continue
 		}
-		if _, authorized := comparedIDs[owner]; !authorized {
-			next[key] = n.current[key]
+		if _, authorized := comparedIDs[prior.AniListID]; !authorized {
+			next[key] = prior
 			carried++
 			continue
 		}
@@ -289,6 +310,7 @@ func findingKVs(f *compare.Finding) []any {
 		"arr", f.Arr,
 		"arr_url", capURLAttr(f.ArrURL),
 		"season", f.Season,
+		"episodes", align.EpisodeLabel(f.Episodes),
 		"scope", f.Scope,
 		"approx", f.Approx,
 		"current_group", capAttr(f.CurrentGroup),

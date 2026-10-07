@@ -735,6 +735,10 @@ func (c *cancellingSonarr) EpisodeFiles(context.Context, int) ([]arrapi.EpisodeF
 	return nil, nil
 }
 
+func (c *cancellingSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
+	return nil, nil
+}
+
 func (c *cancellingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
@@ -1553,14 +1557,15 @@ func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
 	}
 	wantAttrs := map[string]string{
-		"seadex_entries": "3",
-		"library_items":  "1",
-		"findings":       "1",
-		"mapped":         "2",
-		"unmapped":       "1",
-		"added":          "0",
-		"removed":        "1",
-		"changed":        "1",
+		"seadex_entries":  "3",
+		"library_items":   "1",
+		"findings":        "1",
+		"mapped":          "2",
+		"unmapped":        "1",
+		"specials_unread": "0",
+		"added":           "0",
+		"removed":         "1",
+		"changed":         "1",
 	}
 	for key, want := range wantAttrs {
 		if got, ok := recordAttr(recorder, "cycle complete", key); !ok || got != want {

@@ -858,56 +858,56 @@ const legacyMappingState = `{
 "version":1
 }`
 
-// TestStoreLoadIgnoresALegacyMappingCache pins the move of the mapping cache to
-// a new key: a file carrying only the old "mapping" member loads with no error
-// and no quarantine, the old cache is ignored whole (its validators belong to
-// another upstream, so sending them would be wrong and serving its records
-// stale would be too), every other member survives, and the next Save writes
-// the old key no more.
+var legacyAnimapState = strings.Replace(legacyMappingState, `"mapping":{`, `"animap":{`, 1)
+
 func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(legacyMappingState), 0o600); err != nil {
-		t.Fatalf("write legacy state: %v", err)
-	}
-	store := NewStore(path, testLogger())
-	got, err := store.Load(t.Context())
-	if err != nil {
-		t.Fatalf("Load(legacy state) error: %v, want a clean load", err)
-	}
-	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
-		t.Errorf("quarantine stat = %v, want not exist", statErr)
-	}
-	if m := got.Mapping; m.ETag != "" || m.LastModified != "" || m.RefusedETag != "" || m.RejectedRefreshes != 0 ||
-		len(m.Records) != 0 || len(m.Mappings) != 0 || !m.FetchedAt.IsZero() {
-		t.Errorf("Load(legacy state).Mapping = %+v, want the zero cache", m)
-	}
-	if e, ok := got.Memo.Entries[154587]; !ok || len(e.Titles) != 1 || e.Titles[0] != "Frieren" {
-		t.Errorf("Load(legacy state) memo entry 154587 = %+v ok=%v, want the Frieren lookup", e, ok)
-	}
-	if len(got.Library.Items) != 1 || got.Library.Items[0].Title != "Frieren" {
-		t.Errorf("Load(legacy state) library = %+v, want the one Frieren item", got.Library.Items)
-	}
-	wantStanding := []StandingCondition{{Condition: "library-walk-shrunk", Arr: "sonarr"}}
-	if !slices.Equal(got.Standing, wantStanding) {
-		t.Errorf("Load(legacy state) standing = %+v, want %+v", got.Standing, wantStanding)
-	}
-	if got.ShrunkWalksByArr["sonarr"] != 1 || got.SeadexFailures != 2 || got.AniListDegraded != 1 || got.PartialWalks != 1 {
-		t.Errorf("Load(legacy state) streaks = (%v, %d, %d, %d), want (sonarr 1, 2, 1, 1)",
-			got.ShrunkWalksByArr, got.SeadexFailures, got.AniListDegraded, got.PartialWalks)
-	}
-	if err := store.Save(t.Context(), &got); err != nil {
-		t.Fatalf("Save after a legacy load: %v", err)
-	}
-	saved, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read saved state: %v", err)
-	}
-	var members map[string]json.RawMessage
-	if err := json.Unmarshal(saved, &members); err != nil {
-		t.Fatalf("decode saved state: %v", err)
-	}
-	if _, ok := members["mapping"]; ok {
-		t.Error("Save after a legacy load still wrote the old \"mapping\" member")
+	for _, tc := range []struct{ key, body string }{{"mapping", legacyMappingState}, {"animap", legacyAnimapState}} {
+		t.Run(tc.key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write legacy state: %v", err)
+			}
+			store := NewStore(path, testLogger())
+			got, err := store.Load(t.Context())
+			if err != nil {
+				t.Fatalf("Load(legacy state) error: %v, want a clean load", err)
+			}
+			if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("quarantine stat = %v, want not exist", statErr)
+			}
+			if m := got.Mapping; m.ETag != "" || m.LastModified != "" || m.RefusedETag != "" || m.RejectedRefreshes != 0 ||
+				len(m.Records) != 0 || len(m.Mappings) != 0 || !m.FetchedAt.IsZero() {
+				t.Errorf("Load(legacy state).Mapping = %+v, want the zero cache", m)
+			}
+			if e, ok := got.Memo.Entries[154587]; !ok || len(e.Titles) != 1 || e.Titles[0] != "Frieren" {
+				t.Errorf("Load(legacy state) memo entry 154587 = %+v ok=%v, want the Frieren lookup", e, ok)
+			}
+			if len(got.Library.Items) != 1 || got.Library.Items[0].Title != "Frieren" {
+				t.Errorf("Load(legacy state) library = %+v, want the one Frieren item", got.Library.Items)
+			}
+			wantStanding := []StandingCondition{{Condition: "library-walk-shrunk", Arr: "sonarr"}}
+			if !slices.Equal(got.Standing, wantStanding) {
+				t.Errorf("Load(legacy state) standing = %+v, want %+v", got.Standing, wantStanding)
+			}
+			if got.ShrunkWalksByArr["sonarr"] != 1 || got.SeadexFailures != 2 || got.AniListDegraded != 1 || got.PartialWalks != 1 {
+				t.Errorf("Load(legacy state) streaks = (%v, %d, %d, %d), want (sonarr 1, 2, 1, 1)",
+					got.ShrunkWalksByArr, got.SeadexFailures, got.AniListDegraded, got.PartialWalks)
+			}
+			if err := store.Save(t.Context(), &got); err != nil {
+				t.Fatalf("Save after a legacy load: %v", err)
+			}
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read saved state: %v", err)
+			}
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal(saved, &members); err != nil {
+				t.Fatalf("decode saved state: %v", err)
+			}
+			if _, ok := members[tc.key]; ok {
+				t.Errorf("Save after a legacy load still wrote the old %q member", tc.key)
+			}
+		})
 	}
 }
 
@@ -1140,7 +1140,7 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 
 func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	body := `{"animap":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"animap-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
+	body := `{"animap_v2":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"animap-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write state fixture: %v", err)
 	}
