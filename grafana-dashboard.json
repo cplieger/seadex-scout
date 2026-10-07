@@ -1313,7 +1313,7 @@
         "spec": {
           "id": 41,
           "title": "Library overview",
-          "description": "SeaDex entries in your library, one per season, film or special SeaDex lists, grouped by what you have. A film or special both Sonarr and Radarr hold counts once per copy. Season not found means seadex-scout found no files for that season, because they are missing or Sonarr numbers that season differently, for example under specials. Episode not known means a film or special in Sonarr's specials that seadex-scout does not compare. The anime ID map does not tie it to an episode Sonarr lists, or Sonarr's specials could not be read. No summary yet means no daily library summary has arrived in the last 26 hours.",
+          "description": "SeaDex entries in your library, one per season, film or special SeaDex lists and once per copy when Sonarr and Radarr both hold it, grouped by what you have. Season not found means seadex-scout found no files for that season, because they are missing or Sonarr numbers that season differently, for example under specials. Episode not known means seadex-scout does not compare a film or special in Sonarr's specials, because the anime ID map does not tie it to a listed episode or the specials could not be read. No summary yet means no daily library summary has arrived in the last 26 hours.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
