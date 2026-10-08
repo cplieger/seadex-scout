@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"fmt"
-	"math"
 	"path"
 	"regexp"
 	"slices"
@@ -12,7 +11,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
-	"github.com/cplieger/seadex-scout/internal/nametoken"
 	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -203,14 +201,14 @@ func seasonLabel(s int) string { return fmt.Sprintf("S%02d", s) }
 
 // absoluteEpisodeNumber reads the episode number out of a census
 // single-episode marker in the absolute "- NN" form, stripping a version
-// suffix exactly as the census keys it (episodeVersion). ok is false for a
+// suffix exactly as the census keys it (payload.EpisodeVersion). ok is false for a
 // marker in any other form - an SxxExx token, or the empty marker.
 func absoluteEpisodeNumber(marker string) (int, bool) {
 	number, found := strings.CutPrefix(marker, "- ")
 	if !found {
 		return 0, false
 	}
-	n, err := strconv.Atoi(episodeVersion.ReplaceAllString(number, ""))
+	n, err := strconv.Atoi(payload.EpisodeVersion.ReplaceAllString(number, ""))
 	if err != nil {
 		return 0, false
 	}
@@ -269,17 +267,17 @@ func rangeSeason(ranges []SeasonRange, files []seadex.File) (int, bool) {
 }
 
 // absoluteEpisodeSpan reads the lowest and highest absolute "- NN" episode
-// number across a pack's census population, keyed exactly as distinctEpisodes'
-// absolute arm keys them (episodeKeyBase, version suffix stripped). ok is false
+// number across a pack's census population, keyed exactly as payload.DistinctEpisodes'
+// absolute arm keys them (payload.EpisodeKeyBase, version suffix stripped). ok is false
 // when no file carries the absolute form.
 func absoluteEpisodeSpan(files []seadex.File) (first, last int, ok bool) {
-	for _, f := range contentPopulation(files) {
-		base := episodeKeyBase(f.Name)
-		l := lastSubmatchIndex(absoluteEpisode, base)
+	for _, f := range payload.Census(files) {
+		base := payload.EpisodeKeyBase(f.Name)
+		l := payload.LastSubmatchIndex(payload.AbsoluteEpisode, base)
 		if l == nil {
 			continue
 		}
-		n, err := strconv.Atoi(episodeVersion.ReplaceAllString(base[l[2]:l[3]], ""))
+		n, err := strconv.Atoi(payload.EpisodeVersion.ReplaceAllString(base[l[2]:l[3]], ""))
 		if err != nil {
 			continue
 		}
@@ -304,7 +302,7 @@ func relabelEpisodeSeason(value string, meta *EntryInfo) string {
 	if !meta.SeasonKnown {
 		return value
 	}
-	l := lastSubmatchIndex(episodeToken, value)
+	l := payload.LastSubmatchIndex(payload.EpisodeToken, value)
 	if l == nil {
 		return value
 	}
@@ -321,13 +319,13 @@ func singleEpisodeMarker(files []seadex.File) string {
 		return ""
 	}
 	// Read the episode identity from the same base-then-full-path rule the census
-	// uses (episodeKeyBase), so a token that lives only in a directory component
+	// uses (payload.EpisodeKeyBase), so a token that lives only in a directory component
 	// still names the episode instead of being lost.
-	base := episodeKeyBase(name)
-	if l := lastSubmatchIndex(episodeToken, base); l != nil {
+	base := payload.EpisodeKeyBase(name)
+	if l := payload.LastSubmatchIndex(payload.EpisodeToken, base); l != nil {
 		return strings.ToUpper(base[l[2]:l[3]])
 	}
-	if l := lastSubmatchIndex(absoluteEpisode, base); l != nil {
+	if l := payload.LastSubmatchIndex(payload.AbsoluteEpisode, base); l != nil {
 		return "- " + base[l[2]:l[3]]
 	}
 	return ""
@@ -358,42 +356,8 @@ func releaseFlags(t *seadex.Torrent) []string {
 	return flags
 }
 
-// episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13, S01E15v2),
-// captured in group 1 with its season half in group 2.
-var episodeToken = regexp.MustCompile(
-	`((` + nametoken.Literal("S") + `\d{1,2})` + nametoken.Literal("E") + `\d{1,4}` +
-		`(?:-` + nametoken.Literal("E") + `?\d{1,4})?(?:` + nametoken.Literal("v") + `\d+)?)` +
-		`(?:` + nametoken.NonWordEdge + `|$)`,
-)
-
-// absoluteEpisode matches an absolute episode number in the fansub "- 07" form
-// (optional version suffix), with the episode number captured in group 1. The
-// delimiters accept underscores as well as spaces: underscore-named releases
-// ("_Show_-_01_") use "_" everywhere a space would sit, and matching only the
-// space-dash form made such packs read as a single episode. Used to keep a
-// multi-file pack from reading as episode 7 when there is no SxxExx token to
-// collapse, and to extract a single absolute episode's number for synthesis.
-var absoluteEpisode = regexp.MustCompile(`[\s_]-[\s_](\d{1,4}(?:v\d+)?)(?:[\s_]|$)`)
-
-// episodeVersion strips a trailing vN revision from an episode token so a v2
-// replacement of the same episode never counts as a second episode. The v is
-// the shared case class (nametoken.Literal), which for a letter with no
-// non-ASCII fold is exactly what (?i)v was - it reads from the one home rather
-// than restating the rule.
-var episodeVersion = regexp.MustCompile(nametoken.Literal("v") + `\d+$`)
-
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
-
-// lastSubmatchIndex returns the submatch index pairs of the LAST non-overlapping match
-// of re in s, or nil when there is none.
-func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
-	all := re.FindAllStringSubmatchIndex(s, -1)
-	if len(all) == 0 {
-		return nil
-	}
-	return all[len(all)-1]
-}
 
 // derivedTitle is the file-name derivation with the entry's known mapping
 // applied: when the entry pins a season (a positive mapped TVDB season, or a
@@ -415,7 +379,7 @@ func derivedTitle(t *seadex.Torrent, meta *EntryInfo) string {
 		// with its cour-local season half relabeled when the entry maps one.
 		return strings.TrimSpace(relabelEpisodeSeason(base, meta))
 	}
-	if l := lastSubmatchIndex(episodeToken, base); l != nil {
+	if l := payload.LastSubmatchIndex(payload.EpisodeToken, base); l != nil {
 		// Collapse only the LAST episode token: scene naming puts the marker after the
 		// title, so a title that itself contains an SxxExx-shaped substring is
 		// preserved verbatim.
@@ -425,7 +389,7 @@ func derivedTitle(t *seadex.Torrent, meta *EntryInfo) string {
 		}
 		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}
-	if last := lastSubmatchIndex(absoluteEpisode, base); last != nil {
+	if last := payload.LastSubmatchIndex(payload.AbsoluteEpisode, base); last != nil {
 		// Collapse only the LAST absolute episode token (mirroring the SxxExx
 		// arm above): a title segment that is itself " - NN"-shaped (e.g.
 		label := " "
@@ -470,13 +434,13 @@ func packSeason(files []seadex.File) (season int, ok bool) {
 // marker after the title).
 func seasonCounts(files []seadex.File) map[int]int {
 	counts := make(map[int]int)
-	// The census population, not the raw list: contentPopulation is the one home
+	// The census population, not the raw list: payload.Census is the one home
 	// of that rule (the episode pool, then content media files only), so the
 	// season tally and the pack verdict read the same file set by construction.
-	files = contentPopulation(files)
+	files = payload.Census(files)
 	for i := range files {
-		name := stripExt(files[i].Name)
-		l := lastSubmatchIndex(episodeToken, name)
+		name := payload.StripExt(files[i].Name)
+		l := payload.LastSubmatchIndex(payload.EpisodeToken, name)
 		if l == nil {
 			continue
 		}
@@ -489,38 +453,13 @@ func seasonCounts(files []seadex.File) map[int]int {
 	return counts
 }
 
-// episodeKeyBase picks the portion of a file's name its episode identity is
-// read from: the file's OWN base name when that carries episode evidence
-// (an SxxExx token or an absolute "- NN" number), else the full path - so a
-// pack whose only episode tokens live in a directory component still keys per
-// directory. Reading the full path unconditionally let a shared directory
-// token (a batch folder named "... S01E01-E12 ...") shadow every file's own
-// absolute number, collapsing a whole season pack onto ONE episode key: the
-// pack then read as a single episode and was served titled as episode 1.
-func episodeKeyBase(name string) string {
-	base := stripExt(path.Base(name))
-	if hasEpisodeEvidence(base) {
-		return base
-	}
-	return stripExt(name)
-}
-
-// hasEpisodeEvidence reports whether a path fragment carries an episode
-// identity - an SxxExx token or an absolute "- NN" number. It is the ONE
-// predicate the episode-evidence readers of this file share (episodeKeyBase's
-// base-then-full-path rule and titleBase's headline pick), so they cannot
-// disagree about which fragment names the episode.
-func hasEpisodeEvidence(s string) bool {
-	return episodeToken.MatchString(s) || absoluteEpisode.MatchString(s)
-}
-
 // titleBase picks the path fragment a DERIVED title headlines with: the file's
 // own base name, or the nearest ancestor directory component when the base
 // carries no episode evidence and that directory carries both episode evidence
 // AND text of its own.
 func titleBase(name string) string {
-	base := stripExt(path.Base(name))
-	if hasEpisodeEvidence(base) {
+	base := payload.StripExt(path.Base(name))
+	if payload.HasEpisodeEvidence(base) {
 		return base
 	}
 	// Walk the ancestors nearest-first over ONE cleaned split, so a component is
@@ -529,7 +468,7 @@ func titleBase(name string) string {
 		if component == "" {
 			continue
 		}
-		if hasEpisodeEvidence(component) && hasNonTokenText(component) {
+		if payload.HasEpisodeEvidence(component) && hasNonTokenText(component) {
 			return component
 		}
 	}
@@ -540,7 +479,7 @@ func titleBase(name string) string {
 // beyond its episode tokens - i.e. whether it could name a show at all. A
 // fragment that is nothing but its token ("S01E01") is not a release name.
 func hasNonTokenText(s string) bool {
-	stripped := absoluteEpisode.ReplaceAllString(episodeToken.ReplaceAllString(s, " "), " ")
+	stripped := payload.AbsoluteEpisode.ReplaceAllString(payload.EpisodeToken.ReplaceAllString(s, " "), " ")
 	for _, r := range stripped {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return true
@@ -570,11 +509,11 @@ const (
 )
 
 // packEvidenceOf grades what a torrent's file list proves about its episode
-// count. The distinct-token count is read from contentPopulation, the SAME
+// count. The distinct-token count is read from payload.Census, the SAME
 // population coveredEpisodes counts, so one recognized token implies a
 // non-empty population.
 func packEvidenceOf(t *seadex.Torrent) packEvidence {
-	switch n := distinctEpisodes(contentPopulation(t.Files)); {
+	switch n := payload.DistinctEpisodes(payload.Census(t.Files)); {
 	case n > 1:
 		return packEvidencePack
 	case n == 1:
@@ -591,55 +530,6 @@ func packEvidenceOf(t *seadex.Torrent) packEvidence {
 // in the SeaDex record, so this needs no torrent fetch.
 func isPack(t *seadex.Torrent) bool {
 	return packEvidenceOf(t) == packEvidencePack
-}
-
-// contentPopulation narrows a file list to the population the episode census
-// counts over: the episode pool, then content media files only.
-func contentPopulation(files []seadex.File) []seadex.File {
-	files = payload.Population(files)
-	kept := make([]seadex.File, 0, len(files))
-	for i := range files {
-		if isContentMediaFile(files[i].Name) {
-			kept = append(kept, files[i])
-		}
-	}
-	return kept
-}
-
-// distinctEpisodes counts the distinct episodes a census population spans,
-// keying on the SxxExx token first and the "- NN" absolute-episode form (space-
-// or underscore-delimited) as a fallback. Creditless extras (NCED/NCOP) and
-// other sidecars carry neither token and are not counted, so an episode bundled
-// with its creditless files still reads as a single episode.
-func distinctEpisodes(files []seadex.File) int {
-	seen := make(map[string]struct{})
-	for i := range files {
-		base := episodeKeyBase(files[i].Name)
-		qualifier := sharedTokenQualifier(files[i].Name)
-		if l := lastSubmatchIndex(episodeToken, base); l != nil {
-			// Key on the LAST token: scene naming puts the episode marker
-			// after the title, so a title containing an SxxExx-shaped
-			// substring must not shadow the real episode marker.
-			tok := strings.ToUpper(base[l[2]:l[3]])
-			seen["e"+episodeVersion.ReplaceAllString(tok, "")+qualifier] = struct{}{}
-			continue
-		}
-		if l := lastSubmatchIndex(absoluteEpisode, base); l != nil {
-			tok := base[l[2]:l[3]]
-			seen["a"+episodeVersion.ReplaceAllString(tok, "")+qualifier] = struct{}{}
-		}
-	}
-	return len(seen)
-}
-
-// sharedTokenQualifier returns the per-file suffix an episode key needs when
-// the token episodeKeyBase found does NOT come from the file's own base name.
-func sharedTokenQualifier(name string) string {
-	own := stripExt(path.Base(name))
-	if hasEpisodeEvidence(own) {
-		return ""
-	}
-	return "|" + episodeVersion.ReplaceAllString(own, "")
 }
 
 // seasonOnlyTitle matches what Sonarr calls a "season only release"
@@ -680,7 +570,7 @@ func packFromTitle(title string) (pack, known bool) {
 	if s == "" {
 		return false, false
 	}
-	if hasEpisodeEvidence(s) {
+	if payload.HasEpisodeEvidence(s) {
 		return false, true
 	}
 	if seasonPackDisqualifier.MatchString(s) {
@@ -748,15 +638,15 @@ func correctSeasonOnlyTitle(title, marker string) (string, bool) {
 // census's own single-episode marker: an SxxExx marker's episode text verbatim
 // (so a range token "S01E01-E13" keeps its range rather than naming one
 // episode of it), or the absolute "- NN" form as E%02d. A version suffix is
-// stripped exactly as the census keys it (episodeVersion), so a "v2" marker
+// stripped exactly as the census keys it (payload.EpisodeVersion), so a "v2" marker
 // cannot emit an unparseable token. ok is false for a marker in neither form -
 // including the empty marker, which packEvidenceSingle cannot produce but the
 // caller must still handle rather than assume away.
 func episodeSuffix(marker string) (string, bool) {
-	if l := lastSubmatchIndex(episodeToken, marker); l != nil {
+	if l := payload.LastSubmatchIndex(payload.EpisodeToken, marker); l != nil {
 		// Group 1 is the whole token and group 2 its season half, so the text
 		// between the season half's end and the token's end is the episode half.
-		return episodeVersion.ReplaceAllString(strings.ToUpper(marker[l[5]:l[3]]), ""), true
+		return payload.EpisodeVersion.ReplaceAllString(strings.ToUpper(marker[l[5]:l[3]]), ""), true
 	}
 	n, ok := absoluteEpisodeNumber(marker)
 	if !ok {
@@ -781,11 +671,11 @@ func representativeFile(files []seadex.File) string {
 	// Prefer a real episode file (skipping creditless extras/sidecars): first an SxxExx
 	// token, then an absolute-numbered episode, so the title derives from a real
 	// episode rather than an extra.
-	if name := firstEpisodeFile(files, episodeToken.MatchString); name != "" {
+	if name := firstEpisodeFile(files, payload.EpisodeToken.MatchString); name != "" {
 		return name
 	}
 	if name := firstEpisodeFile(files, func(n string) bool {
-		return absoluteEpisode.MatchString(stripExt(n))
+		return payload.AbsoluteEpisode.MatchString(payload.StripExt(n))
 	}); name != "" {
 		return name
 	}
@@ -818,33 +708,6 @@ func firstEpisodeFile(files []seadex.File, match func(string) bool) string {
 // "what counts as a content file").
 func isContentMediaFile(name string) bool {
 	return payload.ContentMediaFile(name)
-}
-
-// stripExt drops a trailing known video extension from a file name, leaving any
-// other trailing dotted token (a release name is not a path) intact.
-func stripExt(name string) string {
-	if !payload.IsMediaFile(name) {
-		return name
-	}
-	return name[:len(name)-len(path.Ext(name))]
-}
-
-// totalSize sums the byte lengths of a torrent's files (the pack size). The
-// lengths come from the untrusted SeaDex record, so the arithmetic is
-// validated: a negative length, or a sum that would overflow int64 into a
-// negative value, returns 0 - the feed's existing "size unknown"
-// representation - rather than rendering a negative enclosure length to the
-// arrs.
-func totalSize(files []seadex.File) int64 {
-	var n int64
-	for i := range files {
-		length := files[i].Length
-		if length < 0 || length > math.MaxInt64-n {
-			return 0
-		}
-		n += length
-	}
-	return n
 }
 
 // entryURL is the SeaDex entry page for an AniList id under the canonical

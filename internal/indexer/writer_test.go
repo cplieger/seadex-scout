@@ -896,7 +896,7 @@ func TestJournalItemPersistedShapeIsFlat(t *testing.T) {
 
 // TestValidPersistedItemRejectsNegativeCounts pins the numeric arm of the
 // shared persisted-item limits: both producers guarantee non-negative
-// size/seeders/leechers (toItem clamps, totalSize floors at 0), so a
+// size/seeders/leechers (toItem clamps, payload.TotalSize floors at 0), so a
 // persisted negative value identifies a hand-edited or corrupted snapshot
 // and must be rejected at load rather than rendered as an invalid enclosure
 // length or peer count.

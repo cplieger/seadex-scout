@@ -95,7 +95,7 @@ func twinRun(t *seadex.Torrent, info *EntryInfo) (first, last int, ok bool) {
 func holdsOnlyTheEntry(t *seadex.Torrent, info *EntryInfo, runLen int) bool {
 	anidb := info.SpecialsEpisodes
 	files := len(payload.Names(t.Files))
-	episodes := distinctEpisodes(contentPopulation(t.Files))
+	episodes := payload.DistinctEpisodes(payload.Census(t.Files))
 	switch {
 	case files < 1 || files > max(anidb, runLen, 1) || episodes > max(anidb, runLen):
 		return false

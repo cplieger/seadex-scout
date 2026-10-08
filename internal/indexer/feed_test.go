@@ -2,12 +2,12 @@ package indexer
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -16,11 +16,11 @@ import (
 // two-step census rule (narrow to the counted population, then count) spelled as
 // one call, and it lives HERE because production has no use for that spelling:
 // packEvidenceOf grades a torrent and needs both halves separately, so it calls
-// contentPopulation and distinctEpisodes itself. Keeping this in feed.go made it
+// payload.Census and payload.DistinctEpisodes itself. Keeping this in feed.go made it
 // a production function nothing but tests reached, which is what the deadcode
 // gate reports.
 func coveredEpisodes(files []seadex.File) int {
-	return distinctEpisodes(contentPopulation(files))
+	return payload.DistinctEpisodes(payload.Census(files))
 }
 
 // TestSortFeedRetainsOverflow pins the journal feed's ordering + retention
@@ -63,8 +63,8 @@ func TestStripExt(t *testing.T) {
 		{"noext", "noext"},
 	}
 	for _, tc := range tests {
-		if got := stripExt(tc.in); got != tc.want {
-			t.Errorf("stripExt(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := payload.StripExt(tc.in); got != tc.want {
+			t.Errorf("payload.StripExt(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -540,33 +540,6 @@ func TestSynthesizeTitle(t *testing.T) {
 	}
 }
 
-// TestTotalSize pins the untrusted-arithmetic domain of the pack-size sum: the
-// lengths come from the SeaDex record with no length constraint, so a negative
-// file length and an int64 overflow across two large lengths both return 0
-// (the feed's existing size-unknown representation) instead of rendering a
-// negative enclosure length to the arrs; normal sums are unaffected.
-func TestTotalSize(t *testing.T) {
-	tests := []struct {
-		name  string
-		files []seadex.File
-		want  int64
-	}{
-		{"sums normal lengths", []seadex.File{{Length: 100}, {Length: 250}}, 350},
-		{"no files is zero", nil, 0},
-		{"negative length rejected", []seadex.File{{Length: 100}, {Length: -1}}, 0},
-		{"zero-length file does not zero the sum", []seadex.File{{Length: 0}, {Length: 250}}, 250},
-		{"overflow across two files rejected", []seadex.File{{Length: math.MaxInt64}, {Length: math.MaxInt64}}, 0},
-		{"exact MaxInt64 sum allowed", []seadex.File{{Length: math.MaxInt64 - 1}, {Length: 1}}, math.MaxInt64},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := totalSize(tc.files); got != tc.want {
-				t.Errorf("totalSize = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestSynthesizeTitleFilelessAndMarkerlessFallbacks pins the two degenerate
 // single-release shapes of the assembled-title path: a file-less torrent (no
 // marker source at all) assembles from the show title and the flags it still
@@ -603,7 +576,7 @@ func TestPackSeasonIgnoresEpisodeNamedSidecars(t *testing.T) {
 
 // TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens pins derivedTitle's final
 // fallback (the one branch its tables missed): coveredEpisodes keys a file whose
-// OWN base name carries no episode evidence on the FULL path (episodeKeyBase's
+// OWN base name carries no episode evidence on the FULL path (payload.EpisodeKeyBase's
 // fallback arm), while the title derives from path.Base of the representative
 // file - so a pack whose SxxExx tokens live only in directory components is a
 // pack with a token-less base, and the trimmed basename is served rather than an
@@ -625,7 +598,7 @@ func TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 // per-file episode evidence outvotes a shared directory episode token: when a
 // pack's files carry only absolute episode numbers in their own base names
 // while a SHARED directory component carries an SxxExx token, each file must key on
-// its own absolute number (episodeKeyBase), so the torrent reads as the multi-episode
+// its own absolute number (payload.EpisodeKeyBase), so the torrent reads as the multi-episode
 // pack it is instead of collapsing onto the one directory token and being served as
 // episode 1.
 func TestDerivedTitleAbsolutePackUnderSharedEpisodeTokenDirectory(t *testing.T) {
@@ -962,7 +935,7 @@ func TestRepresentativeFileFallsBackToFirstFileWhenNoMediaFileSurvives(t *testin
 
 // TestRepresentativeFileFindsAbsoluteEpisodeAbuttingTheExtension pins the
 // asymmetric input representativeFile's ABSOLUTE arm needs (the case its own
-// "do not unify them onto one input" comment names): absoluteEpisode ends in
+// "do not unify them onto one input" comment names): payload.AbsoluteEpisode ends in
 // (?:[\s_]|$), so an episode number abutting the extension ("Show - 07.mkv")
 // only matches against the extension-stripped name. Fed the raw name the arm
 // finds nothing and the pick falls through to the first media file - here a
@@ -1271,40 +1244,6 @@ func TestPackFromTitleReadsSonarrCleanedTitles(t *testing.T) {
 			pack, known := packFromTitle(tc.title)
 			if pack != tc.wantPack || known != tc.wantKnown {
 				t.Errorf("packFromTitle(%q) = (%v, %v), want (%v, %v)", tc.title, pack, known, tc.wantPack, tc.wantKnown)
-			}
-		})
-	}
-}
-
-// TestLastSubmatchIndexFindsAMarkerAdjacentToThePrevious commits the boundary the
-// scan's rebased offsets turn on: an absolute marker that begins exactly where the
-// previous match ended, which happens whenever two delimiters sit between two markers.
-// Resuming one byte past the previous match instead of AT it still finds every
-// well-separated marker, so it returns the wrong - earlier - span only for this shape,
-// and every season and episode decision in this file reads its title slice offsets from
-// that span. The randomized sibling reaches this only when its draw places two markers
-// adjacently, so the input is pinned here rather than left to the draw.
-func TestLastSubmatchIndexFindsAMarkerAdjacentToThePrevious(t *testing.T) {
-	tests := map[string]struct {
-		name string
-		want []int
-	}{
-		// "Show - 07  - 1085 ": the first marker ends at 10 having consumed one
-		// space, and the second starts there on the other one.
-		"double-space separated markers": {"Show - 07  - 1085 ", []int{10, 18, 13, 17}},
-		// The underscore-named form of the same shape ("_Show_-_02__-_03_").
-		"double-underscore separated markers": {"Show_-_02__-_03_", []int{10, 16, 13, 15}},
-	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			got := lastSubmatchIndex(absoluteEpisode, tc.name)
-			if len(got) != len(tc.want) {
-				t.Fatalf("lastSubmatchIndex(absoluteEpisode, %q) = %v, want %v", tc.name, got, tc.want)
-			}
-			for i := range tc.want {
-				if got[i] != tc.want[i] {
-					t.Fatalf("lastSubmatchIndex(absoluteEpisode, %q) = %v, want %v (index %d differs)", tc.name, got, tc.want, i)
-				}
 			}
 		})
 	}

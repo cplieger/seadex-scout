@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/payload"
@@ -24,7 +23,7 @@ func TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testin
 				// LAST matching token in a file name, and real fansub names put
 				// the marker after the title, so a token-shaped title is outside
 				// the domain this heuristic (documented best-effort) supports.
-				return !episodeToken.MatchString(s) && !payload.IsCreditlessExtra(s)
+				return !payload.EpisodeToken.MatchString(s) && !payload.IsCreditlessExtra(s)
 			}).
 			Draw(t, "title")
 		season := rapid.IntRange(1, 99).Draw(t, "season")
@@ -44,42 +43,6 @@ func TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testin
 		}
 		if got, want := derivedTitle(pack, &EntryInfo{}), fmt.Sprintf("%s - S%02d [Grp]", title, season); got != want {
 			t.Fatalf("derivedTitle(pack) = %q, want %q", got, want)
-		}
-	})
-}
-
-// TestLastSubmatchIndex_isFindAllsLastMatchProperty pins the equivalence the
-// memory-bounded replay in lastSubmatchIndex claims: for the two patterns the title
-// synthesis actually scans with, it must return exactly what
-// FindAllStringSubmatchIndex's LAST element would be, and nil when there is no match.
-// Every season/episode decision in this file reads its span offsets from that return, so
-// an off-by-one in the offset rebase or a lost last-match progression silently serves a
-// mangled or wrong-episode title. A name assembled from repeated marker-shaped pieces is
-// what makes the property discriminating: with one match the rebase is a no-op.
-func TestLastSubmatchIndex_isFindAllsLastMatchProperty(t *testing.T) {
-	piece := rapid.SampledFrom([]string{
-		"Show", " - ", "_", ".", "-", " ", "1080p", "v2", "NCED",
-		"S01E01", "S1E7", "S02E05-E07", "S01E15v2", " - 07", "_-_02_", " - 1085 ",
-	})
-	rapid.Check(t, func(t *rapid.T) {
-		re := episodeToken
-		if rapid.Bool().Draw(t, "absolute_form") {
-			re = absoluteEpisode
-		}
-		name := strings.Join(rapid.SliceOfN(piece, 0, 8).Draw(t, "pieces"), "")
-		all := re.FindAllStringSubmatchIndex(name, -1)
-		var want []int
-		if len(all) > 0 {
-			want = all[len(all)-1]
-		}
-		got := lastSubmatchIndex(re, name)
-		if len(got) != len(want) {
-			t.Fatalf("lastSubmatchIndex(%v, %q) = %v, want %v (the last of %d matches)", re, name, got, want, len(all))
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("lastSubmatchIndex(%v, %q) = %v, want %v (index %d differs)", re, name, got, want, i)
-			}
 		}
 	})
 }

@@ -86,7 +86,7 @@ func TestParseTorznab(t *testing.T) {
 }
 
 // TestParseTorznabClampsNegativeCounts pins the numeric-domain normalization
-// of the untrusted Torznab decode (the sibling of totalSize's guard on the
+// of the untrusted Torznab decode (the sibling of payload.TotalSize's guard on the
 // SeaDex path): negative size/seeders/leechers values clamp to the feed's
 // zero-as-unknown representation, and a negative peers value cannot inflate
 // the derived leechers count via an unbounded negative seeders subtraction.

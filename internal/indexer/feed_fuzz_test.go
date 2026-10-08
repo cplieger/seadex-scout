@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -60,7 +61,7 @@ func FuzzDerivedTitle_singleVideoPreservesName(f *testing.F) {
 		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, &EntryInfo{})
 		components := strings.Split(base, "/")
 		own := components[len(components)-1]
-		if episodeToken.MatchString(own) || absoluteEpisode.MatchString(own) {
+		if payload.EpisodeToken.MatchString(own) || payload.AbsoluteEpisode.MatchString(own) {
 			if want := strings.TrimSpace(own); got != want {
 				t.Errorf("derivedTitle(single video %q) = %q, want %q (a base name carrying episode evidence headlines)", base, got, want)
 			}

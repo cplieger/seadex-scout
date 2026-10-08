@@ -2,8 +2,9 @@
 // evidence about the release, and for which question. It is a pure leaf over
 // the SeaDex file model - the type gate (a video container that is neither a
 // creditless extra nor a sample clip), the primary-payload size rule the
-// quality classification votes on (Names), and the episode-census size rule a
-// file COUNT runs over (Population).
+// quality classification votes on (Names), the episode-census size rule a
+// file COUNT runs over (Population), and the episode census itself (Census,
+// DistinctEpisodes) with the token patterns it keys on.
 package payload
 
 import (
