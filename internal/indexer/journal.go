@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
+	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -260,7 +261,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, hashRefs h
 				synthesizeTitle(a.torrent, infoFor.ref(a.entry.AniListID)),
 				synthesizeTitle(b.torrent, infoFor.ref(b.entry.AniListID)),
 			),
-			cmp.Compare(totalSize(a.torrent.Files), totalSize(b.torrent.Files)),
+			cmp.Compare(payload.TotalSize(a.torrent.Files), payload.TotalSize(b.torrent.Files)),
 		)
 	})
 	for _, occ := range ordered {
@@ -283,7 +284,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, hashRefs h
 			DownloadURL:          dl,
 			InfoHash:             validInfoHash(occ.torrent.InfoHash),
 			DownloadVolumeFactor: dvfAlt,
-			Size:                 totalSize(occ.torrent.Files),
+			Size:                 payload.TotalSize(occ.torrent.Files),
 			Key:                  key,
 			AniListID:            occ.entry.AniListID,
 			NonFilm:              !info.IsMovie,
@@ -911,7 +912,7 @@ func revisedTitle(title string, payloadRev release.Revision) string {
 // seasonTokenEnd returns the offset right after a title's LAST season+episode
 // token, else right after its season-only token, and whether either exists.
 func seasonTokenEnd(title string) (int, bool) {
-	if l := lastSubmatchIndex(episodeToken, title); l != nil {
+	if l := payload.LastSubmatchIndex(payload.EpisodeToken, title); l != nil {
 		return l[3], true
 	}
 	if m := seasonOnlyTitle.FindStringSubmatchIndex(title); m != nil {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
+	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 )
@@ -230,7 +231,7 @@ func ownershipOf(entries []seadex.Entry, infoFor EntryInfoFunc) map[string][]own
 			}
 			r.SonarrTitle, r.TwinFirst, r.TwinLast = twinFor(t, &info)
 			if r.SonarrTitle != "" {
-				r.TwinSeries, r.URL, r.Size = strings.TrimSpace(info.SeriesTitle), classify.PublishURL(t), totalSize(t.Files)
+				r.TwinSeries, r.URL, r.Size = strings.TrimSpace(info.SeriesTitle), classify.PublishURL(t), payload.TotalSize(t.Files)
 			}
 			if r.Key == "" && r.Hash == "" {
 				// Nothing a search can match on, so nothing to own.

@@ -75,7 +75,7 @@ const (
 // validPersistedItem reports whether one feed item respects the shared persisted-item
 // limits: every string field under maxPersistedFieldBytes, the category list under
 // maxPersistedCategories, and the non-negative numeric domain both producers guarantee
-// (toItem clamps size/seeders/leechers to >= 0; totalSize returns 0 on
+// (toItem clamps size/seeders/leechers to >= 0; payload.TotalSize returns 0 on
 // negative/overflowing sums), so a hand-edited or corrupted snapshot with a negative
 // value is rejected at load instead of rendering an invalid enclosure length/size attr.
 func validPersistedItem(it *journalItem) bool {
