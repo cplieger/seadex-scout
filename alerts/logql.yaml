@@ -21,43 +21,80 @@
 #                                   (which also carries arr) and library-walk-partial
 #     attrs: condition, arr
 #   msg="better release available"  the better-release finding, and the newer
-#                                   revision of a group on disk (status=newer_revision)
+#                                   revision of a group on disk (status=newer_revision).
+#                                   recommended_bytes, current_bytes and
+#                                   size_change_bytes are present only when known
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
 #     attrs: current_tier, recommended_group, alert_recommended_group, seadex_tags,
-#     attrs: info_hash, resolution, kind, release_url, nyaa_url, public_url,
+#     attrs: info_hash, resolution, kind, tracker, release_url, nyaa_url, public_url,
 #     attrs: public_tracker, ab_url, ab_tracker, current_revision, recommended_revision,
-#     attrs: alt_groups, episodes
+#     attrs: alt_groups, episodes, pass_id, first_seen, rank_alt, rank_none,
+#     attrs: recommended_bytes, current_bytes, size_change_bytes
 #   msg="series spans multiple release groups, manual review"
 #                                   the mixed-group manual-review nudge
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
 #     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups,
-#     attrs: episodes
+#     attrs: episodes, pass_id, first_seen, rank_check
 #   msg="release group unverifiable, manual review"
 #                                   a comparison an untagged release left undecided
 #     attrs: title, alert_title, al_id, arr, arr_url, season, status, current_group,
 #     attrs: recommended_group, alert_recommended_group, seadex_tags, alt_groups,
-#     attrs: episodes
+#     attrs: episodes, pass_id, first_seen, rank_check
+#   msg="findings reported"         the last line of each pass of the finding set, where
+#                                   manual_review counts the two manual-review messages
+#                                   and rank_check numbers them
+#     attrs: pass_id, emitted, manual_review
+#   msg="upgrade sizes"             one per pass and hidden_tier (alt or none), the
+#                                   size totals of the upgrades that view shows
+#     attrs: pass_id, hidden_tier, upgrades, upgrades_better_release,
+#     attrs: upgrades_newer_revision, upgrades_sized, upgrades_unsized,
+#     attrs: recommended_bytes_total, current_bytes_replaced, size_change_bytes
+#   msg="biggest upgrade"           up to 25 per pass and hidden_tier, by size change
+#     attrs: pass_id, hidden_tier, rank, current_tier, status, title, al_id, arr,
+#     attrs: arr_url, season, current_group, recommended_group, recommended_bytes,
+#     attrs: current_bytes, size_change_bytes
+#   msg="group rank"                up to 15 per pass, hidden_tier and kind
+#                                   (recommended or held_below), by upgrade count
+#     attrs: pass_id, hidden_tier, kind, rank, group, upgrades
+#   msg="upgrade found"             an upgrade entered the set; after_start=true on
+#                                   the first pass after a start
+#     attrs: pass_id, after_start, title, al_id, arr, arr_url, season, status,
+#     attrs: current_tier, current_group, recommended_group
+#   msg="upgrade resolved"          an upgrade left the set
+#     attrs: pass_id, after_start, title, al_id, arr, arr_url, season, status,
+#     attrs: current_tier, current_group, recommended_group
 #   msg="report written"            a report was generated, and anime is the
 #                                   number of rows it holds
 #     attrs: anime
 #   msg="cycle complete"            \
+#     attrs: duration, library_items, findings, specials_unread
 #   msg="cycle degraded"             | the loop deadman, matched as
-#   msg="tick complete"              | "(cycle|tick) (complete|degraded)"
-#   msg="tick degraded"             /
+#     attrs: reason, duration, library_items, findings, specials_unread
+#   msg="tick complete"              | "(cycle|tick) (complete|degraded)". duration is
+#   msg="tick degraded"             /  a Go duration string. reason values are below
+#     attrs: reason
 #   msg="reconcile started"         the start of a full pass, also in the loop deadman
 #   msg="reconcile complete"        the backstop deadman
 #   msg="indexer request"           one Torznab request from an arr, where feed=true is an
-#                                   RSS poll, the shape the feed rule counts
-#     attrs: scope, feed
+#                                   RSS poll, the shape the feed rule counts. t is the
+#                                   Torznab function, returned the items sent back and
+#                                   curated the SeaDex-curated items among them
+#     attrs: scope, feed, t, curated, returned
 #   msg="indexer feed snapshot written"
 #                                   the feed was rebuilt or advanced, and journal_new is
 #                                   the count of releases newly added to the RSS feed
-#     attrs: journal_new
+#     attrs: journal_new, scope, nyaa_feed, ab_feed, ab_releases_skipped
 #   msg="library summary"           the daily library audit's counts, logged by each
 #                                   full pass whose library read was complete
 #     attrs: rows, have_best, have_alt, have_older_revision, have_unlisted, no_file,
 #     attrs: unverified, unattributed, not_on_seadex, anime_items, items_with_entry,
 #     attrs: items_all_best, items_all_best_or_alt
+# The reason values. cycle degraded: library-shrunk, partial-walk,
+# anilist-degraded, mapping-stale, tags-emptied-side, walk-failed,
+# mapping-unusable, seadex-fetch-failed and seadex-zero-entries. tick degraded:
+# awaiting-first-reconcile, probe-failed, window-fetch-failed, window-oversize
+# and mapping-unusable. A gated cycle degraded line carries no duration,
+# library_items, findings or specials_unread.
 groups:
   - name: seadex-scout
     rules:

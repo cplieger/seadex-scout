@@ -33,13 +33,13 @@ const episodeFailureBudget = 5
 
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
 // interface; *arrapi.Sonarr satisfies it). EpisodeFiles lists exactly the
-// episodes that have a file on disk - the walker only consumes episodes WITH
-// files, so it needs no episode rows to skip. SeasonEpisodes is read for
-// season 0 only, where a file must be tied to its episode.
+// files on disk, which every group and revision reading comes from; Episodes
+// adds which episode each file holds, which only the season-0 comparison and
+// the size readings need.
 type SonarrClient interface {
 	Series(ctx context.Context) ([]arrapi.Series, error)
 	EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error)
-	SeasonEpisodes(ctx context.Context, seriesID int, season arrapi.SeasonNumber) ([]arrapi.Episode, error)
+	Episodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error)
 	Tags(ctx context.Context) ([]arrapi.Tag, error)
 }
 
@@ -325,7 +325,9 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 		return &item, true
 	}
 	item := w.seriesItem(s, files)
-	item.Specials = w.fetchSpecials(ctx, s, files)
+	if item.HasFile {
+		w.addEpisodes(ctx, s, files, &item)
+	}
 	// A declared-but-empty episode list makes the item compare as genuinely
 	// fileless (seriesItem's HasFile is len(files) > 0), so record the
 	// degradation rather than let it look like a real no-file series. Stays a
@@ -339,23 +341,40 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*librar
 	return &item, false
 }
 
-// fetchSpecials reads which file sits on each season-0 episode, for a series
-// holding a season-0 file; nil otherwise and on a failed read. A failed read
-// leaves the series' films and specials uncompared rather than the series
-// failed, because nothing is compared on the missing data.
-func (w *Walker) fetchSpecials(ctx context.Context, s *arrapi.Series, files []arrapi.EpisodeFile) map[int]library.SpecialEpisode {
-	if !slices.ContainsFunc(files, func(f arrapi.EpisodeFile) bool { return f.SeasonNumber == specialsSeason }) {
-		return nil
+// addEpisodes reads which file each episode of s holds, the input of its
+// upgrade sizes and, for a series holding a season-0 file, of its Specials. A
+// failed read leaves both unknown rather than the series failed, because its
+// groups and revisions come from the file list.
+func (w *Walker) addEpisodes(ctx context.Context, s *arrapi.Series, files []arrapi.EpisodeFile, item *library.Item) {
+	holdsSpecials := slices.ContainsFunc(files, func(f arrapi.EpisodeFile) bool { return f.SeasonNumber == specialsSeason })
+	episodes, err := w.sonarr.Episodes(ctx, s.ID)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return
+	case err != nil && holdsSpecials:
+		w.log.Warn("sonarr episode list read failed; this series' upgrade sizes are unknown and its films and specials stay uncompared",
+			"series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+		return
+	case err != nil:
+		w.log.Warn("sonarr episode list read failed; this series' upgrade sizes are unknown",
+			"series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+		return
 	}
-	eps, err := w.sonarr.SeasonEpisodes(ctx, s.ID, specialsSeason)
-	if err != nil {
-		if ctx.Err() == nil {
-			w.log.Warn("sonarr specials episode fetch failed; the series' films and specials stay uncompared",
-				"series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
-		}
-		return nil
+	seasonEpisodes, placed := episodeFiles(episodes)
+	if !placed {
+		w.log.Warn("sonarr episode list marks a file it does not place; this series' upgrade sizes are unknown",
+			"series", logattr.Cap(s.Title), "id", s.ID)
 	}
-	specials, ok := specialEpisodes(eps)
+	item.SeasonEpisodes = seasonEpisodes
+	if holdsSpecials {
+		item.Specials = w.specials(s, episodes)
+	}
+}
+
+// specials is the series' season-0 episodes read from its episode list, nil
+// with a WARN when the list cannot tie its season-0 file to an episode.
+func (w *Walker) specials(s *arrapi.Series, episodes []arrapi.Episode) map[int]library.SpecialEpisode {
+	specials, ok := specialEpisodes(episodes)
 	switch {
 	case !ok:
 		w.log.Warn("sonarr specials episode list marks a file it does not send; the series' films and specials stay uncompared",
@@ -390,6 +409,28 @@ func specialEpisodes(eps []arrapi.Episode) (specials map[int]library.SpecialEpis
 	}
 	if len(out) == 0 {
 		return nil, true
+	}
+	return out, true
+}
+
+// episodeFiles maps each season to its episodes that have a file. ok is false,
+// and the map nil, when an episode holds a file the list does not tie to a
+// file id and an episode number: that file may be one a download covers, so
+// counting it replaced could drop the episode.
+func episodeFiles(episodes []arrapi.Episode) (seasons map[int]map[int]library.Episode, ok bool) {
+	out := make(map[int]map[int]library.Episode)
+	for i := range episodes {
+		ep := &episodes[i]
+		if !ep.HasFile && ep.EpisodeFile == nil {
+			continue
+		}
+		if ep.EpisodeFile == nil || ep.EpisodeFile.ID <= 0 || ep.EpisodeNumber <= 0 {
+			return nil, false
+		}
+		if out[ep.SeasonNumber] == nil {
+			out[ep.SeasonNumber] = make(map[int]library.Episode)
+		}
+		out[ep.SeasonNumber][ep.EpisodeNumber] = library.Episode{File: ep.EpisodeFile.ID, Absolute: max(ep.AbsoluteEpisodeNumber, 0)}
 	}
 	return out, true
 }
@@ -524,7 +565,14 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 	groupCounts := make(map[string]int)
 	seasonCounts := make(map[int]map[string]int)
 	var revs revisionFold
+	var fileBytes map[int]int64
 	for i := range epFiles {
+		if epFiles[i].ID > 0 {
+			if fileBytes == nil {
+				fileBytes = make(map[int]int64, len(epFiles))
+			}
+			fileBytes[epFiles[i].ID] = epFiles[i].Size
+		}
 		fi := fileFromEpisode(&epFiles[i])
 		files = append(files, fi)
 		// fi.group is never empty: fileInfoFrom normalizes it via
@@ -538,6 +586,7 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) libr
 		SeasonGroups:    seasonGroups(seasonCounts),
 		SeasonRevisions: revs.seasons(),
 		Revisions:       revs.groups(),
+		FileBytes:       fileBytes,
 		Groups:          sortedKeys(groupCounts),
 		AltTitles:       altTitles(s.AlternateTitles),
 		Arr:             library.ArrSonarr,
@@ -580,6 +629,9 @@ func (w *Walker) movieItem(m *arrapi.Movie) library.Item {
 		// sentinel ("nogrp") for group-less files.
 		item.Groups = []string{fi.group}
 		item.Revisions = map[string]release.Revision{fi.group: fi.revision}
+		if m.MovieFile.ID > 0 {
+			item.FileBytes = map[int]int64{m.MovieFile.ID: m.MovieFile.Size}
+		}
 		item.Current = fingerprint(&fi)
 	}
 	return item

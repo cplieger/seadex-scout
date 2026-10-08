@@ -32,6 +32,14 @@ type Item struct {
 	// so unknown when any of those files' revision is unknown). Keys mirror
 	// SeasonGroups; a missing key reads as the unknown zero value.
 	SeasonRevisions map[int]map[string]release.Revision `json:"season_revisions,omitempty"`
+	// SeasonEpisodes maps a season to its episodes that have a file, by episode
+	// number. It is nil when the walk could not read the series' episode list,
+	// or the list holds a file it does not tie to an episode, which leaves
+	// every size built on it unknown.
+	SeasonEpisodes map[int]map[int]Episode `json:"season_episodes,omitempty"`
+	// FileBytes maps each of the item's file ids to the size the arr reported.
+	// A size of 0 or less is unknown: the arrs decode an absent size as 0.
+	FileBytes map[int]int64 `json:"file_bytes,omitempty"`
 	// Revisions is the same fold over all of the item's files per group; it is
 	// the movie scope's source.
 	Revisions map[string]release.Revision `json:"revisions,omitempty"`
@@ -70,6 +78,19 @@ type SpecialEpisode struct {
 	HasFile  bool             `json:"has_file,omitempty"`
 }
 
+// Episode is one episode of a series that has a file: the file's id and the
+// episode's absolute number, 0 when the arr gives none.
+type Episode struct {
+	File     int `json:"file"`
+	Absolute int `json:"absolute,omitempty"`
+}
+
+// FileKey identifies one of the item's files across the library: the arr and
+// the file id, which each arr numbers on its own.
+func (it *Item) FileKey(fileID int) string {
+	return keyenc.Join(it.Arr, "file", strconv.Itoa(fileID))
+}
+
 // Key identifies the item by its arr source and arr ID ("arr:id") - the
 // item's semantic identity across snapshots and packages. Snapshot diffing
 // (indexByKey) and the audit's covered-item map both key on it, so the
@@ -86,9 +107,9 @@ func (it *Item) Key() string {
 func (it *Item) Comparable() bool { return !it.Failed }
 
 // SpecialsUnknown reports whether the series holds a season-0 file whose
-// episode is not known: the season-0 read failed or gave no usable episode
-// list, or the snapshot predates the field. A series with no season-0 file is
-// known to hold none.
+// episode is not known: the episode list read failed or tied no season-0
+// episode to it, or the snapshot predates the field. A series with no
+// season-0 file is known to hold none.
 func (it *Item) SpecialsUnknown() bool {
 	return it.Specials == nil && len(it.SeasonGroups[0]) > 0
 }
@@ -120,8 +141,8 @@ type Diff struct {
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its file presence, group set, per-season group
-// attribution, revision readings, season-0 episode files, or current
-// fingerprint differs.
+// attribution, revision readings, season-0 episode files, file sizes,
+// episode-to-file map, or current fingerprint differs.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey, prevFailed := indexByKey(prev)
 	curByKey, curFailed := indexByKey(cur)
@@ -192,13 +213,14 @@ func indexByKey(s *Snapshot) (byKey map[string]*Item, failed map[string]struct{}
 }
 
 // sameItem reports whether two items have the same current release state
-// (file presence, group set, per-season group attribution, revision readings,
-// season-0 episode files, and fingerprint), for diff change detection.
+// (every field DiffSnapshots names), for diff change detection.
 func sameItem(a, b *Item) bool {
 	return a.HasFile == b.HasFile && a.Current == b.Current &&
 		slices.Equal(a.Groups, b.Groups) &&
 		maps.EqualFunc(a.SeasonGroups, b.SeasonGroups, slices.Equal) &&
 		maps.EqualFunc(a.SeasonRevisions, b.SeasonRevisions, maps.Equal) &&
 		maps.Equal(a.Revisions, b.Revisions) &&
-		maps.Equal(a.Specials, b.Specials)
+		maps.Equal(a.Specials, b.Specials) &&
+		maps.Equal(a.FileBytes, b.FileBytes) &&
+		maps.EqualFunc(a.SeasonEpisodes, b.SeasonEpisodes, maps.Equal)
 }

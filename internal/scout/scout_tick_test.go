@@ -826,6 +826,7 @@ func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 			if n := recorder.CountExact("tick degraded"); n != 1 {
 				t.Errorf("'tick degraded' count = %d, want 1 (the deadman must see the loop is alive)", n)
 			}
+			assertContractAttrs(t, recorder, "tick degraded")
 		})
 	}
 }

@@ -14,8 +14,15 @@ import (
 // finding line carrying title, in emission order, so two passes can be compared
 // attribute-by-attribute rather than only by line count.
 func emittedAttrsByTitle(recorder *capture.Recorder, title string) []map[string]string {
+	findingMessages := map[string]bool{}
+	for _, s := range []compare.Status{compare.StatusBetter, compare.StatusMixedGroup, compare.StatusIncomplete, compare.StatusTheoretical, compare.StatusUnverifiable} {
+		findingMessages[message(s)] = true
+	}
 	var out []map[string]string
 	for _, rec := range recorder.Records() {
+		if !findingMessages[rec.Message] {
+			continue
+		}
 		attrs := map[string]string{}
 		rec.Attrs(func(a slog.Attr) bool {
 			if s, ok := a.Value.Any().(string); ok {

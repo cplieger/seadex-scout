@@ -42,11 +42,11 @@ func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.Epi
 	return f.files[seriesID], nil
 }
 
-func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (f *fakeSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *fakeSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
+func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 

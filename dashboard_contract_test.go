@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"regexp"
@@ -34,9 +35,17 @@ var (
 	lineFilterRe = regexp.MustCompile("\\|=\\s*`([^`]*)`")
 	regexLineRe  = regexp.MustCompile("(^|[\\s}])(\\|~|!~|!=)\\s*`")
 	offsetRe     = regexp.MustCompile(`offset\s+([^\s)]+)`)
-	regexMetaRe  = regexp.MustCompile(`[\\.*+?()\[\]{}^$]`)
-	urlHostRe    = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://([^/"\s:?#]+)`)
-	ipv4Re       = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
+	logQueryRe   = regexp.MustCompile(`^\{[^{}]*\}((?:[^\[{]|\{\{[^}]*\}\})*)$`)
+	overTimeRe   = regexp.MustCompile(`\b[a-z_]+_over_time\(`)
+	// LogQL takes a by () grouping only on these unwrapped range aggregations;
+	// the others, sum_over_time among them, take it on an outer sum.
+	groupableRe   = regexp.MustCompile(`^(avg|min|max|stddev|stdvar|quantile|first|last)_over_time\($`)
+	outerSumRe    = regexp.MustCompile(`sum\s+by\s*\([^)]*\)\s*\($`)
+	byRe          = regexp.MustCompile(`\bby\s*\(([^)]*)\)`)
+	summaryReadRe = regexp.MustCompile("\\|=\\s*`(upgrade sizes|biggest upgrade|group rank)`")
+	regexMetaRe   = regexp.MustCompile(`[\\.*+?()\[\]{}^$]`)
+	urlHostRe     = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://([^/"\s:?#]+)`)
+	ipv4Re        = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
 )
 
 // allowedWindows are the fixed windows that encode seadex-scout's own cadence;
@@ -47,6 +56,13 @@ type dashTarget struct {
 	datasource any
 	panel      string
 	expr       string
+	maxLines   float64
+}
+
+type dashPanel struct {
+	title      string
+	targets    []dashTarget
+	transforms []map[string]any
 }
 
 func loadContract(t *testing.T) logcontract.Contract {
@@ -86,17 +102,35 @@ func field(v any, keys ...string) any {
 // dashboardTargets keeps a query with no expr as an empty one, so the
 // contract checks report it instead of skipping it.
 func dashboardTargets(d map[string]any) []dashTarget {
-	elements, _ := field(d, "spec", "elements").(map[string]any)
 	var out []dashTarget
+	for _, p := range dashboardPanels(d) {
+		out = append(out, p.targets...)
+	}
+	return out
+}
+
+func dashboardPanels(d map[string]any) []dashPanel {
+	elements, _ := field(d, "spec", "elements").(map[string]any)
+	var out []dashPanel
 	for _, name := range slices.Sorted(maps.Keys(elements)) {
 		el := elements[name]
-		title, _ := field(el, "spec", "title").(string)
+		p := dashPanel{}
+		p.title, _ = field(el, "spec", "title").(string)
 		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
 		for _, q := range queries {
 			query := field(q, "spec", "query")
 			expr, _ := field(query, "spec", "expr").(string)
-			out = append(out, dashTarget{panel: title, expr: expr, datasource: field(query, "datasource")})
+			maxLines, _ := field(query, "spec", "maxLines").(float64)
+			p.targets = append(p.targets, dashTarget{panel: p.title, expr: expr, datasource: field(query, "datasource"), maxLines: maxLines})
 		}
+		transforms, _ := field(el, "spec", "data", "spec", "transformations").([]any)
+		for _, tr := range transforms {
+			m := map[string]any{"group": field(tr, "group")}
+			opts, _ := field(tr, "spec", "options").(map[string]any)
+			maps.Copy(m, opts)
+			p.transforms = append(p.transforms, m)
+		}
+		out = append(out, p)
 	}
 	return out
 }
@@ -159,7 +193,13 @@ func checkPipeline(c *logcontract.Contract, stages, window string) []string {
 	return problems
 }
 
+// checkExpr applies every expression-level rule. A log query, one stream
+// selector and its stages with no range, is read whole; a metric query is read
+// one range pipeline at a time.
 func checkExpr(c *logcontract.Contract, expr string) []string {
+	if m := logQueryRe.FindStringSubmatch(expr); m != nil {
+		return checkPipeline(c, m[1], "$__range")
+	}
 	pipes := pipelineRe.FindAllStringSubmatch(expr, -1)
 	if len(pipes) == 0 {
 		return []string{"no log pipeline found"}
@@ -168,12 +208,172 @@ func checkExpr(c *logcontract.Contract, expr string) []string {
 	for _, p := range pipes {
 		problems = append(problems, checkPipeline(c, p[1], p[2])...)
 	}
+	problems = append(problems, checkGrouping(expr)...)
 	for _, m := range offsetRe.FindAllStringSubmatch(expr, -1) {
 		if m[1] != "$__range" {
 			problems = append(problems, "offset "+m[1]+" is a fixed look-back; use $__range")
 		}
 	}
 	return problems
+}
+
+// checkGrouping applies the series-count rules of a metric query: every range
+// aggregation over an unwrapped value names its grouping, so extracted labels
+// cannot split it into one series per line, no grouping names a finding's
+// identity, which would make one series per finding, and every per-view
+// summary read selects the view.
+func checkGrouping(expr string) []string {
+	var problems []string
+	for _, loc := range overTimeRe.FindAllStringIndex(expr, -1) {
+		end := matchingParen(expr, loc[1]-1)
+		if end < 0 {
+			problems = append(problems, "an unbalanced range aggregation")
+			continue
+		}
+		if !strings.Contains(expr[loc[1]:end], "| unwrap") {
+			continue
+		}
+		grouped := regexp.MustCompile(`^\s*by\s*\(`).MatchString(expr[end+1:])
+		if !groupableRe.MatchString(expr[loc[0]:loc[1]]) {
+			grouped = outerSumRe.MatchString(expr[:loc[0]])
+		}
+		if !grouped {
+			problems = append(problems, "the unwrapped aggregation "+expr[loc[0]:loc[1]]+"...) names no by () grouping")
+		}
+	}
+	for _, m := range byRe.FindAllStringSubmatch(expr, -1) {
+		for label := range strings.SplitSeq(m[1], ",") {
+			if label = strings.TrimSpace(label); slices.Contains([]string{"al_id", "info_hash", "title"}, label) {
+				problems = append(problems, "a metric grouping names the finding identity "+label)
+			}
+		}
+	}
+	for _, loc := range summaryReadRe.FindAllStringIndex(expr, -1) {
+		pipe := expr[loc[0]:]
+		if end := strings.IndexByte(pipe, '['); end >= 0 {
+			pipe = pipe[:end]
+		}
+		if !strings.Contains(pipe, `| hidden_tier="$optional"`) {
+			problems = append(problems, "a per-view summary read without | hidden_tier=\"$optional\"")
+		}
+	}
+	return problems
+}
+
+func matchingParen(s string, open int) int {
+	depth := 0
+	for i := open; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// snapshotMessages are the lines a pass re-states in full, so a table over
+// them shows one pass only by joining on the newest pass's pass_id.
+var snapshotMessages = []string{"better release available", "manual review", "biggest upgrade", "group rank"}
+
+// passMessages are the per-pass lines whose newest pass_id a snapshot joins on.
+var passMessages = []string{"findings reported", "upgrade sizes"}
+
+// checkPanel applies the item-table rules: every log query has a line limit,
+// and a log query over a snapshot message sits beside a one-line read of a pass
+// message, joined inner on pass_id, so the table shows the newest pass alone.
+func checkPanel(p *dashPanel) []string {
+	var problems []string
+	snapshot, pass := false, false
+	for _, tg := range p.targets {
+		if !logQueryRe.MatchString(tg.expr) {
+			continue
+		}
+		if tg.maxLines <= 0 || tg.maxLines > 401 {
+			problems = append(problems, fmt.Sprintf("a log query with line limit %v, want 1 to 401", tg.maxLines))
+		}
+		for _, msg := range snapshotMessages {
+			snapshot = snapshot || strings.Contains(tg.expr, "|= `"+msg+"`")
+		}
+		for _, msg := range passMessages {
+			pass = pass || (strings.Contains(tg.expr, "|= `"+msg+"`") && tg.maxLines == 1)
+		}
+	}
+	if !snapshot {
+		return problems
+	}
+	joined := slices.ContainsFunc(p.transforms, func(tr map[string]any) bool {
+		return tr["group"] == "joinByField" && tr["byField"] == "pass_id" && tr["mode"] == "inner"
+	})
+	if !pass || !joined {
+		problems = append(problems, "a snapshot read not joined inner on pass_id with a one-line pass read")
+	}
+	return problems
+}
+
+func TestDashboardItemTablesAreSnapshotsOrEventReads(t *testing.T) {
+	n := 0
+	for _, p := range dashboardPanels(loadDashboard(t)) {
+		for _, problem := range checkPanel(&p) {
+			t.Errorf("panel %q: %s", p.title, problem)
+		}
+		for _, tg := range p.targets {
+			if logQueryRe.MatchString(tg.expr) {
+				n++
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s carries no log query, so the item-table rules check nothing", dashboardPath)
+	}
+}
+
+func TestDashboardItemTableCheckRejects(t *testing.T) {
+	const findings = `{container="$container"} |= ` + "`better release available` | json msg=\"msg\" | msg=`better release available`"
+	const pass = `{container="$container"} |= ` + "`findings reported` | json msg=\"msg\", pass_id=\"pass_id\" | msg=`findings reported`"
+	join := map[string]any{"group": "joinByField", "byField": "pass_id", "mode": "inner"}
+	cases := map[string]dashPanel{
+		"no line limit":  {targets: []dashTarget{{expr: pass, maxLines: 1}, {expr: findings}}, transforms: []map[string]any{join}},
+		"no join":        {targets: []dashTarget{{expr: pass, maxLines: 1}, {expr: findings, maxLines: 401}}},
+		"outer join":     {targets: []dashTarget{{expr: pass, maxLines: 1}, {expr: findings, maxLines: 401}}, transforms: []map[string]any{{"group": "joinByField", "byField": "pass_id", "mode": "outer"}}},
+		"no pass read":   {targets: []dashTarget{{expr: findings, maxLines: 401}}, transforms: []map[string]any{join}},
+		"wide pass read": {targets: []dashTarget{{expr: pass, maxLines: 5}, {expr: findings, maxLines: 401}}, transforms: []map[string]any{join}},
+	}
+	for name, p := range cases {
+		t.Run(name, func(t *testing.T) {
+			if problems := checkPanel(&p); len(problems) == 0 {
+				t.Errorf("checkPanel(%s) reported nothing, want a violation", name)
+			}
+		})
+	}
+	ok := dashPanel{targets: []dashTarget{{expr: pass, maxLines: 1}, {expr: findings, maxLines: 401}}, transforms: []map[string]any{join}}
+	if problems := checkPanel(&ok); len(problems) != 0 {
+		t.Errorf("checkPanel(joined snapshot) = %v, want no problem", problems)
+	}
+}
+
+// TestDashboardSizeChangeSkipsUnknownSizes pins that every size the dashboard
+// shows is one the app computed over known sizes only: no query adds or
+// subtracts byte fields itself, where an unknown size would read as 0, and the
+// net change tile and column read size_change_bytes.
+func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
+	byteField := regexp.MustCompile(`unwrap (recommended_bytes|current_bytes|recommended_bytes_total|current_bytes_replaced)\b[^|]*\)[^)]*\)?\s*[-+]`)
+	reads := 0
+	for _, tg := range dashboardTargets(loadDashboard(t)) {
+		if byteField.MatchString(tg.expr) {
+			t.Errorf("panel %q computes a size difference in the query\nexpr: %s", tg.panel, tg.expr)
+		}
+		if strings.Contains(tg.expr, `size_change_bytes="size_change_bytes"`) {
+			reads++
+		}
+	}
+	if reads < 2 {
+		t.Errorf("%d queries read size_change_bytes, want the net change tile and the upgrades table", reads)
+	}
 }
 
 func TestDashboardReadsOnlyTheLogContract(t *testing.T) {
@@ -205,6 +405,12 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 		"regex line filter":   sel + " |~ `reconcile (started|complete)` | json msg=\"msg\" | msg=`reconcile complete` [3h]",
 		"foreign line filter": sel + " |= `findings reported` | json msg=\"msg\" | msg=`reconcile complete` [3h]",
 		"no pipeline":         "vector(1)",
+		"ungrouped unwrap":    "max(last_over_time(" + sel + " |= `library summary` | json msg=\"msg\", rows=\"rows\" | msg=`library summary` | unwrap rows [26h]))",
+		"identity grouping":   "sum by (title) (count_over_time(" + sel + " |= `better release available` | json msg=\"msg\", title=\"title\" | msg=`better release available` [2h]))",
+		"info_hash grouping":  "count(sum by (info_hash, arr) (count_over_time(" + sel + " |= `better release available` | json msg=\"msg\", info_hash=\"info_hash\" | msg=`better release available` [2h])))",
+		"ungrouped sum":       "sum(sum_over_time(" + sel + " |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
+		"summary of no view":  "last_over_time(" + sel + " |= `upgrade sizes` | json msg=\"msg\", upgrades=\"upgrades\" | msg=`upgrade sizes` | unwrap upgrades [2h]) by ()",
+		"log query bare json": sel + " |= `group rank` | json | msg=`group rank` | hidden_tier=\"$optional\"",
 	}
 	for name, expr := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -213,9 +419,13 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 			}
 		})
 	}
-	ok := sel + " |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]"
-	if problems := checkExpr(&c, ok); len(problems) != 0 {
-		t.Errorf("checkExpr(%q) = %v, want no problem", ok, problems)
+	for _, ok := range []string{
+		"last_over_time(" + sel + " |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]) by ()",
+		sel + " |= `group rank` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`group rank` | hidden_tier=\"$optional\"",
+	} {
+		if problems := checkExpr(&c, ok); len(problems) != 0 {
+			t.Errorf("checkExpr(%q) = %v, want no problem", ok, problems)
+		}
 	}
 }
 
@@ -281,23 +491,77 @@ func TestDashboardShape(t *testing.T) {
 	}
 }
 
-// A library summary is one snapshot, so a panel reading it takes the newest
-// sample: any other range aggregation can combine fields from two summaries,
-// and keeps a count that fell at the last check at its older, larger value.
-func TestDashboardReadsTheLatestLibrarySummary(t *testing.T) {
-	summaryRe := regexp.MustCompile("(\\w+)\\(\\{[^{}]*\\}\\s*\\|=\\s*`library summary`")
-	n := 0
+// A library summary and an upgrade sizes line are each one snapshot, so a
+// panel reading one takes the newest sample: any other range aggregation can
+// combine fields from two snapshots, and keeps a count that fell at the last
+// check at its older, larger value.
+func TestDashboardReadsTheLatestSummaries(t *testing.T) {
+	summaryRe := regexp.MustCompile("(\\w+)\\(\\{[^{}]*\\}\\s*\\|=\\s*`(library summary|upgrade sizes)`")
+	reads := map[string]int{}
 	for _, tg := range dashboardTargets(loadDashboard(t)) {
 		for _, m := range summaryRe.FindAllStringSubmatch(tg.expr, -1) {
-			n++
+			reads[m[2]]++
 			if m[1] != "last_over_time" {
-				t.Errorf("panel %q reads the library summary with %s, want last_over_time\nexpr: %s", tg.panel, m[1], tg.expr)
+				t.Errorf("panel %q reads the %s line with %s, want last_over_time\nexpr: %s", tg.panel, m[2], m[1], tg.expr)
 			}
 		}
 	}
-	if n == 0 {
-		t.Fatalf("%s reads no library summary", dashboardPath)
+	for _, msg := range []string{"library summary", "upgrade sizes"} {
+		if reads[msg] == 0 {
+			t.Errorf("%s reads no %s line through a range aggregation", dashboardPath, msg)
+		}
 	}
+}
+
+// A breakdown that divides finding lines by findings reported lines over a
+// window is an average per check, fractional whenever the set changed in the
+// window, so its panel must say so and show a decimal rather than round it
+// into a count that disagrees with the Upgrades tile.
+func TestDashboardShowsPerCheckAveragesAsAverages(t *testing.T) {
+	perCheckRe := regexp.MustCompile("/\\s*on\\s*\\(\\)\\s*group_left\\s+sum\\s+by\\s*\\(\\)\\s*\\(count_over_time\\(\\{[^{}]*\\}\\s*\\|=\\s*`findings reported`")
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	n := 0
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		el := elements[name]
+		title, _ := field(el, "spec", "title").(string)
+		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
+		if !slices.ContainsFunc(queries, func(q any) bool {
+			expr, _ := field(q, "spec", "query", "spec", "expr").(string)
+			return perCheckRe.MatchString(expr)
+		}) {
+			continue
+		}
+		n++
+		if desc, _ := field(el, "spec", "description").(string); !strings.Contains(strings.ToLower(desc), "average") {
+			t.Errorf("panel %q shows a per-check average, but its description never says average: %q", title, desc)
+		}
+		decimals := panelDecimals(field(el, "spec", "vizConfig", "spec", "fieldConfig"))
+		if len(decimals) == 0 || slices.ContainsFunc(decimals, func(d float64) bool { return d < 1 }) {
+			t.Errorf("panel %q shows a per-check average with decimals %v, want at least one decimal everywhere it sets them", title, decimals)
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s carries no per-check average, so this check checks nothing", dashboardPath)
+	}
+}
+
+func panelDecimals(fieldConfig any) []float64 {
+	var out []float64
+	if d, ok := field(fieldConfig, "defaults", "decimals").(float64); ok {
+		out = append(out, d)
+	}
+	overrides, _ := field(fieldConfig, "overrides").([]any)
+	for _, o := range overrides {
+		props, _ := field(o, "properties").([]any)
+		for _, p := range props {
+			if field(p, "id") == "decimals" {
+				if d, ok := field(p, "value").(float64); ok {
+					out = append(out, d)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // Dividing by a zero items_with_entry yields NaN, which Grafana renders as a
@@ -324,9 +588,10 @@ func TestDashboardGuardsTheBestShareDenominator(t *testing.T) {
 }
 
 // The upgrades tile and table must hide the same optional upgrades, or the
-// count and the list disagree, so every finding read carries the filter.
+// count and the list disagree, so every finding, event and ranking read
+// carries the filter.
 func TestDashboardFiltersOptionalUpgradesEverywhere(t *testing.T) {
-	findingRe := regexp.MustCompile("\\{[^{}]*\\}\\s*\\|=\\s*`better release available`")
+	findingRe := regexp.MustCompile("\\{[^{}]*\\}\\s*\\|=\\s*`(better release available|upgrade resolved|upgrade found|biggest upgrade)`")
 	const filter = `| current_tier != "$optional"`
 	n := 0
 	for _, tg := range dashboardTargets(loadDashboard(t)) {
@@ -344,6 +609,114 @@ func TestDashboardFiltersOptionalUpgradesEverywhere(t *testing.T) {
 	if n == 0 {
 		t.Fatalf("%s reads no finding", dashboardPath)
 	}
+}
+
+var errorsOnlyRe = regexp.MustCompile("\\|\\s*level\\s*=\\s*`ERROR`")
+
+// A table that reads only ERROR records cannot show a stopped check, which
+// logs nothing, so its title and its empty text must say errors rather than
+// claim every problem behind Status.
+func TestDashboardErrorTablesSayTheyListErrors(t *testing.T) {
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	n := 0
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		el := elements[name]
+		if field(el, "spec", "vizConfig", "group") != "table" {
+			continue
+		}
+		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
+		if len(queries) == 0 || slices.ContainsFunc(queries, func(q any) bool {
+			expr, _ := field(q, "spec", "query", "spec", "expr").(string)
+			return !errorsOnlyRe.MatchString(expr)
+		}) {
+			continue
+		}
+		n++
+		title, _ := field(el, "spec", "title").(string)
+		noValue, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "defaults", "noValue").(string)
+		if !strings.Contains(strings.ToLower(title), "error") {
+			t.Errorf("panel %q reads only ERROR records, want a title that says errors", title)
+		}
+		if noValue != "No errors logged" {
+			t.Errorf("panel %q no-value text = %q, want %q", title, noValue, "No errors logged")
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s carries no table of ERROR records, so this check checks nothing", dashboardPath)
+	}
+}
+
+// The Status tile sits on another tab than the panels that explain it, so its
+// description must name that tab as a tab.
+func TestDashboardStatusNamesTheHealthTab(t *testing.T) {
+	d := loadDashboard(t)
+	desc, _ := field(d, "spec", "elements", "panel-10", "spec", "description").(string)
+	health := tabHolding(t, d, "panel-52")
+	if home := tabHolding(t, d, "panel-10"); home == health {
+		t.Fatalf("Status and Last check are both on tab %q, want them on different tabs", home)
+	}
+	if !strings.Contains(desc, "the "+health+" tab") {
+		t.Errorf("Status description = %q, want it to name the %s tab", desc, health)
+	}
+}
+
+// A bar chart counting events per $__interval draws one bar per event at a
+// week's range, so every bar chart buckets by day and its title says so.
+func TestDashboardBarChartsCountPerDay(t *testing.T) {
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	n := 0
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		el := elements[name]
+		if field(el, "spec", "vizConfig", "group") != "timeseries" ||
+			field(el, "spec", "vizConfig", "spec", "fieldConfig", "defaults", "custom", "drawStyle") != "bars" {
+			continue
+		}
+		n++
+		title, _ := field(el, "spec", "title").(string)
+		if interval := field(el, "spec", "data", "spec", "queryOptions", "interval"); interval != "1d" {
+			t.Errorf("bar chart %q has minimum query interval %v, want 1d", title, interval)
+		}
+		if !strings.HasSuffix(title, " per day") {
+			t.Errorf("bar chart %q counts per day, want a title ending in \"per day\"", title)
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s carries no bar chart, so this check checks nothing", dashboardPath)
+	}
+}
+
+func tabHolding(t *testing.T, d map[string]any, element string) string {
+	t.Helper()
+	tabs, _ := field(d, "spec", "layout", "spec", "tabs").([]any)
+	for _, tab := range tabs {
+		if referencesElement(field(tab, "spec", "layout"), element) {
+			title, _ := field(tab, "spec", "title").(string)
+			return title
+		}
+	}
+	t.Fatalf("no tab of %s references %s", dashboardPath, element)
+	return ""
+}
+
+func referencesElement(v any, element string) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		if x["kind"] == "ElementReference" && x["name"] == element {
+			return true
+		}
+		for _, child := range x {
+			if referencesElement(child, element) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if referencesElement(child, element) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // divisors returns the right operand of every '/' in expr, read as one

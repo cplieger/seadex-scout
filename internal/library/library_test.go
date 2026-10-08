@@ -355,3 +355,33 @@ func TestItemSpecialsRoundTripAndLegacyReadsUnknown(t *testing.T) {
 		t.Errorf("legacy item Specials = %+v, want nil (unknown)", legacy.Specials)
 	}
 }
+
+// TestDiffSnapshotsDetectsAReplacedFile pins that a file replaced by another of
+// the same group, which changes no group or fingerprint, still reads as a change.
+func TestDiffSnapshotsDetectsAReplacedFile(t *testing.T) {
+	item := func(file int, size int64) Item {
+		return Item{
+			Arr: ArrSonarr, ArrID: 1, Groups: []string{"pmr"}, HasFile: true,
+			FileBytes:      map[int]int64{file: size},
+			SeasonEpisodes: map[int]map[int]Episode{1: {1: {File: file}}},
+		}
+	}
+	tests := map[string]Item{"new file id": item(2, 100), "new size": item(1, 200)}
+	for name, cur := range tests {
+		t.Run(name, func(t *testing.T) {
+			d := DiffSnapshots(&Snapshot{Items: []Item{item(1, 100)}}, &Snapshot{Items: []Item{cur}})
+			if d.Changed != 1 {
+				t.Errorf("diff = %+v, want one changed item", d)
+			}
+		})
+	}
+}
+
+// TestFileKeyDistinguishesArrsAndItemKeys pins that a file key names its arr
+// and never equals an item key, since the two arrs number files on their own.
+func TestFileKeyDistinguishesArrsAndItemKeys(t *testing.T) {
+	sonarr, radarr := Item{Arr: ArrSonarr, ArrID: 5}, Item{Arr: ArrRadarr, ArrID: 5}
+	if sonarr.FileKey(5) == radarr.FileKey(5) || sonarr.FileKey(5) == sonarr.Key() {
+		t.Errorf("FileKey(5) = %q, %q, item Key %q, want three distinct keys", sonarr.FileKey(5), radarr.FileKey(5), sonarr.Key())
+	}
+}

@@ -22,13 +22,13 @@ import (
 )
 
 type specialsSonarr struct {
-	seasonErr error
+	episodesErr error
 	fakeSonarr
 }
 
-func (f *specialsSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
-	if f.seasonErr != nil {
-		return nil, f.seasonErr
+func (f *specialsSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+	if f.episodesErr != nil {
+		return nil, f.episodesErr
 	}
 	return []arrapi.Episode{{
 		SeasonNumber: 0, EpisodeNumber: 9, HasFile: true,
@@ -102,7 +102,7 @@ func TestCycleKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 		t.Fatalf("Cycle(season 0 read) findings = %d, want 1 (the fixture must raise the special's finding first)", total)
 	}
 
-	sonarr.seasonErr = errors.New("season 0 fetch failed")
+	sonarr.episodesErr = errors.New("episode list read failed")
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle(season 0 read failed) healthy=false, want true")
 	}
@@ -113,7 +113,7 @@ func TestCycleKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 		t.Errorf("Cycle(season 0 read failed) total=%d preserved=%d resolved=%d, want 1/1/0", total, preserved, resolved)
 	}
 
-	sonarr.seasonErr = nil
+	sonarr.episodesErr = nil
 	sonarr.files = map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "oz"}}}
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle(no season-0 file) healthy=false, want true")
@@ -129,11 +129,31 @@ func TestCycleKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 	}
 }
 
+func TestCycleSizesAPlacedSpecialByItsDownloadOnly(t *testing.T) {
+	logger, recorder := capture.New()
+	s := New(placedOVADeps(logger, placedOVASonarr(), notify.NewNotifier(logger, nil), &fakeSeaDex{entries: []seadex.Entry{placedOVAEntry()}}, 1))
+	if healthy := s.Cycle(t.Context()); !healthy {
+		t.Fatal("Cycle healthy=false, want true")
+	}
+	const finding = "better release available"
+	if got, ok := recorder.AttrValueExact(finding, "recommended_bytes"); !ok || got != "1" {
+		t.Errorf("%q recommended_bytes = %q, %v, want \"1\": the special's download size is known", finding, got, ok)
+	}
+	for _, key := range []string{"current_bytes", "size_change_bytes"} {
+		if got, ok := recorder.AttrValueExact(finding, key); ok {
+			t.Errorf("%q %s = %q, want absent: the files a season-0 special replaces are unknown", finding, key, got)
+		}
+	}
+	if got := recorder.AttrValuesExact("upgrade sizes", "upgrades_unsized"); !slices.Equal(got, []string{"1", "1"}) {
+		t.Errorf("'upgrade sizes' upgrades_unsized = %q, want one unsized upgrade in each view", got)
+	}
+}
+
 func TestTickKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 	logger, recorder := capture.New()
 	notifier := notify.NewNotifier(logger, nil)
 	sonarr := placedOVASonarr()
-	sonarr.seasonErr = errors.New("season 0 fetch failed")
+	sonarr.episodesErr = errors.New("episode list read failed")
 	sea := &fakeSeaDex{entries: []seadex.Entry{placedOVAEntry()}, windowEntries: []seadex.Entry{placedOVAEntry()}}
 	s := New(placedOVADeps(logger, sonarr, notifier, sea, 96))
 

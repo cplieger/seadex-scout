@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
@@ -29,6 +30,13 @@ type Notifier struct {
 	// current is the set of conditions true as of the last completed pass,
 	// keyed by dedupe key.
 	current map[string]compare.Finding
+	// firstSeen is when each key of current entered the set in this process,
+	// so it resets on a restart.
+	firstSeen map[string]time.Time
+	now       func() time.Time
+	// reported is set once a Report or ReportScoped pass has run, so the
+	// first one's found events can say they only reflect the start.
+	reported bool
 }
 
 // NewNotifier builds a Notifier. logger may be nil. ignore is the operator's
@@ -37,7 +45,7 @@ func NewNotifier(logger *slog.Logger, ignore map[int]struct{}) *Notifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Notifier{log: logger, ignore: ignore, current: map[string]compare.Finding{}}
+	return &Notifier{log: logger, ignore: ignore, current: map[string]compare.Finding{}, firstSeen: map[string]time.Time{}, now: time.Now}
 }
 
 // Owner is the copy of a SeaDex entry a finding belongs to: the entry in one
@@ -85,12 +93,14 @@ func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs map[int]
 // only when the app stops emitting it.
 func (n *Notifier) Reemit() {
 	// Nothing was evaluated, so nothing was eligible for deletion: resolved is 0.
-	n.emitAll(0, len(n.current), 0)
+	n.emitAll(passID(n.now()), 0, len(n.current), 0)
 }
 
 // report is the shared body. comparedIDs nil means FULL deletion authority
 // (every row may be deleted by omission); non-nil bounds it to those owners.
 func (n *Notifier) report(findings []compare.Finding, comparedIDs map[int]struct{}, preserve Preserve) {
+	start := n.now()
+	pass := passID(start)
 	next := make(map[string]compare.Finding, len(findings))
 	// Last-payload-wins per key.
 	for i := range findings {
@@ -122,8 +132,10 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs map[int]struct
 		}
 		resolved++
 	}
+	n.reportChanges(next, pass, start)
 	n.current = next
-	n.emitAll(preserved, carried, resolved)
+	n.reported = true
+	n.emitAll(pass, preserved, carried, resolved)
 }
 
 // maxRetainedListItems bounds how many elements of a retained row's untrusted
@@ -187,35 +199,55 @@ func boundRetained(f *compare.Finding) {
 // byte-identical, so an honest row stays unchanged across passes.
 func capRetainedElem(s string) string { return reboundTo(capAttr(s), maxRetainedElemBytes) }
 
-// emitAll logs every row of the current set, in a deterministic order so a
-// pass is diffable against the one before it, and closes with one summary line.
-func (n *Notifier) emitAll(preserved, carried, resolved int) {
+// emitAll logs every row of the current set in a deterministic order, so a
+// pass is diffable against the one before it, then each view's size summary
+// and rankings, and closes with one summary line. Every line of the pass
+// carries pass; the closing line is last, so a reader that finds it can read
+// the whole pass before it.
+func (n *Notifier) emitAll(pass int64, preserved, carried, resolved int) {
 	keys := make([]string, 0, len(n.current))
 	for key := range n.current {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
 
-	emitted, suppressed := 0, 0
+	rows := make([]row, 0, len(keys))
+	suppressed := 0
 	for _, key := range keys {
 		f := n.current[key]
 		if _, ignored := n.ignore[f.AniListID]; ignored {
 			suppressed++
 			continue
 		}
-		n.emit(&f)
-		emitted++
+		rows = append(rows, row{f: f, key: key, firstSeen: n.firstSeen[key]})
+	}
+	views := rankViews(rows)
+	checks := rankChecks(rows)
+	for i := range rows {
+		n.emit(&rows[i], pass)
+	}
+	conflicts := map[string]bool{}
+	for i := range views {
+		n.emitView(&views[i], pass, conflicts)
 	}
 	n.log.Info("findings reported",
-		"total", len(n.current), "emitted", emitted,
+		"total", len(n.current), "emitted", len(rows),
 		"suppressed", suppressed, "preserved", preserved, "carried", carried,
-		"resolved", resolved)
+		"resolved", resolved, "pass_id", pass, "manual_review", checks)
 }
 
 // emit logs a finding at the level its status maps to, with the full field
-// set the alert rules key on.
-func (n *Notifier) emit(f *compare.Finding) {
-	n.log.Log(context.Background(), level(f.Status), message(f.Status), findingKVs(f)...)
+// set the alert rules key on, the pass, and an upgrade's ranks and sizes.
+func (n *Notifier) emit(r *row, pass int64) {
+	kvs := append(findingKVs(&r.f), "pass_id", pass, "first_seen", r.firstSeen.UnixMilli())
+	switch {
+	case isUpgrade(&r.f):
+		kvs = append(kvs, "rank_alt", r.ranks[viewAlt], "rank_none", r.ranks[viewNone])
+		kvs = append(kvs, sizeKVs(&r.f)...)
+	case isManualReview(&r.f):
+		kvs = append(kvs, "rank_check", r.checkRank)
+	}
+	n.log.Log(context.Background(), level(r.f.Status), message(r.f.Status), kvs...)
 }
 
 // maxAttrBytes is the per-attribute volume budget the emit path enforces on

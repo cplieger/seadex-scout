@@ -161,6 +161,9 @@ func TestCompareGroupListsNewestAcrossItsBestTorrents(t *testing.T) {
 	if len(got) != 1 || got[0].Status != StatusNewerRevision || got[0].RecommendedRevision != revV2 {
 		t.Fatalf("Compare(UDF v1 pack beside a UDF v2 single episode, held v1) = %+v, want one newer_revision at v2", got)
 	}
+	if f := got[0]; f.ReleaseURL != "https://nyaa.si/view/4" || f.ReleaseBytes != 1<<30 {
+		t.Errorf("Compare(UDF v1 pack beside a UDF v2 single episode) recommends %q at %d bytes, want the v2 single at %d", f.ReleaseURL, f.ReleaseBytes, 1<<30)
+	}
 }
 
 func TestCompareRevisionNeverClaimsWithoutProof(t *testing.T) {

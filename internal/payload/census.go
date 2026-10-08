@@ -4,6 +4,7 @@ import (
 	"math"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/nametoken"
@@ -139,4 +140,73 @@ func TotalSize(files []seadex.File) int64 {
 		n += length
 	}
 	return n
+}
+
+// EpisodeSpan is the run of episodes one file's token names: an SxxExx token's
+// season and episode range, or Season AbsoluteSeason for an absolute "- NN"
+// number. First and Last are inclusive and equal for one episode.
+type EpisodeSpan struct {
+	Season, First, Last int
+}
+
+// AbsoluteSeason is the Season of a span read from an absolute "- NN" number.
+const AbsoluteSeason = -1
+
+// maxSpanEpisodes bounds one token's range: the regex admits four-digit
+// numbers, and a consumer iterates every episode of a span.
+const maxSpanEpisodes = 2000
+
+// seasonEpisodeToken splits an upper-cased, version-stripped EpisodeToken match.
+var seasonEpisodeToken = regexp.MustCompile(`^S(\d{1,2})E(\d{1,4})(?:-E?(\d{1,4}))?$`)
+
+// Spans returns the episode span of every file in a census population, and
+// false when any file names no episode of its own: no token, a token only a
+// shared directory carries, or a range that runs backwards or past
+// maxSpanEpisodes.
+func Spans(files []seadex.File) ([]EpisodeSpan, bool) {
+	spans := make([]EpisodeSpan, 0, len(files))
+	for i := range files {
+		if sharedTokenQualifier(files[i].Name) != "" {
+			return nil, false
+		}
+		span, ok := fileSpan(EpisodeKeyBase(files[i].Name))
+		if !ok {
+			return nil, false
+		}
+		spans = append(spans, span)
+	}
+	return spans, true
+}
+
+// fileSpan reads base's last episode token, the one DistinctEpisodes keys on.
+func fileSpan(base string) (EpisodeSpan, bool) {
+	if l := LastSubmatchIndex(EpisodeToken, base); l != nil {
+		tok := EpisodeVersion.ReplaceAllString(strings.ToUpper(base[l[2]:l[3]]), "")
+		m := seasonEpisodeToken.FindStringSubmatch(tok)
+		if m == nil {
+			return EpisodeSpan{}, false
+		}
+		season, _ := strconv.Atoi(m[1])
+		first, _ := strconv.Atoi(m[2])
+		last := first
+		if m[3] != "" {
+			last, _ = strconv.Atoi(m[3])
+		}
+		return checkedSpan(season, first, last)
+	}
+	if l := LastSubmatchIndex(AbsoluteEpisode, base); l != nil {
+		n, err := strconv.Atoi(EpisodeVersion.ReplaceAllString(base[l[2]:l[3]], ""))
+		if err != nil {
+			return EpisodeSpan{}, false
+		}
+		return checkedSpan(AbsoluteSeason, n, n)
+	}
+	return EpisodeSpan{}, false
+}
+
+func checkedSpan(season, first, last int) (EpisodeSpan, bool) {
+	if first <= 0 || last < first || last-first >= maxSpanEpisodes {
+		return EpisodeSpan{}, false
+	}
+	return EpisodeSpan{Season: season, First: first, Last: last}, true
 }
