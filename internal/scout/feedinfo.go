@@ -22,7 +22,7 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 	// match.NewLibIndex applies the matcher's arr-consistent ID routing, so a film
 	// carrying its parent series' IMDb id cannot take that Sonarr series' title.
 	// Failed placeholder items keep their ids, so a partial walk still supplies titles.
-	find := match.NewLibIndex(lib).FindByID
+	li := match.NewLibIndex(lib)
 	return func(alID int) indexer.EntryInfo {
 		var info indexer.EntryInfo
 		rec, ok := idx.Lookup(alID)
@@ -30,15 +30,13 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 			info.IsMovie = rec.IsMovie()
 			info.TvdbID = rec.TvdbID
 			info.Season, info.SeasonKnown = resolvedSeason(&rec)
-			it := find(&rec)
-			info.Target = arrTarget(it)
-			applyMappingList(idx, &rec, it, &info)
+			it := li.FindByID(&rec)
+			applyMappingList(idx, &rec, li, &info)
 			// The item's title is taken only when the item is the entry's own work.
 			// FindByID resolves a MOVIE record to the Sonarr series TVDB files it
 			// under, and that series is a DIFFERENT work, so a film on a Sonarr item
 			// falls through to the memo tier and keeps its own name.
-			ownWork := !info.IsMovie || info.Target != indexer.TargetSonarr
-			if it != nil && ownWork && strings.TrimSpace(it.Title) != "" {
+			if it != nil && (!info.IsMovie || it.Arr == library.ArrRadarr) && strings.TrimSpace(it.Title) != "" {
 				info.Title, info.Year = it.Title, it.Year
 				return info
 			}
@@ -58,15 +56,15 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 	}
 }
 
-// applyMappingList projects the mapping list's two facts onto the
-// feed metadata. The entry's TVDB season ranges ride along whatever the target
-// (a pack's season token is a per-torrent decision the indexer makes over
-// them). The film's special episode is stamped only for the OFFERED class - a
-// record whose season scope is the season-0 bucket - resolved to a Sonarr series
-// with a title: that is the one shape where the feed serves a second title the
-// series' Sonarr can match, and a series node carrying an identically shaped
-// row for one of its own specials must not gain a twin on every pack.
-func applyMappingList(idx *mapping.Index, rec *mapping.Record, it *library.Item, info *indexer.EntryInfo) {
+// applyMappingList projects the mapping facts onto the feed metadata. The
+// entry's TVDB season ranges ride along whatever the target (a pack's season
+// token is a per-torrent decision the indexer makes over them). The twin's
+// season-0 run (mapping.Mapping.SpecialRun) is stamped only for the OFFERED
+// class - a record whose season scope is the season-0 bucket - with the titled
+// Sonarr series it is filed under, whichever arr FindByID resolved: a series
+// node carrying an identically shaped row for one of its own specials must not
+// gain a twin on every pack, and a film also in Radarr still needs its twin.
+func applyMappingList(idx *mapping.Index, rec *mapping.Record, li *match.LibIndex, info *indexer.EntryInfo) {
 	m, mapped := idx.MappingFor(rec)
 	if !mapped {
 		return
@@ -77,29 +75,18 @@ func applyMappingList(idx *mapping.Index, rec *mapping.Record, it *library.Item,
 			info.Seasons[i] = indexer.SeasonRange{Season: r.Season, First: r.First, Last: r.Last}
 		}
 	}
-	if m.SpecialEpisode <= 0 || it == nil || info.Target != indexer.TargetSonarr || strings.TrimSpace(it.Title) == "" {
+	run, anidbEpisodes := m.SpecialRun()
+	if len(run) == 0 {
 		return
 	}
 	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
 		return
 	}
-	info.SpecialEpisode = m.SpecialEpisode
-	info.SeriesTitle = it.Title
-}
-
-// arrTarget names which arr a resolved library item belongs to, three-valued so
-// "not in the library" stays distinguishable from "Radarr". It is what decides
-// the feed categories, which the movie flag alone cannot: measured, 131 curated
-// MOVIE records carry a tvdb id without resolving to Sonarr against 50 that do.
-func arrTarget(it *library.Item) indexer.ArrTarget {
-	switch {
-	case it == nil:
-		return indexer.TargetNone
-	case it.Arr == library.ArrRadarr:
-		return indexer.TargetRadarr
-	default:
-		return indexer.TargetSonarr
+	series := li.SpecialsSeries(rec)
+	if series == nil || strings.TrimSpace(series.Title) == "" {
+		return
 	}
+	info.SpecialEpisodes, info.SpecialsEpisodes, info.SeriesTitle = run, anidbEpisodes, series.Title
 }
 
 // applyMemoTyping fills the media typing - and the season that typing implies -

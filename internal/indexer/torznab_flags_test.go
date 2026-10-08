@@ -58,7 +58,7 @@ func markerIndexer(t *testing.T, isBest bool) *Indexer {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	info := func(int) EntryInfo { return EntryInfo{Title: "Some Anime", Target: TargetSonarr} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Some Anime"} }
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}

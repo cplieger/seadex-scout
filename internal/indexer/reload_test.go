@@ -33,7 +33,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	})
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -46,7 +46,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 		t.Errorf("missing-snapshot warned %d times across two reloads, want exactly 1 (warn once, then stay quiet); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "first" {
 		t.Errorf("feed after disappearance = %+v, want the last loaded feed kept", got)
 	}
 
@@ -61,7 +61,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	if got := rec.Count("indexer feed snapshot reappeared"); got != 1 {
 		t.Errorf("reappearance logged %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "second" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "second" {
 		t.Errorf("feed after reappearance = %+v, want the new snapshot served", got)
 	}
 }
@@ -116,7 +116,7 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	})
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -171,7 +171,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	})
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -211,7 +211,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 		t.Errorf("reload recovery logged %d times, want 0 (nothing was successfully reloaded); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "first" {
 		t.Errorf("feed = %+v, want the last good snapshot kept", got)
 	}
 
@@ -292,7 +292,7 @@ func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 	}
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -321,7 +321,7 @@ func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 		t.Errorf("announced resumed reloads while the reappeared file is still the memoized malformed one; log output:\n%s",
 			strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("feed = %d items, want the last-good 1 still served", len(got))
 	}
 }
@@ -345,7 +345,7 @@ func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	})
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -368,7 +368,7 @@ func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 		t.Errorf("over-limit item dropped-warning fired %d times across two reloads, want exactly 1 (the installed identity makes the second reload a no-op); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 		t.Errorf("feed after over-limit rewrite = %+v, want the over-limit item dropped from the installed snapshot", got)
 	}
 }
@@ -394,7 +394,7 @@ func TestReloadKeepsFeedOnAnUnidentifiableSnapshot(t *testing.T) {
 		SnapshotPath:   path,
 		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -408,7 +408,7 @@ func TestReloadKeepsFeedOnAnUnidentifiableSnapshot(t *testing.T) {
 	bumpMtime(t, path)
 	ix.cache.loader.refresh(t.Context())
 
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "live" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "live" {
 		t.Errorf("feed after an unidentifiable rewrite = %+v, want the last-good feed kept", got)
 	}
 	if !rec.Contains("indexer feed snapshot malformed; keeping current feed") {
@@ -467,7 +467,7 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 1 {
 		t.Fatalf("nyaa feed = %d items, want 1 valid item after dropping the underivable GUID", len(got))
 	}
@@ -535,7 +535,7 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 				ABPasskey:      "PASSKEY",
 			}, log, nil)
 
-			got := ix.feedFor(tc.scope)
+			got := ix.feedFor(tc.scope, requesterAny)
 			if len(got) != 1 {
 				t.Fatalf("%s feed = %d items (%+v), want only the canonical-host item after the trust gate", tc.scope, len(got), got)
 			}
@@ -596,7 +596,7 @@ func TestReloadDropsCrossKeySnapshotGUIDs(t *testing.T) {
 				ABPasskey:      "PASSKEY",
 			}, log, nil)
 
-			if got := ix.feedFor(tc.scope); len(got) != 0 {
+			if got := ix.feedFor(tc.scope, requesterAny); len(got) != 0 {
 				t.Errorf("%s feed = %d items (%+v), want 0: a cross-key GUID must never serve under the persisted curation binding", tc.scope, len(got), got)
 			}
 			if count := rec.Count(tc.wantWarn); count != 1 {
@@ -630,7 +630,7 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 3 {
 		t.Fatalf("nyaa feed = %d items (%+v), want 3: the gate blanks InfoURL, never drops the item", len(got), got)
 	}
@@ -795,7 +795,7 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 				ABPasskey:      "PASSKEY",
 			}, log, nil)
 
-			if got := ix.feedFor(tc.scope); len(got) != 0 {
+			if got := ix.feedFor(tc.scope, requesterAny); len(got) != 0 {
 				t.Errorf("%s feed = %d items (%+v), want 0: a cross-tracker item must never serve from the wrong feed", tc.scope, len(got), got)
 			}
 			if count := rec.Count(tc.wantWarn); count != 1 {
@@ -827,7 +827,7 @@ func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
 		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, log, nil)
 
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 		t.Errorf("nyaa feed = %d items (%+v), want 0: a userinfo-bearing persisted GUID must never serve", len(got), got)
 	}
 	const wantWarn = "indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL"
@@ -879,7 +879,7 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+			if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 				t.Fatalf("initial feed = %d items, want 1", len(got))
 			}
 			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
@@ -887,7 +887,7 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 			}
 			bumpMtime(t, path)
 			ix.cache.loader.refresh(t.Context())
-			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+			if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 				t.Errorf("after %s rewrite feed = %d items, want 1 (a zero snapshot must not blank a live feed)", tc.name, len(got))
 			}
 		})
@@ -919,7 +919,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	// A restart after rotating the passkey: the loaded AB feed must carry only
 	// the NEW credential.
 	ix := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}, nil, nil)
-	got := ix.feedFor(upstreamAB)
+	got := ix.feedFor(upstreamAB, requesterAny)
 	if len(got) != 1 {
 		t.Fatalf("ab feed = %d items, want 1", len(got))
 	}
@@ -934,7 +934,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	// not be served at all: the AB feed clears (serve answers the /ab RSS
 	// check with a Torznab <error> in that state); Nyaa is untouched.
 	none := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
-	if got := none.feedFor(upstreamAB); len(got) != 0 {
+	if got := none.feedFor(upstreamAB, requesterAny); len(got) != 0 {
 		t.Errorf("ab feed without a configured passkey = %d items, want 0", len(got))
 	}
 
@@ -946,7 +946,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 		t.Fatalf("write no-id snapshot: %v", err)
 	}
 	dropper := warmedIndexer(&Config{APIKey: "k", SnapshotPath: noIDPath, ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}, nil, nil)
-	if got := dropper.feedFor(upstreamAB); len(got) != 0 {
+	if got := dropper.feedFor(upstreamAB, requesterAny); len(got) != 0 {
 		t.Errorf("ab feed with an underivable item = %d items, want 0 (dropped, never served with the persisted credential)", len(got))
 	}
 }
@@ -1005,7 +1005,7 @@ func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 	loadedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
 	setMtime(t, path, loadedAt)
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -1020,7 +1020,7 @@ func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 	}
 	setMtime(t, path, loadedAt)
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 2 {
 		t.Errorf("after preserved-mtime replacement feed = %d items, want 2 (a new inode at the loaded mtime must install)", len(got))
 	}
 }
@@ -1038,7 +1038,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	// The warm-up runs against a missing file (the fresh-install arm), so the
 	// recoverable failure below is the first read of this inode.
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 		t.Fatalf("initial feed = %d items, want 0 (no snapshot yet)", len(got))
 	}
 
@@ -1050,7 +1050,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	ix.cache.loader.refresh(cancelled)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 		t.Fatalf("feed after the cancelled read = %d items, want 0 (nothing was loaded)", len(got))
 	}
 
@@ -1058,7 +1058,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	// memoized, so this read must happen and install.
 	setMtime(t, path, failedAt)
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("after same-inode retry feed = %d items, want 1 (a recoverable read failure must stay retryable)", len(got))
 	}
 }
@@ -1076,7 +1076,7 @@ func TestConcurrentReadersAgainstAnInstallingLoader(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 	// A second cycle over a grown catalogue: entry 1 carries, entry 2 is new.
@@ -1094,7 +1094,7 @@ func TestConcurrentReadersAgainstAnInstallingLoader(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for range 20 {
-				items := ix.feedFor(upstreamNyaa)
+				items := ix.feedFor(upstreamNyaa, requesterAny)
 				if len(items) != 1 && len(items) != 2 {
 					t.Errorf("feed = %d items mid-install, want a complete snapshot (1 before, 2 after)", len(items))
 				}
@@ -1105,7 +1105,7 @@ func TestConcurrentReadersAgainstAnInstallingLoader(t *testing.T) {
 	}
 	wg.Wait()
 	<-installed
-	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 2 {
 		t.Errorf("after the install feed = %d items, want 2", len(got))
 	}
 }
@@ -1154,7 +1154,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	// mtime differs from the loaded snapshot's, and the file is the truth.
 	ix.cache.loader.refresh(t.Context())
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 1 || got[0].Title != "restored" {
 		t.Errorf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
 	}
@@ -1179,7 +1179,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 	setMtime(t, path, when)
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("initial feed = %#v, want the first snapshot", got)
 	}
 
@@ -1190,7 +1190,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 	setMtime(t, path, when)
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("feed after unchanged-mtime rewrite = %#v, want the loaded first snapshot (equality skips)", got)
 	}
 }
@@ -1226,7 +1226,7 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 	}}) {
 		t.Fatal("second install with same unchanged file = true, want false")
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("served feed = %+v, want the originally installed snapshot", got)
 	}
 }
@@ -1255,7 +1255,7 @@ func TestReloadRebasesFutureSnapshotTimestamps(t *testing.T) {
 	before := time.Now().UTC()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 2 {
 		t.Errorf("nyaa feed = %d items, want 2 (the skew is corrected, not dropped)", len(got))
 	}
@@ -1295,7 +1295,7 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 	})
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -1309,7 +1309,7 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 		t.Errorf("oversized snapshot warned %d times across two reloads, want exactly 1 (an unchanged over-cap inode must memoize); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "first" {
 		t.Errorf("feed after the oversized write = %+v, want the last-good feed kept", got)
 	}
 
@@ -1323,7 +1323,7 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 	})
 	setMtime(t, path, time.Now().Add(4*time.Second))
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "repaired" {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 || got[0].Title != "repaired" {
 		t.Errorf("feed after the repaired write = %+v, want the replacement inode loaded", got)
 	}
 }
@@ -1373,7 +1373,7 @@ func TestReloadReBaselinesAnUnsupportedSchemaVersion(t *testing.T) {
 		if got := ix.cache.curation(); len(got.byKey) != 0 || len(got.byHash) != 0 {
 			t.Errorf("curation = %+v, want empty: a version this binary cannot read must not be served", got)
 		}
-		if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 			t.Errorf("nyaa feed = %+v, want empty for one window", got)
 		}
 	})
@@ -1413,7 +1413,7 @@ func TestReloadBlanksOutOfVocabularyDownloadVolumeFactor(t *testing.T) {
 	})
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 2 {
 		t.Fatalf("nyaa feed = %d items (%+v), want 2 (the factor is blanked, the item kept)", len(got), got)
 	}
@@ -1453,7 +1453,7 @@ func TestReloadDropsOutOfVocabularyCategories(t *testing.T) {
 	})
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 2 {
 		t.Errorf("nyaa feed = %d items (%+v), want 2 (the ids are filtered, the item kept)", len(got), got)
 	}
@@ -1615,7 +1615,7 @@ func TestAnOlderLoadCannotOverwriteANewerPublish(t *testing.T) {
 	release()
 	<-loaded
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 1 || got[0].Title != "generation-n" {
 		t.Errorf("served feed = %+v, want the published generation-n kept (an overtaken read must not move the cache backwards)", got)
 	}
@@ -1687,10 +1687,10 @@ func TestReloadHealthySnapshotEmitsNoScrubDiagnostics(t *testing.T) {
 
 	// The load happened and both journals survived it, so the absence below is
 	// the guards staying silent rather than the items never reaching them.
-	if got := len(ix.feedFor(upstreamNyaa)); got != 1 {
+	if got := len(ix.feedFor(upstreamNyaa, requesterAny)); got != 1 {
 		t.Fatalf("nyaa feed = %d items, want 1", got)
 	}
-	if got := len(ix.feedFor(upstreamAB)); got != 1 {
+	if got := len(ix.feedFor(upstreamAB, requesterAny)); got != 1 {
 		t.Fatalf("ab feed = %d items, want 1", got)
 	}
 	for _, msg := range []string{

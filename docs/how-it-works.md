@@ -59,9 +59,9 @@ Every full pass and every quick check that downloads SeaDex changes asks GitHub 
 
 ### Episode mapping
 
-Each record's mapping list and `tvdb_placement` in `animap.json` add three facts. A record finds them by its AniDB ID. A special that AniDB files under another anime has no AniDB ID of its own, so it finds them by its AniList ID. The first is which TVDB season 0 episode a film filed under a series is, read from the mapping list. That lets the indexer offer such a film to Sonarr under a title it can match.
+Each record's mapping list and `tvdb_placement` in `animap.json` add three facts. A record finds them by its AniDB ID. A special that AniDB files under another anime has no AniDB ID of its own, so it finds them by its AniList ID. The first is which TVDB special episodes a film or special filed under a series is. It is read from `tvdb_placement`, which animap works out for every episode. That lets the report compare it and the indexer offer it to Sonarr under a title Sonarr can match. The indexer does that only when every episode of the entry has a special episode, so an entry with some episodes left off TVDB gets no series-titled item. An `animap.json` without that field leaves those films and specials uncompared.
 
-The second is which TVDB special episodes a film or special filed under a series is. It is read from `tvdb_placement`, which animap works out for every episode. That lets the report compare it. An `animap.json` without that field leaves those films and specials uncompared. The third is which TVDB seasons an absolute-numbered run's episodes fall in. That lets a pack with no season in its file names carry its season. It also lets the report judge a split show against its own seasons.
+The second is the one TVDB special episode a mapping list row names for a film filed under a series. The indexer reads it only when the record has no `tvdb_placement`, and only for a film, because a row may name one episode of a longer OVA. Where both exist and differ, `tvdb_placement` wins, because it answers every episode of the entry and a row may answer only some. The third is which TVDB seasons an absolute-numbered run's episodes fall in. That lets a pack with no season in its file names carry its season. It also lets the report judge a split show against its own seasons.
 
 ### Overrides
 
@@ -126,6 +126,8 @@ If every upstream query fails, a search answers with a Torznab error rather than
 
 The feed answers whole-season searches, not single-episode ones. SeaDex tracks season packs, so the feed answers a season search with the pack. For a single-episode query it returns nothing, without contacting a tracker. Specials and movies are single releases and are always answered. That is why Sonarr's **Anime Standard Format Search** option must be ticked on the indexer. Without it, Sonarr sends only single-episode queries.
 
+A Sonarr search for a special episode is also answered from SeaDex's own list. A film's releases are named after the film, so a tracker search for `Code Geass S00E04` finds nothing. The feed adds each release SeaDex lists for that series and special episode that the file and holder checks below can label safely, titled as in the RSS feed below. For an Anime-type series, Sonarr searches its specials season, or several specials at once, as the series title followed by `00`. The feed answers that with every such release of the series, without contacting a tracker, and Sonarr keeps the episodes it asked for.
+
 ### Markers
 
 Every item, from a search or from RSS, carries a marker. That is a download volume factor for the tier plus a `scene` tag. SeaDex's best release gets the factor `0.75`, which with the `scene` tag Sonarr and Radarr record as the Indexer Flags Freeleech25 and Scene. An alternative gets `0.25`, recorded as Freeleech75 and Scene. Map that pair to a Custom Format with both flags required, and Sonarr and Radarr prefer SeaDex's pick.
@@ -134,8 +136,12 @@ Requiring both flags matters because some trackers use real 25% and 75% freeleec
 
 ### Categories and titles
 
-Each item's category follows the entry's real media type and the app its library item resolved to. A series, OVA or special is `5070`, Anime, for Sonarr. A film is `2000`, Movies, for Radarr. A film whose library item is a Sonarr series is also offered under Anime, because Sonarr subscribes only to Anime.
+Each item's category follows the entry's real media type. A series, OVA or special is `5070`, Anime, for Sonarr. A film is `2000`, Movies, for Radarr, whichever app holds it. Sonarr gets a film only as the series-titled item below.
 
-A film that TVDB files as a special of a series you have in Sonarr is also served as a second item titled `<Series> S00Exx` under Anime, so Sonarr's parser can match it. A season pack whose file names carry no season gets the season of the one TVDB season the mapping places it in.
+A film or special that TVDB files under a series you have in Sonarr is also served as a second item under Anime. That item carries the series title and the special episodes, such as `Code Geass S00E04`, so Sonarr's parser can match it. A two-part special reads `Black Butler S00E09-E10`, which Sonarr grabs as both episodes. A film you also keep in Radarr gets this item too. A release gets none when it holds more than that entry, such as a season pack that carries the special, or when it holds one part of a multi-part special, such as one film of an entry that holds several. It gets none either when SeaDex lists the same release under another entry, when the special episodes are not consecutive, or when the map leaves some of the entry's episodes without one.
+
+Sonarr and Radarr each get only their own item, told apart by the categories they ask for. A request for Anime or TV only gets the series-titled item in place of the film's or special's own. A request for Movies only gets the film under its own title. A request that names neither, such as Prowlarr's save test, gets both. A release with no series-titled item reaches Sonarr on RSS only when its title is not a film's, and in a search, where it keeps the tracker's title, only when some entry holding it is not a film. Sonarr could match it only by guessing one special episode from the film's title, and for a two-part special that guess grabs one part as the whole.
+
+A season pack whose file names carry no season gets the season of the one TVDB season the mapping places it in.
 
 When the newest file of a release carries a newer revision, a `v2`, `PROPER` or `REPACK`, and the title would otherwise read an older one, the title gains that revision. That holds even when only one reissued episode of a pack carries it. Two examples are `Show S01 [v2] 1080p [Grp]` and `86 Eighty Six S01 REPACK 1080p [koala]`. Sonarr and Radarr then see the upgrade the daemon reports. The token goes before the release flags, never at the end, where Sonarr would read it as the release group. A search result keeps the tracker's own title.

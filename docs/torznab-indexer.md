@@ -24,7 +24,7 @@ The port is fixed at `9118`. It is not a config key. Add it to the seadex-scout 
 
 While you are in Prowlarr, change one setting on the **Nyaa** indexer. Under its advanced settings, set **Sort requested from site** to `seeders` instead of the default created date. Nyaa returns a single page of results and Prowlarr never asks for the pages behind it. Date-sorted results therefore bury older, well-seeded BD and batch releases beyond that first page. Sorting by seeders brings those up, so a search returns more SeaDex picks for older shows.
 
-For searches, the download links are Prowlarr's own proxy links, so no passkey is needed. Prowlarr grabs with the credentials it holds. The AnimeBytes RSS feed is the one exception. SeaDex never publishes AnimeBytes download links, so the feed builds them from your `ab_passkey`, the token in your AnimeBytes RSS or announce URL. Leave it empty and the `/ab` feed has nothing to offer, so it returns a clear error and Prowlarr's save test fails until you set it. Nyaa is public and needs nothing.
+For searches, the download links are Prowlarr's own proxy links, so no passkey is needed. Prowlarr grabs with the credentials it holds. A search for a special episode also returns SeaDex's own releases for it, which link straight to Nyaa, or to AnimeBytes through your `ab_passkey`. Without the passkey, an `/ab` special search returns only what Prowlarr finds. The AnimeBytes RSS feed is the one exception. SeaDex never publishes AnimeBytes download links, so the feed builds them from your `ab_passkey`, the token in your AnimeBytes RSS or announce URL. Leave it empty and the `/ab` feed has nothing to offer, so it returns a clear error and Prowlarr's save test fails until you set it. Nyaa is public and needs nothing.
 
 The passkey rides in the AnimeBytes feed's links, so keep the feed on your local network, as [Security](../README.md#security) explains.
 
@@ -36,8 +36,8 @@ In Sonarr or Radarr, open Settings, Indexers, Add, and pick **Torznab** under Cu
 
 - The feed is per tracker. Set **URL** to the address Sonarr reaches seadex-scout at, with `/nyaa` for Nyaa and `/ab` for AnimeBytes, such as `http://192.0.2.10:9118/nyaa` and `http://192.0.2.10:9118/ab`, as two Torznab indexers. If Sonarr shares a Docker network with seadex-scout, `http://seadex-scout:9118/nyaa` works too. There is no combined endpoint. A path per tracker lets you choose each tracker's search types on its own, as [Per-tracker search gating](#per-tracker-search-gating) shows.
 - Set **API Key** to the `indexer.feed_api_key` from step 1.
-- Set **Categories** to `5070` (Anime) in Sonarr and `2000` (Movies) in Radarr.
-- Tick **Anime Standard Format Search**. This is required. It makes Sonarr send the whole-season search the feed answers. Without it, Sonarr sends only single-episode searches, which the feed ignores, and you get nothing.
+- Set **Categories** to `5070` (Anime) in Sonarr and `2000` (Movies) in Radarr. The feed tells Sonarr and Radarr apart by them, so keep each app to its own. A film reaches Sonarr under its series title and special episode, and Radarr under its own title. A film that cannot be named that way reaches Radarr only.
+- Tick **Anime Standard Format Search**. This is required. It makes Sonarr send the whole-season search the feed answers. Without it, Sonarr sends only single-episode searches, which the feed answers only for specials, and you get nothing else.
 
 You can add the feed to Prowlarr instead and let Prowlarr sync it to Sonarr and Radarr. Either works, and there is no search loop. The Anime Standard Format Search option must still end up ticked on the indexer as Sonarr sees it.
 

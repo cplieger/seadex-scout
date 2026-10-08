@@ -145,8 +145,13 @@ func placeholderCount(feed servarrFeed) int {
 // group or tag, or a special/OVA token.
 var placeholderTitleIdentity = regexp.MustCompile(`(?i)[0-9\[\]()]|\b(specials?|ova|ona|oad)\b`)
 
+// realItem is a journaled release; an Anime-categorised one carries a non-film
+// entry's title.
 func realItem(guid string, cats ...int) journalItem {
-	return journalItem{Title: "Show S01E01 1080p [G]", GUID: guid, DownloadURL: "https://nyaa.si/download/" + guid + ".torrent", Categories: cats}
+	return journalItem{
+		Title: "Show S01E01 1080p [G]", GUID: guid, DownloadURL: "https://nyaa.si/download/" + guid + ".torrent", Categories: cats,
+		NonFilm: slices.Contains(cats, catAnime),
+	}
 }
 
 // TestServePlaceholderParsesLikeServarr pins the wire shape the placeholder's
@@ -535,7 +540,7 @@ func TestPlaceholderNeverReachesPersistence(t *testing.T) {
 
 // TestServeSummaryLineReportsThePlaceholder pins the request log on a feed path
 // that holds real items: the placeholder is reported only when it is served, and
-// curated counts the real items, never the placeholder.
+// curated counts the real items this requester is offered, never the placeholder.
 func TestServeSummaryLineReportsThePlaceholder(t *testing.T) {
 	tests := map[string]struct {
 		journal []journalItem
@@ -545,9 +550,9 @@ func TestServeSummaryLineReportsThePlaceholder(t *testing.T) {
 			journal: []journalItem{realItem("https://nyaa.si/view/1", catAnime), realItem("https://nyaa.si/view/2", catAnime)},
 			want:    map[string]string{"feed": "true", "curated": "2", "placeholder": "false", "returned": "2"},
 		},
-		"real items in the other category": {
+		"real items only the other arr is offered": {
 			journal: []journalItem{realItem("https://nyaa.si/view/1", catMovies)},
-			want:    map[string]string{"feed": "true", "curated": "1", "placeholder": "true", "returned": "1"},
+			want:    map[string]string{"feed": "true", "curated": "0", "placeholder": "true", "returned": "1"},
 		},
 	}
 	for name, tc := range tests {

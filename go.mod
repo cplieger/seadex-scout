@@ -17,5 +17,6 @@ require (
 	github.com/cplieger/webhttp/v3 v3.0.0
 	github.com/cplieger/xmlx v1.0.4
 	go.yaml.in/yaml/v3 v3.0.5
+	golang.org/x/text v0.42.0
 	pgregory.net/rapid v1.3.0
 )

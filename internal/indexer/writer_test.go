@@ -78,7 +78,7 @@ func TestRebuildJournalsAFilmTwinAsOneRecord(t *testing.T) {
 		}},
 	}}
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -299,7 +299,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	// configured passkey on load, so the feed serves grabbable links even
 	// though the snapshot holds none.
 	ix := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}, nil, nil)
-	served := ix.feedFor(upstreamAB)
+	served := ix.feedFor(upstreamAB, requesterAny)
 	if len(served) != 1 {
 		t.Fatalf("served ab feed = %d items, want 1", len(served))
 	}
@@ -2131,7 +2131,7 @@ func TestPassPublishesToTheInProcessServer(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	// No tick, no refresh: the server serves what the cycle handed it.
-	items := ix.feedFor(upstreamNyaa)
+	items := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(items) != 1 {
 		t.Fatalf("served feed after the pass = %d items, want 1 published in-process", len(items))
 	}
@@ -2163,11 +2163,11 @@ func TestPassWithoutAnInProcessServerOnlyWritesTheFile(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 		t.Fatalf("served feed = %d items with no in-process handover, want 0 until the reload clock runs", len(got))
 	}
 	tick(ix)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("served feed after one tick = %d items, want the persisted snapshot loaded (1)", len(got))
 	}
 }
@@ -2297,7 +2297,7 @@ func TestPassOverAHealthySnapshotEmitsNoDegradationDiagnostics(t *testing.T) {
 			t.Fatalf("Rebuild pass %d: %v", pass, err)
 		}
 	}
-	if got := len(ix.feedFor(upstreamNyaa)); got != 1 {
+	if got := len(ix.feedFor(upstreamNyaa, requesterAny)); got != 1 {
 		t.Fatalf("served feed = %d items, want 1 (the passes must have really run)", got)
 	}
 	for _, msg := range []string{

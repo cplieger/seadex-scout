@@ -19,6 +19,10 @@ type journalItem struct {
 	Key       string    `json:"Key,omitempty"`
 	item
 	AniListID int `json:"AniListID,omitempty"`
+	// NonFilm is whether the entry whose title the item carries is not a film,
+	// the one case the original reaches Sonarr (twinsFor). A stored item without
+	// it reads as a film's title.
+	NonFilm bool `json:"NonFilm,omitempty"`
 }
 
 // feedJournalMaxAge bounds how long a newly curated release stays in the
@@ -271,8 +275,9 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, hashRefs h
 		if !resolved {
 			continue
 		}
+		info := infoFor.ref(occ.entry.AniListID)
 		it := journalItem{
-			Title:                synthesizeTitle(occ.torrent, infoFor.ref(occ.entry.AniListID)),
+			Title:                synthesizeTitle(occ.torrent, info),
 			GUID:                 classify.PublishURL(occ.torrent),
 			InfoURL:              entryURL(occ.entry.AniListID),
 			DownloadURL:          dl,
@@ -281,6 +286,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, hashRefs h
 			Size:                 totalSize(occ.torrent.Files),
 			Key:                  key,
 			AniListID:            occ.entry.AniListID,
+			NonFilm:              !info.IsMovie,
 		}
 		if it.Title == "" {
 			// No episode files and no release group on this occurrence: an
@@ -349,9 +355,8 @@ func foldRefs(it *journalItem, refs []curatedRef, hashRefs hashLookup, infoFor E
 		}
 		info := infoFor(ref.entry.AniListID)
 		vote.add(info.TvdbID)
-		title := twinTitle(ref.torrent, &info)
-		twin.add(title)
-		foldHolderCategories(it, &info, title)
+		twin.add(twinTitle(ref.torrent, &info))
+		foldHolderCategories(it, &info)
 	}
 	// The union above appends in catalogue order, which is the one input
 	// renderJournalItem's sort exists to neutralize: without a canonical order a
@@ -361,18 +366,8 @@ func foldRefs(it *journalItem, refs []curatedRef, hashRefs hashLookup, infoFor E
 	return vote, twin
 }
 
-// foldHolderCategories unions one holder's categories into the item. A MOVIE
-// holder whose film has a twin title contributes Movies only: the twin is the
-// item that carries Anime for it, so the original stops offering the film to
-// Sonarr under a title its parser rejects. The drop is MOVIE-only because an
-// OVA- or SPECIAL-typed holder's ONLY category is Anime, and dropping it would
-// leave the list empty. When the twin is later vetoed, stampTwin restores Anime.
-func foldHolderCategories(it *journalItem, info *EntryInfo, twinTitle string) {
-	cats := categoriesFor(info.IsMovie, info.Target)
-	if twinTitle != "" && info.IsMovie {
-		cats = []int{catMovies}
-	}
-	for _, c := range cats {
+func foldHolderCategories(it *journalItem, info *EntryInfo) {
+	for _, c := range categoriesFor(info.IsMovie) {
 		if !slices.Contains(it.Categories, c) {
 			it.Categories = append(it.Categories, c)
 		}
@@ -381,21 +376,12 @@ func foldHolderCategories(it *journalItem, info *EntryInfo, twinTitle string) {
 
 // stampTwin collapses the film twin vote onto the item, once, after every holder
 // - the pass's own and the carried unevaluated owners - has been seen, and after
-// the item's GUID is final (the twin GUID derives from it). An agreed title sets
-// the two stored fields; a vetoed one (candidates but no agreement) restores the
-// Anime category a MOVIE holder withheld in favor of its twin, so the release
-// serves exactly as it did without the list; nobody voting changes nothing.
+// the item's GUID is final (the twin GUID derives from it).
 func stampTwin(it *journalItem, twin twinVote) {
-	switch title := twin.resolve(); {
-	case title != "":
+	if title := twin.resolve(); title != "" {
 		it.SonarrTitle = title
 		it.SonarrGUID = twinGUID(it.GUID)
-	case twin.candidates > 0:
-		if !slices.Contains(it.Categories, catAnime) {
-			it.Categories = append(it.Categories, catAnime)
-		}
 	}
-	slices.Sort(it.Categories)
 }
 
 // holdersOf returns the item's whole holder set: the occurrences the pass grouped
@@ -776,15 +762,11 @@ func (p *journalPass) carryOwnerVote(it *journalItem, owner string, releases []o
 	if len(owned) == 0 {
 		return false
 	}
-	title := ""
 	for _, r := range owned {
 		if r.IsBest {
 			it.DownloadVolumeFactor = dvfBest
 		}
 		twin.add(r.SonarrTitle)
-		if r.SonarrTitle != "" {
-			title = r.SonarrTitle
-		}
 	}
 	alID, err := strconv.Atoi(owner)
 	if err != nil {
@@ -794,7 +776,7 @@ func (p *journalPass) carryOwnerVote(it *journalItem, owner string, releases []o
 	}
 	info := p.infoFor(alID)
 	vote.add(info.TvdbID)
-	foldHolderCategories(it, &info, title)
+	foldHolderCategories(it, &info)
 	return true
 }
 

@@ -318,7 +318,7 @@ func TestServeStampsTheTvdbIDOnBothRenderPaths(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Some Anime", TvdbID: 79525, Target: TargetSonarr}
+		return EntryInfo{Title: "Some Anime", TvdbID: 79525}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -357,9 +357,10 @@ func TestServeStampsTheTvdbIDOnBothRenderPaths(t *testing.T) {
 
 // TestServeEmitsTheFilmTwinOnBothRenderPaths walks the film twin end to end over
 // both render paths from ONE persisted record: a film on a Sonarr series whose
-// mapping names special episode 4 is journaled once, then the RSS check serves
-// the original under Movies only beside its "<Series> S00E04" twin under Anime,
-// and the proxied search serves Prowlarr's own result untouched beside the same
+// mapping names special episode 4 is journaled once, then a request no arr can
+// be told from gets, on RSS, the original under Movies only beside its
+// "<Series> S00E04" twin under Anime, and on a proxied search Prowlarr's own
+// result untouched beside the same
 // twin derived from the result's GUID. Both twins carry the series' tvdb id.
 func TestServeEmitsTheFilmTwinOnBothRenderPaths(t *testing.T) {
 	const hash = "ABCDEF1234567890abcdef1234567890abcdef12"
@@ -374,7 +375,7 @@ func TestServeEmitsTheFilmTwinOnBothRenderPaths(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -402,7 +403,7 @@ func TestServeEmitsTheFilmTwinOnBothRenderPaths(t *testing.T) {
 			target: "/nyaa?apikey=k", wantOrigTitle: "Lelouch of the Resurrection 1080p [PMR]", wantOrigCats: []int{catMovies},
 		},
 		"proxied search": {
-			target: "/nyaa?t=tvsearch&q=Code+Geass&apikey=k", wantOrigTitle: "[Group] Some Anime S01 [1080p]", wantOrigCats: []int{catAnime},
+			target: "/nyaa?t=search&q=Code+Geass&apikey=k", wantOrigTitle: "[Group] Some Anime S01 [1080p]", wantOrigCats: []int{catAnime},
 		},
 	}
 	for name, tc := range tests {
@@ -563,7 +564,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	}
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -575,7 +576,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	}
 	bumpMtime(t, path)
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("feed after unreadable snapshot = %d items, want 1 (a bad read must not blank a live feed)", len(got))
 	}
 	if !rec.Contains("indexer feed snapshot unreadable") {
@@ -598,7 +599,7 @@ func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 	}
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -610,7 +611,7 @@ func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 	}
 	bumpMtime(t, path)
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("feed after non-regular snapshot path = %d items, want 1 (a refused path must not blank a live feed)", len(got))
 	}
 	if !rec.Contains("indexer feed snapshot path is not a regular file; refusing to load it") {
@@ -631,7 +632,7 @@ func TestReloadRefusesSymlinkedSnapshotPath(t *testing.T) {
 	}
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
@@ -648,7 +649,7 @@ func TestReloadRefusesSymlinkedSnapshotPath(t *testing.T) {
 		t.Fatalf("symlink snapshot: %v", err)
 	}
 	ix.cache.loader.refresh(t.Context())
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("feed after symlinked snapshot path = %d items, want 1 (the link target must never be loaded)", len(got))
 	}
 	if !rec.Contains("indexer feed snapshot open failed; keeping current feed") {
@@ -669,7 +670,7 @@ func TestReloadRefusesFifoSnapshotPathWithoutBlocking(t *testing.T) {
 	}
 	log, rec := capture.New()
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 	if err := os.Remove(path); err != nil {
@@ -688,7 +689,7 @@ func TestReloadRefusesFifoSnapshotPathWithoutBlocking(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("refresh blocked on a FIFO snapshot path; the open must not wait for a writer")
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Errorf("feed after FIFO snapshot path = %d items, want 1", len(got))
 	}
 	if !rec.Contains("indexer feed snapshot path is not a regular file; refusing to load it") {
@@ -745,7 +746,7 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 	if !rec.Contains("indexer feed snapshot open failed") {
 		t.Errorf("stat failure (ENOTDIR) not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
 		t.Errorf("feed = %d items, want 0 (current feed kept on stat failure)", len(got))
 	}
 }

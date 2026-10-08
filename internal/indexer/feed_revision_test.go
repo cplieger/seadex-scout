@@ -98,7 +98,7 @@ func TestSynthesizeTitleCarriesPayloadRevision(t *testing.T) {
 
 func TestTwinTitleCarriesPayloadRevision(t *testing.T) {
 	tor := seadex.Torrent{ReleaseGroup: "Grp", Files: []seadex.File{{Name: "[Grp] Show Movie 01v2 [BD 1080p].mkv", Length: 1 << 30}}}
-	info := EntryInfo{Title: "Show Movie", SeriesTitle: "Show", SpecialEpisode: 3, Target: TargetSonarr}
+	info := EntryInfo{Title: "Show Movie", SeriesTitle: "Show", SpecialEpisodes: []int{3}, SpecialsEpisodes: 1}
 	if got, want := twinTitle(&tor, &info), "Show S00E03 [v2] 1080p [Grp]"; got != want {
 		t.Errorf("twinTitle(v2 film) = %q, want %q", got, want)
 	}

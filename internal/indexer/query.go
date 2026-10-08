@@ -36,23 +36,27 @@ const (
 // records which hash/key combinations were observed on the SAME SeaDex torrent, so
 // lookup can prove an item's two identity signals name one release. A nil byPair
 // is a legacy snapshot; lookup then FAILS CLOSED for items carrying both signals
-// while single-signal matching keeps working.
+// while single-signal matching keeps working. twins is the twin catalogue a
+// special search is answered from, keyed by seriesQueryKey.
 type curation struct {
 	byHash map[string]curatedSignal
 	byKey  map[string]curatedSignal
 	byPair map[string]bool
+	twins  map[string][]catalogueTwin
 }
 
 // curatedSignal is what one identity signal's owners agreed on, folded at build
-// time: whether any of them marks the release best, and the tvdb id and film twin
-// title they agree on, each as a THREE-state vote. A vote must carry
+// time: whether any of them marks the release best or is not a film, and the
+// tvdb id and film twin title they agree on, each as a vote keeping
+// contradiction apart. A vote must carry
 // "contradicted" as its own state, because a bare zero conflates it with "no
 // owner supplied one" and then reads as abstention at the cross-signal fold,
 // where an agreeing sibling signal would override the contradiction.
 type curatedSignal struct {
-	twin   twinVote
-	vote   tvdbVote
-	isBest bool
+	twin    twinVote
+	vote    tvdbVote
+	isBest  bool
+	nonFilm bool
 }
 
 // pairKey joins a validated info hash and a tracker key into the byPair relation
@@ -71,6 +75,7 @@ type curationMatch struct {
 	twin    twinVote
 	vote    tvdbVote
 	isBest  bool
+	nonFilm bool
 	matched bool
 }
 
@@ -85,6 +90,7 @@ func (m *curationMatch) accept(sig curatedSignal, ok bool) bool {
 		return false
 	}
 	m.isBest, m.matched = sig.isBest, true
+	m.nonFilm = m.nonFilm || sig.nonFilm
 	m.vote.merge(sig.vote)
 	m.twin.merge(sig.twin)
 	return true
@@ -92,13 +98,15 @@ func (m *curationMatch) accept(sig curatedSignal, ok bool) bool {
 
 // curationVerdict is lookup's answer for one search result: whether the release
 // is curated at all, whether it is the best one, whether it was rejected by an
-// identity CONTRADICTION rather than by not being curated, and the two facts every
-// holder of every accepted signal agrees on - the TVDB id (0 when none supplied
-// one or they disagreed) and the film twin title ("" likewise).
+// identity CONTRADICTION rather than by not being curated, whether any holder is
+// not a film, and the two facts every holder of every accepted signal agrees on -
+// the TVDB id (0 when none supplied one or they disagreed) and the film twin
+// title ("" likewise).
 type curationVerdict struct {
 	sonarrTitle string
 	tvdbID      int
 	isBest      bool
+	nonFilm     bool
 	matched     bool
 	conflict    bool
 }
@@ -139,7 +147,7 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) curationVerdict {
 		return curationVerdict{conflict: match.matched}
 	}
 	return curationVerdict{
-		isBest: match.isBest, matched: match.matched,
+		isBest: match.isBest, matched: match.matched, nonFilm: match.nonFilm,
 		tvdbID: match.vote.resolve(), sonarrTitle: match.twin.resolve(),
 	}
 }
@@ -229,6 +237,7 @@ type queryStats struct {
 	upstreamFetched int
 	upstream        int
 	curated         int
+	catalogue       int
 	// identityConflicts counts search results dropped because a curated identity
 	// signal was CONTRADICTED by another signal on the same item, as opposed to the
 	// ordinary not-curated drop. Without it a tampered or misbehaving upstream reads
@@ -240,7 +249,7 @@ type queryStats struct {
 // queryStats summary, and a non-nil torznabFault when the request could not be
 // answered with a feed at all.
 func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]item, queryStats, *torznabFault) {
-	if !servesQuery(q) {
+	if _, _, special := specialsRequest(q); !servesQuery(q) && !special {
 		return nil, queryStats{}, nil
 	}
 	// A disabled tracker has NO feed to read and NO upstream to search, whatever the
@@ -265,30 +274,12 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		stats queryStats
 		fault *torznabFault
 	)
+	class := requesterOf(q)
 	if isFeedRequest(q) {
-		items = ix.feedFor(scope)
+		items = ix.feedFor(scope, class)
 		stats = queryStats{answered: true, feed: true, curated: len(items)}
 	} else {
-		raw, fetched, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
-		set := ix.cache.curation()
-		var conflicts int
-		items, conflicts = markAndDedupe(raw, &set, scope)
-		stats = queryStats{
-			answered:        true,
-			upstreamFetched: fetched, upstream: len(raw), curated: len(items),
-			identityConflicts: conflicts,
-		}
-		if failed {
-			// A total upstream failure is reported as a Torznab <error>, not an empty
-			// 200 feed: an empty feed reads as a clean no-match, which would record a
-			// Prowlarr outage as a successful search. A partial failure keeps the
-			// degraded-but-successful feed.
-			fault = &torznabFault{
-				summary: "upstream query failed",
-				code:    errCodeUnknown,
-				detail:  "upstream Prowlarr query failed; search results unavailable",
-			}
-		}
+		items, stats, fault = ix.search(ctx, q, scope, class, enabled)
 	}
 
 	if stats.feed {
@@ -317,6 +308,42 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		items = items[:maxItems]
 	}
 	return items, stats, fault
+}
+
+func (ix *Indexer) search(ctx context.Context, q url.Values, scope string, class requester, enabled bool) ([]item, queryStats, *torznabFault) {
+	var (
+		raw     []item
+		fetched int
+		failed  bool
+	)
+	// A special search servesQuery skips is answered from the curation alone.
+	if servesQuery(q) {
+		raw, fetched, failed = ix.fetchRaw(ctx, upstreamParams(q), scope)
+	}
+	set := ix.cache.curation()
+	items, conflicts := markAndDedupe(raw, &set, scope, class)
+	curated, added := len(items), 0
+	if enabled && class != requesterMovies && firstPage(q) {
+		items, added = set.answerSpecial(q, scope, ix.enablement.ABPasskey, items)
+	}
+	stats := queryStats{
+		answered:        true,
+		upstreamFetched: fetched, upstream: len(raw), curated: curated,
+		catalogue:         added,
+		identityConflicts: conflicts,
+	}
+	if !failed || len(items) > 0 {
+		return items, stats, nil
+	}
+	// A total upstream failure is reported as a Torznab <error>, not an empty 200
+	// feed: an empty feed reads as a clean no-match, which would record a Prowlarr
+	// outage as a successful search. A partial failure, or one the catalogue still
+	// answered, keeps the degraded-but-successful feed.
+	return items, stats, &torznabFault{
+		summary: "upstream query failed",
+		code:    errCodeUnknown,
+		detail:  "upstream Prowlarr query failed; search results unavailable",
+	}
 }
 
 // isFeedRequest reports whether a request is the empty-query periodic RSS check
@@ -389,7 +416,7 @@ func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 // shape as a tracker with no data. The returned slice is safe to use after the read
 // returns - reload installs fresh backing arrays and never mutates the old ones -
 // but callers must only read it.
-func (ix *Indexer) feedFor(scope string) []item {
+func (ix *Indexer) feedFor(scope string, class requester) []item {
 	// The enablement gate is the SERVER's, not the cache's: whether a tracker's feed
 	// may be served at all is config policy, while the cache only answers what is
 	// loaded.
@@ -399,12 +426,14 @@ func (ix *Indexer) feedFor(scope string) []item {
 	feed := ix.cache.feed(scope)
 	// The serve boundary speaks the WIRE vocabulary only: strip the journal
 	// bookkeeping by projecting each record onto its embedded item, so the render
-	// path cannot depend on persisted-only fields. A stored item carrying a film
-	// twin expands into two wire items here; the journal holds one record.
+	// path cannot depend on persisted-only fields.
 	items := make([]item, 0, len(feed))
 	for i := range feed {
-		items = append(items, feed[i].item)
-		if feed[i].SonarrTitle != "" {
+		original, twin := class.twinsFor(feed[i].SonarrTitle != "", feed[i].NonFilm)
+		if original {
+			items = append(items, feed[i].item)
+		}
+		if twin {
 			items = append(items, sonarrTwin(&feed[i].item))
 		}
 	}
@@ -465,11 +494,11 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 // markAndDedupe keeps the curated releases, stamps each with the best/alt marker
 // and the TVDB id its owners agree on, drops intra-upstream duplicates by guid (a
 // torrent listed under several title aliases carries distinct guids and is
-// deliberately kept), and follows a film whose owners agree on a twin title with
-// its search twin. It also reports how many items were dropped by an identity
-// CONTRADICTION rather than by not being curated, so that class is visible in the
-// per-request line instead of reading as no-match.
-func markAndDedupe(raw []item, set *curation, scope string) (out []item, conflicts int) {
+// deliberately kept), and pairs a release whose owners agree on a twin title with
+// its search twin, per requester (twinsFor). It also reports how many items were
+// dropped by an identity CONTRADICTION rather than by not being curated, so that
+// class is visible in the per-request line instead of reading as no-match.
+func markAndDedupe(raw []item, set *curation, scope string, class requester) (out []item, conflicts int) {
 	seen := make(map[string]struct{}, len(raw))
 	out = make([]item, 0, len(raw))
 	for i := range raw {
@@ -494,8 +523,11 @@ func markAndDedupe(raw []item, set *curation, scope string) (out []item, conflic
 			continue
 		}
 		seen[id] = struct{}{}
-		out = append(out, it)
-		if verdict.sonarrTitle != "" {
+		original, twin := class.twinsFor(verdict.sonarrTitle != "", verdict.nonFilm)
+		if original {
+			out = append(out, it)
+		}
+		if twin {
 			out = append(out, searchTwin(&it, verdict.sonarrTitle))
 		}
 	}
@@ -519,6 +551,13 @@ func upstreamParams(q url.Values) url.Values {
 	return out
 }
 
+// firstPage reports whether a search asks for its first page, the only one
+// answerSpecial serves: the curation has no pages, so a later one would repeat it.
+func firstPage(q url.Values) bool {
+	off, err := strconv.Atoi(strings.TrimSpace(q.Get("offset")))
+	return err != nil || off <= 0
+}
+
 // upstreamForScope returns the upstream a scope targets, or nil when no configured
 // upstream matches. Scope is always a specific tracker here and New wires at most
 // one upstream per name, so a single match is the only case.
@@ -540,7 +579,7 @@ func servesQuery(q url.Values) bool {
 	case "tvsearch", "tv-search":
 		// Season 0 is Sonarr's specials bucket: specials are single releases, so a
 		// season-0 per-episode search is always answered rather than skipped.
-		return strings.TrimSpace(q.Get("ep")) == "" || strings.TrimSpace(q.Get("season")) == "0"
+		return strings.TrimSpace(q.Get("ep")) == "" || isSpecialsSeason(q.Get("season"))
 	default: // "search", "", specials, generic, RSS
 		// A Movies-category search is a film (single release), always answered. It must
 		// not fall through to the episode-skip below: a movie query ends in its year,
@@ -550,6 +589,14 @@ func servesQuery(q url.Values) bool {
 		}
 		return !trailingEpisode.MatchString(strings.TrimSpace(q.Get("q")))
 	}
+}
+
+// isSpecialsSeason reports whether a season param names season 0, in any
+// spelling: Sonarr and Prowlarr send it as "00"
+// (https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Indexers/Newznab/NewznabRequestGenerator.cs#L633).
+func isSpecialsSeason(season string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(season))
+	return err == nil && n == 0
 }
 
 // requestsMovies reports whether the Torznab category list targets Movies
@@ -603,6 +650,69 @@ func categoryMatch(itemCats []int, want map[int]bool) bool {
 		}
 	}
 	return false
+}
+
+type requester int
+
+const (
+	requesterAny requester = iota
+	requesterTV
+	requesterMovies
+)
+
+// requesterOf classifies a request by its categories, every one TV (5000-5999)
+// or every one Movies (2000-2999), and only without any by its search type.
+// The type cannot lead: Prowlarr rewrites an id-less TV or movie search to
+// t=search, while the categories it forwards are the ones the arr synced
+// (https://github.com/Prowlarr/Prowlarr/blob/3c6e1d97ac485a70cc9d4063dd5d17af7a77584d/src/NzbDrone.Core/Indexers/Definitions/Newznab/NewznabRequestGenerator.cs#L52).
+// A malformed category token makes the list unknown, so it is attributed to
+// neither.
+func requesterOf(q url.Values) requester {
+	named, tv, movies := false, true, true
+	for part := range strings.SplitSeq(q.Get("cat"), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		c, err := strconv.Atoi(part)
+		if err != nil {
+			return requesterAny
+		}
+		named = true
+		tv = tv && c >= catTV && c < catTV+1000
+		movies = movies && c >= catMovies && c < catMovies+1000
+	}
+	switch {
+	case named && tv:
+		return requesterTV
+	case named && movies:
+		return requesterMovies
+	case named:
+		return requesterAny
+	}
+	switch strings.ToLower(strings.TrimSpace(q.Get("t"))) {
+	case "tvsearch", "tv-search":
+		return requesterTV
+	case "movie", "movie-search", "moviesearch":
+		return requesterMovies
+	}
+	return requesterAny
+}
+
+// twinsFor reports which of a release's two items this requester is served,
+// given whether it has a twin and whether its original is offered to Sonarr at
+// all (a film's is not). Radarr never gets a twin. Sonarr gets the twin in
+// place of the original, and never a film's own title: Sonarr can attribute
+// one only by guessing an episode from it, one part of a multi-part special
+// (https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Parser/ParsingService.cs#L259).
+func (r requester) twinsFor(hasTwin, sonarrOriginal bool) (original, twin bool) {
+	switch r {
+	case requesterTV:
+		return !hasTwin && sonarrOriginal, hasTwin
+	case requesterMovies:
+		return true, false
+	}
+	return true, hasTwin
 }
 
 // parseCats parses a comma-separated torznab category list into a set.

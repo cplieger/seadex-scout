@@ -298,24 +298,124 @@ func TestIndex_MappingFor(t *testing.T) {
 
 func TestIndex_MappingForKeepsThePlacementOnItsSeries(t *testing.T) {
 	idx := NewIndexWithMappings(nil, map[int]Mapping{
-		70: {SpecialEpisode: 9, Specials: []int{9}, SpecialsTvdb: 500},
-		71: {Specials: []int{3}, SpecialsTvdb: 500},
+		70: {SpecialEpisode: 9, Specials: []int{9}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
+		71: {Specials: []int{3}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
 	})
 	for _, tc := range []struct {
 		rec          Record
 		wantSpecials []int
 		wantSpecial  int
+		wantCount    int
 		wantHit      bool
 	}{
-		{rec: Record{AniDBID: 70, TvdbID: 500}, wantSpecials: []int{9}, wantSpecial: 9, wantHit: true},
-		{rec: Record{AniDBID: 70, TvdbID: 600}, wantSpecial: 9, wantHit: true},
+		{rec: Record{AniDBID: 70, TvdbID: 500}, wantSpecials: []int{9}, wantSpecial: 9, wantCount: 1, wantHit: true},
+		{rec: Record{AniDBID: 70, TvdbID: 600}},
 		{rec: Record{AniDBID: 71, TvdbID: 600}},
 	} {
 		got, ok := idx.MappingFor(&tc.rec)
-		if ok != tc.wantHit || got.SpecialEpisode != tc.wantSpecial || !slices.Equal(got.Specials, tc.wantSpecials) {
-			t.Errorf("MappingFor(anidb %d, tvdb %d) = %+v, %v, want specials %v special episode %d, %v",
-				tc.rec.AniDBID, tc.rec.TvdbID, got, ok, tc.wantSpecials, tc.wantSpecial, tc.wantHit)
+		if ok != tc.wantHit || got.SpecialEpisode != tc.wantSpecial || !slices.Equal(got.Specials, tc.wantSpecials) ||
+			got.SpecialsEpisodes != tc.wantCount {
+			t.Errorf("MappingFor(anidb %d, tvdb %d) = %+v, %v, want specials %v (count %d) special episode %d, %v",
+				tc.rec.AniDBID, tc.rec.TvdbID, got, ok, tc.wantSpecials, tc.wantCount, tc.wantSpecial, tc.wantHit)
 		}
+	}
+}
+
+// TestMapping_SpecialRunPrefersThePlacement pins the one reader of an entry's
+// season-0 episodes: a placement wholly in season 0 and its episode count,
+// nothing for any other placement, and the mapping list's single episode with
+// an unknown count only where there is no placement.
+func TestMapping_SpecialRunPrefersThePlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		m         Mapping
+		want      []int
+		wantCount int
+	}{
+		{name: "placement only", m: Mapping{Specials: []int{9, 10}, SpecialsEpisodes: 2, Placed: true}, want: []int{9, 10}, wantCount: 2},
+		{name: "row only", m: Mapping{SpecialEpisode: 4}, want: []int{4}},
+		{name: "both agreeing", m: Mapping{SpecialEpisode: 4, Specials: []int{4}, SpecialsEpisodes: 1, Placed: true}, want: []int{4}, wantCount: 1},
+		{name: "both disagreeing", m: Mapping{SpecialEpisode: 8, Specials: []int{8, 12}, SpecialsEpisodes: 3, Placed: true}, want: []int{8, 12}, wantCount: 3},
+		{name: "a placement leaving episodes unplaced beside a row", m: Mapping{SpecialEpisode: 3, Specials: []int{3}, Placed: true}},
+		{name: "a placement with no season-0 run beside a row", m: Mapping{SpecialEpisode: 4, Placed: true}},
+		{name: "neither", m: Mapping{Seasons: []SeasonRange{{Season: 1, First: 1}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, count := tc.m.SpecialRun()
+			if !slices.Equal(got, tc.want) || count != tc.wantCount {
+				t.Errorf("(%+v).SpecialRun() = %v, %d, want %v, %d", tc.m, got, count, tc.want, tc.wantCount)
+			}
+		})
+	}
+}
+
+// TestMapping_SpecialRunTakesThePlacementOverAPartialRow pins the decoded
+// disagreement shape (anidb 905): rows put episodes 2 and 3 on S00E08, the
+// stated offset puts episode 1 on S00E12, so the row names part of the entry.
+func TestMapping_SpecialRunTakesThePlacementOverAPartialRow(t *testing.T) {
+	record := `{"anilist_id":901,"anidb_id":905,"type":"MOVIE","tvdb_id":81472,"tvdb_season":0,"episodes":3,` +
+		`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[2,8],[3,8]]}],` +
+		`"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":12},{"start":2,"end":2,"season":0,"episode":8},{"start":3,"end":3,"season":0,"episode":8}]}`
+	parsed, err := parseAnimap(animapBody(`[`+record+`]`), discardLogger())
+	if err != nil {
+		t.Fatalf("parseAnimap(anidb 905) error: %v", err)
+	}
+	idx := buildIndex(parsed.records, parsed.mappings, parsed.parentMappings)
+	rec, _ := idx.Lookup(901)
+	m, ok := idx.MappingFor(&rec)
+	if !ok || m.SpecialEpisode != 8 {
+		t.Fatalf("MappingFor(anidb 905) = %+v, %v, want the row's episode 8 decoded", m, ok)
+	}
+	if got, count := m.SpecialRun(); !slices.Equal(got, []int{8, 12}) || count != 3 {
+		t.Errorf("MappingFor(anidb 905).SpecialRun() = %v, %d, want [8 12], 3", got, count)
+	}
+}
+
+// TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero pins the decoded
+// partial shapes: a placement that leaves some regular episodes without a TVDB
+// episode names no run, and silences a row beside it, while the comparison
+// still reads the placed episodes.
+func TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero(t *testing.T) {
+	for _, tc := range []struct {
+		name, record string
+		wantSpecials []int
+		alID         int
+		wantRow      int
+	}{
+		{
+			name: "the first episode placed, the rest unplaced (anidb 219)",
+			record: `{"anilist_id":5,"anidb_id":219,"type":"MOVIE","tvdb_id":76885,"tvdb_season":0,"episodes":6,` +
+				`"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":3},{"start":2,"end":6}]}`,
+			alID: 5, wantSpecials: []int{3},
+		},
+		{
+			name: "the first episode unplaced, the rest placed (anidb 10046)",
+			record: `{"anilist_id":20593,"anidb_id":10046,"type":"SPECIAL","tvdb_id":102261,"tvdb_season":0,"episodes":6,` +
+				`"tvdb_placement":[{"start":1,"end":1},{"start":2,"end":6,"season":0,"episode":10}]}`,
+			alID: 20593, wantSpecials: []int{10, 11, 12, 13, 14},
+		},
+		{
+			name: "every episode unplaced beside a row naming one",
+			record: `{"anilist_id":30,"anidb_id":300,"type":"MOVIE","tvdb_id":500,"tvdb_season":0,"episodes":1,` +
+				`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}],"tvdb_placement":[{"start":1,"end":1}]}`,
+			alID: 30, wantRow: 8,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parseAnimap(animapBody(`[`+tc.record+`]`), discardLogger())
+			if err != nil {
+				t.Fatalf("parseAnimap(%s) error: %v", tc.record, err)
+			}
+			idx := buildIndex(parsed.records, parsed.mappings, parsed.parentMappings)
+			rec, _ := idx.Lookup(tc.alID)
+			m, _ := idx.MappingFor(&rec)
+			if !slices.Equal(m.Specials, tc.wantSpecials) || m.SpecialEpisode != tc.wantRow {
+				t.Errorf("MappingFor(%s) = specials %v, row %d, want %v, %d", tc.record, m.Specials, m.SpecialEpisode, tc.wantSpecials, tc.wantRow)
+			}
+			if got, count := m.SpecialRun(); got != nil || count != 0 {
+				t.Errorf("MappingFor(%s).SpecialRun() = %v, %d, want nil, 0", tc.record, got, count)
+			}
+		})
 	}
 }
 
@@ -340,7 +440,7 @@ func TestIndex_MappingForJoinsAParentRecordOnItsAniListID(t *testing.T) {
 func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
 	dir := t.TempDir()
 	overrides := filepath.Join(dir, "overrides.json")
-	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":42,"type":"movie","tmdb_movies":[7],"anidb_id":12276}]`), 0o600); err != nil {
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":42,"type":"movie","tmdb_movies":[7],"tvdb_id":100,"anidb_id":12276}]`), 0o600); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

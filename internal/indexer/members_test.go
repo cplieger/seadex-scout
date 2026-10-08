@@ -242,10 +242,10 @@ func TestProjectCurationFoldsTheTvdbIDPerSignal(t *testing.T) {
 	}
 }
 
-// TestProjectCurationFoldsTheTwinTitlePerSignal is holders-agree on the film twin
+// TestProjectCurationFoldsTheTwinTitlePerSignal is unanimity on the film twin
 // AT the search projection's fold: two owners of one release naming the same
-// twin title project it, an owner with none abstains, and two owners naming
-// different titles leave the signal with no twin at all. Driven through
+// twin title project it, while an owner with none, or two owners naming
+// different titles, leave the signal with no twin at all. Driven through
 // ownershipOf, so the title reaches the projection only the way a pass records
 // it (ownedRelease.SonarrTitle).
 func TestProjectCurationFoldsTheTwinTitlePerSignal(t *testing.T) {
@@ -265,8 +265,8 @@ func TestProjectCurationFoldsTheTwinTitlePerSignal(t *testing.T) {
 			episodes: map[int]int{10: 2, 20: 2}, want: "Minami-ke S00E02 1080p [G]",
 		},
 		"one owner carries none": {
-			desc:     "absence abstains",
-			episodes: map[int]int{10: 2}, want: "Minami-ke S00E02 1080p [G]",
+			desc:     "an owner with no twin holds the torrent too, so it vetoes",
+			episodes: map[int]int{10: 2}, want: "",
 		},
 		"the owners disagree": {
 			desc:     "the Minami-ke shape: two episodes veto the twin for this signal",
@@ -284,7 +284,7 @@ func TestProjectCurationFoldsTheTwinTitlePerSignal(t *testing.T) {
 				{AniListID: 20, Torrents: []seadex.Torrent{torrent}},
 			}
 			set := projectCuration(ownershipOf(entries, func(alID int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, Target: TargetSonarr, SpecialEpisode: tc.episodes[alID], SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, SpecialEpisodes: []int{tc.episodes[alID]}, SeriesTitle: "Minami-ke"}
 			}))
 			if got := set.byKey[key].twin.resolve(); got != tc.want {
 				t.Errorf("byKey[%q] twin = %q, want %q (%s)", key, got, tc.want, tc.desc)
@@ -294,6 +294,24 @@ func TestProjectCurationFoldsTheTwinTitlePerSignal(t *testing.T) {
 					got, tc.want, tc.desc)
 			}
 		})
+	}
+}
+
+// TestProjectCurationOwnsASharedTwinByTheLowestEntry pins the catalogue owner
+// of a twin several entries agree on: the lowest AniList id, whatever order
+// the owner map ranges in, so the rendered entry link is stable across reloads.
+func TestProjectCurationOwnsASharedTwinByTheLowestEntry(t *testing.T) {
+	shared := ownedRelease{
+		Key: "nyaa:1", SonarrTitle: "Overlord S00E11 [G]", TwinSeries: "Overlord",
+		URL: "https://nyaa.si/view/1", TwinFirst: 11, TwinLast: 11,
+	}
+	owners := map[string][]ownedRelease{"not-an-id": {shared}}
+	for id := 900; id >= 300; id -= 100 {
+		owners[ownerKey(id)] = []ownedRelease{shared}
+	}
+	twins := projectCuration(owners).twins[seriesQueryKey("Overlord")]
+	if len(twins) != 1 || twins[0].alID != 300 {
+		t.Errorf("projectCuration(7 owners of one twin).twins = %+v, want one candidate owned by 300", twins)
 	}
 }
 

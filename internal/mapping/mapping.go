@@ -240,7 +240,8 @@ type Index struct {
 // without joins on its AniList id, which only a specials-of-parent record has
 // facts under. An override joins through the AniDB id it names: it replaces the
 // upstream record wholesale, its facts included, and an override naming another
-// tvdb_id drops the placement, whose episodes belong to animap's series.
+// tvdb_id drops the placement and the special episode, whose episode numbers
+// belong to animap's series.
 func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
 	if i == nil || rec == nil {
 		return Mapping{}, false
@@ -252,7 +253,7 @@ func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
 		m = i.parentMappings[rec.AniListID]
 	}
 	if m.SpecialsTvdb != rec.TvdbID {
-		m.Specials, m.SpecialsTvdb = nil, 0
+		m.Specials, m.SpecialEpisode, m.SpecialsTvdb, m.SpecialsEpisodes = nil, 0, 0, 0
 	}
 	return m, !m.empty()
 }

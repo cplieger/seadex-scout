@@ -26,53 +26,36 @@ import (
 // cannot drift from it.
 const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 
-// ArrTarget is the arr an entry's library item was resolved to, three-valued
-// because "not in the library" and "Radarr" are different facts. This package
-// imports neither mapping nor align, so EntryInfo is its only channel.
-type ArrTarget int
-
-const (
-	// TargetNone means no library item resolved for the entry.
-	TargetNone ArrTarget = iota
-	// TargetSonarr means the entry resolved to a Sonarr series, including a FILM
-	// TVDB files under one, which is why this is not derivable from IsMovie.
-	TargetSonarr
-	// TargetRadarr means the entry resolved to a Radarr movie.
-	TargetRadarr
-)
-
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
 // (or the AniList canonical title as fallback; empty when neither is known),
-// its release year, the season the entry maps to, whether it is a movie, the
-// TVDB id its mapping record carries, and which arr it resolved to.
+// its release year, the season the entry maps to, whether it is a movie, and the
+// TVDB id its mapping record carries.
 type EntryInfo struct {
 	Title string
-	// SeriesTitle is the Sonarr series a film is filed under, set only beside
-	// SpecialEpisode (a Sonarr target): the second title the film twin is
-	// labeled with, since Title keeps the film's own name.
+	// SeriesTitle is the Sonarr series the entry is filed under, set only beside
+	// SpecialEpisodes: the second title the twin is labeled with, since Title
+	// keeps the entry's own name.
 	SeriesTitle string
 	// Seasons are the TVDB seasons this entry's absolute-numbered episodes fall
 	// into, from the mapping list; nil when the list names none. The
 	// RANGES, never a scalar: three measured entries need 6, 8 and 2 distinct
 	// seasons across their packs, so one season per entry mislabels most of them.
 	Seasons []SeasonRange
-	Year    int
+	// SpecialEpisodes are the TVDB season-0 episodes of SeriesTitle this offered
+	// entry is, ascending, nil when the map names none; SpecialsEpisodes is the
+	// AniDB episode count they answer, 0 when unknown. They let the feed serve a
+	// release a second time as "<SeriesTitle> S00Exx", which Sonarr can parse.
+	SpecialEpisodes  []int
+	SpecialsEpisodes int
+	Year             int
 	// Season is the season number this entry's releases belong to, and SeasonKnown
 	// reports whether one was resolved at all.
 	Season int
 	// TvdbID is the series id the entry's mapping record carries, 0 when it has
 	// none. It feeds the rendered tvdbid attribute, which is what lets Sonarr
 	// resolve a series it could not parse out of the release title.
-	TvdbID int
-	// SpecialEpisode is the TVDB season-0 episode the mapping list
-	// files this film as, 0 when it names none or the entry is not an offered
-	// film on a Sonarr series. It is what lets the feed serve the film a second
-	// time as "<SeriesTitle> S00Exx", a title Sonarr's parser can match.
-	SpecialEpisode int
-	// Target is the arr the entry's library item was resolved to, and it decides
-	// the categories: a film on a Sonarr item is served under BOTH.
-	Target      ArrTarget
+	TvdbID      int
 	SeasonKnown bool
 	IsMovie     bool
 }
@@ -118,21 +101,16 @@ func entryInfoFunc(info EntryInfoFunc) EntryInfoFunc {
 	return func(int) EntryInfo { return EntryInfo{} }
 }
 
-// categoriesFor maps a show's mapping type and its resolved arr to its Torznab
-// categories: a movie to Movies (Radarr), a movie whose library item is a SONARR
-// series to BOTH, and everything else to Anime. BOTH rather than whichever arr won,
-// because a film not owned in Radarr still needs Radarr discovery while its parent
-// series' Sonarr subscribes only to Anime. The unknown case defaults to Anime: a
-// single-file OVA looks like a movie by file name, and a special mis-routed to
-// Radarr can never match there.
-func categoriesFor(isMovie bool, target ArrTarget) []int {
-	if !isMovie {
-		return []int{catAnime}
+// categoriesFor maps a show's mapping type to its Torznab categories: a movie to
+// Movies (Radarr) whichever arr holds it, since Sonarr is offered a film only as
+// its twin (twinsFor), and everything else to Anime. The unknown case defaults to
+// Anime: a single-file OVA looks like a movie by file name, and a special
+// mis-routed to Radarr can never match there.
+func categoriesFor(isMovie bool) []int {
+	if isMovie {
+		return []int{catMovies}
 	}
-	if target == TargetSonarr {
-		return []int{catMovies, catAnime}
-	}
-	return []int{catMovies}
+	return []int{catAnime}
 }
 
 // synthesizeTitle builds the served release title for one curated torrent.

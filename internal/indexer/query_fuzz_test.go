@@ -108,3 +108,34 @@ func FuzzUpstreamParams_limitIsAlwaysTheDecoderWindow(f *testing.F) {
 		}
 	})
 }
+
+// FuzzRequesterOf_neverGivesRadarrATwin holds for any client-sent t and cat: a
+// Movies requester is never served a twin, and a TV requester never a film's
+// own title nor the original a twin supersedes.
+func FuzzRequesterOf_neverGivesRadarrATwin(f *testing.F) {
+	f.Add("search", "5070,5000")
+	f.Add("search", "2000")
+	f.Add("search", "")
+	f.Add("tvsearch", "")
+	f.Add("movie", "")
+	f.Add("search", "2000,5070")
+	f.Add("tvsearch", "8000")
+	f.Add("movie", "5070")
+	f.Add("search", "abc,2040")
+	f.Add("search", " 5999 , 5000")
+	f.Fuzz(func(t *testing.T, kind, cat string) {
+		class := requesterOf(url.Values{"t": {kind}, "cat": {cat}})
+		for _, sonarrOriginal := range []bool{false, true} {
+			original, twin := class.twinsFor(true, sonarrOriginal)
+			if class == requesterMovies && twin {
+				t.Fatalf("requesterOf(t=%q, cat=%q) serves a twin to Radarr", kind, cat)
+			}
+			if class == requesterTV && original {
+				t.Fatalf("requesterOf(t=%q, cat=%q) serves Sonarr the superseded original", kind, cat)
+			}
+		}
+		if original, _ := class.twinsFor(false, false); class == requesterTV && original {
+			t.Fatalf("requesterOf(t=%q, cat=%q) serves Sonarr a film under its own title", kind, cat)
+		}
+	})
+}

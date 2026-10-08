@@ -3,7 +3,9 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 )
@@ -220,11 +222,15 @@ func ownershipOf(entries []seadex.Entry, infoFor EntryInfoFunc) map[string][]own
 		for j := range torrents {
 			t := &torrents[j]
 			r := ownedRelease{
-				Key:         trackerKey(t.Tracker, t.URL),
-				Hash:        validInfoHash(t.InfoHash),
-				SonarrTitle: twinTitle(t, &info),
-				TvdbID:      info.TvdbID,
-				IsBest:      t.IsBest,
+				Key:     trackerKey(t.Tracker, t.URL),
+				Hash:    validInfoHash(t.InfoHash),
+				TvdbID:  info.TvdbID,
+				IsBest:  t.IsBest,
+				NonFilm: !info.IsMovie,
+			}
+			r.SonarrTitle, r.TwinFirst, r.TwinLast = twinFor(t, &info)
+			if r.SonarrTitle != "" {
+				r.TwinSeries, r.URL, r.Size = strings.TrimSpace(info.SeriesTitle), classify.PublishURL(t), totalSize(t.Files)
 			}
 			if r.Key == "" && r.Hash == "" {
 				// Nothing a search can match on, so nothing to own.

@@ -1,8 +1,11 @@
 package indexer
 
 import (
+	"cmp"
 	"maps"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // This file is the persisted feed contract: one store, two facts, two
@@ -110,37 +113,66 @@ type ownedRelease struct {
 	Key  string `json:"key,omitempty"`
 	Hash string `json:"hash,omitempty"`
 	// SonarrTitle is the film twin title THIS owner gives the release (twinTitle),
-	// "" when the owner is not a film offered to a Sonarr series with a named
-	// special episode. At rest for the same reason TvdbID is: the search render
-	// and a tick's unevaluated-owner carry both read it here. Re-derived every
-	// pass, so nothing accumulates.
+	// "" when the owner gives it none. At rest for the same reason TvdbID is: the
+	// search render and a tick's unevaluated-owner carry both read it here.
+	// Re-derived every pass, so nothing accumulates.
 	SonarrTitle string `json:"sonarr_title,omitempty"`
+	// TwinSeries, URL, Size, TwinFirst and TwinLast are set beside SonarrTitle:
+	// the Sonarr series, the published page URL, the payload size and the
+	// season-0 run, which is what a special search is answered with from the
+	// curation alone (answerSpecial). Re-derived every pass, so nothing
+	// accumulates; decodeSnapshotOwners drops a set that cannot be served.
+	TwinSeries string `json:"twin_series,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	TwinFirst  int    `json:"twin_first,omitempty"`
+	TwinLast   int    `json:"twin_last,omitempty"`
 	// TvdbID is the owning entry's TVDB id, 0 when it has none. It is the SEARCH
 	// render's carrier and has to be at rest: the server is a pure snapshot reader
 	// with no mapping access. Re-derived every pass, so nothing accumulates.
 	TvdbID int  `json:"tvdb_id,omitempty"`
 	IsBest bool `json:"best,omitempty"`
+	// NonFilm is whether the owning entry is not a film; only then may a
+	// Sonarr search be served the release under its own title (twinsFor). The
+	// polarity is the fail-safe one: a record written without the field reads
+	// as a film. Re-derived every pass, so nothing accumulates.
+	NonFilm bool `json:"non_film,omitempty"`
+}
+
+// dropUnservableTwin clears the catalogue fields of a persisted record that
+// cannot be served from: a run outside 1..maxTwinEpisode, a blank or oversized
+// series or URL, a URL that is not the record's own tracker identity, or a
+// negative size. SonarrTitle stays, since the proxied search folds it apart.
+func (r *ownedRelease) dropUnservableTwin() {
+	runOK := r.TwinFirst >= 1 && r.TwinFirst <= r.TwinLast && r.TwinLast <= maxTwinEpisode
+	textOK := strings.TrimSpace(r.TwinSeries) != "" && len(r.TwinSeries) <= maxPersistedFieldBytes && len(r.URL) <= maxPersistedFieldBytes
+	if runOK && textOK && r.Size >= 0 && r.Key != "" && trackerKeyFromURL(r.URL) == r.Key {
+		return
+	}
+	r.TwinSeries, r.URL, r.Size, r.TwinFirst, r.TwinLast = "", "", 0, 0, 0
 }
 
 // ownerKey is an AniList entry id in its persisted map-key form: JSON object keys
 // are strings, so the id is written as its decimal spelling.
 func ownerKey(alID int) string { return strconv.Itoa(alID) }
 
-// projectCuration derives the three search maps from the owner-keyed ownership
-// fact: persist the fact, derive the projection, so the maps can never drift from
-// it or be tampered with independently. Both folds on an identity signal are
-// recomputed from every owner's vote rather than accumulated destructively, which
-// is what makes a best-to-alt demotion expressible and what puts holders-agree on
-// the tvdb id here, where several owners collapse into one signal. All three maps
-// are always allocated, so byPair is never absent.
+// projectCuration derives the search maps and the twin catalogue from the
+// owner-keyed ownership fact, so they can never drift from it or be tampered
+// with independently. Every fold is recomputed from every owner's vote rather
+// than accumulated, which makes a best-to-alt demotion expressible and puts
+// holders-agree on the tvdb id here. byPair is always allocated, never absent.
+// A twin several entries share is owned by the lowest AniList id, so its entry
+// link does not follow map order.
 func projectCuration(owners map[string][]ownedRelease) curation {
 	set := curation{
 		byHash: make(map[string]curatedSignal, len(owners)),
 		byKey:  make(map[string]curatedSignal, len(owners)),
 		byPair: make(map[string]bool, len(owners)),
+		twins:  make(map[string][]catalogueTwin),
 	}
-	for _, releases := range owners {
-		for _, r := range releases {
+	for owner, releases := range owners {
+		for i := range releases {
+			r := &releases[i]
 			if r.Hash != "" {
 				set.byHash[r.Hash] = foldOwnerIntoSignal(set.byHash[r.Hash], r)
 			}
@@ -150,18 +182,51 @@ func projectCuration(owners map[string][]ownedRelease) curation {
 			if r.Hash != "" && r.Key != "" {
 				set.byPair[pairKey(r.Hash, r.Key)] = true
 			}
+			set.addTwin(ownerAniListID(owner), r)
 		}
+	}
+	for series := range set.twins {
+		// Map iteration order must not reach the rendered order.
+		slices.SortFunc(set.twins[series], func(a, b catalogueTwin) int { return cmp.Compare(a.key, b.key) })
 	}
 	return set
 }
 
+func (c *curation) addTwin(alID int, r *ownedRelease) {
+	series := seriesQueryKey(r.TwinSeries)
+	if r.SonarrTitle == "" || r.TwinFirst < 1 || series == "" {
+		return
+	}
+	for i := range c.twins[series] {
+		have := &c.twins[series][i]
+		if have.key == r.Key {
+			if alID > 0 && (have.alID == 0 || alID < have.alID) {
+				have.alID = alID
+			}
+			return
+		}
+	}
+	c.twins[series] = append(c.twins[series], catalogueTwin{
+		key: r.Key, hash: r.Hash, url: r.URL, size: r.Size, alID: alID, first: r.TwinFirst, last: r.TwinLast,
+	})
+}
+
+func ownerAniListID(owner string) int {
+	id, err := strconv.Atoi(owner)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
 // foldOwnerIntoSignal folds one owner's stored contribution into the accumulated
-// verdict for one identity signal: best-wins on the vote, and holders-agree on the
-// tvdb id and the film twin title through the same three-state folds the RSS
-// render uses (tvdbVote, twinVote), so the two render paths cannot disagree about
-// a contested id or title.
-func foldOwnerIntoSignal(acc curatedSignal, r ownedRelease) curatedSignal {
+// verdict for one identity signal: best-wins on the vote and on not being a
+// film, holders-agree on the tvdb id and unanimity on the film twin title,
+// through the same folds the RSS render uses (tvdbVote, twinVote), so the two
+// render paths cannot disagree about a contested id or title.
+func foldOwnerIntoSignal(acc curatedSignal, r *ownedRelease) curatedSignal {
 	acc.isBest = acc.isBest || r.IsBest
+	acc.nonFilm = acc.nonFilm || r.NonFilm
 	acc.vote.add(r.TvdbID)
 	acc.twin.add(r.SonarrTitle)
 	return acc
