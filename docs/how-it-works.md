@@ -6,7 +6,7 @@ This page explains how seadex-scout checks your library, matches shows to SeaDex
 
 seadex-scout runs one full pass when it starts and every 24 hours after that. A full pass has four steps:
 
-1. It reads the Sonarr and Radarr anime library, honouring the `arr_tags` include and exclude lists, and records each item's current release. That record holds the release group, resolution, codec, whether it is a remux or an encode, and whether it has dual audio.
+1. It reads the Sonarr and Radarr anime library, honouring the `arr_tags` include and exclude lists, and records each item's current release. That record holds the release group, resolution, codec, whether it is a remux or an encode, and whether it has dual audio. For each Sonarr series with files it also reads which file holds each episode, one extra request per series, so an upgrade's size can count the files it replaces.
 2. It matches each SeaDex entry to a library item by AniList ID, through the [animap](https://github.com/cplieger/animap) ID map. Entries that do not map fall back to an AniList title match.
 3. It filters SeaDex's recommended releases by your settings for remuxes, AnimeBytes and dual audio.
 4. It compares the recommendation that is left with what you have, and logs a `warn` line when SeaDex has something better.
@@ -98,7 +98,7 @@ On your side, the revision is the one Sonarr or Radarr recorded when it imported
 
 Both sides compare their newest revision. Your side is the newest revision your files of a group carry, across the season, the movie, or all the seasons an entry spans. SeaDex's side is the newest file SeaDex lists across that group's best releases. A group that reissues one episode of a pack as `v2` therefore lists `v2`.
 
-When your newest revision is older than SeaDex's for every SeaDex best group you hold, the item is not aligned. The daemon logs a `newer_revision` finding and the report says `have_older_revision`. That includes a library that holds the pack without the reissued episode. Holding the listed revision or a newer one stays aligned. So does missing revision evidence on either side, such as a SeaDex release with no version or a library file with no recorded revision. A missing token is never read as an older release.
+When your newest revision is older than SeaDex's for every SeaDex best group you hold, the item is not aligned. The daemon logs a `newer_revision` finding and the report says `have_older_revision`. That includes a library that holds the pack without the reissued episode. The finding recommends and links the group's releases at that newer revision when you can get one, not the older ones SeaDex still lists beside them. Holding the listed revision or a newer one stays aligned. So does missing revision evidence on either side, such as a SeaDex release with no version or a library file with no recorded revision. A missing token is never read as an older release.
 
 ## Filters
 

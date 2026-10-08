@@ -2,6 +2,7 @@ package payload
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,4 +100,34 @@ func TestLastSubmatchIndex_isFindAllsLastMatchProperty(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestSpans(t *testing.T) {
+	file := func(name string) seadex.File { return seadex.File{Name: name, Length: 100} }
+	tests := []struct {
+		name  string
+		files []seadex.File
+		want  []EpisodeSpan
+		ok    bool
+	}{
+		{name: "one SxxExx episode", files: []seadex.File{file("Show - S01E03 (1080p).mkv")}, want: []EpisodeSpan{{1, 3, 3}}, ok: true},
+		{name: "a version suffix", files: []seadex.File{file("Show - S02E05v2 (1080p).mkv")}, want: []EpisodeSpan{{2, 5, 5}}, ok: true},
+		{name: "a range in one file", files: []seadex.File{file("Show - S01E03-E04 (1080p).mkv")}, want: []EpisodeSpan{{1, 3, 4}}, ok: true},
+		{name: "a range without the second E", files: []seadex.File{file("Show - S01E03-04 (1080p).mkv")}, want: []EpisodeSpan{{1, 3, 4}}, ok: true},
+		{name: "an absolute number", files: []seadex.File{file("[Grp] Show - 07v2 [1080p].mkv")}, want: []EpisodeSpan{{AbsoluteSeason, 7, 7}}, ok: true},
+		{name: "the last token wins", files: []seadex.File{file("Show S01E01 Remake - S01E09.mkv")}, want: []EpisodeSpan{{1, 9, 9}}, ok: true},
+		{name: "a file with no token", files: []seadex.File{file("Show - S01E01.mkv"), file("Show Movie.mkv")}, ok: false},
+		{name: "a token only the directory carries", files: []seadex.File{file("Show S01E01-E12/a.mkv"), file("Show S01E01-E12/b.mkv")}, ok: false},
+		{name: "a backwards range", files: []seadex.File{file("Show - S01E09-E03.mkv")}, ok: false},
+		{name: "episode zero", files: []seadex.File{file("Show - S01E00.mkv")}, ok: false},
+		{name: "a range past the bound", files: []seadex.File{file("Show - S01E0001-E2001.mkv")}, ok: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := Spans(tc.files)
+			if ok != tc.ok || (ok && !slices.Equal(got, tc.want)) {
+				t.Errorf("Spans(%v) = %v, %v, want %v, %v", tc.files, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
 }

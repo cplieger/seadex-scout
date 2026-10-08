@@ -852,6 +852,11 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	if !rec.Contains("indexer feed snapshot written") {
 		t.Fatalf("no snapshot log line; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
+	for _, key := range []string{"scope", "nyaa_feed", "ab_feed", "ab_releases_skipped", "journal_new"} {
+		if _, ok := rec.AttrValue("indexer feed snapshot written", key); !ok {
+			t.Errorf("snapshot line lacks %q, which the log contract declares stable", key)
+		}
+	}
 }
 
 // foreignHostInfoHash is a valid 40-hex info hash for the ownership-gate

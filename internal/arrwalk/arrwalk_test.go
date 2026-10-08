@@ -36,18 +36,19 @@ func discardLogger() *slog.Logger {
 }
 
 // fakeSonarr is a scripted SonarrClient: Series returns series (or listErr),
-// EpisodeFiles returns files[id] (or epErr[id]), Tags returns the canned
-// tag list (or tagErr).
+// EpisodeFiles returns files[id] (or epErr[id]), Episodes returns
+// episodes[id] (or episodesErr[id]) and counts the call in episodesCalls, Tags
+// returns the canned tag list (or tagErr).
 type fakeSonarr struct {
 	files         map[int][]arrapi.EpisodeFile
+	episodes      map[int][]arrapi.Episode
 	epErr         map[int]error
-	specials      map[int][]arrapi.Episode
-	spErr         map[int]error
+	episodesErr   map[int]error
 	listErr       error
 	tagErr        error
+	episodesCalls map[int]int
 	series        []arrapi.Series
 	tags          []arrapi.Tag
-	specialsCalls map[int]int
 	mu            sync.Mutex
 }
 
@@ -62,21 +63,21 @@ func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.Epi
 	return f.files[seriesID], nil
 }
 
-func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
-	return f.tags, f.tagErr
+func (f *fakeSonarr) Episodes(_ context.Context, seriesID int) ([]arrapi.Episode, error) {
+	f.mu.Lock()
+	if f.episodesCalls == nil {
+		f.episodesCalls = map[int]int{}
+	}
+	f.episodesCalls[seriesID]++
+	f.mu.Unlock()
+	if err := f.episodesErr[seriesID]; err != nil {
+		return nil, err
+	}
+	return f.episodes[seriesID], nil
 }
 
-func (f *fakeSonarr) SeasonEpisodes(_ context.Context, seriesID int, season arrapi.SeasonNumber) ([]arrapi.Episode, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.specialsCalls == nil {
-		f.specialsCalls = map[int]int{}
-	}
-	f.specialsCalls[seriesID]++
-	if season != 0 {
-		return nil, fmt.Errorf("SeasonEpisodes(%d, %d): the walker reads season 0 only", seriesID, season)
-	}
-	return f.specials[seriesID], f.spErr[seriesID]
+func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+	return f.tags, f.tagErr
 }
 
 func epFile(season int, group string) arrapi.EpisodeFile {
@@ -368,10 +369,6 @@ func (f *boundedSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *boundedSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
-	return nil, nil
-}
-
 func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	f.mu.Lock()
 	f.active++
@@ -396,6 +393,10 @@ func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrap
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (f *boundedSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+	return nil, nil
 }
 
 func (f *boundedSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
@@ -473,7 +474,7 @@ func (f *cancelingSonarr) EpisodeFiles(ctx context.Context, _ int) ([]arrapi.Epi
 	return nil, ctx.Err()
 }
 
-func (f *cancelingSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
+func (f *cancelingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
@@ -1090,10 +1091,6 @@ func (f *budgetSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *budgetSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
-	return nil, nil
-}
-
 func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	select {
 	case f.started <- seriesID:
@@ -1106,6 +1103,10 @@ func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (f *budgetSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+	return nil, nil
 }
 
 func (f *budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {

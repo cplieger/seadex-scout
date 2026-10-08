@@ -107,6 +107,13 @@ type Finding struct {
 	// definite AnimeBytes torrent skipped while the toggle is off.
 	AltGroups []string
 	Links     []ReleaseLink
+	// Downloads is the download set an upgrade selects, one record per torrent
+	// (at most MaxDownloadsPerFinding), and ReleaseBytes their total; both stay
+	// zero when that size is unknown or the finding is not an upgrade.
+	Downloads []Download
+	// Replaced is the library files that download set replaces whole and
+	// CurrentBytes their total; both stay zero when that size is unknown.
+	Replaced []Replacement
 	// CurrentGroups preserves the scoped on-disk group set with its element
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
@@ -120,6 +127,8 @@ type Finding struct {
 	// revision SeaDex lists for them (align.Decision).
 	CurrentRevision     release.Revision
 	RecommendedRevision release.Revision
+	ReleaseBytes        int64
+	CurrentBytes        int64
 	AniListID           int
 	Season              int
 	DualAudio           bool
@@ -218,7 +227,12 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	case align.OutcomeNoBest:
 		return emptyResult(entry, &base)
 	case align.OutcomeSuperseded:
-		return supersededResult(entry, &base, &d, recommended)
+		pool, exact := supersededPool(&d, recommended, listing.BestRevisions)
+		f := supersededResult(entry, &base, &d, pool)
+		if !exact {
+			return f
+		}
+		return sized(m, &d, pool, f)
 	case align.OutcomeUnverifiable:
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusUnverifiable)
@@ -230,7 +244,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 		if f.Status == StatusBetter {
 			f.Tier = c.tier(m, recGroups, listed)
 		}
-		return f
+		return sized(m, &d, recommended, f)
 	default:
 		// Every Outcome the shared linearization produces is handled above.
 		fillBest(&base, recommended, recGroups)
@@ -331,19 +345,39 @@ func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, r
 	return finalize(base, status)
 }
 
-// supersededResult finalizes a same-group revision finding. The pool narrows to
-// the superseded groups first, so the recommendation and its links name the
-// group the operator already holds rather than another best group. An
-// incomplete entry downgrades to the incomplete nudge, as betterResult does.
-func supersededResult(entry *seadex.Entry, base *Finding, d *align.Decision, recommended []candidate) *Finding {
-	// SupersededGroups is a subset of the best set Decide was given, which is
-	// groupSet(recommended), so the pool is never empty for fillBest.
-	var pool []candidate
+// supersededPool narrows the recommended candidates to the superseded groups,
+// so the recommendation names the group the operator already holds, and each
+// group to its candidates at the revision listed for it, so it names the newer
+// release. listed reads every best torrent, obtainable or not: a group with no
+// recommended candidate at its listed revision keeps them all and exact is
+// false, as the pool then does not stand for the newer download. The pool is
+// never empty: SupersededGroups is a subset of groupSet(recommended).
+func supersededPool(d *align.Decision, recommended []candidate, listed map[string]release.Revision) (pool []candidate, exact bool) {
+	atListed := make(map[string]bool, len(d.SupersededGroups))
 	for i := range recommended {
-		if slices.Contains(d.SupersededGroups, release.NormalizeGroup(recommended[i].rel.Group)) {
-			pool = append(pool, recommended[i])
+		group := release.NormalizeGroup(recommended[i].rel.Group)
+		if recommended[i].rel.Revision == listed[group] {
+			atListed[group] = true
 		}
 	}
+	exact = true
+	for _, group := range d.SupersededGroups {
+		exact = exact && atListed[group]
+	}
+	for i := range recommended {
+		group := release.NormalizeGroup(recommended[i].rel.Group)
+		if !slices.Contains(d.SupersededGroups, group) || (atListed[group] && recommended[i].rel.Revision != listed[group]) {
+			continue
+		}
+		pool = append(pool, recommended[i])
+	}
+	return pool, exact
+}
+
+// supersededResult finalizes a same-group revision finding over the
+// supersededPool. An incomplete entry downgrades to the incomplete nudge, as
+// betterResult does.
+func supersededResult(entry *seadex.Entry, base *Finding, d *align.Decision, pool []candidate) *Finding {
 	status := StatusNewerRevision
 	if entry.Incomplete {
 		status = StatusIncomplete

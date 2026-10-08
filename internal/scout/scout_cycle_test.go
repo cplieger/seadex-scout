@@ -666,6 +666,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 	if n := recorder.CountExact("cycle complete"); n != 1 {
 		t.Errorf("'cycle complete' count = %d, want 1", n)
 	}
+	assertContractAttrs(t, recorder, "cycle complete")
 	if got := store.st.Library.Items; len(got) != 1 || got[0].Title != "Frieren" {
 		t.Errorf("persisted library = %+v, want the refreshed Frieren snapshot", got)
 	}
@@ -735,7 +736,7 @@ func (c *cancellingSonarr) EpisodeFiles(context.Context, int) ([]arrapi.EpisodeF
 	return nil, nil
 }
 
-func (c *cancellingSonarr) SeasonEpisodes(context.Context, int, arrapi.SeasonNumber) ([]arrapi.Episode, error) {
+func (c *cancellingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
@@ -1359,6 +1360,7 @@ func TestCycleReportCarriesForwardIncompleteEvidence(t *testing.T) {
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
 		t.Errorf("degraded reasons = %v, want [partial-walk] (the switch's first arm wins the combined degradation)", reasons)
 	}
+	assertContractAttrs(t, recorder, "cycle degraded")
 	if n := recorder.CountExact("cycle complete"); n != 1 {
 		t.Errorf("'cycle complete' count = %d, want 1 (the healthy cycle only)", n)
 	}

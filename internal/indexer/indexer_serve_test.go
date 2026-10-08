@@ -1059,6 +1059,7 @@ func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
 
 	for _, want := range []struct{ key, value string }{
 		{"scope", "nyaa"},
+		{"t", "tvsearch"},
 		{"answered", "true"},
 		{"feed", "false"},
 		{"upstream_fetched", "2"},

@@ -70,7 +70,7 @@ On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**.
 
 ## Reading the results
 
-The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists every upgrade newest first, with links to the release and the show in Sonarr or Radarr. It shows how much of your library is at SeaDex's best or alt, and whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
+The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known. The dashboard also shows how much of your library is at SeaDex's best or alt, and whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
 
 With the rules from step 4 loaded, your Alertmanager sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. To stop the messages for one show, add its `al_id` to `filters.ignore`.
 

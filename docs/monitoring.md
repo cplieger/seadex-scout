@@ -21,6 +21,10 @@ Every full pass whose library read was complete also logs one `library summary` 
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
 
+Every line a pass logs about the findings carries `pass_id`, the start of that pass in Unix milliseconds. Every finding line also carries `first_seen`, when seadex-scout first saw the finding since it started. A `better release available` line also carries `rank_alt` and `rank_none`, its place in the upgrades list with Optional upgrades on Hide and on Show, where 0 means that view leaves it out. It carries `recommended_bytes`, `current_bytes` and `size_change_bytes` when each is known. The two manual-review messages carry `rank_check`.
+
+After the findings, each pass logs one `upgrade sizes` line per view, with `hidden_tier` set to `alt` or `none`, carrying the size totals. Up to 25 `biggest upgrade` lines and up to 30 `group rank` lines follow per view, and `findings reported` with its `manual_review` count closes the pass. An upgrade that enters the list logs `upgrade found`, and one that leaves it logs `upgrade resolved`. On the first pass after a start, every `upgrade found` line carries `after_start=true`.
+
 A problem that lasts, such as SeaDex being unreachable, logs an `error` line with a `condition` attribute on every pass until it clears. It saves these problems in its state, so a restart does not clear an alert that is still true.
 
 ## Health
@@ -41,11 +45,11 @@ The dashboard has three variables at the top. **Data source** picks your Loki da
 
 **Optional upgrades** decides whether the upgrades list shows upgrades where you already have a SeaDex alt. **Hide** is the default and leaves them out. Pick **Show** to see them too. The Upgrades count at the top follows the same setting, so the count matches the list.
 
-The dashboard has three rows:
+The dashboard has three tabs:
 
-- At a glance shows the status, the number of upgrades and of findings to check by hand, and two shares of your anime. Library overview on its right counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy.
-- Upgrades lists every upgrade, newest first, with the time it was first seen. It also lists the findings seadex-scout could not decide on its own, under Check by hand. Below them, a stacked graph counts your anime at each daily check. Its four parts are at SeaDex best, at SeaDex alt, not at best or alt, and not on SeaDex, so the total is every anime in your library. Not at best or alt covers an anime with any season on another group, an older version, no files found or an untagged release.
-- Scout health is collapsed. It shows why the status is not `✓`, when the last checks finished, how often Sonarr and Radarr read the Torznab feed, and how many releases the feed newly offered.
+- Overview shows the status, the number of upgrades and of findings to check by hand, two shares of your anime and Library overview, which counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrade storage gives the space the upgrades need, then Upgrades available and Check by hand list them.
+- Upgrades is the deep dive. It shows the biggest size changes, the upgrade count over time and the upgrades recently resolved. It also breaks the upgrades down by reason, format and source, as the average per check over the last two hours, and ranks the release groups involved.
+- Scout health shows when the last checks finished and the errors that keep the status from `✓`. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
 
 The SeaDex best tile is the share of your anime where everything you have is SeaDex's best release. The SeaDex alt tile is the share where you have best or alt releases with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts as alt.
 
@@ -55,15 +59,37 @@ Episode not known means a film or special in Sonarr's specials that seadex-scout
 
 In the upgrades list, You have, SeaDex best and SeaDex alt name the release groups. On a newer version they also show the version, such as `smol v1` against `smol v2`. SeaDex alt shows `-` when SeaDex lists no alt.
 
-Each title opens the series or film in Sonarr or Radarr. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
+Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens the entry on releases.moe. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
 
 The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
 
-The status shows `✓`, `!` or `✗`, built from the same conditions as the shipped alert rules. A tick means checks run and nothing fails. An exclamation mark means SeaDex, AniList or the anime ID map is failing, and nothing needs fixing on your side. A cross means an error you can fix or checks that stopped. Scout health says which.
+The status shows `✓`, `!` or `✗`, built from the same conditions as the shipped alert rules. A tick means checks run and nothing fails. An exclamation mark means SeaDex, AniList or the anime ID map is failing, and nothing needs fixing on your side. A cross means an error you can fix or checks that stopped. On the Scout health tab, Errors behind Status lists those errors, and Last check and Last full check show stopped checks.
 
-First seen is the earliest time a finding was logged within the selected time range. A finding older than the range, or older than the logs your Loki keeps, shows the earliest time still held. Widen the range to look further back. Loki's `max_query_length` setting can refuse a very long range. If it does, the upgrades still show with First seen empty. First seen needs a Loki version whose `label_format` supports `__timestamp__`. Loki 3.7 is known to work.
+Upgrades available and Check by hand show the newest check only, up to 200 upgrades and 100 findings, while the counts above them count every one. Upgrades come first when they are a newer version of a group you have, then by size change, from most added to most freed. First seen is when seadex-scout first saw the upgrade since it started, so it resets when the container restarts.
 
-The two share tiles, Library overview and the graph show the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available. An anime whose only SeaDex entries have no file, or are only offered in the feed, has an entry but is never at best or alt.
+### Upgrade sizes
+
+Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. The Download needed and Net library size change tiles add up every upgrade the Optional upgrades setting shows, including any beyond the 200 rows the table lists. Without a size counts the ones left out.
+
+The download is one set of torrents. A season pack, or a release whose files name no episode, is that torrent alone. A single episode stands for every single episode of the same release, which is the same group, tracker, resolution, codec, kind and dual audio, one torrent per episode. Each torrent counts at its full size, extras and samples included.
+
+The size it replaces is the files of yours that download covers whole. A file holding two episodes is replaced only when the download brings both. A film replaces its one file. seadex-scout reads which file holds each episode from Sonarr once a day, during the full check.
+
+A size stays unknown in these cases, among others:
+
+- The release mixes a pack with single episodes, two torrents name the same episode, or a file names no episode.
+- A torrent has no size or has neither an info hash nor a link, two torrents of one download share an info hash or a link, or the set needs more than 64 torrents.
+- Sonarr's episode list for the series could not be read or marks a file without saying which, or a file names an episode of another season.
+- A covered episode has no file, or Sonarr or Radarr reports a file without its size.
+- An absolute episode number is carried by no episode of the series, by several, or by one in another season.
+- The download covers none of your files whole.
+- The entry covers your whole series rather than one season, or another SeaDex entry maps the same season.
+- A newer revision is listed only on a release you cannot get, such as one on AnimeBytes with `animebytes` off.
+- The entry is a film or special filed in Sonarr's specials. Its copy in Radarr, if you have one, replaces its one file like any film.
+
+The totals count each torrent once, even when two upgrades share it, and each replaced file once. So the rows can add up to more than the tiles.
+
+The two share tiles and Library overview show the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available. An anime whose only SeaDex entries have no file, or are only offered in the feed, has an entry but is never at best or alt.
 
 These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. They then keep the previous summary until it is 26 hours old and are empty after that, until a complete check logs a new one.
 
