@@ -192,3 +192,23 @@ func TestHoldsCopyReadsUnknownAsHeld(t *testing.T) {
 		}
 	}
 }
+
+func TestSpecialsSeriesFindsTheSonarrCopyFindByIDHides(t *testing.T) {
+	film, series := radarrFilm(true), sonarrSeries(false)
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{film, series}})
+	if got := li.FindByID(&placedFilm); got == nil || got.Arr != library.ArrRadarr {
+		t.Fatalf("FindByID(both-arr film) = %+v, want the Radarr copy", got)
+	}
+	if got := li.SpecialsSeries(&placedFilm); got == nil || got.Arr != library.ArrSonarr || got.ArrID != 7 {
+		t.Errorf("SpecialsSeries(both-arr film) = %+v, want the Sonarr series ArrID 7", got)
+	}
+	noTvdb := placedFilm
+	noTvdb.TvdbID = 0
+	if got := li.SpecialsSeries(&noTvdb); got != nil {
+		t.Errorf("SpecialsSeries(no tvdb id) = %+v, want nil", got)
+	}
+	radarrOnly := NewLibIndex(&library.Snapshot{Items: []library.Item{film}})
+	if got := radarrOnly.SpecialsSeries(&placedFilm); got != nil {
+		t.Errorf("SpecialsSeries(film in Radarr only) = %+v, want nil", got)
+	}
+}

@@ -86,7 +86,9 @@ It writes a timestamped Markdown and JSON pair into `config/reports`, with a ver
 
 The indexer is off until you set it up. It offers SeaDex's picks to Sonarr and Radarr as a Torznab indexer, marked so a Custom Format can score them. It finds releases by searching through the Nyaa and AnimeBytes indexers you already have in Prowlarr.
 
-You fill in the `indexer` section of `config.yaml`, add port `9118` to the service, and add the feed to Sonarr and Radarr as a Torznab indexer. Then you create two Custom Formats, one for SeaDex's best picks and one for its alternatives. In that indexer's settings in Sonarr, tick **Anime Standard Format Search**. Without it, Sonarr asks only for single episodes, which the indexer does not answer, and you get nothing.
+You fill in the `indexer` section of `config.yaml`, add port `9118` to the service, and add the feed to Sonarr and Radarr as a Torznab indexer. Give it category `5070` in Sonarr and `2000` in Radarr, because the indexer tells the two apart by them. Then you create two Custom Formats, one for SeaDex's best picks and one for its alternatives. In that indexer's settings in Sonarr, tick **Anime Standard Format Search**. Without it, Sonarr asks only for single episodes, which the indexer answers only for specials, and you get nothing else.
+
+A film or special that TVDB files under a series reaches Sonarr under that series' title and special episode, such as `Code Geass S00E04`. A film also reaches Radarr under its own title. A film the map cannot name that way is offered to Radarr only, so Sonarr never has to guess which special it is.
 
 Right after setup, the indexer's RSS list is empty. It lists only picks SeaDex adds from then on. Sonarr and Radarr find the older ones when they search. [Torznab feed setup](docs/torznab-indexer.md) has every click.
 

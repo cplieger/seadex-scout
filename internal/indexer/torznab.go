@@ -44,10 +44,9 @@ type item struct {
 	DownloadURL          string    `json:"DownloadURL"`
 	InfoHash             string    `json:"InfoHash"`
 	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
-	// SonarrTitle and SonarrGUID are the film twin's two facts, set on a film
-	// filed under a Sonarr series whose holders agree on the season-0 episode the
-	// mapping list names: the "<Series> S00Exx <flags>" title Sonarr's
-	// parser can match, and the original GUID with a fragment. The render expands
+	// SonarrTitle and SonarrGUID are the twin's two facts, set on a release every
+	// holder twins identically (twinVote): the "<Series> S00Exx <flags>" title
+	// Sonarr's parser can match, and the original GUID with a fragment. The render expands
 	// a stored item carrying them into a second wire item (sonarrTwin); nothing is
 	// journaled twice. Additive and omitempty, re-derived every reconcile, so an
 	// older binary drops them and nothing accumulates.

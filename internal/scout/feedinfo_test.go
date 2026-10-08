@@ -373,9 +373,6 @@ func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
 	if film.Title != "Lelouch of the Resurrection" {
 		t.Errorf("info(1).Title = %q, want the film's own name (never the parent series')", film.Title)
 	}
-	if film.Target != indexer.TargetSonarr {
-		t.Errorf("info(1).Target = %v, want %v (the film's media is owned in Sonarr)", film.Target, indexer.TargetSonarr)
-	}
 	if film.TvdbID != 79525 {
 		t.Errorf("info(1).TvdbID = %d, want 79525 (the id that makes the offer consumable)", film.TvdbID)
 	}
@@ -384,32 +381,28 @@ func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
 	}
 
 	radarr := info(2)
-	if radarr.Title != "Lelouch of the Resurrection" || radarr.Target != indexer.TargetRadarr {
-		t.Errorf("info(2) = %+v, want the Radarr item's own title and the Radarr target", radarr)
+	if radarr.Title != "Lelouch of the Resurrection" {
+		t.Errorf("info(2) = %+v, want the Radarr item's own title", radarr)
 	}
 
 	series := info(3)
-	if series.Title != "Code Geass" || series.Target != indexer.TargetSonarr {
+	if series.Title != "Code Geass" {
 		t.Errorf("info(3) = %+v, want the Sonarr series' own title (the gate is for MOVIE records only)", series)
 	}
 
 	unmatched := info(4)
-	if unmatched.Target != indexer.TargetNone {
-		t.Errorf("info(4).Target = %v, want %v", unmatched.Target, indexer.TargetNone)
-	}
 	if unmatched.TvdbID != 0 {
 		t.Errorf("info(4).TvdbID = %d, want 0 (the record carries none)", unmatched.TvdbID)
 	}
 }
 
 // TestFeedEntryInfoProjectsTheMappingList pins the projection of the record's
-// mapping list onto the feed metadata. The special episode is stamped ONLY for
-// the offered class on a Sonarr series (a MOVIE record with a mapped season zero
-// resolved to a titled Sonarr item), beside the series title, while the film
-// keeps its own name; the same record on a Radarr item, a TV record with a
-// positive season (a series node carrying a specials row of its own) and an
-// untitled series all stamp nothing. The season ranges ride along for every
-// mapped record whatever its target.
+// mapping facts onto the feed metadata. The twin's season-0 run is stamped ONLY
+// for the offered class, beside the title of the Sonarr series it is filed
+// under, whichever arr the entry resolved to, and a film keeps its own name. A
+// positive-season TV record, an untitled series, an override naming another
+// series and an unmapped record stamp nothing. Season ranges ride along for
+// every mapped record.
 func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 	ranges := []mapping.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
 	idx := mapping.NewIndexWithMappings([]mapping.Record{
@@ -417,12 +410,18 @@ func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 		{AniListID: 2, Type: "MOVIE", TvdbID: 79525, TmdbMovies: []int{5528}, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 3, Type: "TV", TvdbID: 79525, AniDBID: 7949, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
 		{AniListID: 4, Type: "TV", TvdbID: 81797, AniDBID: 69, SeasonKind: mapping.SeasonAbsent},
-		{AniListID: 5, Type: "MOVIE", TvdbID: 70000, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 5, Type: "MOVIE", TvdbID: 70000, AniDBID: 6009, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 6, Type: "MOVIE", TvdbID: 79525, AniDBID: 9999, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 7, Type: "OVA", TvdbID: 79525, AniDBID: 8001, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 8, Type: "MOVIE", TvdbID: 79525, AniDBID: 905, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 9, Type: "MOVIE", TvdbID: 81797, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
 	}, map[int]mapping.Mapping{
-		6008: {SpecialEpisode: 4},
-		7949: {SpecialEpisode: 1},
+		6008: {SpecialEpisode: 4, SpecialsTvdb: 79525},
+		6009: {SpecialEpisode: 4, SpecialsTvdb: 70000},
+		7949: {SpecialEpisode: 1, SpecialsTvdb: 79525},
 		69:   {Seasons: ranges},
+		8001: {Specials: []int{9, 10}, SpecialsTvdb: 79525, SpecialsEpisodes: 2},
+		905:  {SpecialEpisode: 8, Specials: []int{8, 12}, SpecialsTvdb: 79525, SpecialsEpisodes: 3},
 	})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 79525, Title: "Code Geass", Year: 2006},
@@ -435,24 +434,36 @@ func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 	}}
 	info := feedEntryInfo(idx, lib, memo)
 
-	film := info(1)
-	if film.SpecialEpisode != 4 || film.SeriesTitle != "Code Geass" {
-		t.Errorf("info(1) = SpecialEpisode %d SeriesTitle %q, want 4 and the Sonarr series' title", film.SpecialEpisode, film.SeriesTitle)
+	for _, tc := range []struct {
+		name       string
+		alID       int
+		wantRun    []int
+		wantCount  int
+		wantSeries string
+	}{
+		{name: "a film only in Sonarr, from the mapping list", alID: 1, wantRun: []int{4}, wantSeries: "Code Geass"},
+		{name: "a film also in Radarr", alID: 2, wantRun: []int{4}, wantSeries: "Code Geass"},
+		{name: "a positive-season TV record", alID: 3},
+		{name: "a blank-titled series", alID: 5},
+		{name: "no mapping", alID: 6},
+		{name: "a placement only", alID: 7, wantRun: []int{9, 10}, wantCount: 2, wantSeries: "Code Geass"},
+		{name: "a placement and a row disagreeing", alID: 8, wantRun: []int{8, 12}, wantCount: 3, wantSeries: "Code Geass"},
+		{name: "an override naming another series", alID: 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := info(tc.alID)
+			if !slices.Equal(got.SpecialEpisodes, tc.wantRun) || got.SpecialsEpisodes != tc.wantCount || got.SeriesTitle != tc.wantSeries {
+				t.Errorf("info(%d) = SpecialEpisodes %v (count %d) SeriesTitle %q, want %v (count %d) %q",
+					tc.alID, got.SpecialEpisodes, got.SpecialsEpisodes, got.SeriesTitle, tc.wantRun, tc.wantCount, tc.wantSeries)
+			}
+		})
 	}
+	film := info(1)
 	if film.Title != "Lelouch of the Resurrection" {
 		t.Errorf("info(1).Title = %q, want the film's own name kept", film.Title)
 	}
-	if radarr := info(2); radarr.SpecialEpisode != 0 || radarr.SeriesTitle != "" {
-		t.Errorf("info(2) on a Radarr item = SpecialEpisode %d SeriesTitle %q, want none (Radarr's item does not change)", radarr.SpecialEpisode, radarr.SeriesTitle)
-	}
-	if tv := info(3); tv.SpecialEpisode != 0 || tv.SeriesTitle != "" {
-		t.Errorf("info(3) positive-season TV record = SpecialEpisode %d SeriesTitle %q, want none (the offered class only)", tv.SpecialEpisode, tv.SeriesTitle)
-	}
-	if untitled := info(5); untitled.SpecialEpisode != 0 || untitled.SeriesTitle != "" {
-		t.Errorf("info(5) on a blank-titled series = SpecialEpisode %d SeriesTitle %q, want none", untitled.SpecialEpisode, untitled.SeriesTitle)
-	}
-	if unlisted := info(6); unlisted.SpecialEpisode != 0 {
-		t.Errorf("info(6) with no mapping = SpecialEpisode %d, want 0", unlisted.SpecialEpisode)
+	if both := info(2); !both.IsMovie || both.Title != "Lelouch of the Resurrection" {
+		t.Errorf("info(2) = IsMovie %v Title %q, want the Radarr film unchanged", both.IsMovie, both.Title)
 	}
 	want := []indexer.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
 	if run := info(4); !slices.Equal(run.Seasons, want) {

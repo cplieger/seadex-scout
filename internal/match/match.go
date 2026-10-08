@@ -549,6 +549,14 @@ func (li *LibIndex) otherCopy(rec *mapping.Record, primary *library.Item) *libra
 	return li.filmCopy(rec, imdbKey(primary.ImdbID))
 }
 
+// SpecialsSeries is the Sonarr series rec's TVDB id names, or nil. The caller
+// owns the precondition that rec is filed in that series' specials (an offered
+// record): only then do its season-0 episodes belong to this item, whichever
+// copy FindByID resolved.
+func (li *LibIndex) SpecialsSeries(rec *mapping.Record) *library.Item {
+	return li.byTvdb[rec.TvdbID] // byTvdb is Sonarr-only, positive ids only (indexIDs)
+}
+
 // filmCopy is the Radarr film rec's TMDB movie ids, then its IMDb ids, name.
 // seriesImdb, the IMDb id of the entry's Sonarr series ("" when it has none),
 // never names the film: TVDB reuses a film's IMDb id on its parent series.

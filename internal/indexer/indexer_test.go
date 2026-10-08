@@ -219,7 +219,7 @@ func TestMarkAndDedupe(t *testing.T) {
 		{Title: "not curated", InfoURL: "https://nyaa.si/view/999", GUID: "g3"},
 		{Title: "dup of best", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
 	}
-	out, _ := markAndDedupe(raw, set, upstreamNyaa)
+	out, _ := markAndDedupe(raw, set, upstreamNyaa, requesterAny)
 	if len(out) != 2 {
 		t.Fatalf("got %d items, want 2 (best + alt, dup dropped, uncurated dropped)", len(out))
 	}
@@ -255,7 +255,7 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 				InfoURL:  "https://nyaa.si/view/999",
 			},
 		}
-		if out, _ := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
+		if out, _ := markAndDedupe(raw, set, upstreamNyaa, requesterAny); len(out) != 0 {
 			t.Errorf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
 		}
 	})
@@ -275,7 +275,7 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 			InfoURL: "https://nyaa.si/view/100",
 			GUID:    "https://nyaa.si/view/200",
 		}}
-		if out, _ := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
+		if out, _ := markAndDedupe(conflicting, bothBest, upstreamNyaa, requesterAny); len(out) != 0 {
 			t.Errorf("got %d items, want 0 (distinct tracker identities must drop the item even when both are best)", len(out))
 		}
 	})
@@ -350,7 +350,7 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if out, _ := markAndDedupe(tc.items, tc.set, upstreamNyaa); len(out) != tc.want {
+			if out, _ := markAndDedupe(tc.items, tc.set, upstreamNyaa, requesterAny); len(out) != tc.want {
 				t.Errorf("got %d items, want %d (%s)", len(out), tc.want, tc.why)
 			}
 		})
@@ -372,7 +372,7 @@ func TestMarkAndDedupeKeyOnlyABNeedsNoPair(t *testing.T) {
 		InfoURL: "https://animebytes.tv/torrent/300/group",
 		GUID:    "https://animebytes.tv/torrent/300/group",
 	}}
-	out, _ := markAndDedupe(raw, set, upstreamAB)
+	out, _ := markAndDedupe(raw, set, upstreamAB, requesterAny)
 	if len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (a key-only AB item needs no pair)", len(out))
 	}
@@ -397,11 +397,11 @@ func TestMarkAndDedupeRejectsCrossScopeKey(t *testing.T) {
 		{Title: "nyaa key under ab scope", InfoURL: "https://nyaa.si/view/1143533", GUID: "g1"},
 		{Title: "curated hash only under ab scope", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g2"},
 	}
-	if out, _ := markAndDedupe(raw, set, upstreamAB); len(out) != 0 {
+	if out, _ := markAndDedupe(raw, set, upstreamAB, requesterAny); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (cross-scope key and hash-only items must not match under /ab)", len(out))
 	}
 	abOnly := []item{{Title: "ab key under nyaa scope", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g3"}}
-	if out, _ := markAndDedupe(abOnly, set, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(abOnly, set, upstreamNyaa, requesterAny); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (an AnimeBytes key must not match under /nyaa)", len(out))
 	}
 }
@@ -417,7 +417,7 @@ func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 		byKey:  bestVotes(map[string]bool{}),
 	}
 	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
-	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa, requesterAny)
 	if len(out) != 0 {
 		t.Errorf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
 	}
@@ -446,7 +446,7 @@ func TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey(t *testing.T) {
 		InfoURL:  "https://nyaa.si/view/1143533",
 		GUID:     "https://nyaa.si/view/1143533",
 	}}
-	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa, requesterAny)
 	if len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (an unknown hash must not veto a curated tracker key)", len(out))
 	}
@@ -478,7 +478,7 @@ func TestMarkAndDedupeCountsIdentityConflicts(t *testing.T) {
 		},
 		{Title: "nothing curated", InfoURL: "https://nyaa.si/view/999", GUID: "g2"},
 	}
-	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa, requesterAny)
 	if len(out) != 0 {
 		t.Errorf("got %d items, want 0", len(out))
 	}
@@ -546,7 +546,7 @@ func TestMarkAndDedupeStampsTheAgreedTvdbID(t *testing.T) {
 				byKey:  map[string]curatedSignal{key: tc.keySig},
 				byPair: map[string]bool{pairKey(hash, key): true},
 			}
-			out, conflicts := markAndDedupe(dualSignal, set, upstreamNyaa)
+			out, conflicts := markAndDedupe(dualSignal, set, upstreamNyaa, requesterAny)
 			if len(out) != 1 {
 				t.Fatalf("got %d items, want the 1 curated result (%s): a contested id vetoes the ATTRIBUTE, never the match", len(out), tc.desc)
 			}
@@ -620,7 +620,7 @@ func TestMarkAndDedupeAppendsTheFilmTwin(t *testing.T) {
 				byKey:  map[string]curatedSignal{key: tc.keySig},
 				byPair: map[string]bool{pairKey(hash, key): true},
 			}
-			out, conflicts := markAndDedupe(dualSignal, set, upstreamNyaa)
+			out, conflicts := markAndDedupe(dualSignal, set, upstreamNyaa, requesterAny)
 			if conflicts != 0 {
 				t.Errorf("identity conflicts = %d, want 0: a contested twin vetoes the TWIN, never the match", conflicts)
 			}
@@ -679,7 +679,7 @@ func TestSearchRenderAgreesWithTheMirrorIdentityRSSRender(t *testing.T) {
 		Title: "Mirror Show S01", InfoHash: mirrorHash,
 		InfoURL: "https://nyaa.si/view/777", GUID: "https://nyaa.si/view/777",
 	}}
-	out, _ := markAndDedupe(raw, &set, upstreamNyaa)
+	out, _ := markAndDedupe(raw, &set, upstreamNyaa, requesterAny)
 	if len(out) != 1 {
 		t.Fatalf("got %d items, want the 1 curated result: the holders agree on the best vote, so nothing drops the match", len(out))
 	}
@@ -1013,7 +1013,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 	defer cancel()
 	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 	ix.cache.start(ctx)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 1 {
 		t.Fatalf("feed after start = %d items, want the persisted snapshot loaded (1)", len(got))
 	}
 
@@ -1024,12 +1024,12 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if got := ix.feedFor(upstreamNyaa); len(got) == 3 {
+		if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) == 3 {
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("feed = %d items after the out-of-process rewrite, want 3 within a few ticks",
-				len(ix.feedFor(upstreamNyaa)))
+				len(ix.feedFor(upstreamNyaa, requesterAny)))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -1105,7 +1105,7 @@ func TestAnimeBytesMatching(t *testing.T) {
 	// End to end: an AB item (no info hash) matches the SeaDex set by tracker key.
 	set := &curation{byHash: bestVotes(map[string]bool{}), byKey: bestVotes(map[string]bool{"ab:1167293": true})}
 	raw := []item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
-	out, _ := markAndDedupe(raw, set, upstreamAB)
+	out, _ := markAndDedupe(raw, set, upstreamAB, requesterAny)
 	if len(out) != 1 || out[0].DownloadVolumeFactor != dvfBest {
 		t.Fatalf("AB item did not match/mark best: %+v", out)
 	}
@@ -1124,7 +1124,8 @@ func TestServesQuery(t *testing.T) {
 		"caps":                              {"t": {"caps"}},
 		"top of the Movies range is a film": {"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}},
 		// A single release, so it is always answered.
-		"season-0 special search": {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"0"}, "ep": {"1"}},
+		"season-0 special search":  {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"0"}, "ep": {"1"}},
+		"season-00 special search": {"t": {"tvsearch"}, "q": {"Sailor Moon"}, "season": {"00"}, "ep": {"2"}},
 	}
 	for name, q := range serves {
 		if !servesQuery(q) {
@@ -1134,6 +1135,7 @@ func TestServesQuery(t *testing.T) {
 
 	skips := map[string]url.Values{
 		"per-episode (season+ep)":  {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "ep": {"1"}},
+		"non-numeric season + ep":  {"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"zero"}, "ep": {"1"}},
 		"anime absolute episode":   {"t": {"search"}, "q": {"Frieren 01"}},
 		"4-digit absolute episode": {"t": {"search"}, "q": {"One Piece 1085"}},
 		// cat 3000 is past the Movies range, so the episode skip still applies.
@@ -1851,10 +1853,10 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 	}, nil, nil)
 	seedJournal(t, ix, upstreamNyaa, journalItem{Title: "n"})
 	seedJournal(t, ix, upstreamAB, journalItem{Title: "a"})
-	if got := ix.feedFor("other"); got != nil {
+	if got := ix.feedFor("other", requesterAny); got != nil {
 		t.Errorf("feedFor(unknown scope) = %+v, want nil", got)
 	}
-	if got := ix.feedFor(""); got != nil {
+	if got := ix.feedFor("", requesterAny); got != nil {
 		t.Errorf("feedFor(empty scope) = %+v, want nil", got)
 	}
 }
@@ -1889,7 +1891,7 @@ func TestFeedForExpandsAFilmTwinIntoTwoWireItems(t *testing.T) {
 	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
 	seedJournal(t, ix, upstreamNyaa, stored, plain)
 
-	got := ix.feedFor(upstreamNyaa)
+	got := ix.feedFor(upstreamNyaa, requesterAny)
 	if len(got) != 3 {
 		t.Fatalf("feedFor = %d items, want 3 (the twin-bearing record expands to two, the plain one to itself)", len(got))
 	}

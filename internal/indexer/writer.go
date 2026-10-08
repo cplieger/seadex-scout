@@ -239,10 +239,7 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 			return dst, keyErr
 		}
 		releases, arrErr := d.Array([]ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
-			if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
-				return chargeErr
-			}
-			return d.Decode(r)
+			return decodeOwnedRelease(d, r, &perMap, entries)
 		})
 		if arrErr != nil {
 			return dst, arrErr
@@ -250,6 +247,17 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 		dst[key] = releases
 	}
 	return dst, d.Close()
+}
+
+func decodeOwnedRelease(d *jsoncap.Decoder, r *ownedRelease, perMap, entries *int) error {
+	if err := chargeSnapshotEntry(string(memberOwners), perMap, entries); err != nil {
+		return err
+	}
+	if err := d.Decode(r); err != nil {
+		return err
+	}
+	r.dropUnservableTwin()
+	return nil
 }
 
 // decodeSnapshotFeed decodes one persisted journal feed under its per-array

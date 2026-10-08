@@ -536,13 +536,10 @@ func TestRenderJournalItemSortsCategoryUnion(t *testing.T) {
 	}
 }
 
-// TestRenderJournalItemServesFilmOnSonarrItemUnderBothCategories is the category
-// union at the fold site: ONE entry, a film whose library item is a Sonarr
-// series, must render both categories in ascending order. The category carries
-// the offer to the arr that owns the media - Sonarr subscribes only to Anime
-// 5070, so all 50 such entries were served where the operator's Sonarr never
-// looked.
-func TestRenderJournalItemServesFilmOnSonarrItemUnderBothCategories(t *testing.T) {
+// TestRenderJournalItemOffersATwinlessFilmToRadarrOnly pins the category
+// fold for a film with no twin: Movies only, whichever arr holds it, so a
+// Sonarr RSS poll is never offered the film under its own title.
+func TestRenderJournalItemOffersATwinlessFilmToRadarrOnly(t *testing.T) {
 	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
 	torrent := seadex.Torrent{
 		Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634",
@@ -551,25 +548,25 @@ func TestRenderJournalItemServesFilmOnSonarrItemUnderBothCategories(t *testing.T
 	film := &seadex.Entry{AniListID: 21519, Torrents: []seadex.Torrent{torrent}}
 	refs := []curatedRef{{entry: film, torrent: &film.Torrents[0]}}
 	rendered, ok := w.renderJournalItem("nyaa:2133634", refs, nil, func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525}
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525}
 	})
 	if !ok {
 		t.Fatal("renderJournalItem: item not rendered")
 	}
-	if it := rendered.item; !slices.Equal(it.Categories, []int{catMovies, catAnime}) {
-		t.Errorf("Categories = %v, want [%d %d]", it.Categories, catMovies, catAnime)
+	if it := rendered.item; !slices.Equal(it.Categories, []int{catMovies}) {
+		t.Errorf("Categories = %v, want [%d]", it.Categories, catMovies)
 	}
 	if got := rendered.vote.resolve(); got != 79525 {
 		t.Errorf("tvdb vote = %d, want 79525 (the id rides the render, never the persisted item)", got)
 	}
 }
 
-// TestRenderJournalItemFilmTwinDropsAnimeFromAMovieHolderOnly is the twin at the
-// fold site, one holder at a time. A MOVIE holder whose film has a named special
-// episode contributes Movies only - the twin is what carries Anime for it - and
-// the twin vote resolves to "<Series> S00E04 <flags>". An OVA-typed holder with
-// an episode keeps Anime: its only category, and the drop is MOVIE-only.
-func TestRenderJournalItemFilmTwinDropsAnimeFromAMovieHolderOnly(t *testing.T) {
+// TestRenderJournalItemFoldsTheTwinPerHolderType is the twin at the fold site,
+// one holder at a time. A MOVIE holder contributes Movies only, twin or not -
+// the twin is what carries Anime for it - and the twin vote resolves to
+// "<Series> S00E04 <flags>". An OVA-typed holder keeps Anime, its only
+// category, beside its twin.
+func TestRenderJournalItemFoldsTheTwinPerHolderType(t *testing.T) {
 	torrent := seadex.Torrent{
 		Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634", ReleaseGroup: "G",
 		Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
@@ -580,18 +577,18 @@ func TestRenderJournalItemFilmTwinDropsAnimeFromAMovieHolderOnly(t *testing.T) {
 		wantTitle string
 	}{
 		"movie holder with a twin": {
-			info:      EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"},
+			info:      EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"},
 			wantCats:  []int{catMovies},
 			wantTitle: "Code Geass S00E04 1080p [G]",
 		},
 		"ova holder with a twin keeps anime": {
-			info:      EntryInfo{Title: "Some OVA", Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"},
+			info:      EntryInfo{Title: "Some OVA", TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"},
 			wantCats:  []int{catAnime},
 			wantTitle: "Code Geass S00E04 1080p [G]",
 		},
-		"movie holder without an episode serves as today": {
-			info:     EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525},
-			wantCats: []int{catMovies, catAnime},
+		"movie holder without an episode is Movies only": {
+			info:     EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525},
+			wantCats: []int{catMovies},
 		},
 	}
 	for name, tc := range tests {
@@ -616,13 +613,11 @@ func TestRenderJournalItemFilmTwinDropsAnimeFromAMovieHolderOnly(t *testing.T) {
 	}
 }
 
-// TestRenderJournalItemLeavesTheRadarrFilmUntouched is the strongest form of
-// "the Radarr item does not change in any byte": through the pass's own
-// resolution site, the same torrent renders the SAME journal item whether or not
-// the entry carries the mapping-list's film facts, because only a Sonarr target
-// earns a twin. Anything the twin path stamped on a Radarr film would show here
-// as a field difference.
-func TestRenderJournalItemLeavesTheRadarrFilmUntouched(t *testing.T) {
+// TestRenderJournalItemKeepsTheRadarrItemOfABothArrFilm pins a film held in
+// both arrs, through the pass's own resolution site: the Radarr item renders the
+// same bytes as without the mapping facts, Movies only, and gains only the twin
+// fields Sonarr is served from.
+func TestRenderJournalItemKeepsTheRadarrItemOfABothArrFilm(t *testing.T) {
 	torrent := seadex.Torrent{
 		Tracker: "Nyaa", URL: "https://nyaa.si/view/2133634", ReleaseGroup: "G", IsBest: true,
 		Files: []seadex.File{{Length: 7, Name: "Lelouch of the Resurrection (1080p) [G].mkv"}},
@@ -638,38 +633,37 @@ func TestRenderJournalItemLeavesTheRadarrFilmUntouched(t *testing.T) {
 		}
 		return it
 	}
-	plain := EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetRadarr, TvdbID: 79525}
+	plain := EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525}
 	mapped := plain
-	mapped.SpecialEpisode, mapped.SeriesTitle = 4, "Code Geass"
+	mapped.SpecialEpisodes, mapped.SpecialsEpisodes, mapped.SeriesTitle = []int{4}, 1, "Code Geass"
 
 	before, after := render(plain), render(mapped)
-	if !reflect.DeepEqual(before, after) {
-		t.Errorf("Radarr film renders differently once the mapping names its episode:\n without %+v\n    with %+v", before, after)
+	if after.SonarrTitle != "Code Geass S00E04 1080p [G]" || after.SonarrGUID != twinGUID(after.GUID) {
+		t.Errorf("both-arr film twin = (%q, %q), want the Code Geass S00E04 twin on %q", after.SonarrTitle, after.SonarrGUID, twinGUID(after.GUID))
 	}
-	if after.SonarrTitle != "" || after.SonarrGUID != "" {
-		t.Errorf("Radarr film carries a twin (%q, %q), want none", after.SonarrTitle, after.SonarrGUID)
+	after.SonarrTitle, after.SonarrGUID = "", ""
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("both-arr film's Radarr item renders differently once the mapping names its episode:\n without %+v\n    with %+v", before, after)
 	}
 	if !slices.Equal(after.Categories, []int{catMovies}) {
-		t.Errorf("Radarr film Categories = %v, want [%d]", after.Categories, catMovies)
+		t.Errorf("both-arr film Categories = %v, want [%d]", after.Categories, catMovies)
 	}
 }
 
-// TestRenderJournalItemFoldsTheTwinAcrossHolders is holders-agree on the twin at
+// TestRenderJournalItemFoldsTheTwinAcrossHolders is unanimity on the twin at
 // the RSS fold, through the pass's own resolution site (newJournalItem): two
-// MOVIE holders naming episodes 2 and 3 (the Minami-ke shape) veto the twin AND
-// the release serves under both categories exactly as today - the Anime a MOVIE
-// holder withheld comes back with the veto, which fails if the drop is applied
-// before the vote; a holder with an episode beside one without yields the twin
-// with both categories (the second holder still offers the film as today).
+// MOVIE holders naming episodes 2 and 3 (the Minami-ke shape), or one holder
+// with no episode beside one with, veto the twin, and the release stays Movies
+// only: a vetoed film is not offered to Sonarr under its own title either.
 func TestRenderJournalItemFoldsTheTwinAcrossHolders(t *testing.T) {
 	tests := map[string]struct {
 		first, second int
 		wantTitle     string
 		wantCats      []int
 	}{
-		"holders disagree": {first: 2, second: 3, wantTitle: "", wantCats: []int{catMovies, catAnime}},
+		"holders disagree": {first: 2, second: 3, wantTitle: "", wantCats: []int{catMovies}},
 		"holders agree":    {first: 2, second: 2, wantTitle: "Minami-ke S00E02 1080p [G]", wantCats: []int{catMovies}},
-		"one abstains":     {first: 2, second: 0, wantTitle: "Minami-ke S00E02 1080p [G]", wantCats: []int{catMovies, catAnime}},
+		"one abstains":     {first: 2, second: 0, wantTitle: "", wantCats: []int{catMovies}},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -683,7 +677,7 @@ func TestRenderJournalItemFoldsTheTwinAcrossHolders(t *testing.T) {
 			}
 			episodes := map[int]int{14575: tc.first, 20221: tc.second}
 			infoFor := func(alID int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, Target: TargetSonarr, TvdbID: 80000, SpecialEpisode: episodes[alID], SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, TvdbID: 80000, SpecialEpisodes: []int{episodes[alID]}, SeriesTitle: "Minami-ke"}
 			}
 			w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
 			pass := &journalPass{w: w, ev: newEvidence(entries, tagfilter.New(nil), scopeCatalogue), publish: map[string]bool{}, infoFor: infoFor, js: &journalStats{}, now: time.Now()}
@@ -793,9 +787,9 @@ func TestRebuildFoldsAllThreeVotesOverTheHashOnlyHolder(t *testing.T) {
 	}}}
 	info := func(alID int) EntryInfo {
 		if alID == hashHolderID {
-			return EntryInfo{Title: "Union Film", IsMovie: true, Target: TargetRadarr}
+			return EntryInfo{Title: "Union Film", IsMovie: true}
 		}
-		return EntryInfo{Title: "Union Show", TvdbID: 79525, Target: TargetSonarr}
+		return EntryInfo{Title: "Union Show", TvdbID: 79525}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -1136,31 +1130,15 @@ func TestRebuildJournalItemShape(t *testing.T) {
 }
 
 // TestCategoriesFor verifies the RSS category comes from the entry's real
-// media typing AND its resolved arr, not a guess from the file name: a movie
-// routes to Radarr (Movies), a movie whose library item is a SONARR series
-// routes to both (TVDB files anime films under the parent series, and Sonarr
-// subscribes only to Anime, so a Movies-only offer never reaches it), and
-// everything else to Sonarr (Anime) - a single-file OVA/special is
+// media typing, not a guess from the file name: a film is Movies whichever arr
+// holds it, and everything else Anime - a single-file OVA/special is
 // indistinguishable from a film by name, so the safe default matters.
 func TestCategoriesFor(t *testing.T) {
-	tests := []struct {
-		name    string
-		isMovie bool
-		target  ArrTarget
-		want    []int
-	}{
-		{name: "film on a Sonarr item is served under both", isMovie: true, target: TargetSonarr, want: []int{catMovies, catAnime}},
-		{name: "Radarr-only film", isMovie: true, target: TargetRadarr, want: []int{catMovies}},
-		{name: "unmatched film", isMovie: true, target: TargetNone, want: []int{catMovies}},
-		{name: "series on a Sonarr item", target: TargetSonarr, want: []int{catAnime}},
-		{name: "unmatched series", target: TargetNone, want: []int{catAnime}},
+	if got := categoriesFor(true); !slices.Equal(got, []int{catMovies}) {
+		t.Errorf("categoriesFor(film) = %v, want [%d]", got, catMovies)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := categoriesFor(tt.isMovie, tt.target); !slices.Equal(got, tt.want) {
-				t.Errorf("categoriesFor(%v, %v) = %v, want %v", tt.isMovie, tt.target, got, tt.want)
-			}
-		})
+	if got := categoriesFor(false); !slices.Equal(got, []int{catAnime}) {
+		t.Errorf("categoriesFor(not a film) = %v, want [%d]", got, catAnime)
 	}
 }
 
@@ -1274,7 +1252,7 @@ func TestRebuildCarriedTwinGUIDDerivesFromTheServedGUID(t *testing.T) {
 		}},
 	}}
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, Target: TargetSonarr, TvdbID: 79525, SpecialEpisode: 4, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)

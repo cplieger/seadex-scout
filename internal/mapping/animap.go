@@ -64,22 +64,39 @@ type SeasonRange struct {
 }
 
 // Mapping is what a record's mapping list and placement say beyond its ids:
-// which TVDB season-0 episode a film filed in a series' specials IS
-// (SpecialEpisode, 0 when the list names none, read by the feed), which TVDB
-// season-0 episodes the record's regular episodes are (Specials, ascending,
-// nil unless animap places every one of them in season 0 or nowhere), and
-// which TVDB seasons an absolute-numbered run's episodes fall into (Seasons,
-// nil when it carries no ranged rows). SpecialsTvdb is the TVDB series
-// Specials number episodes of.
+// the season-0 episode a film filed in a series' specials IS (SpecialEpisode,
+// 0 when none), the season-0 episodes its regular episodes are (Specials,
+// ascending, nil unless animap places every one in season 0 or nowhere), and
+// the TVDB seasons an absolute-numbered run falls into (Seasons). SpecialsTvdb
+// is the series both number episodes of. SpecialsEpisodes, the AniDB episode
+// count, is set only for a placement wholly in season 0; Placed marks any.
 type Mapping struct {
-	Seasons        []SeasonRange `json:"seasons,omitempty"`
-	Specials       []int         `json:"specials,omitempty"`
-	SpecialEpisode int           `json:"special_episode,omitempty"`
-	SpecialsTvdb   int           `json:"specials_tvdb,omitempty"`
+	Seasons          []SeasonRange `json:"seasons,omitempty"`
+	Specials         []int         `json:"specials,omitempty"`
+	SpecialEpisode   int           `json:"special_episode,omitempty"`
+	SpecialsTvdb     int           `json:"specials_tvdb,omitempty"`
+	SpecialsEpisodes int           `json:"specials_episodes,omitempty"`
+	Placed           bool          `json:"placed,omitempty"`
 }
 
 func (m *Mapping) empty() bool {
 	return m.SpecialEpisode == 0 && len(m.Seasons) == 0 && len(m.Specials) == 0
+}
+
+// SpecialRun is the one reader of which TVDB season-0 episodes this entry is:
+// a placement wholly in season 0 with its AniDB episode count; nil, the row
+// silenced too, beside any other placement, which says the entry is not wholly
+// specials; else the mapping list's single episode with a count of 0 (unknown).
+func (m *Mapping) SpecialRun() (episodes []int, anidbEpisodes int) {
+	switch {
+	case len(m.Specials) > 0 && m.SpecialsEpisodes > 0:
+		return slices.Clone(m.Specials), m.SpecialsEpisodes
+	case m.Placed:
+		return nil, 0
+	case m.SpecialEpisode > 0:
+		return []int{m.SpecialEpisode}, 0
+	}
+	return nil, 0
 }
 
 // maxSpecialEpisodes bounds the TVDB episodes one record's placement may
@@ -192,9 +209,15 @@ func (r *animapRecord) toRecord() Record {
 }
 
 func (r *animapRecord) mapping() Mapping {
-	m := Mapping{SpecialEpisode: r.filmEpisode(), Specials: r.specialEpisodes(), Seasons: seasonRanges(r.MappingList)}
-	if m.Specials != nil {
+	m := Mapping{
+		SpecialEpisode: r.filmEpisode(), Specials: r.specialEpisodes(), Seasons: seasonRanges(r.MappingList),
+		Placed: len(r.TVDBPlacement) > 0,
+	}
+	if m.Specials != nil || m.SpecialEpisode > 0 {
 		m.SpecialsTvdb = r.TVDBID
+	}
+	if m.Specials != nil && !slices.ContainsFunc(r.TVDBPlacement, func(s animapSegment) bool { return s.unplaced() }) {
+		m.SpecialsEpisodes = r.Episodes
 	}
 	return m
 }
@@ -236,7 +259,7 @@ func placesEvery(segs []animapSegment, episodes int) bool {
 	reach, noneReach := 0, 0
 	for i := range sorted {
 		s := &sorted[i]
-		none := s.Season == nil && s.Episode == nil
+		none := s.unplaced()
 		switch {
 		case s.Start < 1 || s.End < s.Start || s.Start-1 > reach:
 			return false
@@ -267,6 +290,8 @@ func (s *animapSegment) seasonZero() (first, n int, ok bool) {
 	}
 	return *s.Episode, s.End - s.Start + 1, true
 }
+
+func (s *animapSegment) unplaced() bool { return s.Season == nil && s.Episode == nil }
 
 // filmEpisode reads which TVDB season-0 episode a film filed in a series'
 // specials IS, and 0 when the record names none. The record gate is

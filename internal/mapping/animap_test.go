@@ -250,8 +250,8 @@ func TestParseAnimap_placementReachesBothJoins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAnimap error: %v", err)
 	}
-	if got := parsed.mappings[100].Specials; !slices.Equal(got, []int{5, 6}) {
-		t.Errorf("parseAnimap mappings[100].Specials = %v, want [5 6]", got)
+	if got := parsed.mappings[100]; !slices.Equal(got.Specials, []int{5, 6}) || got.SpecialsEpisodes != 2 {
+		t.Errorf("parseAnimap mappings[100] = %+v, want Specials [5 6] answering 2 episodes", got)
 	}
 	if got := parsed.parentMappings[11].Specials; !slices.Equal(got, []int{5, 6}) {
 		t.Errorf("parseAnimap parentMappings[11].Specials = %v, want [5 6]", got)

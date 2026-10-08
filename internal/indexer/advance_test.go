@@ -654,9 +654,9 @@ func TestBothPassKindsRenderTheMirrorIdentityIdentically(t *testing.T) {
 	info := func(alID int) EntryInfo {
 		switch alID {
 		case keyHolderID:
-			return EntryInfo{Title: "Mirror Show", TvdbID: 79525, Target: TargetSonarr}
+			return EntryInfo{Title: "Mirror Show", TvdbID: 79525}
 		case hashHolderID:
-			return EntryInfo{Title: "Mirror Film", IsMovie: true, TvdbID: 123456, Target: TargetRadarr}
+			return EntryInfo{Title: "Mirror Film", IsMovie: true, TvdbID: 123456}
 		}
 		return EntryInfo{}
 	}
@@ -706,11 +706,11 @@ func TestBothPassKindsRenderTheMirrorIdentityIdentically(t *testing.T) {
 	}
 }
 
-// TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote is holders-agree on the
-// film twin across the two records a window pass holds: the occurrence in the
-// window and an unevaluated owner's stored SonarrTitle. An agreeing prior yields
-// the twin and the MOVIE holder's Anime drop; a disagreeing one vetoes the twin
-// and the release serves under both categories.
+// TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote is unanimity on the film
+// twin across the two records a window pass holds: the occurrence in the window
+// and an unevaluated owner's stored SonarrTitle. An agreeing prior yields the
+// twin; a disagreeing or titleless one vetoes it. Either way the film stays
+// Movies only.
 //
 // The fixture is only live while the window holder itself produces a twin title
 // and the prior owner's record names the item's journal KEY.
@@ -727,7 +727,10 @@ func TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote(t *testing.T) {
 			priorTitle: windowTitle, wantTitle: windowTitle, wantCats: []int{catMovies},
 		},
 		"prior owner disagrees": {
-			priorTitle: "Minami-ke S00E03 1080p [G]", wantTitle: "", wantCats: []int{catMovies, catAnime},
+			priorTitle: "Minami-ke S00E03 1080p [G]", wantTitle: "", wantCats: []int{catMovies},
+		},
+		"prior owner has no twin": {
+			priorTitle: "", wantTitle: "", wantCats: []int{catMovies},
 		},
 	}
 	for name, tc := range tests {
@@ -742,7 +745,7 @@ func TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote(t *testing.T) {
 			window := nyaaEntry(windowHolderID, 777, true, "Minami-ke Special (1080p) [G].mkv")
 			window.Torrents[0].ReleaseGroup = "G"
 			info := func(int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, Target: TargetSonarr, TvdbID: 80000, SpecialEpisode: 2, SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, TvdbID: 80000, SpecialEpisodes: []int{2}, SeriesTitle: "Minami-ke"}
 			}
 			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{window}, info); err != nil {
 				t.Fatalf("Advance: %v", err)
