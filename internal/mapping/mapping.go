@@ -65,11 +65,11 @@ type Loader struct {
 type SeasonKind string
 
 const (
-	// SeasonUnknown is the zero value: a Record no upstream record produced (an
+	// seasonUnknown is the zero value: a Record no upstream record produced (an
 	// override naming no season_kind, a format-only Record). The animap decoder
 	// sets the kind explicitly on both arms, so unknown never means "the
 	// upstream was odd".
-	SeasonUnknown SeasonKind = ""
+	seasonUnknown SeasonKind = ""
 	// SeasonPresent means the record carried tvdb_season >= 0, so SeasonTvdb is
 	// what animap said - zero included.
 	SeasonPresent SeasonKind = "present"
@@ -153,7 +153,7 @@ func (r *Record) IsSpecial() bool { return mediatype.IsSpecial(r.Type) }
 func (r *Record) HasMappedSeason() bool { return r.SeasonTvdb > 0 }
 
 // SeasonPresence returns the record's season kind in canonical form: any value
-// but the two named spellings reads unknown. buildIndex canonicalizes every
+// but the two named spellings reads unknown. NewIndex canonicalizes every
 // record it serves, so this differs from the field only for a Record that never
 // passed through an Index - which is the path a scope dispatch must still read
 // as unknown rather than as a fourth state.
@@ -166,7 +166,7 @@ func canonicalSeasonKind(k SeasonKind) SeasonKind {
 	case SeasonPresent, SeasonAbsent:
 		return k
 	default:
-		return SeasonUnknown
+		return seasonUnknown
 	}
 }
 
@@ -287,7 +287,7 @@ func (i *Index) SiblingSeasons(rec *Record) []int {
 	if i == nil || rec == nil {
 		return nil
 	}
-	// buildIndex keys only positive tvdb ids, so a record without one finds no counts.
+	// NewIndex keys only positive tvdb ids, so a record without one finds no counts.
 	counts := i.seasonsByTvdb[rec.TvdbID]
 	if len(counts) == 0 {
 		return nil
@@ -319,25 +319,8 @@ func (i *Index) ForEachRecord(fn func(Record)) {
 	}
 }
 
-// NewIndex builds an index over records already decoded elsewhere, keyed by
-// AniList ID.
-//
-// Reached only by tests: production obtains an Index from Loader.Load, which
-// decodes and indexes in one pass. This exists so a test can index a handful of
-// hand-written Records without a file.
-func NewIndex(records []Record) *Index {
-	return buildIndex(records, nil, nil)
-}
-
-// NewIndexWithMappings is NewIndex with AniDB-keyed mapping-list facts attached,
-// for the same reason NewIndex exists: a test of a MappingFor consumer needs an
-// Index carrying a hand-written map without a Loader or a file.
-func NewIndexWithMappings(records []Record, mappings map[int]Mapping) *Index {
-	return buildIndex(records, mappings, nil)
-}
-
 // deduplicateRecords returns one effective record per AniList ID, preserving
-// buildIndex's last-record-wins semantics and stable order. Records without a
+// NewIndex's last-record-wins semantics and stable order. Records without a
 // positive AniList ID are omitted, so the acceptance validators cannot count a
 // larger population than the effective served index.
 func deduplicateRecords(records []Record) []Record {
@@ -354,18 +337,33 @@ func deduplicateRecords(records []Record) []Record {
 	return out
 }
 
-// buildIndex keys records by AniList ID, admitting only positive IDs (real
+// Source is what an Index is built from: the animap records, the two
+// mapping-list fact maps, and the operator's override records.
+type Source struct {
+	Records []Record
+	// Mappings holds the mapping-list facts keyed by AniDB id.
+	Mappings map[int]Mapping
+	// ParentMappings holds a specials-of-parent record's facts, keyed by its
+	// AniList id.
+	ParentMappings map[int]Mapping
+	// Overrides replace the record of their AniList id wholesale, facts
+	// included, after the index is built. They are canonical already and leave
+	// the sibling-season summary as the records built it.
+	Overrides []Record
+}
+
+// NewIndex keys src.Records by AniList ID, admitting only positive IDs (real
 // SeaDex lookups use positive AniList IDs, so a zero or negative key could
 // never resolve an entry). A later record with the same ID overwrites an
-// earlier one; overrides are applied on top afterwards. mappings is stored as
-// given and parentMappings copied (nil is a valid empty map for either).
-func buildIndex(records []Record, mappings, parentMappings map[int]Mapping) *Index {
-	byAniList := make(map[int]Record, len(records))
-	for _, r := range records {
+// earlier one, and src.Overrides are applied on top. Mappings is stored as
+// given and ParentMappings copied (nil is a valid empty map for either).
+func NewIndex(src Source) *Index {
+	byAniList := make(map[int]Record, len(src.Records))
+	for _, r := range src.Records {
 		if r.AniListID > 0 {
 			// Canonical form is an INDEX invariant, applied once here rather than
 			// re-checked by every accessor: a cache read back from state.json reaches
-			// buildIndex through plain encoding/json.
+			// NewIndex through plain encoding/json.
 			r.canonicalize()
 			byAniList[r.AniListID] = r
 		}
@@ -384,11 +382,16 @@ func buildIndex(records []Record, mappings, parentMappings map[int]Mapping) *Ind
 		}
 		seasons[r.SeasonTvdb]++
 	}
-	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: mappings, parentMappings: maps.Clone(parentMappings)}
+	parentMappings := maps.Clone(src.ParentMappings)
+	for i := range src.Overrides {
+		byAniList[src.Overrides[i].AniListID] = src.Overrides[i]
+		delete(parentMappings, src.Overrides[i].AniListID)
+	}
+	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: src.Mappings, parentMappings: parentMappings}
 }
 
 // indexedRecordCount returns how many records survive into the served index
-// (distinct positive AniList IDs, per buildIndex). It is the single spelling of
+// (distinct positive AniList IDs, per NewIndex). It is the single spelling of
 // the count every records / stale_records attribute reports, so a cache written
 // before deduplication cannot over-report the map consumers receive.
 func indexedRecordCount(records []Record) int {
@@ -517,8 +520,12 @@ func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 		canonicalPrev = &clone
 	}
 	next, err := l.refreshCache(ctx, canonicalPrev)
-	idx := buildIndex(next.Records, next.Mappings, next.ParentMappings)
-	l.applyOverrides(ctx, idx)
+	idx := NewIndex(Source{
+		Records:        next.Records,
+		Mappings:       next.Mappings,
+		ParentMappings: next.ParentMappings,
+		Overrides:      l.effectiveOverrides(ctx),
+	})
 	return next, idx, err
 }
 
@@ -798,7 +805,7 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		return degradeParse(prev, err)
 	}
 	// Collapse duplicate AniList IDs BEFORE any acceptance invariant runs:
-	// buildIndex keeps only the last record per ID, so size-comparing the raw row
+	// NewIndex keeps only the last record per ID, so size-comparing the raw row
 	// count would let a body repeating one ID pass every guard and index to little.
 	records := deduplicateRecords(parsed.records)
 	if validationErr := validateRefreshedRecords(prev.Records, records, parsed.elements); validationErr != nil {
@@ -1084,29 +1091,26 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 // it reaches a log emit boundary (the anilist sanitizeUpstreamMessage policy).
 const maxLoggedErrorBytes = 200
 
-// applyOverrides reads the operator overrides file (if present) and overlays
-// each effective record onto the index, keyed by AniList ID. A missing file is
-// not an error; an unreadable or malformed file is logged at ERROR and ignored.
-// The overlay is WHOLESALE, not a merge, so a record carrying no identifier its
-// routed arr consumes replaces a mapped upstream record with one that resolves to
-// nothing. That is left applied - an operator entry wins by design - but it is
-// reported, because a mistyped id key is otherwise invisible.
-func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
+// effectiveOverrides reads the operator overrides file (if present) and returns
+// its effective records for NewIndex to overlay, keyed by AniList ID. A missing
+// file is not an error; an unreadable or malformed file is logged at ERROR and
+// ignored. The overlay is WHOLESALE, not a merge, so a record carrying no
+// identifier its routed arr consumes replaces a mapped upstream record with one
+// that resolves to nothing. That is left applied - an operator entry wins by
+// design - but it is reported, because a mistyped id key is otherwise invisible.
+func (l *Loader) effectiveOverrides(ctx context.Context) []Record {
 	if l.overridesPath == "" {
-		return
+		return nil
 	}
 	set, ok := l.readOverrides(ctx)
 	if !ok {
-		return
+		return nil
 	}
 	unroutable := 0
 	for i := range set.records {
-		record := set.records[i]
-		if !record.HasArrIdentifier() {
+		if !set.records[i].HasArrIdentifier() {
 			unroutable++
 		}
-		idx.byAniList[record.AniListID] = record
-		delete(idx.parentMappings, record.AniListID)
 	}
 	if set.skipped > 0 {
 		l.log.Warn("mapping: overrides with missing or invalid anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
@@ -1118,6 +1122,7 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if set.applied > 0 {
 		l.log.Info("mapping: applied overrides", "count", set.applied)
 	}
+	return set.records
 }
 
 // readOverridesFile reads the overrides file through an os.Root over its own
@@ -1171,7 +1176,7 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 }
 
 // overrideSet is parseOverrides' result: the effective overlay plus the
-// diagnostics applyOverrides logs. records holds only effective records
+// diagnostics effectiveOverrides logs. records holds only effective records
 // (positive AniList ID, deduplicated last-record-wins); applied counts the
 // positive-ID transport rows; skipped counts the non-positive-ID rows; unknown
 // counts the non-canonical keys seen.

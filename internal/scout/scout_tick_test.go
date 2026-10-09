@@ -1227,7 +1227,7 @@ type rejectingAfterFirstMapping struct{ calls int }
 func (m *rejectingAfterFirstMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
 	m.calls++
 	if m.calls == 1 {
-		return *prev, mapping.NewIndex(prev.Records), nil
+		return *prev, mapping.NewIndex(mapping.Source{Records: prev.Records}), nil
 	}
 	c := *prev
 	c.RejectedRefreshes = prev.RejectedRefreshes + 1
@@ -1296,7 +1296,7 @@ type revalidatingMapping struct{}
 func (revalidatingMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
 	c := *prev
 	c.FetchedAt = time.Now()
-	return c, mapping.NewIndex(prev.Records), nil
+	return c, mapping.NewIndex(mapping.Source{Records: prev.Records}), nil
 }
 
 // refreshingMapping is a mapping loader that reports a NEW validator on every
@@ -1308,7 +1308,7 @@ func (r *refreshingMapping) Load(_ context.Context, prev *mapping.Cache) (mappin
 	r.calls++
 	c := *prev
 	c.ETag = "etag-" + strconv.Itoa(r.calls)
-	return c, mapping.NewIndex(prev.Records), nil
+	return c, mapping.NewIndex(mapping.Source{Records: prev.Records}), nil
 }
 
 // TestProductiveTickSkipsTheStateWriteWhenNothingChanged pins the write skip.

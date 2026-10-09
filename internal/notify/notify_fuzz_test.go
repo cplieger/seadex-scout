@@ -7,6 +7,7 @@ import (
 
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 )
 
 // FuzzCapAttrBoundedAndSanitized fuzzes the emit path's per-attribute boundary:
@@ -24,13 +25,13 @@ func FuzzCapAttrBoundedAndSanitized(f *testing.F) {
 	f.Add("\xff\xfe\xfd")
 	f.Add("https://nyaa.si/view/1?q=a\u2028b")
 	f.Add(strings.Repeat("\xff", 12<<10))
-	f.Add(strings.Repeat("g", maxAttrBytes))
+	f.Add(strings.Repeat("g", logattr.MaxBytes))
 	f.Add(strings.Repeat("\u202e", 4<<10))
 	f.Fuzz(func(t *testing.T, raw string) {
 		got := capAttr(raw)
 
-		if len(got) > maxAttrBytes+len("...") {
-			t.Errorf("capAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), maxAttrBytes+len("..."))
+		if len(got) > logattr.MaxBytes+len("...") {
+			t.Errorf("capAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), logattr.MaxBytes+len("..."))
 		}
 		if !utf8.ValidString(got) {
 			t.Errorf("capAttr(%q) = %q, want valid UTF-8", raw, got)
@@ -41,7 +42,7 @@ func FuzzCapAttrBoundedAndSanitized(f *testing.F) {
 			}
 		}
 		clean := runesafe.Sanitize(raw)
-		if len(raw) <= maxAttrBytes && len(clean) <= maxAttrBytes && got != clean {
+		if len(raw) <= logattr.MaxBytes && len(clean) <= logattr.MaxBytes && got != clean {
 			t.Errorf("capAttr(%q) = %q, want the byte-identical sanitized form %q", raw, got, clean)
 		}
 	})
@@ -70,8 +71,8 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 
 		got := joinLinksAttr(links)
 
-		if len(got) > maxAttrBytes+len("...") {
-			t.Errorf("joinLinksAttr(%d links) = %d bytes, want <= %d", count, len(got), maxAttrBytes+len("..."))
+		if len(got) > logattr.MaxBytes+len("...") {
+			t.Errorf("joinLinksAttr(%d links) = %d bytes, want <= %d", count, len(got), logattr.MaxBytes+len("..."))
 		}
 		if !utf8.ValidString(got) {
 			t.Errorf("joinLinksAttr(%d links) = %q, want valid UTF-8", count, got)
@@ -105,8 +106,8 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		got := capAlertTextAttr(raw)
 
-		if len(got) > maxAttrBytes {
-			t.Errorf("capAlertTextAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), maxAttrBytes)
+		if len(got) > logattr.MaxBytes {
+			t.Errorf("capAlertTextAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), logattr.MaxBytes)
 		}
 		if !utf8.ValidString(got) {
 			t.Errorf("capAlertTextAttr(%d bytes) is not valid UTF-8", len(raw))
@@ -134,7 +135,7 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 // surviving destination-breaking byte closes the destination early and the rest
 // of an untrusted SeaDex URL renders as attacker-authored markdown (CWE-116).
 // Three invariants no per-character table covers: bounded volume (the re-cap
-// keeps the "..." marker INSIDE the budget, so the ceiling is maxAttrBytes
+// keeps the "..." marker INSIDE the budget, so the ceiling is logattr.MaxBytes
 // exactly), valid UTF-8 with no unsafe rune, and no live breaking byte left.
 func FuzzCapURLAttrBoundedAndInertDestination(f *testing.F) {
 	f.Add("")
@@ -147,8 +148,8 @@ func FuzzCapURLAttrBoundedAndInertDestination(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		got := capURLAttr(raw)
 
-		if len(got) > maxAttrBytes {
-			t.Errorf("capURLAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), maxAttrBytes)
+		if len(got) > logattr.MaxBytes {
+			t.Errorf("capURLAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), logattr.MaxBytes)
 		}
 		if !utf8.ValidString(got) {
 			t.Errorf("capURLAttr(%d bytes) is not valid UTF-8", len(raw))

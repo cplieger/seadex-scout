@@ -57,14 +57,14 @@ func unusableFeedKey(key string) bool { return secretref.Unusable(key) }
 // reports success. Both take the documented empty-passkey path instead.
 func unusableABPasskey(passkey string) bool { return secretref.Unusable(passkey) }
 
-// Run serves the Torznab endpoint from the current feed snapshot until ctx is
+// run serves the Torznab endpoint from the current feed snapshot until ctx is
 // cancelled. It first starts the snapshot cache's own reload clock - the one piece
 // of startup work, owned by this lifecycle method rather than by New - then listens
 // immediately, so an arr's caps Test succeeds right away. It serves whatever feed
 // the last compare cycle produced, taking this process's cycles in-process and a
 // `poll` cycle's from the file. It owns no health marker, so a feed failure never
 // flips container health.
-func (ix *Indexer) Run(ctx context.Context) error {
+func (ix *Indexer) run(ctx context.Context) error {
 	// Fail closed at the network boundary: config.Validate already rejects an empty
 	// or unresolved feed_api_key on the daemon path, but any alternate construction
 	// must never bind and serve the passkey-bearing feed behind a guessable or
@@ -157,7 +157,7 @@ func (ix *Indexer) handler() http.Handler {
 	return mux
 }
 
-// chain assembles the middleware stack Run serves. SecurityHeaders is
+// chain assembles the middleware stack run serves. SecurityHeaders is
 // deliberately OUTERMOST so every response carries it, including a recovered
 // panic's 500 and authFailureLimiter's short-circuiting 429.
 func (ix *Indexer) chain() http.Handler {
@@ -216,7 +216,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 // the request may proceed; on rejection the response has been written.
 func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q url.Values) bool {
 	if ix.keyUnusable {
-		// Fail closed at the handler too: Run already refuses to bind with an empty or
+		// Fail closed at the handler too: run already refuses to bind with an empty or
 		// unresolved feed_api_key, but a second independent guard keeps a future
 		// construction path from serving the passkey-bearing feed behind an absent or
 		// guessable gate - and it distinguishes "auth not configured" (this 503) from

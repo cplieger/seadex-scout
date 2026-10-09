@@ -45,7 +45,7 @@ func TestErrRedactsMessageAndPreservesCause(t *testing.T) {
 	}
 }
 
-// TestTextGuards pins Text's documented guard branches: an empty dir redacts
+// TestTextGuards pins redactText's documented guard branches: an empty dir redacts
 // nothing (there is no value to mask), a degenerate dir ("." or "/") skips
 // redaction entirely (replacing it would rewrite every dot or slash in the
 // diagnostic text), and a real dir is masked along with its path-prefix
@@ -67,7 +67,7 @@ func TestTextGuards(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Text(tt.dir, tt.in); got != tt.want {
+			if got := redactText(tt.dir, tt.in); got != tt.want {
 				t.Errorf("Text(%q, %q) = %q, want %q", tt.dir, tt.in, got, tt.want)
 			}
 		})
@@ -124,7 +124,7 @@ func TestTextKeepsShortSeparatorlessDirIntact(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Text(tt.dir, tt.in); got != tt.want {
+			if got := redactText(tt.dir, tt.in); got != tt.want {
 				t.Errorf("Text(%q, %q) = %q, want %q", tt.dir, tt.in, got, tt.want)
 			}
 		})

@@ -61,11 +61,11 @@ func TestRecord_HasMappedSeason(t *testing.T) {
 // too rather than failing the record, and the two named spellings survive.
 func TestRecord_SeasonPresence(t *testing.T) {
 	tests := map[SeasonKind]SeasonKind{
-		"":            SeasonUnknown,
+		"":            seasonUnknown,
 		SeasonPresent: SeasonPresent,
 		SeasonAbsent:  SeasonAbsent,
-		"mapped":      SeasonUnknown,
-		"PRESENT":     SeasonUnknown,
+		"mapped":      seasonUnknown,
+		"PRESENT":     seasonUnknown,
 	}
 	for stored, want := range tests {
 		if got := (&Record{SeasonKind: stored}).SeasonPresence(); got != want {
@@ -76,17 +76,17 @@ func TestRecord_SeasonPresence(t *testing.T) {
 
 // TestNewIndex_canonicalizesSeasonKind pins the kind's normalization at the
 // INDEX boundary, which is what lets the scope dispatch read the field directly:
-// buildIndex canonicalizes every record on both the animap and the persisted-cache
+// NewIndex canonicalizes every record on both the animap and the persisted-cache
 // path, so an unrecognized string can never reach a consumer as a fourth state,
 // while a record's real kind round-trips untouched.
 func TestNewIndex_canonicalizesSeasonKind(t *testing.T) {
-	idx := NewIndex([]Record{
+	idx := NewIndex(Source{Records: []Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100, SeasonKind: "mapped-positive", SeasonTvdb: 2},
 		{AniListID: 2, Type: "TV", TvdbID: 200, SeasonKind: SeasonPresent},
 		{AniListID: 3, Type: "OVA", TvdbID: 300, SeasonKind: SeasonAbsent},
 		{AniListID: 4, Type: "TV", TvdbID: 400},
-	})
-	want := map[int]SeasonKind{1: SeasonUnknown, 2: SeasonPresent, 3: SeasonAbsent, 4: SeasonUnknown}
+	}})
+	want := map[int]SeasonKind{1: seasonUnknown, 2: SeasonPresent, 3: SeasonAbsent, 4: seasonUnknown}
 	for id, kind := range want {
 		rec, ok := idx.Lookup(id)
 		if !ok {
@@ -107,12 +107,12 @@ func TestNewIndex_canonicalizesSeasonKind(t *testing.T) {
 // and omitempty, so an unknown kind writes nothing while the two named spellings
 // survive a Cache write and read.
 func TestRecord_seasonKindRoundTrips(t *testing.T) {
-	for _, kind := range []SeasonKind{SeasonUnknown, SeasonPresent, SeasonAbsent} {
+	for _, kind := range []SeasonKind{seasonUnknown, SeasonPresent, SeasonAbsent} {
 		encoded, err := json.Marshal(Record{AniListID: 7, Type: "TV", SeasonKind: kind})
 		if err != nil {
 			t.Fatalf("Marshal(%q) error: %v", kind, err)
 		}
-		if kind == SeasonUnknown && strings.Contains(string(encoded), "season_kind") {
+		if kind == seasonUnknown && strings.Contains(string(encoded), "season_kind") {
 			t.Errorf("Marshal(unknown) = %s, want no season_kind key (omitempty)", encoded)
 		}
 		var back Record
@@ -142,7 +142,7 @@ func TestParseOverrides_seasonKind(t *testing.T) {
 	if len(set.records) != 3 {
 		t.Fatalf("records = %d, want 3", len(set.records))
 	}
-	want := []SeasonKind{SeasonPresent, SeasonAbsent, SeasonUnknown}
+	want := []SeasonKind{SeasonPresent, SeasonAbsent, seasonUnknown}
 	for i, kind := range want {
 		if set.records[i].SeasonKind != kind {
 			t.Errorf("records[%d].SeasonKind = %q, want %q", i, set.records[i].SeasonKind, kind)
@@ -265,10 +265,7 @@ func TestIndex_nilSafe(t *testing.T) {
 // handed to the index rather than anything derived from Record.
 func TestIndex_MappingFor(t *testing.T) {
 	want := Mapping{SpecialEpisode: 8, Seasons: []SeasonRange{{Season: 1, First: 1, Last: 13}}}
-	idx := NewIndexWithMappings(
-		[]Record{{AniListID: 1, Type: "MOVIE", AniDBID: 12276}, {AniListID: 2, Type: "TV", AniDBID: 999}, {AniListID: 3, Type: "TV"}},
-		map[int]Mapping{12276: want, 0: {SpecialEpisode: 99}},
-	)
+	idx := NewIndex(Source{Records: []Record{{AniListID: 1, Type: "MOVIE", AniDBID: 12276}, {AniListID: 2, Type: "TV", AniDBID: 999}, {AniListID: 3, Type: "TV"}}, Mappings: map[int]Mapping{12276: want, 0: {SpecialEpisode: 99}}})
 	tests := []struct {
 		name    string
 		rec     *Record
@@ -291,16 +288,16 @@ func TestIndex_MappingFor(t *testing.T) {
 			}
 		})
 	}
-	if _, ok := NewIndex([]Record{{AniListID: 1, AniDBID: 12276}}).MappingFor(&Record{AniDBID: 12276}); ok {
+	if _, ok := NewIndex(Source{Records: []Record{{AniListID: 1, AniDBID: 12276}}}).MappingFor(&Record{AniDBID: 12276}); ok {
 		t.Error("NewIndex (no list) MappingFor returned ok=true, want false")
 	}
 }
 
 func TestIndex_MappingForKeepsThePlacementOnItsSeries(t *testing.T) {
-	idx := NewIndexWithMappings(nil, map[int]Mapping{
+	idx := NewIndex(Source{Mappings: map[int]Mapping{
 		70: {SpecialEpisode: 9, Specials: []int{9}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
 		71: {Specials: []int{3}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
-	})
+	}})
 	for _, tc := range []struct {
 		rec          Record
 		wantSpecials []int
@@ -360,7 +357,7 @@ func TestMapping_SpecialRunTakesThePlacementOverAPartialRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAnimap(anidb 905) error: %v", err)
 	}
-	idx := buildIndex(parsed.records, parsed.mappings, parsed.parentMappings)
+	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
 	rec, _ := idx.Lookup(901)
 	m, ok := idx.MappingFor(&rec)
 	if !ok || m.SpecialEpisode != 8 {
@@ -406,7 +403,7 @@ func TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero(t *testing.T) 
 			if err != nil {
 				t.Fatalf("parseAnimap(%s) error: %v", tc.record, err)
 			}
-			idx := buildIndex(parsed.records, parsed.mappings, parsed.parentMappings)
+			idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
 			rec, _ := idx.Lookup(tc.alID)
 			m, _ := idx.MappingFor(&rec)
 			if !slices.Equal(m.Specials, tc.wantSpecials) || m.SpecialEpisode != tc.wantRow {
@@ -424,7 +421,7 @@ func TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero(t *testing.T) 
 // record with an AniDB id never does, whatever its AniList id.
 func TestIndex_MappingForJoinsAParentRecordOnItsAniListID(t *testing.T) {
 	parent := Mapping{SpecialEpisode: 8}
-	idx := buildIndex([]Record{{AniListID: 21777, Type: "SPECIAL"}}, nil, map[int]Mapping{21777: parent})
+	idx := NewIndex(Source{Records: []Record{{AniListID: 21777, Type: "SPECIAL"}}, ParentMappings: map[int]Mapping{21777: parent}})
 	if got, ok := idx.MappingFor(&Record{AniListID: 21777}); !ok || !sameMapping(got, parent) {
 		t.Errorf("MappingFor(no AniDB id, AniList 21777) = %+v ok=%v, want %+v", got, ok, parent)
 	}
@@ -503,7 +500,7 @@ func TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts(t *testing.T)
 }
 
 func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
-	idx := NewIndex([]Record{{AniListID: 1}, {AniListID: 2}})
+	idx := NewIndex(Source{Records: []Record{{AniListID: 1}, {AniListID: 2}}})
 	var got []int
 	idx.ForEachRecord(func(r Record) { got = append(got, r.AniListID) })
 	slices.Sort(got)
@@ -587,12 +584,12 @@ func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
 // (unkeyable; real AniList IDs are positive) and the last duplicate wins, so
 // upstream ordering cannot silently retain a stale record.
 func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
-	idx := NewIndex([]Record{
+	idx := NewIndex(Source{Records: []Record{
 		{AniListID: 0, Type: "TV", TvdbID: 99},
 		{AniListID: -7, Type: "TV", TvdbID: 77},
 		{AniListID: 42, Type: "TV", TvdbID: 100},
 		{AniListID: 42, Type: "TV", TvdbID: 200},
-	})
+	}})
 
 	if got := idx.Len(); got != 1 {
 		t.Errorf("NewIndex length = %d, want 1", got)
@@ -633,7 +630,7 @@ func TestParseOverrides_duplicateIDKeepsLastRecord(t *testing.T) {
 	if len(set.records) != 2 {
 		t.Errorf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
 	}
-	idx := NewIndex(set.records)
+	idx := NewIndex(Source{Records: set.records})
 	if got, ok := idx.Lookup(1); !ok || got.TvdbID != 12 {
 		t.Errorf("Lookup(1) = %+v, %v, want last record with TvdbID 12", got, ok)
 	}
@@ -713,7 +710,7 @@ func TestRecord_RoutedIDsRoutesToTheSelectedArrArm(t *testing.T) {
 // cour-split sibling shares it (Fire Force season 3 spans two AniList entries in
 // one TVDB season).
 func TestIndex_SiblingSeasons(t *testing.T) {
-	idx := NewIndex([]Record{
+	idx := NewIndex(Source{Records: []Record{
 		// Gintama's shape: one seasonless entry plus season-scoped siblings.
 		{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: SeasonAbsent},
 		{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 5},
@@ -728,7 +725,7 @@ func TestIndex_SiblingSeasons(t *testing.T) {
 		// Season-scoped records that carry no tvdb id: they share no series.
 		{AniListID: 500, Type: "TV", SeasonKind: SeasonPresent, SeasonTvdb: 1},
 		{AniListID: 501, Type: "TV", SeasonKind: SeasonPresent, SeasonTvdb: 2},
-	})
+	}})
 	tests := []struct {
 		name string
 		id   int
@@ -804,20 +801,20 @@ func TestRecord_AllIDsDiffersFromRoutedIDsOnlyByTheTypeGate(t *testing.T) {
 	}
 }
 
-// TestBuildIndexCanonicalizesRecords pins the boundary that OWNS the id-usability
-// rule: the accessors do not filter on read, so a record reaching buildIndex
+// TestNewIndexCanonicalizesRecords pins the boundary that OWNS the id-usability
+// rule: the accessors do not filter on read, so a record reaching NewIndex
 // through plain encoding/json - the persisted mapping cache replayed on the 304
 // and stale-on-error paths - must be canonicalized on insertion, which is what
 // makes RoutedIDs' presence check sound.
-func TestBuildIndexCanonicalizesRecords(t *testing.T) {
-	idx := NewIndex([]Record{{
+func TestNewIndexCanonicalizesRecords(t *testing.T) {
+	idx := NewIndex(Source{Records: []Record{{
 		AniListID:  7,
 		Type:       "movie",
 		TvdbID:     -3,
 		SeasonTvdb: -1,
 		TmdbMovies: []int{0, -1, 42},
 		IMDbIDs:    []string{"", "  ", " tt1 "},
-	}})
+	}}})
 	rec, ok := idx.Lookup(7)
 	if !ok {
 		t.Fatal("Lookup(7) = not found, want the indexed record")

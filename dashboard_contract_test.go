@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/logcontract"
 )
@@ -42,7 +43,7 @@ var (
 	groupableRe   = regexp.MustCompile(`^(avg|min|max|stddev|stdvar|quantile|first|last)_over_time\($`)
 	outerSumRe    = regexp.MustCompile(`sum\s+by\s*\([^)]*\)\s*\($`)
 	byRe          = regexp.MustCompile(`\bby\s*\(([^)]*)\)`)
-	summaryReadRe = regexp.MustCompile("\\|=\\s*`(upgrade sizes|biggest upgrade|group rank)`")
+	summaryReadRe = regexp.MustCompile("\\|=\\s*`(upgrade sizes|biggest upgrade)`")
 	regexMetaRe   = regexp.MustCompile(`[\\.*+?()\[\]{}^$]`)
 	urlHostRe     = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://([^/"\s:?#]+)`)
 	ipv4Re        = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
@@ -278,7 +279,7 @@ func matchingParen(s string, open int) int {
 
 // snapshotMessages are the lines a pass re-states in full, so a table over
 // them shows one pass only by joining on the newest pass's pass_id.
-var snapshotMessages = []string{"better release available", "manual review", "biggest upgrade", "group rank"}
+var snapshotMessages = []string{"better release available", "manual review", "biggest upgrade"}
 
 // passMessages are the per-pass lines whose newest pass_id a snapshot joins on.
 var passMessages = []string{"findings reported", "upgrade sizes"}
@@ -361,7 +362,7 @@ func TestDashboardItemTableCheckRejects(t *testing.T) {
 // subtracts byte fields itself, where an unknown size would read as 0, and the
 // net change tile and column read size_change_bytes.
 func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
-	byteField := regexp.MustCompile(`unwrap (recommended_bytes|current_bytes|recommended_bytes_total|current_bytes_replaced)\b[^|]*\)[^)]*\)?\s*[-+]`)
+	byteField := regexp.MustCompile(`unwrap (recommended_bytes|current_bytes|recommended_bytes_total|current_bytes_replaced|download_bytes_total)\b[^|]*\)[^)]*\)?\s*[-+]`)
 	reads := 0
 	for _, tg := range dashboardTargets(loadDashboard(t)) {
 		if byteField.MatchString(tg.expr) {
@@ -373,6 +374,36 @@ func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
 	}
 	if reads < 2 {
 		t.Errorf("%d queries read size_change_bytes, want the net change tile and the upgrades table", reads)
+	}
+}
+
+// The download total leaves out every upgrade whose download size is unknown,
+// so it is a lower bound: its tile must say "at least", and the count it leaves
+// out must be on the dashboard.
+func TestDashboardDownloadTotalReadsAsALowerBound(t *testing.T) {
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	totals, unsized := 0, 0
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		el := elements[name]
+		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
+		for _, q := range queries {
+			expr, _ := field(q, "spec", "query", "spec", "expr").(string)
+			if strings.Contains(expr, "unwrap upgrades_download_unsized ") {
+				unsized++
+			}
+			if !strings.Contains(expr, "unwrap download_bytes_total ") {
+				continue
+			}
+			totals++
+			title, _ := field(el, "spec", "title").(string)
+			shown, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "defaults", "displayName").(string)
+			if !strings.Contains(title+" "+shown, "at least") {
+				t.Errorf("panel %q shows the download total as %q, want it to say at least", title, shown)
+			}
+		}
+	}
+	if totals == 0 || unsized == 0 {
+		t.Fatalf("%s reads the download total %d times and the unsized count %d times, want both", dashboardPath, totals, unsized)
 	}
 }
 
@@ -410,7 +441,7 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 		"info_hash grouping":  "count(sum by (info_hash, arr) (count_over_time(" + sel + " |= `better release available` | json msg=\"msg\", info_hash=\"info_hash\" | msg=`better release available` [2h])))",
 		"ungrouped sum":       "sum(sum_over_time(" + sel + " |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
 		"summary of no view":  "last_over_time(" + sel + " |= `upgrade sizes` | json msg=\"msg\", upgrades=\"upgrades\" | msg=`upgrade sizes` | unwrap upgrades [2h]) by ()",
-		"log query bare json": sel + " |= `group rank` | json | msg=`group rank` | hidden_tier=\"$optional\"",
+		"log query bare json": sel + " |= `biggest upgrade` | json | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
 	}
 	for name, expr := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -421,7 +452,7 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 	}
 	for _, ok := range []string{
 		"last_over_time(" + sel + " |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]) by ()",
-		sel + " |= `group rank` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`group rank` | hidden_tier=\"$optional\"",
+		sel + " |= `biggest upgrade` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
 	} {
 		if problems := checkExpr(&c, ok); len(problems) != 0 {
 			t.Errorf("checkExpr(%q) = %v, want no problem", ok, problems)
@@ -545,6 +576,77 @@ func TestDashboardShowsPerCheckAveragesAsAverages(t *testing.T) {
 	}
 }
 
+// tableColumns maps each table override's matched field to the header it
+// shows: its displayName, else the field name.
+func tableColumns(el any) map[string]map[string]any {
+	columns := map[string]map[string]any{}
+	overrides, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "overrides").([]any)
+	for _, o := range overrides {
+		name, _ := field(o, "matcher", "options").(string)
+		props := map[string]any{"displayName": name}
+		list, _ := field(o, "properties").([]any)
+		for _, p := range list {
+			id, _ := field(p, "id").(string)
+			props[id] = field(p, "value")
+		}
+		columns[name] = props
+	}
+	return columns
+}
+
+func tables(t *testing.T) map[string]any {
+	t.Helper()
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	out := map[string]any{}
+	for name, el := range elements {
+		if field(el, "spec", "vizConfig", "group") == "table" {
+			out[name] = el
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s carries no table", dashboardPath)
+	}
+	return out
+}
+
+// Grafana sorts by a column's shown header, so a sortBy naming a header no
+// column shows leaves the table unsorted.
+func TestDashboardTablesSortByAShownColumn(t *testing.T) {
+	all := tables(t)
+	for _, name := range slices.Sorted(maps.Keys(all)) {
+		el := all[name]
+		shown := map[string]bool{}
+		for _, props := range tableColumns(el) {
+			header, _ := props["displayName"].(string)
+			shown[header] = true
+		}
+		sortBy, _ := field(el, "spec", "vizConfig", "spec", "options", "sortBy").([]any)
+		for _, s := range sortBy {
+			if header, _ := field(s, "displayName").(string); !shown[header] {
+				t.Errorf("panel %q sorts by %q, which no column shows", field(el, "spec", "title"), header)
+			}
+		}
+	}
+}
+
+// A fixed column narrower than its header plus the filter and sort icons cuts
+// the header: at least 8 px per character plus 56 px.
+func TestDashboardTableColumnsFitTheirHeaders(t *testing.T) {
+	all := tables(t)
+	for _, name := range slices.Sorted(maps.Keys(all)) {
+		el := all[name]
+		for column, props := range tableColumns(el) {
+			header, _ := props["displayName"].(string)
+			floor := float64(utf8.RuneCountInString(header)*8 + 56)
+			for _, key := range []string{"custom.width", "custom.minWidth"} {
+				if width, ok := props[key].(float64); ok && width < floor {
+					t.Errorf("panel %q column %q (%q) has %s %v, want at least %v", field(el, "spec", "title"), column, header, key, width, floor)
+				}
+			}
+		}
+	}
+}
+
 func panelDecimals(fieldConfig any) []float64 {
 	var out []float64
 	if d, ok := field(fieldConfig, "defaults", "decimals").(float64); ok {
@@ -562,29 +664,6 @@ func panelDecimals(fieldConfig any) []float64 {
 		}
 	}
 	return out
-}
-
-// Dividing by a zero items_with_entry yields NaN, which Grafana renders as a
-// value; dividing by (x > 0) yields no series, so the panel shows its no-value text.
-func TestDashboardGuardsTheBestShareDenominator(t *testing.T) {
-	guarded := regexp.MustCompile(`(?s)^\(.*>\s*0\s*\)$`)
-	ratios := map[string]bool{}
-	for _, tg := range dashboardTargets(loadDashboard(t)) {
-		for _, d := range divisors(tg.expr) {
-			if !strings.Contains(d, "items_with_entry") {
-				continue
-			}
-			ratios[tg.panel] = true
-			if !guarded.MatchString(d) {
-				t.Errorf("panel %q divides by %s, want the divisor compared with > 0\nexpr: %s", tg.panel, d, tg.expr)
-			}
-		}
-	}
-	for _, panel := range []string{"SeaDex best", "SeaDex alt"} {
-		if !ratios[panel] {
-			t.Errorf("panel %q does not divide by items_with_entry, want the best-share ratio", panel)
-		}
-	}
 }
 
 // The upgrades tile and table must hide the same optional upgrades, or the
@@ -717,43 +796,6 @@ func referencesElement(v any, element string) bool {
 		}
 	}
 	return false
-}
-
-// divisors returns the right operand of every '/' in expr, read as one
-// parenthesized group or one function call.
-func divisors(expr string) []string {
-	var out []string
-	for i, c := range expr {
-		if c != '/' {
-			continue
-		}
-		if op := leadingOperand(strings.TrimLeft(expr[i+1:], " \t\n")); op != "" {
-			out = append(out, op)
-		}
-	}
-	return out
-}
-
-func leadingOperand(s string) string {
-	open := strings.IndexFunc(s, func(r rune) bool {
-		return r != '_' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
-	})
-	if open < 0 || s[open] != '(' {
-		return ""
-	}
-	depth := 0
-	for i := open; i < len(s); i++ {
-		switch s[i] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return s[:i+1]
-			}
-		}
-	}
-	return ""
 }
 
 func TestDashboardNamesTheUncomparedSpecialsPlainly(t *testing.T) {

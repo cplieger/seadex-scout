@@ -226,21 +226,6 @@ func (k ScopeKind) MarshalJSON() ([]byte, error) {
 	return json.Marshal(k.String())
 }
 
-// UnmarshalJSON reads the String() vocabulary back.
-func (k *ScopeKind) UnmarshalJSON(data []byte) error {
-	var name string
-	if err := json.Unmarshal(data, &name); err != nil {
-		return err
-	}
-	for _, candidate := range []ScopeKind{ScopeWholeSeries, ScopeMovie, ScopeSeason, ScopeOffered, ScopeEpisodes} {
-		if candidate.String() == name {
-			*k = candidate
-			return nil
-		}
-	}
-	return fmt.Errorf("unknown scope kind %q", name)
-}
-
 // ClaimsCoverage reports whether this (item, record) pair may stand in for
 // SeaDex covering the item's files: all but a season-0 film or special, which
 // answers at most for its own episodes, never for the series.

@@ -45,17 +45,19 @@
 #                                   and rank_check numbers them
 #     attrs: pass_id, emitted, manual_review
 #   msg="upgrade sizes"             one per pass and hidden_tier (alt or none), the
-#                                   size totals of the upgrades that view shows
+#                                   size totals of the upgrades that view shows.
+#                                   download_bytes_total adds every upgrade whose
+#                                   download size is known, and
+#                                   upgrades_download_unsized counts the rest; the
+#                                   other totals cover only upgrades with both sizes
 #     attrs: pass_id, hidden_tier, upgrades, upgrades_better_release,
 #     attrs: upgrades_newer_revision, upgrades_sized, upgrades_unsized,
-#     attrs: recommended_bytes_total, current_bytes_replaced, size_change_bytes
+#     attrs: recommended_bytes_total, current_bytes_replaced, size_change_bytes,
+#     attrs: download_bytes_total, upgrades_download_unsized
 #   msg="biggest upgrade"           up to 25 per pass and hidden_tier, by size change
 #     attrs: pass_id, hidden_tier, rank, current_tier, status, title, al_id, arr,
 #     attrs: arr_url, season, current_group, recommended_group, recommended_bytes,
 #     attrs: current_bytes, size_change_bytes
-#   msg="group rank"                up to 15 per pass, hidden_tier and kind
-#                                   (recommended or held_below), by upgrade count
-#     attrs: pass_id, hidden_tier, kind, rank, group, upgrades
 #   msg="upgrade found"             an upgrade entered the set; after_start=true on
 #                                   the first pass after a start
 #     attrs: pass_id, after_start, title, al_id, arr, arr_url, season, status,

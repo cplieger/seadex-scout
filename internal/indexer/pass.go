@@ -356,7 +356,7 @@ func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) 
 		return nil
 	}
 	w.log.Warn("indexer publication log crossed its decode caps; the last-good feed snapshot is kept unchanged - remove feed.json to re-baseline",
-		"scope", scope.String(), "entries", len(snap.Published), "max_entries", maxSnapshotMapEntries)
+		"scope", scope.name(), "entries", len(snap.Published), "max_entries", maxSnapshotMapEntries)
 	return fmt.Errorf("indexer: publication log exceeds its decode caps (%d entries, max %d): snapshot not written",
 		len(snap.Published), maxSnapshotMapEntries)
 }
@@ -366,7 +366,7 @@ func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) 
 // same set for both scopes.
 func (w *FeedWriter) logPass(snap *snapshot, ev curationEvidence, js *journalStats, windowEntries int, scope passScope) {
 	w.log.Info("indexer feed snapshot written",
-		"scope", scope.String(),
+		"scope", scope.name(),
 		"input_entries", windowEntries, "curated_entries", len(ev.entries()),
 		"owners", len(snap.Owners),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),

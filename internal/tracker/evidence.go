@@ -65,7 +65,7 @@ const (
 // ClassifyAB grades the AnimeBytes evidence in one release's untrusted
 // (tracker, rawURL) pair. It is total: every input lands in exactly one grade,
 // and it takes no view of what the caller should DO about it - the operator's
-// animebytes toggle is policy, applied by filter.ABVisible.
+// animebytes toggle is policy, applied by filter.Obtainable.
 func ClassifyAB(trackerName, rawURL string) ABEvidence {
 	if IsAnimeBytes(trackerName) {
 		return ABDefinite

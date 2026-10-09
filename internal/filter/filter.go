@@ -16,7 +16,7 @@ import (
 // consumes. A zero Options keeps everything: ExcludeRemux and RequireDualAudio
 // default false. The AnimeBytes tracker toggle is deliberately NOT an Options
 // field: obtainability is a separate concern (the package's content-vs-tracker
-// split), so consumers pass the toggle explicitly to Obtainable/ABVisible.
+// split), so consumers pass the toggle explicitly to Obtainable.
 type Options struct {
 	// ExcludeRemux drops releases classified remux when true. Default false, so
 	// remuxes (often the best release) are kept unless the operator opts out.
@@ -40,27 +40,23 @@ func KeepNonTracker(r *release.Release, opts Options) bool {
 }
 
 // Obtainable reports whether the operator could actually get this release: a
-// public tracker (Nyaa, AnimeTosho, RuTracker) is obtainable unless the ABVisible
-// cross-check hides it (an AnimeBytes-hosted or malformed URL with the toggle
-// off); AnimeBytes is obtainable only when the operator enables it.
+// public tracker (Nyaa, AnimeTosho, RuTracker) is obtainable unless its URL is
+// AnimeBytes-hosted or malformed and the toggle is off; AnimeBytes is
+// obtainable only when the operator enables it.
 func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) bool {
 	if usableURL == "" {
 		return false
 	}
 	switch r.TrackerType {
 	case tracker.Public:
-		return ABVisible(r.Tracker, rawURL, animeBytes)
+		return abVisible(r.Tracker, rawURL, animeBytes)
 	case tracker.Private:
-		return tracker.IsAnimeBytes(r.Tracker) && ABVisible(r.Tracker, rawURL, animeBytes)
+		return tracker.IsAnimeBytes(r.Tracker) && abVisible(r.Tracker, rawURL, animeBytes)
 	default:
 		return false
 	}
 }
 
-// ABVisible reports whether a release may surface to the operator: the
-// animebytes toggle's fail-closed drop rule, and the single home of it.
-//
-// With the toggle ON everything surfaces.
-func ABVisible(trackerName, rawURL string, animeBytes bool) bool {
+func abVisible(trackerName, rawURL string, animeBytes bool) bool {
 	return animeBytes || tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone
 }

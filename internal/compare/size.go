@@ -15,9 +15,9 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// MaxDownloadsPerFinding bounds Finding.Downloads; a set that would need more
+// maxDownloadsPerFinding bounds Finding.Downloads; a set that would need more
 // leaves the finding's download side unknown.
-const MaxDownloadsPerFinding = 64
+const maxDownloadsPerFinding = 64
 
 // Download is one torrent a finding's download set selects, at its full size.
 // ID is the torrent's identity across findings: its info hash, else a digest of
@@ -152,9 +152,9 @@ func releaseFamily(r *release.Release) family {
 // downloadsOf turns a download set into its records and checked total. ok is
 // false for an unknown torrent size, a torrent with no identity, an identity
 // two candidates share (one torrent cannot be two downloads), or a set past
-// MaxDownloadsPerFinding.
+// maxDownloadsPerFinding.
 func downloadsOf(set []candidate) ([]Download, int64, bool) {
-	if len(set) == 0 || len(set) > MaxDownloadsPerFinding {
+	if len(set) == 0 || len(set) > maxDownloadsPerFinding {
 		return nil, 0, false
 	}
 	downloads := make([]Download, 0, len(set))

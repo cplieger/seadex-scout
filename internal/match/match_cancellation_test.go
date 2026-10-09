@@ -34,7 +34,7 @@ func (cancelledAniList) FetchMany(context.Context, []int) (anilist.BatchResult, 
 func TestMatchCancelledLookupsLogDebugNotWarn(t *testing.T) {
 	logger, recorder := capture.New()
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil) // no record: the entry needs the AniList lookup
+	idx := mapping.NewIndex(mapping.Source{}) // no record: the entry needs the AniList lookup
 
 	res := New(cancelledAniList{}, logger).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
 
@@ -89,15 +89,15 @@ func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: the per-id Fetch cancels the ctx and still answers
 		{AniListID: 22, Type: "MOVIE"}, // never reached: the loop breaks on the cancelled ctx
-	})
+	}})
 	fake := &cancelOnFetchAniList{cancel: cancel}
 
 	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
 
-	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != sourceTitle {
 		t.Errorf("matches = %+v, want exactly the one title match completed before the cancellation", res.Matches)
 	}
 	if !res.Degraded {
@@ -124,9 +124,9 @@ func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: the per-id Fetch cancels the ctx and still answers
-	})
+	}})
 	fake := &cancelOnFetchAniList{cancel: cancel}
 	memo := Memo{Entries: map[int]MemoEntry{
 		901: {Titles: []string{"Stale"}, Format: "TV", Year: 2019, Expiry: time.Now().Add(-time.Hour)},
@@ -134,7 +134,7 @@ func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
 
 	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
 
-	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != sourceTitle {
 		t.Fatalf("matches = %+v, want the final entry's completed title match retained", res.Matches)
 	}
 	if !res.Degraded {
@@ -158,7 +158,7 @@ func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
 func TestPrefetchSkippedOnAlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: a pending batch id
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11, Type: "MOVIE"}}}) // id-less: a pending batch id
 	fake := &batchCountingAniList{media: map[int]anilist.Media{
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
 	}}

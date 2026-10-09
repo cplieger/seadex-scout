@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// warmedIndexer builds a server and warms its snapshot cache, the pairing Run makes at
+// warmedIndexer builds a server and warms its snapshot cache, the pairing run makes at
 // the lifecycle boundary (New itself is pure assembly and loads nothing). Tests that
 // assert on the served feed immediately after construction use it; tests that exercise
 // the pre-first-load paths call New directly. There is no wiring helper beside it: New

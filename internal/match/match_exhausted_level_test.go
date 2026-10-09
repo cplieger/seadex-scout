@@ -33,7 +33,7 @@ func TestAniListExhaustionWarnsOnceWithAppContext(t *testing.T) {
 	client := anilist.NewClient(srv.Client(), srv.URL, anilist.WithRate(100000), anilist.WithLogger(logger))
 
 	res := New(client, logger).Match(t.Context(),
-		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, &library.Snapshot{}, mapping.NewIndex(mapping.Source{}), Memo{})
 
 	if !res.Degraded {
 		t.Error("Degraded = false, want true on a total AniList outage")

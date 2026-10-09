@@ -201,14 +201,14 @@ func TestTypeGateASCIICaseInsensitiveProperty(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		name := strings.Join(rapid.SliceOfN(tokenGen, 0, 6).Draw(t, "tokens"), "")
 		swapped := swapASCIICase(name)
-		if got, want := IsMediaFile(swapped), IsMediaFile(name); got != want {
-			t.Errorf("IsMediaFile(%q) = %v, but IsMediaFile(%q) = %v", swapped, got, name, want)
+		if got, want := isMediaFile(swapped), isMediaFile(name); got != want {
+			t.Errorf("isMediaFile(%q) = %v, but isMediaFile(%q) = %v", swapped, got, name, want)
 		}
 		if got, want := IsCreditlessExtra(swapped), IsCreditlessExtra(name); got != want {
 			t.Errorf("IsCreditlessExtra(%q) = %v, but IsCreditlessExtra(%q) = %v", swapped, got, name, want)
 		}
-		if got, want := IsSampleExtra(swapped), IsSampleExtra(name); got != want {
-			t.Errorf("IsSampleExtra(%q) = %v, but IsSampleExtra(%q) = %v", swapped, got, name, want)
+		if got, want := isSampleExtra(swapped), isSampleExtra(name); got != want {
+			t.Errorf("isSampleExtra(%q) = %v, but isSampleExtra(%q) = %v", swapped, got, name, want)
 		}
 		if got, want := ContentMediaFile(swapped), ContentMediaFile(name); got != want {
 			t.Errorf("ContentMediaFile(%q) = %v, but ContentMediaFile(%q) = %v", swapped, got, name, want)

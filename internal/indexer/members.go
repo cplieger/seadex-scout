@@ -89,8 +89,7 @@ const (
 	scopeAny
 )
 
-// String returns the scope's name for a log line or a test failure.
-func (s passScope) String() string {
+func (s passScope) name() string {
 	switch s {
 	case scopeCatalogue:
 		return "catalogue"

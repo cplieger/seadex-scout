@@ -28,8 +28,8 @@ type Verdict string
 const (
 	// VerdictBest means the on-disk release matches a SeaDex isBest release.
 	VerdictBest Verdict = "have_best"
-	// VerdictAlt means the on-disk release matches a listed non-best (alt) release.
-	VerdictAlt Verdict = "have_alt"
+	// verdictAlt means the on-disk release matches a listed non-best (alt) release.
+	verdictAlt Verdict = "have_alt"
 	// VerdictOlderRevision means the on-disk release is a SeaDex best group, but
 	// only at an older revision than SeaDex lists for it (v1 against v2, an
 	// original against a REPACK): the same group's newer release is listed.
@@ -44,12 +44,12 @@ const (
 	// item's file data at all, so neither alignment nor a divergence can
 	// honestly be claimed.
 	VerdictUnverified Verdict = "unverified"
-	// VerdictUnattributed means the item has files on disk but the app does not
+	// verdictUnattributed means the item has files on disk but the app does not
 	// compare this entry: it is an OFFERED unit, a film or special filed in
 	// Sonarr's season-0 bucket that the map does not place on episodes the item
 	// lists. The bucket's groups are reported for what it holds; the feed still
 	// serves the entry.
-	VerdictUnattributed Verdict = "unattributed"
+	verdictUnattributed Verdict = "unattributed"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
 	// (present in the mapping) but SeaDex lists no entry for it.
 	VerdictNotOnSeaDex Verdict = "not_on_seadex"
@@ -57,7 +57,7 @@ const (
 
 // verdictOrder is the report's most-actionable-first ordering. not_on_seadex is
 // last: it is informational (no SeaDex recommendation exists to act on).
-var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictOlderRevision, VerdictUnverified, VerdictUnattributed, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
+var verdictOrder = []Verdict{VerdictUnlisted, verdictAlt, VerdictOlderRevision, VerdictUnverified, verdictUnattributed, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
 
 // Qualifier annotates a row's verdict with the daemon's finding vocabulary for
 // the same (item, entry). It annotates; it never forks the verdict enum.
@@ -75,12 +75,11 @@ const (
 	QualifierIncomplete Qualifier = "incomplete"
 )
 
-// Release is one SeaDex torrent in a report row (best or alt). URL is
-// empty when the upstream link fails usable-link validation.
-type Release struct {
+type rowRelease struct {
 	Tracker string `json:"tracker"`
 	Group   string `json:"group,omitempty"`
-	URL     string `json:"url,omitempty"`
+	// URL is empty when the upstream link fails usable-link validation.
+	URL string `json:"url,omitempty"`
 	// Warnings carries the canonical curation-warning tags (broken, incomplete)
 	// SeaDex curators put on the release. Display vocabulary only: a warned
 	// release is always listed and always annotated.
@@ -105,8 +104,7 @@ type Release struct {
 	UnknownTracker bool `json:"unknown_tracker,omitempty"`
 }
 
-// Row is one anime's alignment record.
-type Row struct {
+type reportRow struct {
 	Title     string  `json:"title"`
 	Arr       string  `json:"arr"`
 	ArrURL    string  `json:"arr_url,omitempty"`
@@ -114,10 +112,10 @@ type Row struct {
 	Verdict   Verdict `json:"verdict"`
 	// Qualifier is the daemon-vocabulary annotation for the row
 	// (mixed/theoretical/incomplete), empty when none applies.
-	Qualifier     Qualifier `json:"qualifier,omitempty"`
-	MatchSource   string    `json:"match_source"`
-	CurrentGroups []string  `json:"current_groups,omitempty"`
-	Releases      []Release `json:"releases,omitempty"`
+	Qualifier     Qualifier    `json:"qualifier,omitempty"`
+	MatchSource   string       `json:"match_source"`
+	CurrentGroups []string     `json:"current_groups,omitempty"`
+	Releases      []rowRelease `json:"releases,omitempty"`
 	// Episodes and MissingEpisodes are set only on an "episodes" row: the
 	// season-0 episodes the entry is, and those of them with no file.
 	Episodes        []int `json:"episodes,omitempty"`
@@ -153,17 +151,17 @@ type Row struct {
 	HiddenAnimeBytesBest int `json:"hidden_animebytes_best,omitempty"`
 }
 
-// IncompleteEntry is one SeaDex entry whose AniList lookup failed transiently
+// incompleteEntry is one SeaDex entry whose AniList lookup failed transiently
 // this run, so its library mapping is unconfirmed: left unmapped, or resolved
 // from an expired memo entry. It renders in the incomplete-mapping section.
-type IncompleteEntry struct {
+type incompleteEntry struct {
 	SeaDexURL string `json:"seadex_url"`
 	AniListID int    `json:"al_id"`
 }
 
-// ItemTotals counts library ITEMS (one series or one film), where Report.Totals
+// itemCounts counts library ITEMS (one series or one film), where Report.Totals
 // counts rows: a series that three SeaDex entries match is one item and three rows.
-type ItemTotals struct {
+type itemCounts struct {
 	// Anime is every item the report has a row for: a SeaDex match or not_on_seadex.
 	Anime int `json:"anime"`
 	// WithEntry is the items at least one SeaDex entry matched.
@@ -181,12 +179,12 @@ type ItemTotals struct {
 type Report struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	Totals      map[string]int `json:"totals"`
-	Rows        []Row          `json:"rows"`
+	Rows        []reportRow    `json:"rows"`
 	// Incomplete lists the SeaDex entries whose library mapping could not be
 	// resolved this run (a transient AniList failure), sorted by AniList id.
 	// Empty on a fully resolved run, and omitted from the JSON.
-	Incomplete []IncompleteEntry `json:"incomplete_mappings,omitempty"`
-	Items      ItemTotals        `json:"items"`
+	Incomplete []incompleteEntry `json:"incomplete_mappings,omitempty"`
+	Items      itemCounts        `json:"items"`
 }
 
 // Config configures an Auditor.
@@ -220,7 +218,7 @@ func New(cfg Config) *Auditor {
 // case the not_on_seadex section is empty. incompleteIDs carries the AniList ids
 // whose needed lookup failed transiently this run.
 func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index, incompleteIDs map[int]struct{}) Report {
-	rows := make([]Row, 0, len(matches))
+	rows := make([]reportRow, 0, len(matches))
 	covered := make(map[string]struct{})
 	matched := make(map[string]itemStanding)
 	for i := range matches {
@@ -269,19 +267,19 @@ func (s itemStanding) with(v Verdict) itemStanding {
 	switch v {
 	case VerdictBest:
 		s.best = true
-	case VerdictAlt:
+	case verdictAlt:
 		s.alt = true
 	case VerdictOlderRevision, VerdictUnlisted, VerdictUnverified:
 		s.belowAlt = true
-	case VerdictNoFile, VerdictUnattributed, VerdictNotOnSeaDex:
+	case VerdictNoFile, verdictUnattributed, VerdictNotOnSeaDex:
 	}
 	return s
 }
 
 // An item can be both matched and uncovered (its only entries are offered
 // ones), so Anime is the union.
-func itemTotals(matched map[string]itemStanding, uncoveredKeys []string) ItemTotals {
-	t := ItemTotals{Anime: len(matched), WithEntry: len(matched)}
+func itemTotals(matched map[string]itemStanding, uncoveredKeys []string) itemCounts {
+	t := itemCounts{Anime: len(matched), WithEntry: len(matched)}
 	for _, key := range uncoveredKeys {
 		if _, ok := matched[key]; !ok {
 			t.Anime++
@@ -303,21 +301,21 @@ func itemTotals(matched map[string]itemStanding, uncoveredKeys []string) ItemTot
 
 // incompleteEntries renders the transiently-unresolved AniList ids as the
 // report's incomplete-mapping section, sorted by id. Nil on a resolved run.
-func incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
+func incompleteEntries(ids map[int]struct{}) []incompleteEntry {
 	if len(ids) == 0 {
 		return nil
 	}
-	out := make([]IncompleteEntry, 0, len(ids))
+	out := make([]incompleteEntry, 0, len(ids))
 	for id := range ids {
-		out = append(out, IncompleteEntry{AniListID: id, SeaDexURL: seadex.EntryURL(id)})
+		out = append(out, incompleteEntry{AniListID: id, SeaDexURL: seadex.EntryURL(id)})
 	}
-	slices.SortFunc(out, func(x, y IncompleteEntry) int { return cmp.Compare(x.AniListID, y.AniListID) })
+	slices.SortFunc(out, func(x, y incompleteEntry) int { return cmp.Compare(x.AniListID, y.AniListID) })
 	return out
 }
 
 // uncoveredRows lists library items that are recognized anime (present in the
 // mapping) but were not covered by any SeaDex match, plus each row's item key.
-func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) (rows []Row, keys []string) {
+func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) (rows []reportRow, keys []string) {
 	if snap == nil {
 		return nil, nil
 	}
@@ -336,7 +334,7 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 			continue
 		}
 		// An uncovered item has no SeaDex-associated record to supply a scope.
-		rows = append(rows, Row{
+		rows = append(rows, reportRow{
 			Title:         it.Title,
 			Arr:           it.Arr,
 			ArrURL:        it.ArrURL,
@@ -352,11 +350,11 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 
 // assess builds one row: classify the entry's releases, resolve the shared
 // comparison decision (align.Decide), and render it as verdict and qualifier.
-func (a *Auditor) assess(m *match.Match) Row {
+func (a *Auditor) assess(m *match.Match) reportRow {
 	releases := a.classifyReleases(&m.Entry)
 	best, alt := groupSets(releases)
 
-	row := Row{
+	row := reportRow{
 		Releases:    releases,
 		Title:       m.Item.Title,
 		Arr:         m.Arr,
@@ -404,7 +402,7 @@ func verdictFor(d *align.Decision, groupsUnknown bool) Verdict {
 		return VerdictNoFile
 	case align.StandingUnverified:
 		if d.Kind == align.ScopeOffered && !groupsUnknown {
-			return VerdictUnattributed
+			return verdictUnattributed
 		}
 		return VerdictUnverified
 	case align.StandingBest:
@@ -412,7 +410,7 @@ func verdictFor(d *align.Decision, groupsUnknown bool) Verdict {
 	case align.StandingBestSuperseded:
 		return VerdictOlderRevision
 	case align.StandingAlt:
-		return VerdictAlt
+		return verdictAlt
 	case align.StandingUnlisted:
 		return VerdictUnlisted
 	default:
@@ -445,13 +443,13 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 	}
 }
 
-// classifyReleases turns every SeaDex torrent into a report Release (group,
+// classifyReleases turns every SeaDex torrent into a rowRelease (group,
 // tracker, usable URL, best flag, curation warnings). DEFINITIVELY AnimeBytes
 // torrents are dropped when the operator has AnimeBytes off. A public-labeled
 // release whose URL evidence is malformed or ambiguous is NOT dropped: it stays
 // listed with Unobtainable set, so a release that drove no verdict is explained.
-func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
-	out := make([]Release, 0, len(entry.Torrents))
+func (a *Auditor) classifyReleases(entry *seadex.Entry) []rowRelease {
+	out := make([]rowRelease, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
 		// Hide only a DEFINITIVELY AB torrent when the toggle is off; ambiguous
@@ -464,7 +462,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 		// readings of the same decision, so "a refusal means no link" is structural.
 		// The refusal REASON comes from the publisher rather than being re-derived.
 		published, refusal := classify.PublishRefusal(t)
-		out = append(out, Release{
+		out = append(out, rowRelease{
 			Tracker:        rel.Tracker,
 			Group:          rel.Group,
 			URL:            published,
@@ -491,7 +489,7 @@ func (a *Auditor) hiddenByABToggle(t *seadex.Torrent) bool {
 // release that forfeits best evidence (forfeitsBest) contributes nothing, while
 // ALT is descriptive - "is what I already have something SeaDex lists?" - and
 // gates nothing. Both classes stay visible in the row's release list, annotated.
-func groupSets(releases []Release) (best, alt []string) {
+func groupSets(releases []rowRelease) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
 		rel := &releases[i]
@@ -512,7 +510,7 @@ func groupSets(releases []Release) (best, alt []string) {
 // the verdict: the operator's tag policy excludes it from the report surface, or
 // it is unreachable. Deliberately NARROWER than the render layer's annotated():
 // a curation warning is display, this is policy.
-func forfeitsBest(rel *Release) bool {
+func forfeitsBest(rel *rowRelease) bool {
 	return rel.Filtered || rel.Unobtainable
 }
 
@@ -527,12 +525,12 @@ func addUnique(seen map[string]struct{}, out *[]string, g string) {
 
 // sortRows orders rows by verdict actionability, then title, then season and
 // AniList id for same-title rows.
-func sortRows(rows []Row) {
+func sortRows(rows []reportRow) {
 	rank := make(map[Verdict]int, len(verdictOrder))
 	for i, v := range verdictOrder {
 		rank[v] = i
 	}
-	slices.SortStableFunc(rows, func(a, b Row) int {
+	slices.SortStableFunc(rows, func(a, b reportRow) int {
 		if c := cmp.Compare(rank[a.Verdict], rank[b.Verdict]); c != 0 {
 			return c
 		}

@@ -191,7 +191,7 @@ func (f *fakeStore) Save(ctx context.Context, st *state.State) error {
 type fakeMapping struct{}
 
 func (fakeMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
-	return *prev, mapping.NewIndex(prev.Records), nil
+	return *prev, mapping.NewIndex(mapping.Source{Records: prev.Records}), nil
 }
 
 // seadexFrierenEntry returns the single curated Frieren entry (one best Nyaa

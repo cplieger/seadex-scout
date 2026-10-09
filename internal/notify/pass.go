@@ -20,11 +20,8 @@ const (
 
 var viewTiers = [viewCount]string{viewAlt: string(compare.TierAlt), viewNone: "none"}
 
-// Per-view list bounds, so the lines one pass adds stay fixed.
-const (
-	maxBiggestUpgrades = 25
-	maxGroupRanks      = 15
-)
+// Per-view list bound, so the lines one pass adds stay fixed.
+const maxBiggestUpgrades = 25
 
 func passID(start time.Time) int64 { return start.UnixMilli() }
 
@@ -145,39 +142,69 @@ type totals struct {
 	counted   int
 }
 
-// add counts f into the totals, or reports false and leaves them unchanged
-// when f is unsized, when one of its identities already carries another size
-// (conflict names it), or when a sum would pass math.MaxInt64.
-func (t *totals) add(f *compare.Finding) (ok bool, conflict string) {
+// add counts f into the totals, or leaves them unchanged when f is unsized,
+// when one of its identities already carries another size (the returned
+// conflict names it), or when a sum would pass math.MaxInt64.
+func (t *totals) add(f *compare.Finding) (conflict string) {
 	if !sized(f) {
-		return false, ""
-	}
-	downloads := make([]part, 0, len(f.Downloads))
-	for _, d := range f.Downloads {
-		downloads = append(downloads, part{d.ID, d.Bytes})
+		return ""
 	}
 	replaced := make([]part, 0, len(f.Replaced))
 	for _, r := range f.Replaced {
 		replaced = append(replaced, part{r.Key, r.Bytes})
 	}
-	download, newDownloads, conflict, ok := union(t.downloads, t.download, downloads)
+	download, newDownloads, conflict, ok := union(t.downloads, t.download, downloadParts(f))
 	if !ok {
-		return false, conflict
+		return conflict
 	}
 	current, newReplaced, conflict, ok := union(t.replaced, t.current, replaced)
 	if !ok {
-		return false, conflict
+		return conflict
 	}
 	maps.Copy(t.downloads, newDownloads)
 	maps.Copy(t.replaced, newReplaced)
 	t.download, t.current = download, current
 	t.counted++
-	return true, ""
+	return ""
+}
+
+// downloadTotal is a view's download floor: the downloads of every finding
+// whose download size is known, each torrent once, whether or not the size of
+// the files it replaces is known.
+type downloadTotal struct {
+	seen    map[string]int64
+	bytes   int64
+	counted int
+}
+
+// add counts f's downloads, or leaves the total unchanged when f's download
+// size is unknown, when one of its torrents already carries another size (the
+// returned conflict names it), or when the sum would pass math.MaxInt64.
+func (t *downloadTotal) add(f *compare.Finding) (conflict string) {
+	if f.ReleaseBytes <= 0 {
+		return ""
+	}
+	bytes, fresh, conflict, ok := union(t.seen, t.bytes, downloadParts(f))
+	if !ok {
+		return conflict
+	}
+	maps.Copy(t.seen, fresh)
+	t.bytes = bytes
+	t.counted++
+	return ""
 }
 
 type part struct {
 	key   string
 	bytes int64
+}
+
+func downloadParts(f *compare.Finding) []part {
+	parts := make([]part, 0, len(f.Downloads))
+	for _, d := range f.Downloads {
+		parts = append(parts, part{d.ID, d.Bytes})
+	}
+	return parts
 }
 
 // union adds the parts seen does not hold yet to total. It returns the new
@@ -204,11 +231,12 @@ func union(seen map[string]int64, total int64, parts []part) (sum int64, fresh m
 	return total, fresh, "", true
 }
 
-// emitView logs one view's size summary, its biggest size changes and its
-// group rankings. conflicts holds the identities already warned about this
-// pass, so a conflict both views meet is reported once.
+// emitView logs one view's size summary and its biggest size changes.
+// conflicts holds the identities already warned about this pass, so a conflict
+// both views meet is reported once.
 func (n *Notifier) emitView(v *view, pass int64, conflicts map[string]bool) {
 	t := totals{downloads: map[string]int64{}, replaced: map[string]int64{}}
+	floor := downloadTotal{seen: map[string]int64{}}
 	better, newer := 0, 0
 	for _, r := range v.rows {
 		if r.f.Status == compare.StatusNewerRevision {
@@ -216,10 +244,12 @@ func (n *Notifier) emitView(v *view, pass int64, conflicts map[string]bool) {
 		} else {
 			better++
 		}
-		if _, conflict := t.add(&r.f); conflict != "" && !conflicts[conflict] {
-			conflicts[conflict] = true
-			n.log.Warn("one download or file carries two sizes across findings; the finding that brought the second is left out of the size totals",
-				"pass_id", pass, "id", conflict, "title", capAttr(r.f.Title), "al_id", r.f.AniListID)
+		for _, conflict := range []string{t.add(&r.f), floor.add(&r.f)} {
+			if conflict != "" && !conflicts[conflict] {
+				conflicts[conflict] = true
+				n.log.Warn("one download or file carries two sizes across findings; the finding that brought the second is left out of the size totals",
+					"pass_id", pass, "id", conflict, "title", capAttr(r.f.Title), "al_id", r.f.AniListID)
+			}
 		}
 	}
 	n.log.Info("upgrade sizes",
@@ -227,9 +257,9 @@ func (n *Notifier) emitView(v *view, pass int64, conflicts map[string]bool) {
 		"upgrades", len(v.rows), "upgrades_better_release", better, "upgrades_newer_revision", newer,
 		"upgrades_sized", t.counted, "upgrades_unsized", len(v.rows)-t.counted,
 		"recommended_bytes_total", t.download, "current_bytes_replaced", t.current,
-		"size_change_bytes", t.download-t.current)
+		"size_change_bytes", t.download-t.current,
+		"download_bytes_total", floor.bytes, "upgrades_download_unsized", len(v.rows)-floor.counted)
 	n.emitBiggest(v, pass)
-	n.emitGroupRanks(v, pass)
 }
 
 // emitBiggest logs the view's maxBiggestUpgrades sized upgrades with the
@@ -264,53 +294,6 @@ func absChange(f *compare.Finding) int64 {
 		return -d
 	}
 	return d
-}
-
-// Group-rank kinds: the groups the view's upgrades recommend, and the groups
-// its better-release rows hold, which SeaDex rates below its best.
-const (
-	kindRecommended = "recommended"
-	kindHeldBelow   = "held_below"
-)
-
-// emitGroupRanks logs the view's maxGroupRanks most frequent groups of each
-// kind, by the number of upgrades naming them, then by name.
-func (n *Notifier) emitGroupRanks(v *view, pass int64) {
-	recommended, held := groupCounts(v)
-	for _, kind := range []struct {
-		counts map[string]int
-		name   string
-	}{{recommended, kindRecommended}, {held, kindHeldBelow}} {
-		groups := slices.SortedFunc(maps.Keys(kind.counts), func(a, b string) int {
-			return cmp.Or(cmp.Compare(kind.counts[b], kind.counts[a]), cmp.Compare(a, b))
-		})
-		for i, g := range groups[:min(len(groups), maxGroupRanks)] {
-			n.log.Info("group rank", "pass_id", pass, "hidden_tier", v.tier, "kind", kind.name,
-				"rank", i+1, "group", g, "upgrades", kind.counts[g])
-		}
-	}
-}
-
-// groupCounts counts, per group, the view's upgrades recommending it and its
-// better releases holding it, each upgrade once per group.
-func groupCounts(v *view) (recommended, held map[string]int) {
-	recommended, held = map[string]int{}, map[string]int{}
-	for _, r := range v.rows {
-		if g := capAttr(r.f.RecommendedGroup); g != "" {
-			recommended[g]++
-		}
-		if r.f.Status != compare.StatusBetter {
-			continue
-		}
-		seen := map[string]bool{}
-		for _, g := range r.f.CurrentGroups {
-			if g = capRetainedElem(g); g != "" && !seen[g] {
-				seen[g] = true
-				held[g]++
-			}
-		}
-	}
-	return recommended, held
 }
 
 // reportChanges logs one event per upgrade key entering or leaving the set and

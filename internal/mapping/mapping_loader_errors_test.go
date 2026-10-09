@@ -85,7 +85,7 @@ func TestLoader_refreshCache_boundsParseErrorText(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_canceledContextSkipsOverrides pins applyOverrides'
+// TestLoader_Load_canceledContextSkipsOverrides pins effectiveOverrides'
 // context-cancellation branch: a canceled context skips the overrides read
 // silently (no overlay, no warn) while the fresh cache still serves.
 func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
@@ -125,7 +125,7 @@ func TestLoader_Load_directoryOverridesIgnored(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_zeroIDOverrideIgnored pins applyOverrides' keying guard: an
+// TestLoader_Load_zeroIDOverrideIgnored pins effectiveOverrides' keying guard: an
 // override record with anilist_id 0 is not indexed (it cannot key a SeaDex
 // lookup), so no phantom entry appears.
 func TestLoader_Load_zeroIDOverrideIgnored(t *testing.T) {

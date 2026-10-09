@@ -9,19 +9,19 @@ import "strings"
 // vocabulary is a subset of it plus UNKNOWN. AniList's MANGA/NOVEL/ONE_SHOT members cannot appear on a
 // SeaDex entry and are deliberately absent.
 const (
-	Movie   = "MOVIE"
-	TV      = "TV"
-	TVShort = "TV_SHORT"
-	Special = "SPECIAL"
-	OVA     = "OVA"
-	ONA     = "ONA"
-	Music   = "MUSIC"
+	movie   = "MOVIE"
+	tv      = "TV"
+	tvShort = "TV_SHORT"
+	special = "SPECIAL"
+	ova     = "OVA"
+	ona     = "ONA"
+	music   = "MUSIC"
 )
 
 // known is the accepted token set, keyed in canonical form.
 var known = map[string]struct{}{
-	TV: {}, TVShort: {}, Movie: {}, Special: {},
-	OVA: {}, ONA: {}, Music: {},
+	tv: {}, tvShort: {}, movie: {}, special: {},
+	ova: {}, ona: {}, music: {},
 }
 
 // Normalize canonicalizes a raw type/format token to the upper-cased, trimmed
@@ -39,14 +39,14 @@ func Known(s string) bool {
 // IsMovie reports whether a canonical token routes to Radarr (TMDB movie /
 // IMDb). Every other token - including an empty or unrecognized one - routes to
 // Sonarr (TVDB).
-func IsMovie(s string) bool { return s == Movie }
+func IsMovie(s string) bool { return s == movie }
 
 // IsSpecial reports whether a canonical token is an OVA/ONA/special/music video
 // rather than a standard TV season or movie, so it can be excluded when the
 // operator turns specials off. An empty or unrecognized token is not special.
 func IsSpecial(s string) bool {
 	switch s {
-	case OVA, ONA, Special, Music:
+	case ova, ona, special, music:
 		return true
 	default:
 		return false

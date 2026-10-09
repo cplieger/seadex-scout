@@ -11,7 +11,7 @@ import (
 // TestTextPropertyMasksEveryPathForm is the per-PR randomized net under the app's
 // one secret-masking primitive. The masked value is secret-capable (config
 // expansion places an allowlisted ${SEADEX_SCOUT_*} value in any string field) and
-// Text is what keeps it out of Loki, while TestTextGuards covers six hand-picked
+// redactText is what keeps it out of Loki, while TestTextGuards covers six hand-picked
 // strings, so the ancestor walk holds only for the two forms it names. Two halves:
 // the secret-bearing component survives in NO path form an os.PathError from the
 // report pipeline can carry, and the marker is always emitted.
@@ -31,7 +31,7 @@ func TestTextPropertyMasksEveryPathForm(t *testing.T) {
 		}).Draw(t, "form")
 		text := noise.Draw(t, "prefix") + form + noise.Draw(t, "suffix")
 
-		got := Text(dir, text)
+		got := redactText(dir, text)
 
 		if strings.Contains(got, secret) {
 			t.Errorf("Text(%q, %q) = %q, leaked the secret-capable dir component", dir, text, got)

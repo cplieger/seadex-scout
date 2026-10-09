@@ -190,17 +190,17 @@ func TestRevisionBehind(t *testing.T) {
 }
 
 func TestRevisionMarkerTextRoundTrip(t *testing.T) {
-	for _, marker := range []RevisionMarker{RevisionUnknown, RevisionNone, RevisionVersion, RevisionRepack, RevisionProper} {
+	for _, marker := range []revisionMarker{RevisionUnknown, RevisionNone, RevisionVersion, RevisionRepack, RevisionProper} {
 		text, err := marker.MarshalText()
 		if err != nil {
-			t.Fatalf("RevisionMarker(%d).MarshalText() error = %v", marker, err)
+			t.Fatalf("revisionMarker(%d).MarshalText() error = %v", marker, err)
 		}
-		var decoded RevisionMarker
+		var decoded revisionMarker
 		if err := decoded.UnmarshalText(text); err != nil || decoded != marker {
 			t.Errorf("UnmarshalText(%q) = %d, %v; want %d, nil", text, decoded, err, marker)
 		}
 	}
-	if _, err := RevisionMarker(len(revisionMarkerNames)).MarshalText(); err == nil {
+	if _, err := revisionMarker(len(revisionMarkerNames)).MarshalText(); err == nil {
 		t.Errorf("MarshalText on an undeclared marker returned nil error, want an error")
 	}
 }
