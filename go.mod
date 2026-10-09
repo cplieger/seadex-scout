@@ -3,19 +3,19 @@ module github.com/cplieger/seadex-scout
 go 1.27.2
 
 require (
-	github.com/cplieger/arrapi/v2 v2.2.0
-	github.com/cplieger/atomicfile/v4 v4.0.0
-	github.com/cplieger/envx/yamlenv/v2 v2.0.1
-	github.com/cplieger/health v1.8.0
-	github.com/cplieger/httpx/v5 v5.0.3
-	github.com/cplieger/jsoncap/v2 v2.0.1
-	github.com/cplieger/keyenc v1.0.9
-	github.com/cplieger/runesafe/v2 v2.1.0
-	github.com/cplieger/scheduler/v4 v4.2.1
-	github.com/cplieger/slogx v1.6.5
-	github.com/cplieger/urlform v1.3.5
-	github.com/cplieger/webhttp/v3 v3.0.0
-	github.com/cplieger/xmlx v1.0.4
+	github.com/cplieger/arrapi/v2 v2.2.3
+	github.com/cplieger/atomicfile/v4 v4.1.0-dev.2
+	github.com/cplieger/envx/yamlenv/v2 v2.0.3
+	github.com/cplieger/health v1.8.2
+	github.com/cplieger/httpx/v5 v5.0.5
+	github.com/cplieger/jsoncap/v2 v2.0.3
+	github.com/cplieger/keyenc v1.1.0-dev.1
+	github.com/cplieger/runesafe/v2 v2.1.1
+	github.com/cplieger/scheduler/v4 v4.2.3
+	github.com/cplieger/slogx v1.6.7
+	github.com/cplieger/urlform v1.4.0-dev.1
+	github.com/cplieger/webhttp/v3 v3.0.2
+	github.com/cplieger/xmlx v1.0.6
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/text v0.42.0
 	pgregory.net/rapid v1.3.0
