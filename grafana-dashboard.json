@@ -88,7 +88,7 @@
                 "textMode": "value",
                 "text": {
                   "titleSize": 14,
-                  "valueSize": 40
+                  "valueSize": 28
                 }
               },
               "fieldConfig": {
@@ -218,7 +218,7 @@
                 "textMode": "value",
                 "text": {
                   "titleSize": 14,
-                  "valueSize": 40
+                  "valueSize": 28
                 },
                 "showPercentChange": false
               },
@@ -2087,7 +2087,7 @@
                 "textMode": "value_and_name",
                 "text": {
                   "titleSize": 14,
-                  "valueSize": 40
+                  "valueSize": 28
                 },
                 "showPercentChange": false
               },
@@ -3529,7 +3529,7 @@
                 "textMode": "value",
                 "text": {
                   "titleSize": 14,
-                  "valueSize": 40
+                  "valueSize": 28
                 },
                 "showPercentChange": false
               },
@@ -3970,7 +3970,7 @@
                                   "x": 0,
                                   "y": 0,
                                   "width": 12,
-                                  "height": 7,
+                                  "height": 9,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-34"
@@ -3983,7 +3983,7 @@
                                   "x": 12,
                                   "y": 0,
                                   "width": 12,
-                                  "height": 4,
+                                  "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-17"
@@ -3994,8 +3994,8 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 12,
-                                  "y": 4,
-                                  "width": 6,
+                                  "y": 3,
+                                  "width": 12,
                                   "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
@@ -4006,9 +4006,9 @@
                               {
                                 "kind": "GridLayoutItem",
                                 "spec": {
-                                  "x": 18,
-                                  "y": 4,
-                                  "width": 6,
+                                  "x": 12,
+                                  "y": 6,
+                                  "width": 12,
                                   "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
@@ -4020,7 +4020,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 7,
+                                  "y": 9,
                                   "width": 24,
                                   "height": 10,
                                   "element": {
