@@ -5,7 +5,7 @@
 <!-- hub-overview BEGIN -->
 seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://releases.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
 
-![The seadex-scout Grafana dashboard showing its status, 12 upgrades and 4 checks by hand, the library's share on SeaDex best and alt releases, a breakdown of the library by verdict, and the table of upgrades available](docs/images/dashboard.png)
+![The seadex-scout Grafana dashboard showing its status, 10 upgrades, 2 findings to check by hand, at least 209.0 GB of storage needed for all upgrades, a breakdown of the library by verdict, and the table of upgrades available](docs/images/dashboard.png)
 
 ## What it does
 
@@ -70,7 +70,7 @@ On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**.
 
 ## Reading the results
 
-The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known. The dashboard also shows how much of your library is at SeaDex's best or alt, and whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
+The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known, and a tile gives the storage all the upgrades need together. The dashboard also shows how much of your library is at SeaDex's best or alt, and whether the scout is healthy. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
 
 With the rules from step 4 loaded, your Alertmanager sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. To stop the messages for one show, add its `al_id` to `filters.ignore`.
 
