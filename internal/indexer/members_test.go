@@ -55,7 +55,7 @@ func TestPublicationLogIsNeverDeletable(t *testing.T) {
 		t.Errorf("appendPublished(%v, {nyaa:3}) = %v, want %v", prev, got, want)
 	}
 	for _, scope := range []passScope{scopeCatalogue, scopeWindow} {
-		t.Run(scope.String(), func(t *testing.T) {
+		t.Run(scope.name(), func(t *testing.T) {
 			snap := buildSnapshot(&feedState{published: prev}, &passWrites{scope: scope})
 			for id := range prev {
 				if !snap.Published[id] {
@@ -88,7 +88,7 @@ func TestPublicationLogCapRefusesTheWriteAndKeepsThePast(t *testing.T) {
 		t.Fatalf("fixture publication log of %d entries is still within its caps; the cap path is unreachable", len(published))
 	}
 	for _, scope := range []passScope{scopeCatalogue, scopeWindow} {
-		t.Run(scope.String(), func(t *testing.T) {
+		t.Run(scope.name(), func(t *testing.T) {
 			snap := snapshot{Owners: owns(), Published: maps.Clone(published)}
 			w := NewFeedWriter(&FeedWriterConfig{Path: filepath.Join(t.TempDir(), "feed.json")}, nil, nil)
 			if err := w.publicationLogPersistable(&snap, scope); err == nil {

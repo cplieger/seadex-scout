@@ -28,7 +28,7 @@ const stopWait = 3 * time.Second
 func (ix *Indexer) Supervise(ctx context.Context, cleanup func()) (stop func()) {
 	ictx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	supervise(ictx, done, ix.Run, cleanup, ix.log)
+	supervise(ictx, done, ix.run, cleanup, ix.log)
 	return func() {
 		cancel()
 		select {
@@ -59,7 +59,7 @@ func supervise(ctx context.Context, done chan struct{}, run func(context.Context
 	}()
 }
 
-// logStop classifies the feed's Run error for the shared slog stream, through the
+// logStop classifies the feed's run error for the shared slog stream, through the
 // feed's own logger so the terminal record carries component=indexer. Both
 // shutdown-path cases are routine on a redeploy (WARN, kept off the cycle-error
 // alert) but carry distinct messages: webhttp.Run returns DeadlineExceeded when

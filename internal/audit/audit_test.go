@@ -26,7 +26,7 @@ func TestVerdictFor(t *testing.T) {
 	}{
 		{name: "no file", decision: align.Decision{Standing: align.StandingNoFile}, want: VerdictNoFile},
 		{name: "best", decision: align.Decision{Standing: align.StandingBest}, want: VerdictBest},
-		{name: "alt", decision: align.Decision{Standing: align.StandingAlt}, want: VerdictAlt},
+		{name: "alt", decision: align.Decision{Standing: align.StandingAlt}, want: verdictAlt},
 		{name: "unlisted", decision: align.Decision{Standing: align.StandingUnlisted}, want: VerdictUnlisted},
 		{name: "older revision", decision: align.Decision{Standing: align.StandingBestSuperseded}, want: VerdictOlderRevision},
 		// The three origins of an unverified standing the report keeps as
@@ -38,7 +38,7 @@ func TestVerdictFor(t *testing.T) {
 		{name: "unverified offered placeholder", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeOffered}, groupsUnknown: true, want: VerdictUnverified},
 		// The one origin that is a different verdict: an offered unit whose bucket
 		// was read, which the app never compares.
-		{name: "unattributed offered comparable", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeOffered}, want: VerdictUnattributed},
+		{name: "unattributed offered comparable", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeOffered}, want: verdictUnattributed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,11 +58,11 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 3, Title: "UncoveredUncatalogued", TvdbID: 300, Groups: []string{"z"}, HasFile: true},
 		{Arr: library.ArrRadarr, ArrID: 4, Title: "UncoveredMovie", TmdbID: 400, HasFile: true},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
 		{AniListID: 2, Type: "TV", TvdbID: 200},
 		{AniListID: 4, Type: "MOVIE", TmdbMovies: []int{400}},
-	})
+	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
@@ -99,7 +99,7 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 // TestAuditRowGroupsDoNotAliasTheSnapshot pins the clone both row-building
 // sites document: for a single-unit scope align.Decide returns the library
 // snapshot's OWN slice, and uncoveredRows reads the item's Groups directly, so
-// an aliased Row.CurrentGroups would hand the report a window into state a
+// an aliased reportRow.CurrentGroups would hand the report a window into state a
 // concurrent daemon cycle owns - a data race whose torn or rewritten group
 // column no assertion in this suite would notice. Mutating the row's groups
 // must leave the snapshot untouched on BOTH arms (a matched season-scoped row
@@ -115,10 +115,10 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 			SeasonGroups: map[int][]string{1: {"grp"}}, Groups: []string{"grp"}, HasFile: true,
 		},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
 		{AniListID: 2, Type: "TV", TvdbID: 200},
-	})
+	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
@@ -157,11 +157,11 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialsOnly", TvdbID: 500, Groups: []string{"g"}, HasFile: true},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "MixedSeries", TvdbID: 600, Groups: []string{"g"}, HasFile: true},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "OVA", TvdbID: 500},
 		{AniListID: 2, Type: "OVA", TvdbID: 600},
 		{AniListID: 3, Type: "TV", TvdbID: 600},
-	})
+	}})
 
 	rowsFor := func(exclude bool) map[string]bool {
 		a := New(Config{ExcludeSpecials: exclude})
@@ -212,7 +212,7 @@ func TestAuditUntaggedGroupEvidence(t *testing.T) {
 				Arr: library.ArrSonarr, ArrID: 9, Title: "Groupless", TvdbID: 900,
 				SeasonGroups: map[int][]string{1: {tt.diskGroup}}, Groups: []string{tt.diskGroup}, HasFile: true,
 			}}}
-			idx := mapping.NewIndex([]mapping.Record{{AniListID: 9, Type: "TV", TvdbID: 900}})
+			idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 9, Type: "TV", TvdbID: 900}}})
 			matches := []match.Match{{
 				Item:   &snap.Items[0],
 				Arr:    library.ArrSonarr,
@@ -223,7 +223,7 @@ func TestAuditUntaggedGroupEvidence(t *testing.T) {
 
 			rep := a.Audit(matches, snap, idx, nil)
 
-			var row *Row
+			var row *reportRow
 			for i := range rep.Rows {
 				if rep.Rows[i].AniListID == 9 {
 					row = &rep.Rows[i]
@@ -330,8 +330,8 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 		} {
 			t.Run(tc.sneakyURL+" "+tt.name, func(t *testing.T) {
 				a := New(Config{AnimeBytes: tt.animeBytes})
-				rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
-				var row *Row
+				rep := a.Audit(matches, snap, mapping.NewIndex(mapping.Source{}), nil)
+				var row *reportRow
 				for i := range rep.Rows {
 					if rep.Rows[i].AniListID == 11 {
 						row = &rep.Rows[i]
@@ -340,7 +340,7 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 				if row == nil {
 					t.Fatal("expected a row for the matched entry")
 				}
-				var sneaky *Release
+				var sneaky *rowRelease
 				for i := range row.Releases {
 					if row.Releases[i].Group == "Sneaky" {
 						sneaky = &row.Releases[i]
@@ -373,10 +373,10 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 
 // TestAuditMalformedPublicURLListedUnobtainable pins the report contract for
 // a public-labeled release with MALFORMED URL evidence: the fail-closed
-// verdict gate (filter.ABVisible) cannot prove it is AnimeBytes, so with
+// verdict gate (filter.Obtainable) cannot prove it is AnimeBytes, so with
 // the toggle off the row must remain LISTED with an empty URL and
 // Unobtainable=true - the operator sees why it did not affect the verdict -
-// while a definite AB release in the same entry stays hidden. Reading ABVisible
+// while a definite AB release in the same entry stays hidden. Reading that gate
 // as the row-visibility gate silently erases such rows.
 func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 	entry := seadex.Entry{AniListID: 12, Torrents: []seadex.Torrent{
@@ -396,8 +396,8 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 	}}
 
 	a := New(Config{})
-	rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
-	var row *Row
+	rep := a.Audit(matches, snap, mapping.NewIndex(mapping.Source{}), nil)
+	var row *reportRow
 	for i := range rep.Rows {
 		if rep.Rows[i].AniListID == 12 {
 			row = &rep.Rows[i]
@@ -406,7 +406,7 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 	if row == nil {
 		t.Fatal("expected a row for the matched entry")
 	}
-	var mangled *Release
+	var mangled *rowRelease
 	for i := range row.Releases {
 		switch row.Releases[i].Group {
 		case "Mangled":
@@ -434,21 +434,21 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 // no other test exercises sortRows' comparator: inverting either the rank or
 // the title comparison must fail here.
 func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
-	rows := []Row{
+	rows := []reportRow{
 		{Title: "zeta", Verdict: VerdictBest},
 		{Title: "Beta", Verdict: VerdictUnlisted},
 		{Title: "gamma", Verdict: VerdictNotOnSeaDex},
 		{Title: "alpha", Verdict: VerdictBest},
 		{Title: "delta", Verdict: VerdictNoFile},
 		{Title: "epsilon", Verdict: VerdictUnverified},
-		{Title: "omega", Verdict: VerdictAlt},
+		{Title: "omega", Verdict: verdictAlt},
 		{Title: "ALPHA2", Verdict: VerdictUnlisted},
 		// Same verdict + title: season ascending, then AniList id ascending
 		// within an equal season (the tie-breaks the title-only ordering
 		// left uncovered).
-		{Title: "shared", Verdict: VerdictAlt, Season: 2, AniListID: 30},
-		{Title: "shared", Verdict: VerdictAlt, Season: 1, AniListID: 20},
-		{Title: "shared", Verdict: VerdictAlt, Season: 1, AniListID: 10},
+		{Title: "shared", Verdict: verdictAlt, Season: 2, AniListID: 30},
+		{Title: "shared", Verdict: verdictAlt, Season: 1, AniListID: 20},
+		{Title: "shared", Verdict: verdictAlt, Season: 1, AniListID: 10},
 	}
 
 	sortRows(rows)
@@ -461,10 +461,10 @@ func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 	}{
 		{"ALPHA2", VerdictUnlisted, 0, 0}, // case-insensitive: "alpha2" < "beta"
 		{"Beta", VerdictUnlisted, 0, 0},
-		{"omega", VerdictAlt, 0, 0},
-		{"shared", VerdictAlt, 1, 10}, // same title: season first, then AniList id
-		{"shared", VerdictAlt, 1, 20},
-		{"shared", VerdictAlt, 2, 30},
+		{"omega", verdictAlt, 0, 0},
+		{"shared", verdictAlt, 1, 10}, // same title: season first, then AniList id
+		{"shared", verdictAlt, 1, 20},
+		{"shared", verdictAlt, 2, 30},
 		{"epsilon", VerdictUnverified, 0, 0},
 		{"delta", VerdictNoFile, 0, 0},
 		{"alpha", VerdictBest, 0, 0},
@@ -483,7 +483,7 @@ func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 }
 
 // TestAuditIncompleteMappings pins the incomplete-mapping section's data
-// shape: the transiently-unresolved AniList ids render as IncompleteEntry
+// shape: the transiently-unresolved AniList ids render as incompleteEntry
 // rows sorted by id, each carrying its releases.moe link, and a fully
 // resolved run (nil or empty set) carries none - so the section (and the
 // JSON key, via omitempty) only ever appears when something actually failed.
@@ -492,7 +492,7 @@ func TestAuditIncompleteMappings(t *testing.T) {
 
 	rep := a.Audit(nil, nil, nil, map[int]struct{}{99: {}, 7: {}})
 
-	want := []IncompleteEntry{
+	want := []incompleteEntry{
 		{SeaDexURL: "https://releases.moe/7", AniListID: 7},
 		{SeaDexURL: "https://releases.moe/99", AniListID: 99},
 	}
@@ -604,8 +604,8 @@ func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
 		// lists?"), and a curation warning does not change that answer -
 		// have_unlisted would claim SeaDex lists the on-disk group neither
 		// as best nor as alt, which is false here.
-		if row.Verdict != VerdictAlt {
-			t.Errorf("verdict = %q, want %q (SeaDex lists the on-disk group as an alt, warned or not)", row.Verdict, VerdictAlt)
+		if row.Verdict != verdictAlt {
+			t.Errorf("verdict = %q, want %q (SeaDex lists the on-disk group as an alt, warned or not)", row.Verdict, verdictAlt)
 		}
 	})
 
@@ -664,12 +664,12 @@ func TestAuditExcludedTagBestNotCounted(t *testing.T) {
 	})
 }
 
-// auditRowFixture returns a helper producing the single report Row for one
+// auditRowFixture returns a helper producing the single report row for one
 // entry's torrents against a fixed on-disk item (Sonarr series, TVDB 100,
 // season 1, group pmr). Shared by the default-behaviour and configured-exclusion
 // tests so both read the same fixture.
-func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) Row {
-	return func(t *testing.T, torrents []seadex.Torrent) Row {
+func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) reportRow {
+	return func(t *testing.T, torrents []seadex.Torrent) reportRow {
 		t.Helper()
 		item := &library.Item{
 			Arr: library.ArrSonarr, ArrID: 1, Title: "Warned", TvdbID: 100,
@@ -698,7 +698,7 @@ func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) Row {
 // entry still classifies as usual and carries no marker.
 func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 	a := New(Config{})
-	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
+	rowFor := func(t *testing.T, torrents []seadex.Torrent) reportRow {
 		t.Helper()
 		item := &library.Item{
 			Arr: library.ArrSonarr, ArrID: 1, Title: "Unobtainable", TvdbID: 100,
@@ -759,10 +759,10 @@ func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 		Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialOnly", TvdbID: 700,
 		Groups: []string{"g"}, HasFile: true,
 	}}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 5, Type: "OVA", TvdbID: 700},
 		{AniListID: 6, Type: "TV", TvdbID: 700},
-	})
+	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
@@ -838,7 +838,7 @@ func TestAuditCoverageFollowsComparability(t *testing.T) {
 				// negative assertion here is against an item the catalogue can see.
 				records = append(records, mapping.Record{AniListID: 9, Type: "TV", TvdbID: tt.item.TvdbID})
 			}
-			idx := mapping.NewIndex(records)
+			idx := mapping.NewIndex(mapping.Source{Records: records})
 			matches := []match.Match{{
 				Item:   &snap.Items[0],
 				Arr:    tt.item.Arr,
@@ -889,8 +889,8 @@ func TestAuditOfferedRowIsHonest(t *testing.T) {
 				t.Fatalf("rows = %+v, want exactly the offered row", rep.Rows)
 			}
 			row := rep.Rows[0]
-			if row.Verdict != VerdictUnattributed {
-				t.Errorf("verdict = %q, want %q (the verdict must MOVE: the app never compares this one)", row.Verdict, VerdictUnattributed)
+			if row.Verdict != verdictUnattributed {
+				t.Errorf("verdict = %q, want %q (the verdict must MOVE: the app never compares this one)", row.Verdict, verdictUnattributed)
 			}
 			if row.Scope != align.ScopeOffered {
 				t.Errorf("scope = %v, want %v", row.Scope, align.ScopeOffered)
@@ -953,11 +953,11 @@ func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
 			Groups:       []string{"cbt", "kh"},
 			SeasonGroups: map[int][]string{1: {"cbt"}, 5: {"kh"}, 10: {"kh"}},
 		}}}
-		idx := mapping.NewIndex([]mapping.Record{
+		idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 			{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonAbsent},
 			{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 5},
 			{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 10},
-		})
+		}})
 		rec, _ := idx.Lookup(918)
 		matches := []match.Match{{
 			Item: &snap.Items[0], SiblingSeasons: idx.SiblingSeasons(&rec), Arr: library.ArrSonarr,
@@ -987,7 +987,7 @@ func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
 			{AniListID: 99749, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
 			{AniListID: 9982, Type: "SPECIAL", TvdbID: 114701, SeasonKind: mapping.SeasonPresent},
 		}
-		idx := mapping.NewIndex(records)
+		idx := mapping.NewIndex(mapping.Source{Records: records})
 		var matches []match.Match
 		for _, id := range []int{6702, 20626, 99749} {
 			rec, _ := idx.Lookup(id)
@@ -1029,15 +1029,15 @@ func TestAuditFairyTailOwnSeasonsAreTruthful(t *testing.T) {
 			8: {"erai"},
 		},
 	}}}
-	idx := mapping.NewIndexWithMappings([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 6702, Type: "TV", TvdbID: 114801, AniDBID: 6662, SeasonKind: mapping.SeasonAbsent},
 		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
 		{AniListID: 99749, Type: "TV", TvdbID: 114801, AniDBID: 13295, SeasonKind: mapping.SeasonAbsent},
-	}, map[int]mapping.Mapping{
+	}, Mappings: map[int]mapping.Mapping{
 		6662:  {Seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 48}, {Season: 2, First: 49, Last: 96}, {Season: 3, First: 97, Last: 150}, {Season: 4, First: 151, Last: 175}}},
 		9980:  {Seasons: []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}, {Season: 7, First: 91, Last: 102}}},
 		13295: {Seasons: []mapping.SeasonRange{{Season: 8, First: 1, Last: 51}}},
-	})
+	}})
 	torrents := []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "CBT", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{ReleaseGroup: "KH", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
@@ -1062,7 +1062,7 @@ func TestAuditFairyTailOwnSeasonsAreTruthful(t *testing.T) {
 		groups  []string
 	}{
 		6702:  {VerdictBest, []string{"cbt"}},
-		20626: {VerdictAlt, []string{"kh"}},
+		20626: {verdictAlt, []string{"kh"}},
 		99749: {VerdictUnlisted, []string{"erai"}},
 	}
 	for _, row := range rep.Rows {
@@ -1088,7 +1088,7 @@ func TestAuditPartialWalkKeepsCoverage(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Frieren", TvdbID: 700, Failed: true,
 	}}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 5, Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 5, Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
@@ -1133,10 +1133,10 @@ func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "UncoveredMovie", TmdbID: 400, HasFile: true},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredSeries", TvdbID: 200, Groups: []string{"grp"}, HasFile: true},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{400}},
 		{AniListID: 2, Type: "TV", TvdbID: 200},
-	})
+	}})
 
 	rep := a.Audit(nil, snap, idx, nil)
 	md := renderMarkdown(&rep)
@@ -1173,7 +1173,7 @@ func TestAssessCarriesEntryStateFlags(t *testing.T) {
 }
 
 func TestGroupSets(t *testing.T) {
-	rels := []Release{
+	rels := []rowRelease{
 		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1"},
 		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2"},
 		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
@@ -1291,11 +1291,11 @@ func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredPlaceholder", TvdbID: 200, Failed: true},
 		{Arr: library.ArrSonarr, ArrID: 3, Title: "UncoveredHealthy", TvdbID: 300, Groups: []string{"erai"}, HasFile: true},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
 		{AniListID: 2, Type: "TV", TvdbID: 200},
 		{AniListID: 3, Type: "TV", TvdbID: 300},
-	})
+	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
@@ -1306,7 +1306,7 @@ func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
 
 	rep := a.Audit(matches, snap, idx, nil)
 
-	byTitle := map[string]*Row{}
+	byTitle := map[string]*reportRow{}
 	for i := range rep.Rows {
 		byTitle[rep.Rows[i].Title] = &rep.Rows[i]
 	}

@@ -190,8 +190,8 @@ func TestIsSampleExtraMarkers(t *testing.T) {
 	}
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got := IsSampleExtra(name); got != want {
-				t.Errorf("IsSampleExtra(%q) = %t, want %t", name, got, want)
+			if got := isSampleExtra(name); got != want {
+				t.Errorf("isSampleExtra(%q) = %t, want %t", name, got, want)
 			}
 			if want && ContentMediaFile(name) {
 				t.Errorf("ContentMediaFile(%q) = true, want false (a sample is not content evidence)", name)
@@ -240,7 +240,7 @@ func TestPopulationMedianAnchoredFloor(t *testing.T) {
 			wantPayload:    1,
 		},
 		"episode-shaped sample is still excluded": {
-			// Dropped by NAME (IsSampleExtra), not by the census floor: at these
+			// Dropped by NAME (isSampleExtra), not by the census floor: at these
 			// two lengths the floor no longer excludes it, because a
 			// sample-to-payload ratio overlaps two real episodes of unequal length.
 			files:          withFirst(seadex.File{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20}, episodes(1, gib)),

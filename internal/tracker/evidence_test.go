@@ -5,7 +5,7 @@ import "testing"
 // TestClassifyAB pins the grade of every AnimeBytes-evidence shape. The three grades carry
 // the two fail directions the app needs: ABNone surfaces with the toggle off, ABDefinite
 // is the audit report's row-listing gate, and ABAmbiguous is the band where the two
-// directions disagree - hidden by ABVisible, still LISTED by the report. The subset
+// directions disagree - hidden by abVisible, still LISTED by the report. The subset
 // relation (definite implies gated) is structural rather than a row assertion: one value
 // cannot be definite without also being non-None, and internal/filter's
 // TestABVisibleReadsEveryGrade reads it once.

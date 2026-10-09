@@ -221,7 +221,7 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Heaven's Feel I", TmdbID: 283984, Year: 2017},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 20791, Type: "MOVIE"}}) // no tmdb/imdb: the split-mapping gap
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 20791, Type: "MOVIE"}}}) // no tmdb/imdb: the split-mapping gap
 	fake := fakeAniList{media: map[int]anilist.Media{
 		20791: {Titles: []string{"Heaven's Feel I"}, Format: "MOVIE", Year: 2017},
 	}}
@@ -236,8 +236,8 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	if !got.InLibrary() || got.Item.ArrID != 1 {
 		t.Errorf("expected a match to the Radarr movie, got %+v", got.Item)
 	}
-	if got.Source != SourceTitle {
-		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	if got.Source != sourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, sourceTitle)
 	}
 	if res.Coverage.Unmapped[library.ArrRadarr] != 1 {
 		t.Errorf("coverage unmapped[radarr] = %d, want 1 (an id-less record is an ID-bridge miss even when the title fallback links it)", res.Coverage.Unmapped[library.ArrRadarr])
@@ -272,7 +272,7 @@ func TestMatchNoTitleFallbackWhenRecordHasArrID(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "In Library", TvdbID: 111},
 	}}
 	// The record carries a TVDB id (555) that is absent from the library.
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 999, Type: "TV", TvdbID: 555}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 999, Type: "TV", TvdbID: 555}}})
 	fake := &countingAniList{}
 	m := New(fake, nil)
 
@@ -281,7 +281,7 @@ func TestMatchNoTitleFallbackWhenRecordHasArrID(t *testing.T) {
 	if len(res.Matches) != 1 {
 		t.Fatalf("want 1 match, got %d", len(res.Matches))
 	}
-	if got := res.Matches[0]; got.InLibrary() || got.Source != SourceUnmapped {
+	if got := res.Matches[0]; got.InLibrary() || got.Source != sourceUnmapped {
 		t.Errorf("want an unmapped miss, got source=%q inLibrary=%v", got.Source, got.InLibrary())
 	}
 	if fake.calls != 0 {
@@ -336,11 +336,11 @@ func TestMatchBatchesAniListLookups(t *testing.T) {
 		{Arr: library.ArrRadarr, ArrID: 3, Title: "Movie C", TmdbID: 300, Year: 2022},
 	}}
 	// Three id-less MOVIE records (split mapping: no tmdb/imdb on the record).
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"},
 		{AniListID: 22, Type: "MOVIE"},
 		{AniListID: 33, Type: "MOVIE"},
-	})
+	}})
 	fake := &batchCountingAniList{media: map[int]anilist.Media{
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
 		22: {Titles: []string{"Movie B"}, Format: "MOVIE", Year: 2021},
@@ -359,7 +359,7 @@ func TestMatchBatchesAniListLookups(t *testing.T) {
 	}
 	matched := 0
 	for i := range res.Matches {
-		if res.Matches[i].InLibrary() && res.Matches[i].Source == SourceTitle {
+		if res.Matches[i].InLibrary() && res.Matches[i].Source == sourceTitle {
 			matched++
 		}
 	}
@@ -388,7 +388,7 @@ func (degradedAniList) FetchMany(context.Context, []int) (anilist.BatchResult, e
 // rather than cached as a permanent miss).
 func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil) // no mapping record: the entry resolves via AniList
+	idx := mapping.NewIndex(mapping.Source{}) // no mapping record: the entry resolves via AniList
 	m := New(degradedAniList{}, nil)
 
 	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
@@ -402,7 +402,7 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	if _, ok := res.IncompleteIDs[42]; !ok || len(res.IncompleteIDs) != 1 {
 		t.Errorf("IncompleteIDs = %v, want exactly {42} (the transiently failed lookup)", res.IncompleteIDs)
 	}
-	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped {
+	if len(res.Matches) != 1 || res.Matches[0].Source != sourceUnmapped {
 		t.Errorf("entry should be unmapped on a transient failure, got %+v", res.Matches)
 	}
 	if _, cached := res.Memo.Entries[42]; cached {
@@ -419,7 +419,7 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 // wrong way makes a degraded cycle read as an improving one.
 func TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr(t *testing.T) {
 	// TvdbID 0 on a series record: the mapping knows the entry but carries no arr id.
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 42, Type: "TV"}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 42, Type: "TV"}}})
 
 	res := New(degradedAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 42}}, &library.Snapshot{}, idx, Memo{})
 
@@ -435,7 +435,7 @@ func TestMatchIDLessRecordTransientErrorCountsUnderTheRecordArr(t *testing.T) {
 	if _, ok := res.IncompleteIDs[42]; !ok || len(res.IncompleteIDs) != 1 {
 		t.Errorf("IncompleteIDs = %v, want exactly {42}", res.IncompleteIDs)
 	}
-	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped {
+	if len(res.Matches) != 1 || res.Matches[0].Source != sourceUnmapped {
 		t.Errorf("matches = %+v, want one unmapped entry", res.Matches)
 	}
 }
@@ -451,7 +451,7 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad"},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "Clannad"},
 	}}
-	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	idx := mapping.NewIndex(mapping.Source{}) // no record: matchEntry resolves via AniList
 	fake := fakeAniList{media: map[int]anilist.Media{
 		500: {Titles: []string{"Clannad"}, Format: "TV"},
 	}}
@@ -462,7 +462,7 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 	if len(res.Matches) != 1 {
 		t.Fatalf("want 1 match, got %d", len(res.Matches))
 	}
-	if got := res.Matches[0]; got.InLibrary() || got.Source != SourceUnmapped {
+	if got := res.Matches[0]; got.InLibrary() || got.Source != sourceUnmapped {
 		t.Errorf("an ambiguous title set must be unmapped, got source=%q inLibrary=%v", got.Source, got.InLibrary())
 	}
 }
@@ -478,7 +478,7 @@ func TestMatchTitleFallbackYearDisambiguatesAmbiguousTitles(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad", TvdbID: 100, Year: 2007},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "Clannad", TvdbID: 200, Year: 2010},
 	}}
-	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	idx := mapping.NewIndex(mapping.Source{}) // no record: matchEntry resolves via AniList
 	fake := fakeAniList{media: map[int]anilist.Media{
 		500: {Titles: []string{"Clannad"}, Format: "TV", Year: 2010},
 	}}
@@ -492,8 +492,8 @@ func TestMatchTitleFallbackYearDisambiguatesAmbiguousTitles(t *testing.T) {
 	if !got.InLibrary() || got.Item.ArrID != 2 {
 		t.Errorf("match item = %+v, want the 2010 series ArrID 2 (the year must disambiguate the two same-titled items)", got.Item)
 	}
-	if got.Source != SourceTitle {
-		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	if got.Source != sourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, sourceTitle)
 	}
 }
 
@@ -518,7 +518,7 @@ func TestMatchCancelledContextStopsBeforeEntries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	snap := &library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, TvdbID: 123, Title: "Frieren"}}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}}})
 	fake := &countingAniList{}
 	res := New(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
 	if !res.Degraded {
@@ -537,11 +537,11 @@ func TestMatchCancelledContextStopsBeforeEntries(t *testing.T) {
 // must not be memoized, and must not degrade the cycle.
 func TestMatchInvalidAniListIDSkipsLookupWithoutDegrading(t *testing.T) {
 	fake := &countingAniList{}
-	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 0}}, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 0}}, &library.Snapshot{}, mapping.NewIndex(mapping.Source{}), Memo{})
 	if res.Degraded {
 		t.Error("Degraded = true, want false for a non-positive AniList ID")
 	}
-	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped || res.Matches[0].Arr != arrUnknown {
+	if len(res.Matches) != 1 || res.Matches[0].Source != sourceUnmapped || res.Matches[0].Arr != arrUnknown {
 		t.Errorf("matches = %+v, want one unknown/unmapped entry", res.Matches)
 	}
 	if got := res.Coverage.Unmapped[arrUnknown]; got != 1 {
@@ -563,7 +563,7 @@ func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}}})
 	fake := &countingAniList{}
 
 	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
@@ -594,14 +594,14 @@ func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
 
 // TestMatchTitleFallbackSucceedsWithoutRecord pins the no-mapping-record success
 // path: an entry with no mapping record resolves through the AniList lookup and
-// links to the single title+year library candidate as SourceTitle, with the arr
+// links to the single title+year library candidate as sourceTitle, with the arr
 // taken from the matched item and the record type normalized from the AniList
 // format.
 func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 3, Title: "Clannad", TvdbID: 555, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil) // no mapping record: matchEntry resolves via AniList
+	idx := mapping.NewIndex(mapping.Source{}) // no mapping record: matchEntry resolves via AniList
 	fake := fakeAniList{media: map[int]anilist.Media{
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
@@ -615,8 +615,8 @@ func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
 	if !got.InLibrary() || got.Item.ArrID != 3 {
 		t.Errorf("match item = %+v, want the Sonarr series ArrID 3", got.Item)
 	}
-	if got.Source != SourceTitle {
-		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	if got.Source != sourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, sourceTitle)
 	}
 	if got.Arr != library.ArrSonarr {
 		t.Errorf("arr = %q, want %q (the matched item's arr)", got.Arr, library.ArrSonarr)
@@ -640,7 +640,7 @@ func TestMatchAltTitleFallbackFiltersArrAndDedupes(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 9, Title: "Frieren: Beyond Journey's End", AltTitles: []string{"Sousou no Frieren"}, Year: 2023},
 		{Arr: library.ArrRadarr, ArrID: 10, Title: "Sousou no Frieren", Year: 2023}, // wrong arr: must be filtered
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV"}}) // id-less series record
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 154587, Type: "TV"}}}) // id-less series record
 	fake := fakeAniList{media: map[int]anilist.Media{
 		154587: {Titles: []string{"!!!", "Sousou no Frieren", "Frieren: Beyond Journey's End"}, Format: "TV", Year: 2023},
 	}}
@@ -654,8 +654,8 @@ func TestMatchAltTitleFallbackFiltersArrAndDedupes(t *testing.T) {
 	if !got.InLibrary() || got.Item.ArrID != 9 {
 		t.Errorf("match item = %+v, want the Sonarr series ArrID 9 via its alternate title", got.Item)
 	}
-	if got.Source != SourceTitle {
-		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	if got.Source != sourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, sourceTitle)
 	}
 }
 
@@ -695,7 +695,7 @@ func TestFindMovieSkipsBlankIMDbIDs(t *testing.T) {
 // TestFindByIDMatchesPaddedIMDbID pins the canonicalization that keeps a padded
 // operator-override IMDb id ("  tt0123456") resolvable on BOTH sides of the lookup, and
 // WHERE each side's trim lives. On the MAPPING side it is the index's: Record.canonicalize
-// trims at every producer and buildIndex reapplies it to a decoded cache, so a record
+// trims at every producer and mapping.NewIndex reapplies it to a decoded cache, so a record
 // reaching RoutedIDs carries only canonical ids - which is why the padded-record case reads
 // its record back through mapping.NewIndex instead of hand-building one. On the LIBRARY
 // side imdbKey trims at index time. Without either, a padded id reads as a usable
@@ -714,9 +714,9 @@ func TestFindByIDMatchesPaddedIMDbID(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			rec, ok := mapping.NewIndex([]mapping.Record{
+			rec, ok := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 				{AniListID: 1, Type: "MOVIE", IMDbIDs: []string{tc.recIMDb}},
-			}).Lookup(1)
+			}}).Lookup(1)
 			if !ok {
 				t.Fatalf("mapping.NewIndex did not index the record carrying IMDb id %q", tc.recIMDb)
 			}
@@ -726,9 +726,9 @@ func TestFindByIDMatchesPaddedIMDbID(t *testing.T) {
 			}
 		})
 	}
-	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{
+	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "MOVIE", IMDbIDs: []string{"  tt0123456"}},
-	}), nil)
+	}}), nil)
 	item := library.Item{Arr: library.ArrRadarr, ImdbID: "tt0123456"}
 	if !cat.Has(&item) {
 		t.Error("Catalogue.Has() = false for an item whose IMDb id a padded record id names, want true")
@@ -766,7 +766,7 @@ func TestMatchEmptyFormatTitleFallbackSearchesBothArrs(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 4, Title: "Clannad", TvdbID: 555, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	idx := mapping.NewIndex(mapping.Source{}) // no record: matchEntry resolves via AniList
 	fake := fakeAniList{media: map[int]anilist.Media{
 		610: {Titles: []string{"Clannad"}, Format: "", Year: 2007},
 	}}
@@ -780,8 +780,8 @@ func TestMatchEmptyFormatTitleFallbackSearchesBothArrs(t *testing.T) {
 	if !got.InLibrary() || got.Item.ArrID != 4 {
 		t.Errorf("match item = %+v, want the Sonarr series despite the unknown format", got.Item)
 	}
-	if got.Source != SourceTitle {
-		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	if got.Source != sourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, sourceTitle)
 	}
 	if got.Arr != library.ArrSonarr {
 		t.Errorf("arr = %q, want %q (taken from the matched item)", got.Arr, library.ArrSonarr)
@@ -801,7 +801,7 @@ func TestMatchMemoizedSteadyStateSurvivesOutage(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: the lookup is needed
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11, Type: "MOVIE"}}}) // id-less: the lookup is needed
 	memo := Memo{Entries: map[int]MemoEntry{
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020, Expiry: time.Now().Add(time.Hour)},
 	}}
@@ -814,7 +814,7 @@ func TestMatchMemoizedSteadyStateSurvivesOutage(t *testing.T) {
 	if len(res.IncompleteIDs) != 0 {
 		t.Errorf("IncompleteIDs = %v, want none for a memo-served pass", res.IncompleteIDs)
 	}
-	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != sourceTitle {
 		t.Errorf("matches = %+v, want the one memo-served title match", res.Matches)
 	}
 }
@@ -830,7 +830,7 @@ func TestMatchIncompleteIDsScope(t *testing.T) {
 		snap := &library.Snapshot{Items: []library.Item{
 			{Arr: library.ArrSonarr, ArrID: 1, Title: "In Library", TvdbID: 111},
 		}}
-		idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 111}})
+		idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 111}}})
 		// FetchMany returns 40's media with an error (a failed later chunk):
 		// a PARTIAL batch failure, so 41 and 42 fall to the per-id Fetch,
 		// where 41 gets a definitive not-found and 42 a transient failure.
@@ -857,7 +857,7 @@ func TestMatchIncompleteIDsScope(t *testing.T) {
 	})
 	t.Run("total outage marks every pending id", func(t *testing.T) {
 		snap := &library.Snapshot{}
-		idx := mapping.NewIndex(nil)
+		idx := mapping.NewIndex(mapping.Source{})
 
 		res := New(degradedAniList{}, nil).Match(t.Context(),
 			[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
@@ -932,7 +932,7 @@ func TestMatchTitleFallbackKeepsUnknownYearItem(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 6, Title: "Clannad", TvdbID: 555},
 	}}
-	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	idx := mapping.NewIndex(mapping.Source{}) // no record: matchEntry resolves via AniList
 	fake := fakeAniList{media: map[int]anilist.Media{
 		620: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
@@ -946,8 +946,8 @@ func TestMatchTitleFallbackKeepsUnknownYearItem(t *testing.T) {
 	if !got.InLibrary() || got.Item.ArrID != 6 {
 		t.Errorf("match item = %+v, want the year-less Sonarr series kept through year narrowing", got.Item)
 	}
-	if got.Source != SourceTitle {
-		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	if got.Source != sourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, sourceTitle)
 	}
 }
 
@@ -982,7 +982,7 @@ func TestMatchIDLessUntypedRecordRoutesByAniListFormat(t *testing.T) {
 	}}
 	// The record exists but carries neither an arr id nor a type: the split
 	// mapping gap, with no routing evidence of its own.
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 21403}}})
 	fake := fakeAniList{media: map[int]anilist.Media{
 		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
 	}}
@@ -1021,7 +1021,7 @@ func TestMatchIDLessUntypedRecordUnknownFormatSearchesBothArrs(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Kizumonogatari", TmdbID: 400, Year: 2016},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 21403}}})
 	fake := fakeAniList{media: map[int]anilist.Media{
 		21403: {Titles: []string{"Kizumonogatari"}, Year: 2016},
 	}}
@@ -1057,7 +1057,7 @@ func TestMatchUntypedRecordWithMovieIDResolvesByID(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Wound Tale", TmdbID: 400, Year: 2016},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403, TmdbMovies: []int{400}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 21403, TmdbMovies: []int{400}}}})
 	fake := fakeAniList{media: map[int]anilist.Media{
 		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
 	}}
@@ -1091,7 +1091,7 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Kizumonogatari", TmdbID: 400, Year: 2016},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403, TmdbMovies: []int{999}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 21403, TmdbMovies: []int{999}}}})
 	fake := fakeAniList{media: map[int]anilist.Media{
 		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
 	}}
@@ -1105,8 +1105,8 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 	if got.InLibrary() {
 		t.Fatalf("match item = %+v, want none: the usable id proves the intended movie is absent", got.Item)
 	}
-	if got.Source != SourceUnmapped {
-		t.Errorf("source = %q, want %q", got.Source, SourceUnmapped)
+	if got.Source != sourceUnmapped {
+		t.Errorf("source = %q, want %q", got.Source, sourceUnmapped)
 	}
 	if res.Coverage.Hits[library.ArrRadarr] != 1 {
 		t.Errorf("coverage hits[radarr] = %d, want 1 (the ID mapping resolved even though the library missed)", res.Coverage.Hits[library.ArrRadarr])
@@ -1169,7 +1169,7 @@ func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 7, Title: "Heaven's Feel III", TmdbID: 400, Year: 2020},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 102351, Type: "SPECIAL", TmdbMovies: []int{400}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 102351, Type: "SPECIAL", TmdbMovies: []int{400}}}})
 
 	res := New(fakeAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 102351}}, snap, idx, Memo{})
 
@@ -1208,12 +1208,12 @@ func TestMatchStampsSiblingSeasons(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Gintama", TvdbID: 79895},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "Frieren", TvdbID: 424536},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonAbsent},
 		{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 5},
 		{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 10},
 		{AniListID: 154587, Type: "TV", TvdbID: 424536, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
-	})
+	}})
 	entries := []seadex.Entry{{AniListID: 918}, {AniListID: 154587}}
 	m := New(fakeAniList{}, nil)
 
@@ -1240,10 +1240,10 @@ func TestMatchStampsOwnSeasons(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "Frieren", TvdbID: 424536},
 	}}
 	ranges := []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}}
-	idx := mapping.NewIndexWithMappings([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
 		{AniListID: 154587, Type: "TV", TvdbID: 424536, AniDBID: 17617, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
-	}, map[int]mapping.Mapping{9980: {Seasons: ranges}})
+	}, Mappings: map[int]mapping.Mapping{9980: {Seasons: ranges}}})
 	entries := []seadex.Entry{{AniListID: 20626}, {AniListID: 154587}}
 	m := New(fakeAniList{}, nil)
 

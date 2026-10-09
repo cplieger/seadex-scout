@@ -135,14 +135,14 @@ func TestABVisible(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ABVisible(tt.tracker, tt.url, tt.animeBytes); got != tt.want {
-				t.Errorf("ABVisible(%q, %q, %v) = %v, want %v", tt.tracker, tt.url, tt.animeBytes, got, tt.want)
+			if got := abVisible(tt.tracker, tt.url, tt.animeBytes); got != tt.want {
+				t.Errorf("abVisible(%q, %q, %v) = %v, want %v", tt.tracker, tt.url, tt.animeBytes, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestObtainableAppliesABURLCrossCheck pins the Obtainable->ABVisible wiring:
+// TestObtainableAppliesABURLCrossCheck pins the Obtainable->abVisible wiring:
 // the raw upstream URL passed to Obtainable must feed the AnimeBytes host
 // cross-check, so a mislabeled public release carrying an AB URL never counts
 // as obtainable while the animebytes toggle is off. It also pins the
@@ -163,7 +163,7 @@ func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 		{"public tracker with AB subdomain URL hidden when AB off", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "https://cdn.animebytes.tv/t/1", "https://cdn.animebytes.tv/t/1", false, false},
 		{"public tracker with AB URL obtainable when AB on", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, abURL, abURL, true, true},
 		{"public tracker with public URL obtainable when AB off", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "https://nyaa.si/view/1", "https://nyaa.si/view/1", false, true},
-		{"public tracker with malformed raw URL hidden by ABVisible even with a usable URL", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "https://nyaa.si/\x7f", "https://nyaa.si/view/1", false, false},
+		{"public tracker with malformed raw URL hidden by abVisible even with a usable URL", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "https://nyaa.si/\x7f", "https://nyaa.si/view/1", false, false},
 		{"public tracker with foreign-host URL rejected by the publisher not obtainable", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "https://evil.example/view/1", "", false, false},
 		{"public tracker with no URL at all not obtainable", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "", "", false, false},
 		{"public tracker with AB torrent-page relative URL hidden when AB off", release.Release{TrackerType: tracker.Public, Tracker: "Nyaa"}, "/torrents.php?id=1&torrentid=2", abURL, false, false},
@@ -203,12 +203,12 @@ func TestABVisibleReadsEveryGrade(t *testing.T) {
 			if got := tracker.ClassifyAB(in.tracker, in.url); got != in.grade {
 				t.Fatalf("fixture drift: ClassifyAB(%q, %q) = %d, want %d", in.tracker, in.url, got, in.grade)
 			}
-			if !ABVisible(in.tracker, in.url, true) {
-				t.Errorf("ABVisible(%d, toggle on) = false, want true", in.grade)
+			if !abVisible(in.tracker, in.url, true) {
+				t.Errorf("abVisible(%d, toggle on) = false, want true", in.grade)
 			}
 			wantOff := in.grade == tracker.ABNone
-			if got := ABVisible(in.tracker, in.url, false); got != wantOff {
-				t.Errorf("ABVisible(%d, toggle off) = %v, want %v", in.grade, got, wantOff)
+			if got := abVisible(in.tracker, in.url, false); got != wantOff {
+				t.Errorf("abVisible(%d, toggle off) = %v, want %v", in.grade, got, wantOff)
 			}
 		})
 	}

@@ -115,8 +115,8 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	if len(c.ExcludeTags) != 1 || c.ExcludeTags[0] != "skip" {
 		t.Errorf("ExcludeTags = %v, want [skip] from arr_tags.exclude", c.ExcludeTags)
 	}
-	if c.ReportDir != DefaultReportDir {
-		t.Errorf("ReportDir = %q, want default %q", c.ReportDir, DefaultReportDir)
+	if c.ReportDir != defaultReportDir {
+		t.Errorf("ReportDir = %q, want default %q", c.ReportDir, defaultReportDir)
 	}
 }
 
@@ -390,7 +390,7 @@ func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 	if c.RadarrPublicURL != "https://radarr.example.com" {
 		t.Errorf("radarr public_url = %q, want trimmed", c.RadarrPublicURL)
 	}
-	if c.ReportDir != DefaultReportDir {
+	if c.ReportDir != defaultReportDir {
 		t.Errorf("blank report dir should fall back to default, got %q", c.ReportDir)
 	}
 }
@@ -1296,8 +1296,8 @@ func TestExampleConfigMatchesLoader(t *testing.T) {
 	if c.RunMode != RunModeDaemon {
 		t.Errorf("RunMode = %q, want %q", c.RunMode, RunModeDaemon)
 	}
-	if c.ReportDir != DefaultReportDir {
-		t.Errorf("ReportDir = %q, want %q", c.ReportDir, DefaultReportDir)
+	if c.ReportDir != defaultReportDir {
+		t.Errorf("ReportDir = %q, want %q", c.ReportDir, defaultReportDir)
 	}
 	// The starter ships filters.exclude_tags empty, which must mean NOTHING is
 	// filtered: a release SeaDex tagged Broken reaches all three surfaces until
@@ -1306,7 +1306,7 @@ func TestExampleConfigMatchesLoader(t *testing.T) {
 		tagfilter.SurfaceFindings, tagfilter.SurfaceReport, tagfilter.SurfaceFeed,
 	} {
 		if c.TagFilter.Excludes([]string{"Broken", "Incomplete"}, s) {
-			t.Errorf("the shipped starter filters a warned release from %s", s)
+			t.Errorf("the shipped starter filters a warned release from surface %d", s)
 		}
 	}
 }
@@ -1775,8 +1775,8 @@ func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
 			if c.PollInterval != DefaultPollInterval || c.PollExternal {
 				t.Errorf("PollInterval = %v external=%v, want built-in default %v", c.PollInterval, c.PollExternal, DefaultPollInterval)
 			}
-			if c.ReportDir != DefaultReportDir {
-				t.Errorf("ReportDir = %q, want default %q", c.ReportDir, DefaultReportDir)
+			if c.ReportDir != defaultReportDir {
+				t.Errorf("ReportDir = %q, want default %q", c.ReportDir, defaultReportDir)
 			}
 			verr := c.Validate()
 			if verr == nil {
@@ -2022,7 +2022,7 @@ func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
 	t.Run("absolute report dir stays silent", func(t *testing.T) {
 		rec := capture.Default(t)
 		cfg := Config{
-			RunMode: RunModeDaemon, ReportDir: DefaultReportDir,
+			RunMode: RunModeDaemon, ReportDir: defaultReportDir,
 			SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
 		}
 
@@ -2145,7 +2145,7 @@ func TestToConfigTagFilterDefaultFiltersNothing(t *testing.T) {
 				tagfilter.SurfaceFindings, tagfilter.SurfaceReport, tagfilter.SurfaceFeed,
 			} {
 				if c.TagFilter.Excludes(warned, s) {
-					t.Errorf("a warned release is excluded from %s by default", s)
+					t.Errorf("a warned release is excluded from surface %d by default", s)
 				}
 			}
 		})
@@ -2182,7 +2182,7 @@ func TestToConfigTagFilterPopulated(t *testing.T) {
 	}
 	for _, tt := range tests {
 		if got := c.TagFilter.Excludes([]string{tt.tag}, tt.surface); got != tt.want {
-			t.Errorf("Excludes(%q, %s) = %v, want %v", tt.tag, tt.surface, got, tt.want)
+			t.Errorf("Excludes(%q, surface %d) = %v, want %v", tt.tag, tt.surface, got, tt.want)
 		}
 	}
 }

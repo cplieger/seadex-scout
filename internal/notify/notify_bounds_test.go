@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 )
 
 // TestAttrJoinerRecapsAfterSanitizeGrowth pins logattr.Joiner.Write's
@@ -26,8 +27,8 @@ func TestAttrJoinerRecapsAfterSanitizeGrowth(t *testing.T) {
 	if !ok {
 		t.Fatal("finding line carries no release_url attribute")
 	}
-	if len(got) > maxAttrBytes+len("...") {
-		t.Errorf("release_url = %d bytes, want <= %d (sanitize growth must be re-capped)", len(got), maxAttrBytes+len("..."))
+	if len(got) > logattr.MaxBytes+len("...") {
+		t.Errorf("release_url = %d bytes, want <= %d (sanitize growth must be re-capped)", len(got), logattr.MaxBytes+len("..."))
 	}
 	if !strings.HasSuffix(got, "...") {
 		t.Errorf("release_url = %d bytes without the ... truncation marker", len(got))
@@ -117,12 +118,12 @@ func TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator(t *testing.T) {
 // The caller builds its own pieces, because a group is a plain string while a
 // link is a `tracker=url` pair; only the shape of the arithmetic is shared.
 func exactFitFill(pieceLen, sepLen int) (full, filler, joined int) {
-	for (full+1)*pieceLen+full*sepLen <= maxAttrBytes {
+	for (full+1)*pieceLen+full*sepLen <= logattr.MaxBytes {
 		full++
 	}
 	joined = full*pieceLen + (full-1)*sepLen
-	if gap := maxAttrBytes - joined - sepLen; gap > 0 && gap < pieceLen {
-		filler, joined = gap, maxAttrBytes
+	if gap := logattr.MaxBytes - joined - sepLen; gap > 0 && gap < pieceLen {
+		filler, joined = gap, logattr.MaxBytes
 	}
 	return full, filler, joined
 }
@@ -184,7 +185,7 @@ func TestCapAlertTextAttrEmitsNoHTMLEntities(t *testing.T) {
 		"a > b < c & d",
 		"&amp;",
 		"&<>",
-		strings.Repeat("&<>", 4*maxAttrBytes),
+		strings.Repeat("&<>", 4*logattr.MaxBytes),
 	}
 	for _, in := range corpus {
 		got := capAlertTextAttr(in)
@@ -210,9 +211,9 @@ func TestCapAlertTextAttrDropsBidiControls(t *testing.T) {
 // byte grows the value, so the pre-escape cap alone would emit ~2x the
 // per-attribute budget into the log pipeline.
 func TestCapAlertTextAttrRecapsAfterEscapeGrowth(t *testing.T) {
-	got := capAlertTextAttr(strings.Repeat("*", 2*maxAttrBytes))
-	if len(got) > maxAttrBytes {
-		t.Errorf("capAlertTextAttr len = %d, want <= %d", len(got), maxAttrBytes)
+	got := capAlertTextAttr(strings.Repeat("*", 2*logattr.MaxBytes))
+	if len(got) > logattr.MaxBytes {
+		t.Errorf("capAlertTextAttr len = %d, want <= %d", len(got), logattr.MaxBytes)
 	}
 	if !strings.HasSuffix(got, attrTruncMarker) {
 		t.Errorf("capAlertTextAttr = ...%q, want the %q truncation marker", lastAttrBytes(got), attrTruncMarker)
@@ -286,12 +287,12 @@ func TestFindingKVsAlertLabelsCarryNoLineBreaks(t *testing.T) {
 // which side of an escape pair the byte budget lands on depends on the value.
 func TestCapAlertTextAttrNeverEndsInADanglingEscape(t *testing.T) {
 	for name, in := range map[string]string{
-		"even offset": strings.Repeat("*", 2*maxAttrBytes),
-		"odd offset":  "a" + strings.Repeat("*", 2*maxAttrBytes),
+		"even offset": strings.Repeat("*", 2*logattr.MaxBytes),
+		"odd offset":  "a" + strings.Repeat("*", 2*logattr.MaxBytes),
 		// A value that is NOTHING but escapes: the run of backslashes then spans
 		// the whole body, so the parity decision rests on its very first byte -
 		// the one case the mixed values above never reach.
-		"all escapes": strings.Repeat(`\`, 2*maxAttrBytes),
+		"all escapes": strings.Repeat(`\`, 2*logattr.MaxBytes),
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := capAlertTextAttr(in)
@@ -306,8 +307,8 @@ func TestCapAlertTextAttrNeverEndsInADanglingEscape(t *testing.T) {
 			if run%2 == 1 {
 				t.Errorf("truncated value ends in a dangling escape: %q", body[max(0, len(body)-8):]+attrTruncMarker)
 			}
-			if len(got) > maxAttrBytes {
-				t.Errorf("truncated value is %d bytes, want at most %d", len(got), maxAttrBytes)
+			if len(got) > logattr.MaxBytes {
+				t.Errorf("truncated value is %d bytes, want at most %d", len(got), logattr.MaxBytes)
 			}
 		})
 	}
@@ -327,10 +328,10 @@ func TestJoinLinksAttrNeverEmitsAHalfLink(t *testing.T) {
 
 	// The first link's whole piece is tracker + "=" + url. Size it so that after
 	// the 1-byte " " separator the budget holds exactly len(tracker) more bytes.
-	firstPiece := maxAttrBytes - len(" ") - len(tracker)
+	firstPiece := logattr.MaxBytes - len(" ") - len(tracker)
 	fill := firstPiece - len(tracker) - len("=") - len(urlPrefix)
 	if fill <= 0 {
-		t.Fatalf("maxAttrBytes = %d is too small to stage the boundary", maxAttrBytes)
+		t.Fatalf("logattr.MaxBytes = %d is too small to stage the boundary", logattr.MaxBytes)
 	}
 	links := []compare.ReleaseLink{
 		{Tracker: tracker, URL: urlPrefix + strings.Repeat("u", fill)},
@@ -350,7 +351,7 @@ func TestJoinLinksAttrNeverEmitsAHalfLink(t *testing.T) {
 			t.Errorf("release_urls element %q is not a tracker=url pair (dangling half-link)", elem)
 		}
 	}
-	if len(got) > maxAttrBytes+len("...") {
-		t.Errorf("release_urls = %d bytes, want <= %d", len(got), maxAttrBytes+len("..."))
+	if len(got) > logattr.MaxBytes+len("...") {
+		t.Errorf("release_urls = %d bytes, want <= %d", len(got), logattr.MaxBytes+len("..."))
 	}
 }

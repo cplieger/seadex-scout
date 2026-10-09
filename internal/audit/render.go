@@ -41,10 +41,10 @@ const (
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:      "You have a release SeaDex does not list as best or alt.",
-	VerdictAlt:           "You have a listed alt; SeaDex marks a different release best.",
+	verdictAlt:           "You have a listed alt; SeaDex marks a different release best.",
 	VerdictOlderRevision: "You have SeaDex's best group, but an older revision of it: SeaDex lists a newer version, PROPER or REPACK from the same group.",
 	VerdictUnverified:    "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
-	VerdictUnattributed:  "A film or special in Sonarr's season 0 that the anime ID map does not tie to an episode Sonarr lists, or whose season-0 episodes could not be read, so it is not compared. The groups shown are everything in season 0.",
+	verdictUnattributed:  "A film or special in Sonarr's season 0 that the anime ID map does not tie to an episode Sonarr lists, or whose season-0 episodes could not be read, so it is not compared. The groups shown are everything in season 0.",
 	VerdictNoFile:        "No file sits where this entry maps. The mapped season, movie, special episodes or specials bucket is empty, or a whole-series comparison found no real season with files. Either the files are missing, or Sonarr files that season elsewhere, such as under TVDB's specials.",
 	VerdictBest:          "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex:   "In your library and recognized as anime (in the anime ID map), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
@@ -54,12 +54,12 @@ var verdictDesc = map[Verdict]string{
 // key alone misleads a reader; the key stays as the machine name.
 var verdictLabel = map[Verdict]string{
 	VerdictNoFile:       "season not found",
-	VerdictUnattributed: "episode not known",
+	verdictUnattributed: "episode not known",
 }
 
 // matchedAnime counts the distinct AniList entries behind the matched rows. It
 // is not the matched row count: an entry kept in both arrs has a row per arr.
-func matchedAnime(rows []Row) int {
+func matchedAnime(rows []reportRow) int {
 	seen := make(map[int]struct{}, len(rows))
 	for i := range rows {
 		if rows[i].Verdict != VerdictNotOnSeaDex {
@@ -189,7 +189,7 @@ func writeIncompleteCaveat(b *strings.Builder, n int) {
 // writeIncompleteSection renders the incomplete-mapping section: one row per
 // SeaDex entry whose library mapping could not be resolved this run, listed by
 // AniList id with its releases.moe link. Omitted on a fully resolved run.
-func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
+func writeIncompleteSection(b *strings.Builder, incomplete []incompleteEntry) {
 	if len(incomplete) == 0 {
 		return
 	}
@@ -203,7 +203,7 @@ func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
 }
 
 // writeRow writes one Markdown table row for a report row.
-func writeRow(b *strings.Builder, row *Row) {
+func writeRow(b *strings.Builder, row *reportRow) {
 	fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n",
 		escapeCell(row.Title),
 		scopeCell(row),
@@ -214,9 +214,9 @@ func writeRow(b *strings.Builder, row *Row) {
 }
 
 // groupsCell renders the on-disk groups column. A row whose group evidence was
-// never established (Row.GroupsUnknown) renders unknownCell rather than the
+// never established (reportRow.GroupsUnknown) renders unknownCell rather than the
 // empty marker: emptyCell is the positive claim "nothing identifiable is here".
-func groupsCell(row *Row) string {
+func groupsCell(row *reportRow) string {
 	if row.GroupsUnknown {
 		return unknownCell
 	}
@@ -225,10 +225,10 @@ func groupsCell(row *Row) string {
 
 // bestCell renders the SeaDex best column: the displayed best groups, plus the
 // count of BEST releases the operator's AnimeBytes toggle withheld
-// (Row.HiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes), so a
+// (reportRow.HiddenAnimeBytesBest, not the all-releases reportRow.HiddenAnimeBytes), so a
 // row whose only bests are AnimeBytes releases is distinguishable from an entry
 // SeaDex lists no best for. The count leaks no group, tracker, or link.
-func bestCell(row *Row) string {
+func bestCell(row *reportRow) string {
 	shown := displayBestGroups(row.Releases)
 	for i := range shown {
 		shown[i] = escapeBestGroup(shown[i])
@@ -245,10 +245,10 @@ func bestCell(row *Row) string {
 // no group name can be read as a curation warning from us. Association is
 // POSITIONAL: one entry per group the best column lists (same selectBestGroups
 // order), `;`-separated, with emptyCell for a group carrying no note.
-func notesCell(row *Row) string {
+func notesCell(row *reportRow) string {
 	var entries []string
 	annotatedAny := false
-	selectBestGroups(row.Releases, func(rel *Release, isAnnotated bool) bool {
+	selectBestGroups(row.Releases, func(rel *rowRelease, isAnnotated bool) bool {
 		if !isAnnotated {
 			entries = append(entries, emptyCell)
 			return true
@@ -268,7 +268,7 @@ func notesCell(row *Row) string {
 // annotations in parentheses: the held and listed revisions on a
 // have_older_revision row, "approx" for a coarse multi-group bucket and the
 // qualifier when one applies - e.g. "S2 (approx, mixed)".
-func scopeCell(row *Row) string {
+func scopeCell(row *reportRow) string {
 	var notes []string
 	if row.CurrentRevision.Known() && row.BestRevision.Known() {
 		notes = append(notes, "revision "+row.CurrentRevision.String()+", SeaDex "+row.BestRevision.String())
@@ -291,10 +291,10 @@ func scopeCell(row *Row) string {
 // scopeLabel renders the comparison scope recorded on the row at build time:
 // "movie", "offered", the TVDB season ("S2"), the season-0 episodes
 // ("S00E09-E10"), or "series" for a whole-series comparison. A pure reader of
-// Row.Scope, so the label cannot drift from the comparison actually performed;
+// reportRow.Scope, so the label cannot drift from the comparison actually performed;
 // the JSON renderer publishes the same value through
 // align.ScopeKind.MarshalJSON, keeping kind and numbers separable.
-func scopeLabel(row *Row) string {
+func scopeLabel(row *reportRow) string {
 	switch {
 	case row.Scope == align.ScopeSeason:
 		return "S" + strconv.Itoa(row.Season)
@@ -313,7 +313,7 @@ type releaseLinkKey struct {
 
 // links builds the compact links cell: the arr deep-link, the SeaDex entry, and
 // each distinct best-release indexer link.
-func links(row *Row) string {
+func links(row *reportRow) string {
 	var parts []string
 	if row.ArrURL != "" {
 		parts = append(parts, mdLink(row.Arr, row.ArrURL))
@@ -348,7 +348,7 @@ func links(row *Row) string {
 // early when fn returns false. It is the ONE home for the selection rule both
 // best-group renderings share, and it never builds a slice, so a bounded
 // consumer still caps before any untrusted aggregate is materialized.
-func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool) bool) {
+func selectBestGroups(releases []rowRelease, fn func(rel *rowRelease, isAnnotated bool) bool) {
 	seen := make(map[string]struct{}, len(releases))
 	for _, annotatedPass := range []bool{false, true} {
 		for i := range releases {
@@ -373,9 +373,9 @@ func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool
 // SeaDex data and nothing else; this app's annotations are notesCell's column.
 // Clean bests are collected first and win the dedupe, which is also what makes
 // the positional Notes association stable.
-func displayBestGroups(releases []Release) []string {
+func displayBestGroups(releases []rowRelease) []string {
 	var out []string
-	selectBestGroups(releases, func(rel *Release, _ bool) bool {
+	selectBestGroups(releases, func(rel *rowRelease, _ bool) bool {
 		out = append(out, rel.Group)
 		return true
 	})
@@ -385,8 +385,8 @@ func displayBestGroups(releases []Release) []string {
 // releaseNotes returns a release's display annotations: its canonical
 // curation-warning tags, plus "unobtainable", "url error" and "unknown tracker"
 // for the corresponding refusals. The returned slice is always a fresh
-// allocation, so callers can append without aliasing Release.Warnings.
-func releaseNotes(rel *Release) []string {
+// allocation, so callers can append without aliasing rowRelease.Warnings.
+func releaseNotes(rel *rowRelease) []string {
 	notes := append([]string(nil), rel.Warnings...)
 	if rel.URLError {
 		// Listed BEFORE "unobtainable": the record itself is wrong upstream, which is
@@ -416,13 +416,13 @@ func releaseNotes(rel *Release) []string {
 // list, which is what stops a new annotation class from rendering a note while
 // still being offered as a grab link. DISPLAY only: verdict eligibility is
 // audit.go's forfeitsBest.
-func annotated(rel *Release) bool {
+func annotated(rel *rowRelease) bool {
 	return len(releaseNotes(rel)) > 0
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.
-func rowsWithVerdict(rows []Row, v Verdict) []Row {
-	var out []Row
+func rowsWithVerdict(rows []reportRow, v Verdict) []reportRow {
+	var out []reportRow
 	for i := range rows {
 		if rows[i].Verdict == v {
 			out = append(out, rows[i])
@@ -472,12 +472,12 @@ func (r *Report) summaryAttrs() []any {
 	return []any{
 		"rows", len(r.Rows),
 		"have_best", r.Totals[string(VerdictBest)],
-		"have_alt", r.Totals[string(VerdictAlt)],
+		"have_alt", r.Totals[string(verdictAlt)],
 		"have_older_revision", r.Totals[string(VerdictOlderRevision)],
 		"have_unlisted", r.Totals[string(VerdictUnlisted)],
 		"no_file", r.Totals[string(VerdictNoFile)],
 		"unverified", r.Totals[string(VerdictUnverified)],
-		"unattributed", r.Totals[string(VerdictUnattributed)],
+		"unattributed", r.Totals[string(verdictUnattributed)],
 		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
 		"anime_items", r.Items.Anime,
 		"items_with_entry", r.Items.WithEntry,
@@ -488,7 +488,7 @@ func (r *Report) summaryAttrs() []any {
 
 // Every untrusted string passes through capDisplayText; the three aggregate
 // attributes stream through logattr.Joiner instead of being materialized.
-func rowAttrs(row *Row) []any {
+func rowAttrs(row *reportRow) []any {
 	bestGroups, bestNotes := joinBestAttrs(row.Releases)
 	return []any{
 		"title", capDisplayText(row.Title),
@@ -800,11 +800,6 @@ func sanitizeDisplayText(s string) string {
 	return runesafe.Sanitize(s)
 }
 
-// maxAttrBytes is the per-attribute volume budget the report's slog path
-// enforces on every untrusted value. The policy itself lives in internal/logattr,
-// shared with the daemon's notify emit path; this alias keeps the bound readable.
-const maxAttrBytes = logattr.MaxBytes
-
 // capDisplayText is sanitizeDisplayText plus a volume cap: an honest value passes
 // byte-identical, an oversized one is capped on a rune boundary with a "..."
 // marker, before the per-rune sanitize so it is never fully copied. A
@@ -835,11 +830,11 @@ func joinGroupsAttr(groups []string) string {
 // re-binding a note to a group the line did not carry. groups carries ONLY
 // upstream group text, and notes is the empty string when no annotated best
 // exists, so a Loki query can test it for emptiness.
-func joinBestAttrs(releases []Release) (groups, notes string) {
+func joinBestAttrs(releases []rowRelease) (groups, notes string) {
 	gj, nj := logattr.NewJoiner(), logattr.NewJoiner()
 	first := true
 	annotatedAny := false
-	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
+	selectBestGroups(releases, func(rel *rowRelease, isAnnotated bool) bool {
 		// Both SEPARATORS are charged together, so one budget refusing a separator
 		// stops both attributes at the same element count. The VALUES are not: a
 		// budget exhausted inside a group leaves seadex_best with a partial trailing
@@ -912,12 +907,12 @@ func sanitizeOutput(r *Report) *Report {
 }
 
 // sanitizedRows returns a sanitized clone of the report rows. Nil rows become
-// []Row{} to preserve the empty-array JSON shape ("rows": []), since
+// []reportRow{} to preserve the empty-array JSON shape ("rows": []), since
 // slices.Clone(nil) is nil and would render null.
-func sanitizedRows(rows []Row) []Row {
+func sanitizedRows(rows []reportRow) []reportRow {
 	out := slices.Clone(rows)
 	if out == nil {
-		out = []Row{}
+		out = []reportRow{}
 	}
 	for i := range out {
 		row := &out[i]
@@ -947,7 +942,7 @@ func sanitizedStrings(ss []string) []string {
 
 // sanitizedReleases returns a sanitized clone of a row's releases (Tracker,
 // Group, and URL are upstream data); a nil or empty slice is returned as-is.
-func sanitizedReleases(rels []Release) []Release {
+func sanitizedReleases(rels []rowRelease) []rowRelease {
 	if len(rels) == 0 {
 		return rels
 	}
@@ -962,7 +957,7 @@ func sanitizedReleases(rels []Release) []Release {
 
 // sanitizedIncomplete returns a sanitized clone of the incomplete-mapping
 // entries (the releases.moe link); a nil or empty slice is returned as-is.
-func sanitizedIncomplete(inc []IncompleteEntry) []IncompleteEntry {
+func sanitizedIncomplete(inc []incompleteEntry) []incompleteEntry {
 	if len(inc) == 0 {
 		return inc
 	}

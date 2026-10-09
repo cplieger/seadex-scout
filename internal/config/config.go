@@ -34,37 +34,37 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// DefaultConfigDir is the single container mount every seadex-scout file lives
+// defaultConfigDir is the single container mount every seadex-scout file lives
 // under; every path constant below is derived from it.
-const DefaultConfigDir = "/config"
+const defaultConfigDir = "/config"
 
 // DefaultConfigPath is the container-internal config file path.
-const DefaultConfigPath = DefaultConfigDir + "/config.yaml"
+const DefaultConfigPath = defaultConfigDir + "/config.yaml"
 
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
 
 // Fixed endpoints, cadences, internal /config file paths, and the default report
 // directory: internal machinery wired at build time, deliberately NOT config-file
-// keys. DefaultReportDir is the one baseline report.dir overrides.
+// keys. defaultReportDir is the one baseline report.dir overrides.
 //
 // Each upstream's package owns its own DefaultURL and request cadence beside the
 // decoder that embodies its contract; config is a leaf that cannot import them.
 const (
 	// DefaultMappingOverrides is the local alID->IDs override file; absent is fine.
-	DefaultMappingOverrides = DefaultConfigDir + "/overrides.json"
+	DefaultMappingOverrides = defaultConfigDir + "/overrides.json"
 	// DefaultStatePath is the atomic JSON cache/state file.
-	DefaultStatePath = DefaultConfigDir + "/state.json"
+	DefaultStatePath = defaultConfigDir + "/state.json"
 	// DefaultCycleLockDir holds cycle.lock, the cross-process cycle coalescing lock.
 	// It is the mount root, so the lock lives beside the writes it orders.
-	DefaultCycleLockDir = DefaultConfigDir
+	DefaultCycleLockDir = defaultConfigDir
 	// DefaultIndexerFeedPath is the atomic JSON file the compare cycle writes the
 	// indexer's materialized feed to and the indexer HTTP server reads; persisting it
 	// lets a `poll` cycle refresh a resident daemon's feed across the process boundary.
-	DefaultIndexerFeedPath = DefaultConfigDir + "/feed.json"
-	// DefaultReportDir is the directory report mode writes timestamped report
+	DefaultIndexerFeedPath = defaultConfigDir + "/feed.json"
+	// defaultReportDir is the directory report mode writes timestamped report
 	// pairs into (report-<UTC timestamp>.md / .json).
-	DefaultReportDir = DefaultConfigDir + "/reports"
+	defaultReportDir = defaultConfigDir + "/reports"
 
 	// RunModeDaemon is the default: poll on a schedule and flag better releases.
 	RunModeDaemon = "daemon"
@@ -186,7 +186,7 @@ type logFile struct {
 func defaultFileConfig() fileConfig {
 	return fileConfig{
 		Mode:   RunModeDaemon,
-		Report: reportFile{Dir: DefaultReportDir},
+		Report: reportFile{Dir: defaultReportDir},
 		Log:    logFile{Level: "info", Format: "json"},
 	}
 }
@@ -400,7 +400,7 @@ func (fc *fileConfig) toConfig() Config {
 	c.SonarrURL, c.SonarrAPIKey, c.SonarrPublicURL = applyArr(&fc.Sonarr)
 	c.RadarrURL, c.RadarrAPIKey, c.RadarrPublicURL = applyArr(&fc.Radarr)
 	if c.ReportDir == "" {
-		c.ReportDir = DefaultReportDir
+		c.ReportDir = defaultReportDir
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
 	c.TagFilter, c.tagFilterErr = buildTagFilter(fc.Filters.ExcludeTags)

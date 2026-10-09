@@ -129,7 +129,7 @@ func wireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) []
 // periodic RSS checks from the two synthesized per-tracker feeds. Both come from
 // the snapshot the compare cycle builds, owned by cache, which takes it either
 // straight from a cycle in this process or from the persisted file on its own
-// reload clock. Run starts that clock (New is pure assembly and loads nothing);
+// reload clock. run starts that clock (New is pure assembly and loads nothing);
 // nothing on the request path loads, and the server never fetches SeaDex.
 type Indexer struct {
 	// cache owns the served snapshot's lifecycle and its locking (see
@@ -160,7 +160,7 @@ type Indexer struct {
 
 // New builds the Torznab feed server from cfg, log, and the HTTP client its
 // Prowlarr search proxy dials with. It is pure assembly and starts no work: the
-// snapshot is loaded by Run, so all background work begins under the explicit
+// snapshot is loaded by run, so all background work begins under the explicit
 // lifecycle method. A nil log falls back to slog.Default(); a nil client serves
 // the snapshot without proxying searches; a nil cfg panics. The upstreams are
 // wired HERE, from cfg's own UpstreamConfig, so the server's enablement gates and

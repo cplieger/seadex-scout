@@ -367,9 +367,9 @@ func hasLetterOrNumber(s string) bool {
 type Overlap int
 
 const (
-	// OverlapNone means every member on both sides is known evidence and no
+	// overlapNone means every member on both sides is known evidence and no
 	// group is shared: a proven divergence.
-	OverlapNone Overlap = iota
+	overlapNone Overlap = iota
 	// OverlapKnown means a known group on one side is present, known, on the
 	// other: proven common membership. Known evidence wins outright, whatever
 	// unknown members ride along in either set. NoGroup on both sides also
@@ -418,7 +418,7 @@ func GroupsOverlap(a, b []string) Overlap {
 	if (unknownA && len(b) > 0) || (unknownB && len(a) > 0) {
 		return OverlapUnknown
 	}
-	return OverlapNone
+	return overlapNone
 }
 
 // --- Ranking and generic helpers ---

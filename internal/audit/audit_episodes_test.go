@@ -22,7 +22,7 @@ func placedOVAReport(t *testing.T, torrents ...seadex.Torrent) Report {
 	}
 	snap := &library.Snapshot{Items: []library.Item{item}}
 	rec := mapping.Record{AniListID: 5, Type: "OVA", TvdbID: 700, SeasonKind: mapping.SeasonPresent}
-	idx := mapping.NewIndex([]mapping.Record{rec, {AniListID: 9, Type: "TV", TvdbID: 700}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{rec, {AniListID: 9, Type: "TV", TvdbID: 700}}})
 	if len(torrents) == 0 {
 		torrents = []seadex.Torrent{{IsBest: true, ReleaseGroup: "G", Tracker: "Nyaa", URL: "https://nyaa.si/view/5"}}
 	}
@@ -33,7 +33,7 @@ func placedOVAReport(t *testing.T, torrents ...seadex.Torrent) Report {
 
 func TestAuditPlacedSpecialRowNamesItsEpisodes(t *testing.T) {
 	rep := placedOVAReport(t)
-	var row *Row
+	var row *reportRow
 	for i := range rep.Rows {
 		if rep.Rows[i].AniListID == 5 {
 			row = &rep.Rows[i]
@@ -64,7 +64,7 @@ func TestAuditPlacedSpecialOnAnAltKeepsItsSeriesOutOfAllBest(t *testing.T) {
 		seadex.Torrent{IsBest: true, ReleaseGroup: "X", Tracker: "Nyaa", URL: "https://nyaa.si/view/6"},
 		seadex.Torrent{ReleaseGroup: "G", Tracker: "Nyaa", URL: "https://nyaa.si/view/5"},
 	)
-	if rep.Totals[string(VerdictAlt)] != 1 {
+	if rep.Totals[string(verdictAlt)] != 1 {
 		t.Fatalf("Audit totals = %v, want the placed special as one have_alt row", rep.Totals)
 	}
 	if rep.Items.AllBest != 0 || rep.Items.AllBestOrAlt != 1 {
@@ -103,13 +103,13 @@ func TestAuditPlacedCopyMatchDoesNotJudgeStillCovers(t *testing.T) {
 				SeasonGroups: map[int][]string{0: {"oz"}},
 				Specials:     map[int]library.SpecialEpisode{4: {Group: "oz", HasFile: true}, 9: tc.onSpecial},
 			}}}
-			idx := mapping.NewIndexWithMappings(tc.records, map[int]mapping.Mapping{70: {Specials: []int{9}, SpecialsTvdb: 500}})
+			idx := mapping.NewIndex(mapping.Source{Records: tc.records, Mappings: map[int]mapping.Mapping{70: {Specials: []int{9}, SpecialsTvdb: 500}}})
 			entry := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{
 				{IsBest: true, ReleaseGroup: "MTBB", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 			}}
 			res := match.New(nil, nil).Match(t.Context(), []seadex.Entry{entry}, snap, idx, match.Memo{})
 			rep := New(Config{}).Audit(res.Matches, snap, idx, nil)
-			var compared []Row
+			var compared []reportRow
 			seriesUncovered := false
 			for _, row := range rep.Rows {
 				switch {
@@ -141,9 +141,5 @@ func TestAuditPlacedSpecialRowJSON(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("rows JSON = %s, want it to carry %s", b, want)
 		}
-	}
-	var back []Row
-	if err := json.Unmarshal(b, &back); err != nil {
-		t.Fatalf("json.Unmarshal(rows): %v", err)
 	}
 }

@@ -37,12 +37,13 @@ const (
 	fileMode = 0o600
 )
 
-// SchemaVersion is the schema version Save stamps into State.Version on every
-// write. Bump it when a persisted member moves or is renamed incompatibly, so
-// a future loader can detect the old shape and migrate (or refuse) explicitly
-// instead of silently zero-loading it. A file whose version field is absent or
-// zero is a legacy envelope written before versioning and loads unchanged.
-const SchemaVersion = 1
+// currentSchemaVersion is the schema version Save stamps into State.Version on
+// every write. Bump it when a persisted member moves or is renamed
+// incompatibly, so a future loader can detect the old shape and migrate (or
+// refuse) explicitly instead of silently zero-loading it. A file whose version
+// field is absent or zero is a legacy envelope written before versioning and
+// loads unchanged.
+const currentSchemaVersion = 1
 
 // State is the persisted cross-cycle cache.
 type State struct {
@@ -73,8 +74,8 @@ type State struct {
 	// back partial (per-series episode-fetch failures left Failed placeholder
 	// items the compare excluded).
 	PartialWalks int `json:"partial_walks,omitempty"`
-	// Version is the persisted envelope's schema version, stamped with
-	// SchemaVersion by every Save (on the shallow copy it writes; the
+	// Version is the persisted envelope's schema version, stamped with the
+	// current schema version by every Save (on the shallow copy it writes; the
 	// caller's State is never mutated).
 	Version int `json:"version,omitempty"`
 }
@@ -130,7 +131,7 @@ const staleTempMaxAge = time.Hour
 // schemaVersion independently decodes the persisted envelope's schema version
 // discriminator straight from the wire bytes, reporting the effective (last)
 // decoded version - zero when the key is absent, which the envelope's
-// contract treats as the legacy pre-version shape (see SchemaVersion) -
+// contract treats as the legacy pre-version shape (see currentSchemaVersion) -
 // and any wire-level failure.
 func schemaVersion(data []byte) (version int, err error) {
 	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
@@ -151,7 +152,7 @@ func schemaVersion(data []byte) (version int, err error) {
 		}
 		if *decoded < 0 {
 			// The documented legacy envelope's version is absent or zero, and
-			// Save only ever stamps SchemaVersion - a negative occurrence can
+			// Save only ever stamps currentSchemaVersion - a negative occurrence can
 			// only be corruption or tampering.
 			return fmt.Errorf("invalid negative schema version %d", *decoded)
 		}
@@ -321,14 +322,14 @@ func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
-	// An absent version key decodes as zero, which is below SchemaVersion,
+	// An absent version key decodes as zero, which is below currentSchemaVersion,
 	// so the legacy envelope takes the ordinary load path here.
-	if wireVersion > SchemaVersion {
+	if wireVersion > currentSchemaVersion {
 		// A file stamped by a newer binary (an image rollback): its members may have
 		// moved, so field-by-field zero-loading is exactly the silent discard
-		// SchemaVersion exists to prevent.
+		// currentSchemaVersion exists to prevent.
 		s.unsupportedVersion = wireVersion
-		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, wireVersion, SchemaVersion)
+		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, wireVersion, currentSchemaVersion)
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
@@ -412,13 +413,13 @@ func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 		return State{}, fmt.Errorf("state: save %s: %w", s.path, err)
 	}
 	if s.unsupportedVersion != 0 {
-		return State{}, fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d): %w", s.path, s.unsupportedVersion, SchemaVersion, ErrSavePreserved)
+		return State{}, fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d): %w", s.path, s.unsupportedVersion, currentSchemaVersion, ErrSavePreserved)
 	}
 	if s.loadFailed {
 		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure, or after corruption the load could not preserve (check for a blocked %s.corrupt); the on-disk state is preserved until a load can classify and preserve it: %w", s.path, s.path, ErrSavePreserved)
 	}
 	sanitized := *st
-	sanitized.Version = SchemaVersion
+	sanitized.Version = currentSchemaVersion
 	return sanitized, nil
 }
 

@@ -37,9 +37,7 @@ var (
 	}
 )
 
-// String returns the surface's config-file spelling, or "invalid" for a value
-// that is not one of the three surfaces.
-func (s Surface) String() string {
+func (s Surface) name() string {
 	if name, ok := surfaceNames[s]; ok {
 		return name
 	}
@@ -51,7 +49,7 @@ func (s Surface) String() string {
 func SurfaceNames() []string {
 	out := make([]string, 0, len(surfaceOrder))
 	for _, s := range surfaceOrder {
-		out = append(out, s.String())
+		out = append(out, s.name())
 	}
 	return out
 }
@@ -65,7 +63,7 @@ func ParseSurface(name string) (s Surface, ok bool) {
 		return surfaceNone, false
 	}
 	for _, candidate := range surfaceOrder {
-		if candidate.String() == want {
+		if candidate.name() == want {
 			return candidate, true
 		}
 	}

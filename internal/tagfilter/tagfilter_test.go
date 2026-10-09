@@ -12,7 +12,7 @@ func TestZeroFilterExcludesNothing(t *testing.T) {
 	var f Filter
 	for _, s := range surfaceOrder {
 		if f.Excludes([]string{"Broken", "Incomplete"}, s) {
-			t.Errorf("zero Filter excluded a warned release from %s", s)
+			t.Errorf("zero Filter excluded a warned release from %s", s.name())
 		}
 	}
 	// New over an empty map must be indistinguishable from the zero value, so a
@@ -77,7 +77,7 @@ func TestExcludesIsPerSurface(t *testing.T) {
 	}
 	for _, tc := range tests {
 		if got := f.Excludes([]string{tc.tag}, tc.surface); got != tc.want {
-			t.Errorf("Excludes(%q, %s) = %v, want %v", tc.tag, tc.surface, got, tc.want)
+			t.Errorf("Excludes(%q, %s) = %v, want %v", tc.tag, tc.surface.name(), got, tc.want)
 		}
 	}
 }
@@ -91,7 +91,7 @@ func TestNewUnionsCaseVariantTagKeys(t *testing.T) {
 	})
 	for _, s := range []Surface{SurfaceFeed, SurfaceFindings} {
 		if !f.Excludes([]string{"broken"}, s) {
-			t.Errorf("union lost the %s surface", s)
+			t.Errorf("union lost the %s surface", s.name())
 		}
 	}
 	if f.Excludes([]string{"broken"}, SurfaceReport) {
@@ -113,7 +113,7 @@ func TestNewIgnoresUnusableEntries(t *testing.T) {
 	}
 	for _, s := range surfaceOrder {
 		if f.Excludes([]string{"tag", "other"}, s) {
-			t.Errorf("a non-surface value produced an exclusion on %s", s)
+			t.Errorf("a non-surface value produced an exclusion on %s", s.name())
 		}
 	}
 }
@@ -145,7 +145,7 @@ func TestSurfaceNames(t *testing.T) {
 	if got := SurfaceNames(); !slices.Equal(got, want) {
 		t.Errorf("SurfaceNames() = %v, want %v", got, want)
 	}
-	if got := surfaceNone.String(); got != "invalid" {
-		t.Errorf("surfaceNone.String() = %q, want %q", got, "invalid")
+	if got := surfaceNone.name(); got != "invalid" {
+		t.Errorf("surfaceNone.name() = %q, want %q", got, "invalid")
 	}
 }

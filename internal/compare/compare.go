@@ -63,18 +63,18 @@ type ReleaseLink struct {
 	Headline bool
 }
 
-// Tier is what a diverged unit already holds, measured against everything the
-// entry lists rather than only what is recommended. It separates an optional
-// upgrade from an overdue one.
-type Tier string
+// findingTier is what a diverged unit already holds, measured against
+// everything the entry lists rather than only what is recommended. It separates
+// an optional upgrade from an overdue one.
+type findingTier string
 
 const (
 	// TierAlt means the unit holds a group the entry lists but does not recommend
 	// under the operator's filters: a SeaDex alt, or a best the filters exclude.
-	TierAlt Tier = "alt"
-	// TierUnlisted means every group the unit holds is known and the entry lists
+	TierAlt findingTier = "alt"
+	// tierUnlisted means every group the unit holds is known and the entry lists
 	// none of them.
-	TierUnlisted Tier = "unlisted"
+	tierUnlisted findingTier = "unlisted"
 )
 
 // Finding is one comparison result for a library item. It carries the
@@ -96,7 +96,7 @@ type Finding struct {
 	Status           Status
 	// Tier is set on a StatusBetter finding only, and stays empty there when
 	// unknown group evidence on the listed side leaves it undecided.
-	Tier Tier
+	Tier findingTier
 	// Scope is the comparison scope the shared decision resolved
 	// (align.Decision.Kind, rendered via its String): "season", "movie",
 	// "episodes" or "series".
@@ -108,8 +108,8 @@ type Finding struct {
 	AltGroups []string
 	Links     []ReleaseLink
 	// Downloads is the download set an upgrade selects, one record per torrent
-	// (at most MaxDownloadsPerFinding), and ReleaseBytes their total; both stay
-	// zero when that size is unknown or the finding is not an upgrade.
+	// (at most 64), and ReleaseBytes their total; both stay zero when that size
+	// is unknown or the finding is not an upgrade.
 	Downloads []Download
 	// Replaced is the library files that download set replaces whole and
 	// CurrentBytes their total; both stay zero when that size is unknown.
@@ -242,7 +242,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	case align.OutcomeDiverged:
 		f := betterResult(entry, &base, recommended, recGroups)
 		if f.Status == StatusBetter {
-			f.Tier = c.tier(m, recGroups, listed)
+			f.Tier = tierOf(m, recGroups, listed)
 		}
 		return sized(m, &d, recommended, f)
 	default:
@@ -276,7 +276,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 			continue
 		}
 		// The ONE AnimeBytes visibility gate on this path: Obtainable applies
-		// filter.ABVisible to the RAW upstream URL (t.URL, never the published
+		// filter.Obtainable to the RAW upstream URL (t.URL, never the published
 		// link) in both its public and its private arm, so an AB-hosted or
 		// AB-labelled release is invisible with the toggle off.
 		if !classify.Obtainable(&rel, t, c.animeBytes) {
@@ -287,18 +287,19 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 	return out
 }
 
-// tier decides Finding.Tier by judging the unit a second time, with every group
-// the entry lists as the alt rung (the recommended ones among them change
-// nothing, since the best rung is judged first). It is a separate decision because the
-// alt rung can change the first one: an untagged (NOGRP) alt turns a proven
-// divergence into an unverifiable comparison, which would change the emission.
-func (c *Comparer) tier(m *match.Match, recGroups, listed []string) Tier {
+// tierOf decides Finding.Tier by judging the unit a second time, with every
+// group the entry lists as the alt rung (the recommended ones among them change
+// nothing, since the best rung is judged first). It is a separate decision
+// because the alt rung can change the first one: an untagged (NOGRP) alt turns a
+// proven divergence into an unverifiable comparison, which would change the
+// emission.
+func tierOf(m *match.Match, recGroups, listed []string) findingTier {
 	listing := align.Listing{Best: recGroups, Alt: listed}
 	switch align.Decide(m.Item, m.AlignEntry(), &listing).Standing {
 	case align.StandingAlt:
 		return TierAlt
 	case align.StandingUnlisted:
-		return TierUnlisted
+		return tierUnlisted
 	default:
 		return ""
 	}

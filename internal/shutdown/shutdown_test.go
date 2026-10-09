@@ -77,7 +77,7 @@ func TestNormalizeClassifiesCauseOnlyForm(t *testing.T) {
 	}
 }
 
-// TestWrapAsLeadsWithTheCallerStage pins the operator-facing half of WrapAs: the
+// TestWrapAsLeadsWithTheCallerStage pins the operator-facing half of wrapAs: the
 // caller's stage leads the message. The classification tokens are what the root
 // branches on, but they are identical for every interrupted stage, so the prefix
 // is the only thing in the line that says WHICH work was cut short - and it is
@@ -90,10 +90,10 @@ func TestWrapAsLeadsWithTheCallerStage(t *testing.T) {
 	const stage = "report write cut short by shutdown"
 	werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
 
-	err := WrapAs(ctx, stage, werr)
+	err := wrapAs(ctx, stage, werr)
 
 	if got := err.Error(); !strings.HasPrefix(got, stage+": ") {
-		t.Errorf("WrapAs(%q, ...) = %q, want it to lead with the stage", stage, got)
+		t.Errorf("wrapAs(%q, ...) = %q, want it to lead with the stage", stage, got)
 	}
 	for _, want := range []error{context.Canceled, cause, context.DeadlineExceeded} {
 		if !errors.Is(err, want) {

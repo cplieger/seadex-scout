@@ -28,7 +28,7 @@ var errRecordPollHealth = errors.New("record poll health")
 
 // dirMode is applied when creating the cycle-lock's parent directory (normally
 // /config, which already exists as the mounted volume holding the config and
-// state files this lock guards). The report dir's mode is reportfs.DirMode's,
+// state files this lock guards). The report dir's mode is reportfs's own,
 // pinned by reportfs.MakeDir for both of that directory's creators.
 const dirMode = 0o700
 

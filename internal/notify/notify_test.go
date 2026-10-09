@@ -9,6 +9,7 @@ import (
 
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -749,8 +750,8 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 	if !strings.HasSuffix(gotURL, "...") {
 		t.Errorf("oversized release_url not truncated with the ... marker (len %d)", len(gotURL))
 	}
-	if len(gotURL) > maxAttrBytes+len("...") {
-		t.Errorf("release_url length = %d, want <= %d", len(gotURL), maxAttrBytes+len("..."))
+	if len(gotURL) > logattr.MaxBytes+len("...") {
+		t.Errorf("release_url length = %d, want <= %d", len(gotURL), logattr.MaxBytes+len("..."))
 	}
 	gotTitle, _ := recorder.AttrValue("better release available", "title")
 	if want := runesafe.Sanitize(normal); gotTitle != want {
@@ -785,8 +786,8 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 		if !ok {
 			t.Fatalf("finding line carries no %s attribute", key)
 		}
-		if len(got) > maxAttrBytes+len("...") {
-			t.Errorf("%s length = %d, want <= %d", key, len(got), maxAttrBytes+len("..."))
+		if len(got) > logattr.MaxBytes+len("...") {
+			t.Errorf("%s length = %d, want <= %d", key, len(got), logattr.MaxBytes+len("..."))
 		}
 		if !strings.HasSuffix(got, "...") {
 			t.Errorf("%s not marked truncated (len %d)", key, len(got))
@@ -807,7 +808,7 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 // constants, so no oversized value can reach them and boundRetained skips them.
 func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 	t.Parallel()
-	huge := strings.Repeat("x", 4*maxAttrBytes)
+	huge := strings.Repeat("x", 4*logattr.MaxBytes)
 	n, _ := newCapturedNotifier()
 	n.Report([]compare.Finding{{
 		AniListID:         7,
@@ -829,7 +830,7 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 	if len(n.current) != 1 {
 		t.Fatalf("retained %d rows, want 1", len(n.current))
 	}
-	ceiling := maxAttrBytes + len(attrTruncMarker)
+	ceiling := logattr.MaxBytes + len(attrTruncMarker)
 	for _, got := range n.current {
 		check := func(field, v string) {
 			t.Helper()
@@ -872,7 +873,7 @@ func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
 func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 	t.Parallel()
 	const upstreamMax = 512 // internal/seadex's maxTorrentsPerEntry
-	huge := strings.Repeat("z", 4*maxAttrBytes)
+	huge := strings.Repeat("z", 4*logattr.MaxBytes)
 	groups := make([]string, upstreamMax)
 	alt := make([]string, upstreamMax)
 	current := make([]string, upstreamMax)
@@ -936,7 +937,7 @@ func TestReportBoundsRetainedRowToItsDocumentedCeiling(t *testing.T) {
 // cycle's own log line also read.
 func TestReportDoesNotMutateCallerFindings(t *testing.T) {
 	t.Parallel()
-	huge := strings.Repeat("y", 4*maxAttrBytes)
+	huge := strings.Repeat("y", 4*logattr.MaxBytes)
 	findings := []compare.Finding{{
 		AniListID:         11,
 		Status:            compare.StatusBetter,

@@ -32,10 +32,10 @@ func InterruptedAs(ctx context.Context, prefix string) error {
 	return fmt.Errorf("%s: %w (cause: %w)", prefix, ctx.Err(), context.Cause(ctx))
 }
 
-// WrapAs re-expresses err as this context's interruption under a caller-chosen
+// wrapAs re-expresses err as this context's interruption under a caller-chosen
 // prefix, adding ctx.Err() as the classification token. An empty prefix yields
 // the bare Normalize shape.
-func WrapAs(ctx context.Context, prefix string, err error) error {
+func wrapAs(ctx context.Context, prefix string, err error) error {
 	if prefix == "" {
 		return fmt.Errorf("%w (cause: %w): %w", ctx.Err(), context.Cause(ctx), err)
 	}
@@ -60,5 +60,5 @@ func Normalize(ctx context.Context, err error) error {
 	if err == nil || errors.Is(err, ctx.Err()) || !Is(ctx, err) {
 		return err
 	}
-	return WrapAs(ctx, "", err)
+	return wrapAs(ctx, "", err)
 }

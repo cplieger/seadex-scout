@@ -47,7 +47,7 @@ func LastSubmatchIndex(re *regexp.Regexp, s string) []int {
 // StripExt drops a trailing known video extension from a file name, leaving any
 // other trailing dotted token (a release name is not a path) intact.
 func StripExt(name string) string {
-	if !IsMediaFile(name) {
+	if !isMediaFile(name) {
 		return name
 	}
 	return name[:len(name)-len(path.Ext(name))]

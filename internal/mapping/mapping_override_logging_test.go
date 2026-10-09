@@ -36,7 +36,7 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 }
 
 // TestLoader_Load_cleanOverridesEmitNoDiagnostics pins the absence side of
-// applyOverrides' diagnostic contract: a clean single-record overrides file
+// effectiveOverrides' diagnostic contract: a clean single-record overrides file
 // (no skipped rows, no unknown keys) must emit NEITHER diagnostic warning and
 // exactly one applied-overrides info with count=1. Every existing logging test
 // asserts presence only, so a regression that emits a zero-count WARN on every
@@ -195,11 +195,11 @@ func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 	}
 }
 
-// unroutableOverrideMessage is applyOverrides' un-mapped-entry warning.
+// unroutableOverrideMessage is effectiveOverrides' un-mapped-entry warning.
 const unroutableOverrideMessage = "mapping: overrides carry no arr identifier and un-map their entry; " +
 	"check for a mistyped tvdb_id/tmdb_movies/imdb_ids key, and restate the ids when overriding only a type or season"
 
-// TestLoader_Load_logsUnroutableOverrideCount pins the count on applyOverrides'
+// TestLoader_Load_logsUnroutableOverrideCount pins the count on effectiveOverrides'
 // un-mapped-entry warning. The overlay is wholesale, so an override carrying no
 // identifier its routed arr consumes REPLACES a mapped upstream record with one
 // that resolves to nothing - left applied by design, which makes this warning

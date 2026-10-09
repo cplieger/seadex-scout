@@ -142,12 +142,12 @@ type totals struct {
 	counted   int
 }
 
-// add counts f into the totals, or reports false and leaves them unchanged
-// when f is unsized, when one of its identities already carries another size
-// (conflict names it), or when a sum would pass math.MaxInt64.
-func (t *totals) add(f *compare.Finding) (ok bool, conflict string) {
+// add counts f into the totals, or leaves them unchanged when f is unsized,
+// when one of its identities already carries another size (the returned
+// conflict names it), or when a sum would pass math.MaxInt64.
+func (t *totals) add(f *compare.Finding) (conflict string) {
 	if !sized(f) {
-		return false, ""
+		return ""
 	}
 	replaced := make([]part, 0, len(f.Replaced))
 	for _, r := range f.Replaced {
@@ -155,17 +155,17 @@ func (t *totals) add(f *compare.Finding) (ok bool, conflict string) {
 	}
 	download, newDownloads, conflict, ok := union(t.downloads, t.download, downloadParts(f))
 	if !ok {
-		return false, conflict
+		return conflict
 	}
 	current, newReplaced, conflict, ok := union(t.replaced, t.current, replaced)
 	if !ok {
-		return false, conflict
+		return conflict
 	}
 	maps.Copy(t.downloads, newDownloads)
 	maps.Copy(t.replaced, newReplaced)
 	t.download, t.current = download, current
 	t.counted++
-	return true, ""
+	return ""
 }
 
 // downloadTotal is a view's download floor: the downloads of every finding
@@ -177,21 +177,21 @@ type downloadTotal struct {
 	counted int
 }
 
-// add counts f's downloads, or reports false and leaves the total unchanged
-// when f's download size is unknown, when one of its torrents already carries
-// another size (conflict names it), or when the sum would pass math.MaxInt64.
-func (t *downloadTotal) add(f *compare.Finding) (ok bool, conflict string) {
+// add counts f's downloads, or leaves the total unchanged when f's download
+// size is unknown, when one of its torrents already carries another size (the
+// returned conflict names it), or when the sum would pass math.MaxInt64.
+func (t *downloadTotal) add(f *compare.Finding) (conflict string) {
 	if f.ReleaseBytes <= 0 {
-		return false, ""
+		return ""
 	}
 	bytes, fresh, conflict, ok := union(t.seen, t.bytes, downloadParts(f))
 	if !ok {
-		return false, conflict
+		return conflict
 	}
 	maps.Copy(t.seen, fresh)
 	t.bytes = bytes
 	t.counted++
-	return true, ""
+	return ""
 }
 
 type part struct {
@@ -244,9 +244,7 @@ func (n *Notifier) emitView(v *view, pass int64, conflicts map[string]bool) {
 		} else {
 			better++
 		}
-		_, sizedConflict := t.add(&r.f)
-		_, downloadConflict := floor.add(&r.f)
-		for _, conflict := range []string{sizedConflict, downloadConflict} {
+		for _, conflict := range []string{t.add(&r.f), floor.add(&r.f)} {
 			if conflict != "" && !conflicts[conflict] {
 				conflicts[conflict] = true
 				n.log.Warn("one download or file carries two sizes across findings; the finding that brought the second is left out of the size totals",

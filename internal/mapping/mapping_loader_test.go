@@ -403,7 +403,7 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_noOverridesPathServesUpstreamUnmodified pins applyOverrides'
+// TestLoader_Load_noOverridesPathServesUpstreamUnmodified pins effectiveOverrides'
 // empty-path early return: a loader constructed with no overrides file
 // configured serves the mapping untouched (no read attempt, no overlay).
 func TestLoader_Load_noOverridesPathServesUpstreamUnmodified(t *testing.T) {
@@ -516,7 +516,7 @@ func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
 // TestLoader_refreshCache_unusableCacheFetchFailureErrors pins the
 // cache-usability gate on the fetch-outage degradation path: a JSON-valid
 // state cache whose records index to nothing (records:[{}] — a zero AniList
-// ID buildIndex drops) must NOT enter staleOrFail as a StaleMapError, because
+// ID NewIndex drops) must NOT enter staleOrFail as a StaleMapError, because
 // scout.mapUsable trusts the error type alone and would proceed into
 // matching against an empty effective map. It must degrade like no cache at
 // all (the no-cache error), so the scout preserves findings.
@@ -590,7 +590,7 @@ func routingFloorPrevCache() *Cache {
 // cache-usability gate on the fresh-reuse fast path, the first of the four
 // cache-state gates cacheUsable documents: a cache inside the refresh window
 // whose records index to nothing
-// (records:[{}] - a zero AniList ID buildIndex drops) must NOT be reused as
+// (records:[{}] - a zero AniList ID NewIndex drops) must NOT be reused as
 // fresh, because serving it would idle a whole refresh window on an empty
 // effective map; the loader must fall through to the fetch and accept the
 // upstream body.
@@ -615,7 +615,7 @@ func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
 
 // TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable pins the
 // population deduplicateRecords hands to cacheUsable: a zero-AniList-ID record
-// is dropped by buildIndex, so its arr identifiers must not count toward the
+// is dropped by NewIndex, so its arr identifiers must not count toward the
 // coverage floor. A cache whose only keyed record carries no arr id, padded by
 // a zero-key record with a TVDB id, is NOT usable — the fresh-cache fast path
 // must fall through to the fetch instead of serving an effective index whose

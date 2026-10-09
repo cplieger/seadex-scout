@@ -79,11 +79,11 @@ func TestLookupByHostFailClosed(t *testing.T) {
 func TestLookupByHostPinsHostSet(t *testing.T) {
 	wantHosts := map[string]string{
 		"animebytes.tv":  NameAnimeBytes,
-		"animetosho.xyz": NameAnimeTosho,
-		"animetosho.org": NameAnimeTosho,
-		"animetosho.net": NameAnimeTosho,
+		"animetosho.xyz": nameAnimeTosho,
+		"animetosho.org": nameAnimeTosho,
+		"animetosho.net": nameAnimeTosho,
 		"nyaa.si":        NameNyaa,
-		"rutracker.org":  NameRuTracker,
+		"rutracker.org":  nameRuTracker,
 	}
 	for host, wantName := range wantHosts {
 		got, ok := LookupByHost(host)
@@ -313,7 +313,7 @@ func TestIsAnimeBytes(t *testing.T) {
 }
 
 // TestIsAnimeBytesHost pins the AB host gate consumed by the AnimeBytes link
-// hider (filter.ABVisible) and the indexer's tracker-key routing
+// hider (filter.Obtainable) and the indexer's tracker-key routing
 // (trackerKeyFromURL): the exact site host, its real dot-delimited
 // subdomains, and the DNS-root trailing-dot form match; a suffix-confusion
 // host, a parent-domain spoof, an empty-labeled host, a non-ASCII homograph
@@ -365,8 +365,8 @@ func TestLookup(t *testing.T) {
 		{in: "nyaa", wantName: NameNyaa, wantType: Public},
 		{in: " AB ", wantName: NameAnimeBytes, wantType: Private},
 		{in: "animebytes", wantName: NameAnimeBytes, wantType: Private},
-		{in: "AnimeTosho", wantName: NameAnimeTosho, wantType: Public},
-		{in: "RuTracker", wantName: NameRuTracker, wantType: Public},
+		{in: "AnimeTosho", wantName: nameAnimeTosho, wantType: Public},
+		{in: "RuTracker", wantName: nameRuTracker, wantType: Public},
 	}
 	for _, tc := range found {
 		got, ok := Lookup(tc.in)

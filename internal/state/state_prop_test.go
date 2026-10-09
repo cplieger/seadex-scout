@@ -16,7 +16,7 @@ import (
 // jittered expiry stamps and arbitrary unicode titles, plus the per-arr shrink
 // streak map and the two scalar escalation streaks) survives Save then Load
 // exactly, and Save stamps
-// SchemaVersion. This is the
+// currentSchemaVersion. This is the
 // generative net over the json-tag/projection drift the deterministic
 // round-trip tests pin with single sample values.
 func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
@@ -57,8 +57,8 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 		if err != nil {
 			rt.Fatalf("Load after Save returned error: %v", err)
 		}
-		if got.Version != SchemaVersion {
-			rt.Errorf("Version = %d, want stamped %d", got.Version, SchemaVersion)
+		if got.Version != currentSchemaVersion {
+			rt.Errorf("Version = %d, want stamped %d", got.Version, currentSchemaVersion)
 		}
 		if !maps.Equal(got.ShrunkWalksByArr, want.ShrunkWalksByArr) {
 			rt.Errorf("ShrunkWalksByArr = %v, want %v", got.ShrunkWalksByArr, want.ShrunkWalksByArr)

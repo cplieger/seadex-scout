@@ -327,7 +327,7 @@ func mappingWorthPersisting(prev, next *mapping.Cache) bool {
 // absence is only sound where absence is evidence: an entry can end without a
 // finding because it was compared and is aligned (absence means resolved), or
 // because the linkage to a library item was lost (absence proves nothing - every
-// such case yields match.SourceUnmapped, which is NOT in IncompleteIDs). A match
+// such case is an unmapped match, which is NOT in IncompleteIDs). A match
 // linked to an item whose walk failed IS included, where preservation takes
 // precedence. Library removal is not a tick's authority: it walked nothing.
 func evaluatedIDs(matches []match.Match) map[int]struct{} {

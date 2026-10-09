@@ -124,17 +124,13 @@ func eligiblePool(files []seadex.File) []seadex.File {
 }
 
 // ContentMediaFile reports whether name is eligible BY TYPE to identify
-// release content: a known video container extension (IsMediaFile) that is
-// neither a creditless extra (IsCreditlessExtra) nor a sample clip
-// (IsSampleExtra).
+// release content: a known video container that is neither a creditless extra
+// (IsCreditlessExtra) nor a sample clip.
 func ContentMediaFile(name string) bool {
-	return IsMediaFile(name) && !IsCreditlessExtra(name) && !IsSampleExtra(name)
+	return isMediaFile(name) && !IsCreditlessExtra(name) && !isSampleExtra(name)
 }
 
-// IsMediaFile reports whether name carries a known video container
-// extension — an episode/movie file rather than a sidecar (subtitles,
-// fonts, screenshots) that happens to carry an episode token.
-func IsMediaFile(name string) bool {
+func isMediaFile(name string) bool {
 	return mediaExts[strings.ToLower(path.Ext(name))]
 }
 
@@ -155,23 +151,20 @@ var creditlessExtra = regexp.MustCompile(
 		`)\d*(?:` + nametoken.Literal("v") + `\d+)?(?:$|` + nametoken.NonWordEdge + `)`,
 )
 
-// IsSampleExtra reports whether name marks a SAMPLE clip (the near-universal
-// scene marker for a short excerpt of the payload, optionally numbered) — an
-// extra that carries the payload's own episode token and quality markers and so
-// is indistinguishable from a real episode by size alone.
-func IsSampleExtra(name string) bool {
+func isSampleExtra(name string) bool {
 	return sampleExtra.MatchString(name)
 }
 
 // sampleExtra matches sample clips ("sample", "Sample01", a "Sample/"
-// directory).
+// directory): a short excerpt that carries the payload's own episode token and
+// quality markers, so nothing but its name tells it from a real episode.
 var sampleExtra = regexp.MustCompile(
 	`(?:^|` + nametoken.NonWordEdge + `)` + nametoken.Literal("sample") + `\d*(?:$|` + nametoken.NonWordEdge + `)`,
 )
 
 // mediaExts are the video container extensions used to tell an episode/movie
-// file from a sidecar file (subtitles, samples) when scanning a torrent's
-// files.
+// file from a sidecar file (subtitles, fonts, screenshots) that may carry an
+// episode token when scanning a torrent's files.
 var mediaExts = map[string]bool{
 	".mkv": true, ".mp4": true, ".avi": true, ".m2ts": true,
 	".ts": true, ".ogm": true, ".mov": true, ".wmv": true, ".webm": true,
