@@ -882,7 +882,7 @@ func TestMatchIncompleteIDsScope(t *testing.T) {
 // with a definitive not-found while everything else fails transiently.
 type partialThenPerIDAniList struct{ media map[int]anilist.Media }
 
-func (p *partialThenPerIDAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+func (*partialThenPerIDAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
 	if id == 41 {
 		return anilist.Media{}, anilist.ErrNotFound
 	}

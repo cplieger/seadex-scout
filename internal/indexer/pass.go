@@ -187,7 +187,7 @@ func (e *windowEvidence) census() map[string]packCensus { return censusPacks(e.c
 
 // carryPolicy is ALWAYS carryVerbatim for a window. It cannot conclude de-curation,
 // because an empty window is legitimate.
-func (e *windowEvidence) carryPolicy(string) (carryPolicy, []curatedRef) {
+func (*windowEvidence) carryPolicy(string) (carryPolicy, []curatedRef) {
 	return carryVerbatim, nil
 }
 

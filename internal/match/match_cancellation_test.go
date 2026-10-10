@@ -67,7 +67,7 @@ func (c *cancelOnFetchAniList) Fetch(_ context.Context, _ int) (anilist.Media, e
 	return anilist.Media{Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}, nil
 }
 
-func (c *cancelOnFetchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+func (*cancelOnFetchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	media := map[int]anilist.Media{}
 	return anilist.BatchResult{
 			Media:    media,

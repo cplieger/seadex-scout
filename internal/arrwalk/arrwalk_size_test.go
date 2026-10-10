@@ -162,7 +162,7 @@ func (f *pairedSonarr) Episodes(ctx context.Context, _ int) ([]arrapi.Episode, e
 	return nil, f.enter(ctx)
 }
 
-func (f *pairedSonarr) Tags(context.Context) ([]arrapi.Tag, error) { return nil, nil }
+func (*pairedSonarr) Tags(context.Context) ([]arrapi.Tag, error) { return nil, nil }
 
 func TestWalkSonarrEpisodeListReadStaysInsideTheConcurrencyBound(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

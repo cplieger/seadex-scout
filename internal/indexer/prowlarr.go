@@ -333,7 +333,7 @@ type transientUpstreamError struct {
 
 func (e *transientUpstreamError) Error() string                 { return e.err.Error() }
 func (e *transientUpstreamError) Unwrap() error                 { return e.err }
-func (e *transientUpstreamError) IsTransient() bool             { return true }
+func (*transientUpstreamError) IsTransient() bool               { return true }
 func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retryAfter }
 
 // malformedUpstreamBody reports whether err is (or wraps) the decode failure
