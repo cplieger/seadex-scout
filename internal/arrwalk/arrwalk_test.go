@@ -392,11 +392,11 @@ func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrap
 	}
 }
 
-func (f *boundedSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*boundedSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *boundedSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*boundedSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -471,11 +471,11 @@ func (f *cancelingSonarr) EpisodeFiles(ctx context.Context, _ int) ([]arrapi.Epi
 	return nil, ctx.Err()
 }
 
-func (f *cancelingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*cancelingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *cancelingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*cancelingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -1102,11 +1102,11 @@ func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi
 	}
 }
 
-func (f *budgetSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*budgetSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 

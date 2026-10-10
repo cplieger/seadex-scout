@@ -570,7 +570,7 @@ func (o *outageAniList) Fetch(_ context.Context, _ int) (anilist.Media, error) {
 	return anilist.Media{}, errors.New("anilist: dial tcp: connection refused")
 }
 
-func (o *outageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+func (*outageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	media := map[int]anilist.Media{}
 	return anilist.BatchResult{
 			Media:    media,

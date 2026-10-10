@@ -267,7 +267,7 @@ func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, info indexer.
 // Advance is unreachable in this fake's tests (they all reconcile) but must
 // exist to satisfy the seam; it records nothing so a misrouted dispatch shows
 // up as an empty got map rather than a plausible-looking one.
-func (p *probingFeed) Advance(context.Context, []seadex.Entry, indexer.EntryInfoFunc) error {
+func (*probingFeed) Advance(context.Context, []seadex.Entry, indexer.EntryInfoFunc) error {
 	return nil
 }
 

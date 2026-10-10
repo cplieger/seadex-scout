@@ -42,11 +42,11 @@ func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.Epi
 	return f.files[seriesID], nil
 }
 
-func (f *fakeSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*fakeSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -573,7 +573,7 @@ func (f *fakeRadarr) Movies(context.Context) ([]arrapi.Movie, error) {
 	return f.movies, f.listErr
 }
 
-func (f *fakeRadarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*fakeRadarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -776,7 +776,7 @@ type slowCancelStore struct {
 	retryHadDead bool
 }
 
-func (s *slowCancelStore) Load(context.Context) (state.State, error) { return state.State{}, nil }
+func (*slowCancelStore) Load(context.Context) (state.State, error) { return state.State{}, nil }
 
 func (s *slowCancelStore) Save(ctx context.Context, _ *state.State) error {
 	s.attempts++
