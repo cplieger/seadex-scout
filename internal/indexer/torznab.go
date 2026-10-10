@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/xmlx"
 )
 

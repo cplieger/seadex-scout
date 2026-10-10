@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logattr"

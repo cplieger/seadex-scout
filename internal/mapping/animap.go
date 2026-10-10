@@ -15,7 +15,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/jsoncap/v2"
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
