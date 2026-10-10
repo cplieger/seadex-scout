@@ -47,9 +47,9 @@ The dashboard has three variables at the top. **Data source** picks your Loki da
 
 The dashboard has three tabs:
 
-- Overview shows the status, the number of upgrades, the number of findings to check by hand and the storage every upgrade needs, each in its own tile. Beside them, Library overview counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrades available and Check by hand list the upgrades and the findings.
-- Upgrades is the deep dive into sizes. It breaks the upgrades down by format and resolution, as the average per check over the last two hours. It shows how much your library grows once every upgrade with both sizes known replaces its files, how many upgrades each size total leaves out, and the biggest size changes.
-- Scout health shows when the last checks finished and the errors that keep the status from `✓`. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
+- Overview shows the number of upgrades and the number of findings to check by hand, one above the other. Beside them, Library overview counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrades available and Check by hand list the upgrades and the findings. Above them, a tile appears only while something needs a look, as [Attention tiles](#attention-tiles) describes.
+- Upgrades is the deep dive into sizes, and it describes the current upgrades whatever time range you pick. It breaks the upgrades down by format and resolution, as the average per check over the last two hours. It shows the storage every upgrade needs, how much your library grows once every upgrade with both sizes known replaces its files, how many upgrades each size total leaves out, and the biggest size changes.
+- Scout health lists the errors logged in the selected time range. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
 
 Three Library overview bars need a word. Season not found means no files sit where the entry maps. They are missing, or Sonarr files that season elsewhere, such as under TVDB's specials. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.
 
@@ -61,13 +61,31 @@ Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens t
 
 The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
 
-The status shows `✓`, `!` or `✗`, built from the same conditions as the shipped alert rules. A tick means checks run and nothing fails. An exclamation mark means SeaDex, AniList or the anime ID map is failing, and nothing needs fixing on your side. A cross means an error you can fix or checks that stopped. On the Scout health tab, Errors behind Status lists those errors, and Last check and Last full check show stopped checks.
-
 Upgrades available and Check by hand show the newest check only, up to 200 upgrades and 100 findings, while the counts above them count every one. Upgrades come first when they are a newer version of a group you have, then by size change, from most added to most freed. First seen is when seadex-scout first saw the upgrade since it started, so it resets when the container restarts.
+
+### Attention tiles
+
+The top of the Overview stays empty while seadex-scout runs well. Each tile below appears only while its condition holds, and reads the same lines as the alert rule it names:
+
+| Tile | Appears when | Alert rule |
+| --- | --- | --- |
+| Last check | no check of any kind has finished or started in 3 hours | `SeadexScoutScanStalled` |
+| Last full check | no daily full check has finished in 72 hours | `SeadexScoutReconcileStalled` |
+| Errors in this range | seadex-scout logged an error you can fix in the selected time range | `SeadexScoutCycleError` |
+| Library problem | Sonarr or Radarr keeps returning a much smaller or incomplete library | `SeadexScoutLibraryDegraded` |
+| Feed not read | a tracker's RSS feed was read in the last week but not in the last 6 hours | `SeadexScoutFeedNotPolled` |
+| AnimeBytes feed | the last feed update held AnimeBytes releases back because `indexer.ab_passkey` is not set | none |
+| Upstream outage | SeaDex, AniList or the anime ID map keeps failing, which needs nothing from you | `SeadexScoutUpstreamUnavailable` |
+
+Library problem, Feed not read and Upstream outage name one app, tracker or service. When several have the problem at once, the tile names the one logged most, and Errors logged on the Scout health tab lists them all.
+
+Errors in this range counts every error with no named problem in the time range you pick, so one error keeps the tile up until it leaves the range, while its alert resolves an hour after the error. Library problem and Upstream outage show a problem only while it was logged in the last hour, as their alerts do. Whatever range you pick, Last check, Last full check and Feed not read look back over their alert's own window, and AnimeBytes feed reads the last feed update. On the Scout health tab, Errors logged names each error in the time range, a past problem included.
+
+A tile also hides when its query fails. If your Loki data source is down, every tile stays hidden, and the tiles, Library overview and tables below them show the query error instead.
 
 ### Upgrade sizes
 
-Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. Storage needed and Library growth add up every upgrade the Optional upgrades setting shows, including any beyond the 200 rows the table lists. Storage needed adds every upgrade whose download size is known, and Upgrades without a download size counts the rest. That is why Storage needed says at least: each upgrade left out would add to it. Library growth needs both the download and the size it replaces, and Upgrades left out of library growth counts the upgrades missing either. It can be off in either direction, because an upgrade left out can grow or shrink your library.
+Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. Storage needed and Library growth add up every upgrade the Optional upgrades setting shows, including any beyond the 200 rows the table lists. Storage needed adds every upgrade whose download size is known. Library growth needs both the download size and the size of the files the download replaces, so it usually leaves out more upgrades than Storage needed. An upgrade is also left out of a total when a torrent or file it shares with another upgrade carries a different size there. Upgrades not in the size totals counts what each total leaves out. Storage needed says at least, because each upgrade it leaves out would add to it. Library growth can be off in either direction, because an upgrade left out can grow or shrink your library.
 
 The download is one set of torrents. A season pack, or a release whose files name no episode, is that torrent alone. A single episode stands for every single episode of the same release, which is the same group, tracker, resolution, codec, kind and dual audio, one torrent per episode. Each torrent counts at its full size, extras and samples included.
 
@@ -91,7 +109,7 @@ Library overview shows the SeaDex view, like the report. Your remux and dual-aud
 
 These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. They then keep the previous summary until it is 26 hours old and are empty after that, until a complete check logs a new one.
 
-With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The status then shows `✗` and the dashboard stays mostly empty.
+With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The Last check and Last full check tiles then show, and the dashboard stays mostly empty.
 
 ## Alerting
 

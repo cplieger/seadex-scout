@@ -49,9 +49,17 @@ var (
 	ipv4Re        = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
 )
 
-// allowedWindows are the fixed windows that encode seadex-scout's own cadence;
-// anything reaching back into history must use Grafana's range.
-var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "26h", "72h"}
+// allowedWindows are the fixed windows that encode seadex-scout's own cadence
+// or a shipped alert rule's window; anything reaching back into history must
+// use Grafana's range.
+var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "6h", "26h", "72h", "7d"}
+
+// rateWindows are the smoothing intervals a rate may take. They hold only
+// under a rate: the same [5m] under count_over_time measures a fixed period.
+var (
+	rateWindows      = []string{"$__rate_interval", "5m"}
+	rateAggregations = []string{"rate", "bytes_rate", "rate_counter"}
+)
 
 type dashTarget struct {
 	datasource any
@@ -158,11 +166,15 @@ func pipelineMessages(stages string) (msgs, problems []string) {
 	return msgs, problems
 }
 
-func checkPipeline(c *logcontract.Contract, stages, window string) []string {
+// smoothsARate reports whether window is a rate's smoothing interval, given
+// the expression text before the pipeline it closes.
+func smoothsARate(before, window string) bool {
+	agg := aggregationRe.FindStringSubmatch(before)
+	return agg != nil && slices.Contains(rateAggregations, agg[1]) && slices.Contains(rateWindows, window)
+}
+
+func checkPipeline(c *logcontract.Contract, stages string) []string {
 	var problems []string
-	if !slices.Contains(allowedWindows, window) {
-		problems = append(problems, "window ["+window+"] is neither Grafana's range nor one of the app's cadence windows")
-	}
 	if regexLineRe.MatchString(stages) {
 		problems = append(problems, "a regex or negative line filter cannot be checked; filter on msg instead")
 	}
@@ -199,15 +211,19 @@ func checkPipeline(c *logcontract.Contract, stages, window string) []string {
 // one range pipeline at a time.
 func checkExpr(c *logcontract.Contract, expr string) []string {
 	if m := logQueryRe.FindStringSubmatch(expr); m != nil {
-		return checkPipeline(c, m[1], "$__range")
+		return checkPipeline(c, m[1])
 	}
-	pipes := pipelineRe.FindAllStringSubmatch(expr, -1)
+	pipes := pipelineRe.FindAllStringSubmatchIndex(expr, -1)
 	if len(pipes) == 0 {
 		return []string{"no log pipeline found"}
 	}
 	var problems []string
 	for _, p := range pipes {
-		problems = append(problems, checkPipeline(c, p[1], p[2])...)
+		window := expr[p[4]:p[5]]
+		if !slices.Contains(allowedWindows, window) && !smoothsARate(expr[:p[0]], window) {
+			problems = append(problems, "window ["+window+"] is neither Grafana's range, a rate's smoothing interval, nor one of the app's cadence windows")
+		}
+		problems = append(problems, checkPipeline(c, expr[p[2]:p[3]])...)
 	}
 	problems = append(problems, checkGrouping(expr)...)
 	for _, m := range offsetRe.FindAllStringSubmatch(expr, -1) {
@@ -431,6 +447,8 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 		"global-only key":     sel + " | json level=\"level\", title=\"title\" | level=`ERROR` [1h]",
 		"bare json":           sel + " | json | msg=`library summary` [26h]",
 		"fixed day window":    sel + " | json msg=\"msg\" | msg=`reconcile complete` [30d]",
+		"5m count":            "count_over_time(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [5m])",
+		"rate interval count": "count_over_time(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [$__rate_interval])",
 		"fixed offset":        sel + " | json msg=\"msg\" | msg=`reconcile complete` [2h] offset 7d",
 		"regex alternative":   sel + " | json msg=\"msg\" | msg=~`cycle .*` [3h]",
 		"regex line filter":   sel + " |~ `reconcile (started|complete)` | json msg=\"msg\" | msg=`reconcile complete` [3h]",
@@ -453,6 +471,8 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 	for _, ok := range []string{
 		"last_over_time(" + sel + " |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]) by ()",
 		sel + " |= `biggest upgrade` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
+		"sum by () (rate(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [5m]))",
+		"sum by () (rate(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [$__rate_interval]))",
 	} {
 		if problems := checkExpr(&c, ok); len(problems) != 0 {
 			t.Errorf("checkExpr(%q) = %v, want no problem", ok, problems)
@@ -463,8 +483,8 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 // TestDashboardShape pins what makes the file importable into any deployment:
 // a schema v2 resource whose metadata.name is seadex-scout, a datasource
 // variable first and used by every query, a container variable, the
-// optional-upgrades switch defaulting to Hide, no fixed number of days, and no
-// host but the SeaDex site.
+// optional-upgrades switch defaulting to Hide, no fixed number of days outside
+// allowedWindows, and no host but the SeaDex site.
 func TestDashboardShape(t *testing.T) {
 	raw, err := os.ReadFile(dashboardPath)
 	if err != nil {
@@ -509,7 +529,7 @@ func TestDashboardShape(t *testing.T) {
 		}
 	}
 	text := string(raw)
-	if m := regexp.MustCompile(`\b\d+ ?days?\b|\[\d+d\]|offset \d+d`).FindString(text); m != "" {
+	if m := regexp.MustCompile(`\b\d+ ?days?\b|offset \d+d`).FindString(text); m != "" {
 		t.Errorf("dashboard carries %q, want no fixed number of days anywhere", m)
 	}
 	for _, m := range urlHostRe.FindAllStringSubmatch(text, -1) {
@@ -694,7 +714,7 @@ var errorsOnlyRe = regexp.MustCompile("\\|\\s*level\\s*=\\s*`ERROR`")
 
 // A table that reads only ERROR records cannot show a stopped check, which
 // logs nothing, so its title and its empty text must say errors rather than
-// claim every problem behind Status.
+// claim every problem seadex-scout can have.
 func TestDashboardErrorTablesSayTheyListErrors(t *testing.T) {
 	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
 	n := 0
@@ -725,20 +745,6 @@ func TestDashboardErrorTablesSayTheyListErrors(t *testing.T) {
 	}
 }
 
-// The Status tile sits on another tab than the panels that explain it, so its
-// description must name that tab as a tab.
-func TestDashboardStatusNamesTheHealthTab(t *testing.T) {
-	d := loadDashboard(t)
-	desc, _ := field(d, "spec", "elements", "panel-10", "spec", "description").(string)
-	health := tabHolding(t, d, "panel-52")
-	if home := tabHolding(t, d, "panel-10"); home == health {
-		t.Fatalf("Status and Last check are both on tab %q, want them on different tabs", home)
-	}
-	if !strings.Contains(desc, "the "+health+" tab") {
-		t.Errorf("Status description = %q, want it to name the %s tab", desc, health)
-	}
-}
-
 // A bar chart counting events per $__interval draws one bar per event at a
 // week's range, so every bar chart buckets by day and its title says so.
 func TestDashboardBarChartsCountPerDay(t *testing.T) {
@@ -761,6 +767,151 @@ func TestDashboardBarChartsCountPerDay(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatalf("%s carries no bar chart, so this check checks nothing", dashboardPath)
+	}
+}
+
+// fixedWindows maps each panel that measures over a fixed window, other than
+// a tile held to its alert rule's windows, to the windows it keeps, in query
+// order, and the words of its description that say why it ignores the time
+// range. Pinning the windows keeps one query from moving to the range alone.
+var fixedWindows = map[string]struct {
+	reason  string
+	windows []string
+}{
+	"panel-34": {reason: "whatever time range you pick", windows: []string{"2h", "2h"}},
+}
+
+var (
+	aggregationRe = regexp.MustCompile(`(\w+)\(\s*$`)
+	// A per-day bucket names a unit, not a length, so "per day" is not matched.
+	fixedLengthRe = regexp.MustCompile(`(?i)\b\d+\s*(s|m|h|d|w|y|mo|mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\b|\b(last|past|previous|this)\s+(hour|day|week|month|year)\b|\b(today|yesterday)\b`)
+)
+
+// measuredWindows returns the fixed windows expr measures a period over. A
+// Grafana interval follows the time range, last_over_time reads only the
+// newest line, so its window bridges the gap between two lines, and a rate's
+// smoothing interval sets no period.
+func measuredWindows(expr string) []string {
+	var out []string
+	for _, m := range pipelineRe.FindAllStringSubmatchIndex(expr, -1) {
+		window, before := expr[m[4]:m[5]], expr[:m[0]]
+		if strings.HasPrefix(window, "$__") || smoothsARate(before, window) {
+			continue
+		}
+		if agg := aggregationRe.FindStringSubmatch(before); agg != nil && agg[1] == "last_over_time" {
+			continue
+		}
+		out = append(out, window)
+	}
+	return out
+}
+
+// layoutTitles returns the dashboard's title and every tab and row title.
+func layoutTitles(d map[string]any) []string {
+	title, _ := field(d, "spec", "title").(string)
+	out := []string{title}
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if x["kind"] == "TabsLayoutTab" || x["kind"] == "RowsLayoutRow" {
+				t, _ := field(x, "spec", "title").(string)
+				out = append(out, t)
+			}
+			for _, child := range x {
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(field(d, "spec", "layout"))
+	return out
+}
+
+// A panel that counts, sums or compares over time reads the time range the
+// reader picked, and no title names a length the range could contradict.
+func TestDashboardWindowsFollowTheTimeRange(t *testing.T) {
+	d := loadDashboard(t)
+	titles := layoutTitles(d)
+	if len(titles) < 2 {
+		t.Fatalf("%s has no tab or row title, so the layout walk found nothing", dashboardPath)
+	}
+	for _, title := range titles {
+		if m := fixedLengthRe.FindString(title); m != "" {
+			t.Errorf("tab, row or dashboard title %q names the length %q, want a title true at any time range", title, m)
+		}
+	}
+	elements, _ := field(d, "spec", "elements").(map[string]any)
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		title, _ := field(elements[name], "spec", "title").(string)
+		if m := fixedLengthRe.FindString(title); m != "" {
+			t.Errorf("panel %q names the length %q, want a title true at any time range", title, m)
+		}
+		if alertTiles[name] != "" {
+			continue
+		}
+		desc, _ := field(elements[name], "spec", "description").(string)
+		want, excepted := fixedWindows[name]
+		var fixed []string
+		for _, expr := range panelExprs(d, name) {
+			fixed = append(fixed, measuredWindows(expr)...)
+		}
+		switch {
+		case len(fixed) > 0 && !excepted:
+			t.Errorf("panel %q measures over the fixed windows %v, want $__range", title, fixed)
+		case excepted && !slices.Equal(fixed, want.windows):
+			t.Errorf("panel %q measures over the fixed windows %v, want exactly its excepted %v", title, fixed, want.windows)
+		case excepted && !strings.Contains(desc, want.reason):
+			t.Errorf("panel %q keeps the fixed windows %v, want its description to say %q", title, fixed, want.reason)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(fixedWindows)) {
+		if _, ok := elements[name]; !ok {
+			t.Errorf("fixedWindows names %s, which %s does not carry", name, dashboardPath)
+		}
+	}
+}
+
+func TestDashboardWindowCheckRejects(t *testing.T) {
+	const pipe = `{container="$container"} | json msg="msg" | msg=` + "`reconcile complete`"
+	for name, expr := range map[string]string{
+		"30d count":                 "sum by () (count_over_time(" + pipe + " [30d]))",
+		"7d rate":                   "rate(" + pipe + " [7d])",
+		"24h maximum":               "max_over_time(" + pipe + " | unwrap duration [24h]) by ()",
+		"5m count":                  "sum by () (count_over_time(" + pipe + " [5m]))",
+		"5m sum of unwrapped bytes": "sum by () (sum_over_time(" + pipe + " | unwrap bytes [5m]))",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := measuredWindows(expr); len(got) == 0 {
+				t.Errorf("measuredWindows(%q) = none, want its fixed window", expr)
+			}
+		})
+	}
+	for _, expr := range []string{
+		"count_over_time(" + pipe + " [$__range])",
+		"count_over_time(" + pipe + " [$__interval])",
+		"max(last_over_time(" + pipe + " | unwrap rows [26h]) by ())",
+		"sum by () (rate(" + pipe + " [5m]))",
+		"sum by () (rate(" + pipe + " [$__rate_interval]))",
+		"sum by () (bytes_rate(" + pipe + " [5m]))",
+		pipe,
+	} {
+		if got := measuredWindows(expr); len(got) != 0 {
+			t.Errorf("measuredWindows(%q) = %v, want none", expr, got)
+		}
+	}
+	for _, title := range []string{"Restarts (30d)", "Errors in the last 24 hours", "Feed reads this week", "Checks in 7 days", "Errors today", "Upgrades, last month"} {
+		if !fixedLengthRe.MatchString(title) {
+			t.Errorf("title %q names a length, want it rejected", title)
+		}
+	}
+	for _, title := range []string{"Feed reads per tracker per day", "Errors in this range", "Last full check", "Releases in the RSS feed"} {
+		if fixedLengthRe.MatchString(title) {
+			t.Errorf("title %q names no length, want it accepted", title)
+		}
 	}
 }
 
