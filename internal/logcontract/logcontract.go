@@ -1,91 +1,133 @@
-// Package logcontract reads the stable log contract alerts/logql.yaml
-// publishes in its header: the messages consumers may match on and the
-// attributes stable on each. Tests on both sides of the contract parse it, so
-// an emitter and a consumer can only drift by failing one of them.
+// Package logcontract reads the stable log contract docs/monitoring.md
+// publishes in its "Log contract" table: the messages consumers may match on
+// and the attributes stable on each. Tests on both sides of the contract parse
+// it, so an emitter and a consumer can only drift by failing one of them.
 package logcontract
 
 import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 )
+
+// Path is the contract's file, relative to the repository root.
+const Path = "docs/monitoring.md"
+
+// heading opens the section whose table is the contract; the next heading
+// closes it.
+const heading = "### Log contract"
 
 // Contract is the parsed stable-message list.
 type Contract struct {
 	// Messages maps each stable msg to the attributes stable on it.
 	Messages map[string][]string
 	// Global holds the attributes stable on every line that carries them: msg,
-	// level, and the attrs listed under the level=ERROR entries.
+	// level, and the attributes listed on the level=ERROR rows.
 	Global []string
 }
 
+var codeSpan = regexp.MustCompile("`([^`]+)`")
+
 var (
-	msgLine   = regexp.MustCompile(`^# {3}msg="([^"]+)"`)
-	levelLine = regexp.MustCompile(`^# {3}level=ERROR`)
-	attrsLine = regexp.MustCompile(`^# {5}attrs: (.+)$`)
+	// errNoContract reports a page whose contract table lists no stable
+	// attribute, which every consumer would otherwise pass vacuously.
+	errNoContract = errors.New("logcontract: no row of the Log contract table carries a stable attribute")
+	// errRow reports a table row whose first cell names no message or level.
+	errRow = errors.New("logcontract: a Log contract row names no message in its first cell")
 )
 
-// errNoContract reports a file whose header carries no stable-message list.
-var errNoContract = errors.New("logcontract: no stable message carries an attrs: line")
-
-type parser struct {
-	current  string
-	c        Contract
-	global   bool
-	sawAttrs bool
-}
-
-// Parse reads the contract out of the leading comment of an alerts/logql.yaml.
-// An attrs: line belongs to the nearest msg= or level=ERROR entry above it.
-func Parse(raw []byte) (Contract, error) {
-	p := parser{c: Contract{Messages: map[string][]string{}, Global: []string{"msg", "level"}}}
-	sc := bufio.NewScanner(bytes.NewReader(raw))
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "#") {
-			break
-		}
-		p.line(line)
-	}
-	if err := sc.Err(); err != nil {
+// Load reads and parses the contract under the repository root at root.
+func Load(root string) (Contract, error) {
+	raw, err := os.ReadFile(filepath.Join(root, Path))
+	if err != nil {
 		return Contract{}, err
 	}
-	if !p.sawAttrs {
-		return Contract{}, errNoContract
-	}
-	return p.c, nil
+	return Parse(raw)
 }
 
-func (p *parser) line(line string) {
-	if m := msgLine.FindStringSubmatch(line); m != nil {
-		p.current, p.global = m[1], false
-		if _, ok := p.c.Messages[p.current]; !ok {
-			p.c.Messages[p.current] = nil
+// Parse reads the contract out of the "Log contract" table of a
+// docs/monitoring.md. Each row is | message | description | attributes |: the
+// first code span of the first cell is the msg, or a level=ERROR row whose
+// attributes are global, and every code span of the third cell is a stable
+// attribute. The header and delimiter rows, and anything outside the table,
+// are ignored.
+func Parse(raw []byte) (Contract, error) {
+	rows, err := sectionRows(raw)
+	if err != nil {
+		return Contract{}, err
+	}
+	c := Contract{Messages: map[string][]string{}, Global: []string{"msg", "level"}}
+	sawAttrs := false
+	for _, line := range rows {
+		added, err := c.addRow(line)
+		if err != nil {
+			return Contract{}, err
 		}
-		return
+		sawAttrs = sawAttrs || added
 	}
-	if levelLine.MatchString(line) {
-		p.current, p.global = "", true
-		return
+	if !sawAttrs {
+		return Contract{}, errNoContract
 	}
-	m := attrsLine.FindStringSubmatch(line)
-	if m == nil || (p.current == "" && !p.global) {
-		return
-	}
-	p.sawAttrs = true
-	for a := range strings.SplitSeq(m[1], ",") {
-		if a = strings.TrimSpace(a); a == "" {
+	return c, nil
+}
+
+// sectionRows returns the data rows of every table under the contract heading.
+func sectionRows(raw []byte) ([]string, error) {
+	var rows []string
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	inSection, row := false, 0
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "#") {
+			if inSection {
+				break
+			}
+			inSection = line == heading
 			continue
 		}
-		if p.global {
-			p.c.Global = appendUnique(p.c.Global, a)
-		} else {
-			p.c.Messages[p.current] = appendUnique(p.c.Messages[p.current], a)
+		if !inSection || !strings.HasPrefix(line, "|") {
+			row = 0
+			continue
+		}
+		row++
+		if row > 2 { // past the header and delimiter rows
+			rows = append(rows, line)
 		}
 	}
+	return rows, sc.Err()
+}
+
+// addRow records one table row and reports whether it listed an attribute.
+func (c *Contract) addRow(line string) (bool, error) {
+	cells := strings.Split(strings.Trim(line, "|"), "|")
+	if len(cells) != 3 {
+		return false, fmt.Errorf("logcontract: row %q has %d cells, want 3", line, len(cells))
+	}
+	name := codeSpan.FindStringSubmatch(cells[0])
+	if name == nil {
+		return false, fmt.Errorf("%w: %q", errRow, line)
+	}
+	global := strings.HasPrefix(name[1], "level=ERROR")
+	if !global {
+		if _, ok := c.Messages[name[1]]; !ok {
+			c.Messages[name[1]] = nil
+		}
+	}
+	attrs := codeSpan.FindAllStringSubmatch(cells[2], -1)
+	for _, a := range attrs {
+		if global {
+			c.Global = appendUnique(c.Global, a[1])
+		} else {
+			c.Messages[name[1]] = appendUnique(c.Messages[name[1]], a[1])
+		}
+	}
+	return len(attrs) > 0, nil
 }
 
 func appendUnique(s []string, v string) []string {

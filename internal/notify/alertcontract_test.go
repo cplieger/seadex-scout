@@ -265,17 +265,13 @@ func TestCapAlertTextAttrHoldsTheAlertBound(t *testing.T) {
 	}
 }
 
-// TestFindingLinesCarryTheLogContract pins every finding message alerts/logql.yaml
+// TestFindingLinesCarryTheLogContract pins every finding message the log contract
 // declares stable to the attributes it lists for it, so a dashboard or rule
 // built on the contract cannot lose a column to a renamed key. current_tier
 // is asserted with its value too: it is the one attribute the dashboard reads
 // that no alert rule groups by.
 func TestFindingLinesCarryTheLogContract(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
-	if err != nil {
-		t.Fatalf("read alerts/logql.yaml: %v", err)
-	}
-	contract, err := logcontract.Parse(raw)
+	contract, err := logcontract.Load(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("parse the log contract: %v", err)
 	}
@@ -284,7 +280,7 @@ func TestFindingLinesCarryTheLogContract(t *testing.T) {
 			msg := message(status)
 			want, ok := contract.Messages[msg]
 			if !ok || len(want) == 0 {
-				t.Fatalf("alerts/logql.yaml declares no attributes for %q", msg)
+				t.Fatalf("the log contract declares no attributes for %q", msg)
 			}
 			f := sizedFinding("k1", "Frieren", 2, 1, download("x", 2))
 			f.Status, f.Tier = status, compare.TierAlt
@@ -304,7 +300,7 @@ func TestFindingLinesCarryTheLogContract(t *testing.T) {
 			}
 			for _, key := range want {
 				if _, ok := got[key]; !ok {
-					t.Errorf("%q line lacks %q, which alerts/logql.yaml declares stable", msg, key)
+					t.Errorf("%q line lacks %q, which the log contract declares stable", msg, key)
 				}
 			}
 			if status == compare.StatusBetter && got["current_tier"] != string(compare.TierAlt) {

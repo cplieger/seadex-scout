@@ -15,7 +15,7 @@ import (
 )
 
 // The bundled grafana-dashboard.json is a consumer of the log contract
-// alerts/logql.yaml publishes, so every message and attribute a panel reads
+// docs/monitoring.md publishes, so every message and attribute a panel reads
 // must be in that contract, and the time windows must follow the operator's
 // Grafana range rather than assume a retention.
 
@@ -76,13 +76,9 @@ type dashPanel struct {
 
 func loadContract(t *testing.T) logcontract.Contract {
 	t.Helper()
-	raw, err := os.ReadFile(alertRulesFile)
+	c, err := logcontract.Load(".")
 	if err != nil {
-		t.Fatalf("read %s: %v", alertRulesFile, err)
-	}
-	c, err := logcontract.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse the log contract in %s: %v", alertRulesFile, err)
+		t.Fatalf("parse the log contract in %s: %v", logcontract.Path, err)
 	}
 	return c
 }
