@@ -336,6 +336,11 @@ func (e *transientUpstreamError) Unwrap() error                 { return e.err }
 func (*transientUpstreamError) IsTransient() bool               { return true }
 func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retryAfter }
 
+var (
+	_ httpx.Transient      = (*transientUpstreamError)(nil)
+	_ httpx.RetryAfterHint = (*transientUpstreamError)(nil)
+)
+
 // malformedUpstreamBody reports whether err is (or wraps) the decode failure
 // of a successful upstream response: the query reached the upstream and it
 // answered 2xx, so the failure is scoped to the one result set that would not
