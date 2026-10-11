@@ -331,8 +331,10 @@ type transientUpstreamError struct {
 	malformedBody bool
 }
 
-func (e *transientUpstreamError) Error() string                 { return e.err.Error() }
-func (e *transientUpstreamError) Unwrap() error                 { return e.err }
+func (e *transientUpstreamError) Error() string { return e.err.Error() }
+func (e *transientUpstreamError) Unwrap() error { return e.err }
+
+//deadset:ignore DS1004 -- asserted by httpx through errors.AsType[Transient]
 func (*transientUpstreamError) IsTransient() bool               { return true }
 func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retryAfter }
 
