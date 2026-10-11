@@ -70,7 +70,7 @@ On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**.
 
 ## Reading the results
 
-The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known, and the Upgrades tab gives the storage all the upgrades need together. The dashboard also shows how much of your library is at SeaDex's best or alt. Tiles at the top appear only while the scout needs a look, such as checks that stopped or an error to fix. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
+The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known. The dashboard also shows how much of your library is at SeaDex's best or alt. Tiles at the top appear only while the scout needs a look, such as checks that stopped or an error to fix. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
 
 With the rules from step 4 loaded, your Alertmanager sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. To stop the messages for one show, add its `al_id` to `filters.ignore`.
 
@@ -152,7 +152,7 @@ The healthcheck runs `seadex-scout health`, which reads a marker file each compl
 
 ## Monitoring
 
-seadex-scout writes JSON logs to standard output and has no metrics endpoint. Nine Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard for Grafana 13.2 or newer ships with every release as `grafana-dashboard.json`. On Grafana 13.1 or older, take it from release [v2.12.1](https://github.com/cplieger/seadex-scout/releases/tag/v2.12.1), the last one in the older dashboard format, and maintain it yourself. [Monitoring and alerts](docs/monitoring.md) explains both and shows how to load them.
+seadex-scout writes JSON logs to standard output and has no metrics endpoint. Eight Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard for Grafana 13.2 or newer ships with every release as `grafana-dashboard.json`. On Grafana 13.1 or older, take it from release [v2.12.1](https://github.com/cplieger/seadex-scout/releases/tag/v2.12.1), the last one in the older dashboard format, and maintain it yourself. [Monitoring and alerts](docs/monitoring.md) explains both and shows how to load them.
 
 ## Documentation
 

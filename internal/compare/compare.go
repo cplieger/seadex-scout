@@ -107,13 +107,6 @@ type Finding struct {
 	// definite AnimeBytes torrent skipped while the toggle is off.
 	AltGroups []string
 	Links     []ReleaseLink
-	// Downloads is the download set an upgrade selects, one record per torrent
-	// (at most 64), and ReleaseBytes their total; both stay zero when that size
-	// is unknown or the finding is not an upgrade.
-	Downloads []Download
-	// Replaced is the library files that download set replaces whole and
-	// CurrentBytes their total; both stay zero when that size is unknown.
-	Replaced []Replacement
 	// CurrentGroups preserves the scoped on-disk group set with its element
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
@@ -127,11 +120,14 @@ type Finding struct {
 	// revision SeaDex lists for them (align.Decision).
 	CurrentRevision     release.Revision
 	RecommendedRevision release.Revision
-	ReleaseBytes        int64
-	CurrentBytes        int64
-	AniListID           int
-	Season              int
-	DualAudio           bool
+	// ReleaseBytes is the size of the download set an upgrade selects, and
+	// CurrentBytes the size of the library files that set replaces whole. Each
+	// stays zero when it is unknown or the finding is not an upgrade.
+	ReleaseBytes int64
+	CurrentBytes int64
+	AniListID    int
+	Season       int
+	DualAudio    bool
 	// Approx marks a coarse comparison (align.Decision.Approx): an offered
 	// bucket held any file, or the whole-series fallback spanned more than one
 	// real season or group, so CurrentGroup is an aggregate rather than an exact

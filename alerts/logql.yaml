@@ -150,29 +150,6 @@ groups:
             failing or not running. Removed or edited SeaDex releases are
             missed, and a release you already upgraded keeps being reported.
             Look for repeated `cycle degraded` or arr errors.
-      # Per scope, a tracker polled in the last 7 days but not in 6 hours. A
-      # tracker you keep disabled never fires.
-      - alert: SeadexScoutFeedNotPolled
-        expr: |
-          sum by (scope) (count_over_time(
-            {container="seadex-scout"} |= `indexer request`
-            | json msg="msg", scope="scope", feed="feed" | msg=`indexer request` | feed=`true` [7d]
-          ))
-          unless
-          sum by (scope) (count_over_time(
-            {container="seadex-scout"} |= `indexer request`
-            | json msg="msg", scope="scope", feed="feed" | msg=`indexer request` | feed=`true` [6h]
-          ))
-        for: 15m
-        labels:
-          severity: warning
-        annotations:
-          summary: "The arrs stopped reading the seadex-scout {{$labels.scope}} feed"
-          description: >
-            No arr has read the seadex-scout {{$labels.scope}} RSS feed in 6
-            hours, so new releases on that tracker are not reaching your arrs.
-            Check whether the indexer is disabled or failing. If
-            SeadexScoutScanStalled fires too, fix that first.
       # Grouped by the finding's identity. info_hash and seadex_tags turn a
       # changed recommendation into a new alert. Loki's ruler has no
       # keep_firing_for, so the [12h] window holds the alert between passes.

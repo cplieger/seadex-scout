@@ -376,12 +376,3 @@ func TestDiffSnapshotsDetectsAReplacedFile(t *testing.T) {
 		})
 	}
 }
-
-// TestFileKeyDistinguishesArrsAndItemKeys pins that a file key names its arr
-// and never equals an item key, since the two arrs number files on their own.
-func TestFileKeyDistinguishesArrsAndItemKeys(t *testing.T) {
-	sonarr, radarr := Item{Arr: ArrSonarr, ArrID: 5}, Item{Arr: ArrRadarr, ArrID: 5}
-	if sonarr.FileKey(5) == radarr.FileKey(5) || sonarr.FileKey(5) == sonarr.Key() {
-		t.Errorf("FileKey(5) = %q, %q, item Key %q, want three distinct keys", sonarr.FileKey(5), radarr.FileKey(5), sonarr.Key())
-	}
-}

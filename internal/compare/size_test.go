@@ -91,6 +91,31 @@ func singles(first, last int) []seadex.Torrent {
 	return out
 }
 
+// distinctSizes gives file 100+e a size of heldBytes plus e bytes, so a total
+// of replaced files tells which files it counted.
+func distinctSizes(item *library.Item) *library.Item {
+	for id := range item.FileBytes {
+		item.FileBytes[id] = heldBytes + int64(id-100)
+	}
+	return item
+}
+
+func files(first, last int) []int {
+	var out []int
+	for e := first; e <= last; e++ {
+		out = append(out, 100+e)
+	}
+	return out
+}
+
+func bytesOf(item *library.Item, ids ...int) int64 {
+	var total int64
+	for _, id := range ids {
+		total += item.FileBytes[id]
+	}
+	return total
+}
+
 func sizeOne(t *testing.T, item *library.Item, rec mapping.Record, torrents []seadex.Torrent, siblings ...int) Finding {
 	t.Helper()
 	m := match.Match{Item: item, Arr: item.Arr, Entry: seadex.Entry{AniListID: 1, Torrents: torrents}, Record: rec, SiblingSeasons: siblings}
@@ -101,39 +126,15 @@ func sizeOne(t *testing.T, item *library.Item, rec mapping.Record, torrents []se
 	return got[0]
 }
 
-func replacedKeys(f *Finding) []string {
-	var keys []string
-	for _, r := range f.Replaced {
-		keys = append(keys, r.Key)
-	}
-	return keys
-}
-
-func fileKeys(item *library.Item, ids ...int) []string {
-	var keys []string
-	for _, id := range ids {
-		keys = append(keys, item.FileKey(id))
-	}
-	slices.Sort(keys)
-	return keys
-}
-
-func ids(first, last int) []int {
-	var out []int
-	for e := first; e <= last; e++ {
-		out = append(out, 100+e)
-	}
-	return out
-}
-
 // TestSizeReplacesOnlyTheFilesTheDownloadCovers pins per-file replacement: the
 // net library size change subtracts exactly the held files the selected
-// download set replaces whole, never the whole season.
+// download set replaces whole, never the whole season. Each file has a
+// distinct size, so CurrentBytes names which files were counted.
 func TestSizeReplacesOnlyTheFilesTheDownloadCovers(t *testing.T) {
 	season1 := mapping.Record{SeasonTvdb: 1}
 	withOdd := singles(1, 10)
 	withOdd[4] = single(5, "x265")
-	multi := sizedSeries()
+	multi := distinctSizes(sizedSeries())
 	multi.SeasonEpisodes[1][4] = library.Episode{File: 103, Absolute: 4}
 	delete(multi.FileBytes, 104)
 	tests := []struct {
@@ -143,10 +144,10 @@ func TestSizeReplacesOnlyTheFilesTheDownloadCovers(t *testing.T) {
 		wantFiles    []int
 		wantReleases int64
 	}{
-		{name: "singles for episodes 1-10 of a 12-file season", item: sizedSeries(), torrents: singles(1, 10), wantFiles: ids(1, 10), wantReleases: 10},
-		{name: "an episode filtered out of the family by codec", item: sizedSeries(), torrents: withOdd, wantFiles: slices.Delete(ids(1, 10), 4, 5), wantReleases: 9},
-		{name: "a partial pack of episodes 1-6", item: sizedSeries(), torrents: []seadex.Torrent{pack(1, 6, 1)}, wantFiles: ids(1, 6), wantReleases: 6},
-		{name: "a complete pack", item: sizedSeries(), torrents: []seadex.Torrent{pack(1, 12, 1)}, wantFiles: ids(1, 12), wantReleases: 12},
+		{name: "singles for episodes 1-10 of a 12-file season", item: distinctSizes(sizedSeries()), torrents: singles(1, 10), wantFiles: files(1, 10), wantReleases: 10},
+		{name: "an episode filtered out of the family by codec", item: distinctSizes(sizedSeries()), torrents: withOdd, wantFiles: slices.Delete(files(1, 10), 4, 5), wantReleases: 9},
+		{name: "a partial pack of episodes 1-6", item: distinctSizes(sizedSeries()), torrents: []seadex.Torrent{pack(1, 6, 1)}, wantFiles: files(1, 6), wantReleases: 6},
+		{name: "a complete pack", item: distinctSizes(sizedSeries()), torrents: []seadex.Torrent{pack(1, 12, 1)}, wantFiles: files(1, 12), wantReleases: 12},
 		{name: "a two-episode file with one episode covered", item: multi, torrents: singles(1, 3), wantFiles: []int{101, 102}, wantReleases: 3},
 		{name: "a two-episode file with both covered", item: multi, torrents: singles(1, 4), wantFiles: []int{101, 102, 103}, wantReleases: 4},
 	}
@@ -156,11 +157,8 @@ func TestSizeReplacesOnlyTheFilesTheDownloadCovers(t *testing.T) {
 			if want := tc.wantReleases * newBytes; f.ReleaseBytes != want {
 				t.Errorf("ReleaseBytes = %d, want %d", f.ReleaseBytes, want)
 			}
-			if got, want := replacedKeys(&f), fileKeys(tc.item, tc.wantFiles...); !slices.Equal(got, want) {
-				t.Errorf("Replaced = %v, want %v", got, want)
-			}
-			if want := int64(len(tc.wantFiles)) * heldBytes; f.CurrentBytes != want {
-				t.Errorf("CurrentBytes = %d, want %d", f.CurrentBytes, want)
+			if want := bytesOf(tc.item, tc.wantFiles...); f.CurrentBytes != want {
+				t.Errorf("CurrentBytes = %d, want %d, the files %v", f.CurrentBytes, want, tc.wantFiles)
 			}
 		})
 	}
@@ -222,27 +220,21 @@ func TestSizeLeavesTheCurrentSideUnknown(t *testing.T) {
 			if f.ReleaseBytes <= 0 {
 				t.Errorf("ReleaseBytes = %d, want the download side known", f.ReleaseBytes)
 			}
-			if f.CurrentBytes != 0 || f.Replaced != nil {
-				t.Errorf("CurrentBytes, Replaced = %d, %v, want unknown (0, nil)", f.CurrentBytes, f.Replaced)
+			if f.CurrentBytes != 0 {
+				t.Errorf("CurrentBytes = %d, want unknown (0)", f.CurrentBytes)
 			}
 		})
 	}
 	t.Run("an absolute number that only one episode can mean", func(t *testing.T) {
-		f := sizeOne(t, sizedSeries(), mapping.Record{SeasonTvdb: 1}, []seadex.Torrent{absolute(1), absolute(2)})
-		if got, want := replacedKeys(&f), fileKeys(sizedSeries(), 101, 102); !slices.Equal(got, want) {
-			t.Errorf("Replaced = %v, want %v", got, want)
+		item := distinctSizes(sizedSeries())
+		f := sizeOne(t, item, mapping.Record{SeasonTvdb: 1}, []seadex.Torrent{absolute(1), absolute(2)})
+		if want := bytesOf(item, 101, 102); f.CurrentBytes != want {
+			t.Errorf("CurrentBytes = %d, want %d, files 101 and 102", f.CurrentBytes, want)
 		}
 	})
 	t.Run("absolute numbers that continue from an earlier season", func(t *testing.T) {
 		item := seasonTwoSeries(1, 13)
 		f := sizeOne(t, item, mapping.Record{SeasonTvdb: 2}, []seadex.Torrent{absolutePack(13, 24, 1)})
-		want := make([]int, 0, 12)
-		for i := 1; i <= 12; i++ {
-			want = append(want, 200+i)
-		}
-		if got, want := replacedKeys(&f), fileKeys(item, want...); !slices.Equal(got, want) {
-			t.Errorf("Replaced = %v, want %v", got, want)
-		}
 		if f.CurrentBytes != 12*heldBytes {
 			t.Errorf("CurrentBytes = %d, want %d", f.CurrentBytes, 12*heldBytes)
 		}
@@ -268,7 +260,6 @@ func TestSizeDownloadSet(t *testing.T) {
 	onAB.Tracker, onAB.URL, onAB.InfoHash = "AB", "/torrents.php?id=1&torrentid=1", ""
 	lateHashPack := pack(5, 6, 1)
 	lateHashPack.InfoHash = hash(999)
-	many := singles(1, 65)
 	sameHash := single(2, "x264")
 	sameHash.InfoHash = hash(501)
 	sameHashLarger := single(2, "x264")
@@ -276,11 +267,6 @@ func TestSizeDownloadSet(t *testing.T) {
 	sameSource := singles(1, 2)
 	for i := range sameSource {
 		sameSource[i].InfoHash, sameSource[i].URL = "", "https://nyaa.si/view/1"
-	}
-	manyItem := sizedSeries()
-	for e := 13; e <= 65; e++ {
-		manyItem.SeasonEpisodes[1][e] = library.Episode{File: 100 + e}
-		manyItem.FileBytes[100+e] = heldBytes
 	}
 	tests := []struct {
 		item     *library.Item
@@ -301,7 +287,6 @@ func TestSizeDownloadSet(t *testing.T) {
 		{name: "two episodes under one info hash", torrents: []seadex.Torrent{single(1, "x264"), sameHash}, want: 0},
 		{name: "two episodes under one info hash at different sizes", torrents: []seadex.Torrent{single(1, "x264"), sameHashLarger}, want: 0},
 		{name: "two episodes under one tracker and URL", torrents: sameSource, want: 0},
-		{name: "more than 64 downloads", item: manyItem, torrents: many, want: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -313,17 +298,24 @@ func TestSizeDownloadSet(t *testing.T) {
 			if f.ReleaseBytes != tc.want {
 				t.Errorf("ReleaseBytes = %d, want %d", f.ReleaseBytes, tc.want)
 			}
-			if tc.want == 0 && (f.Downloads != nil || f.Replaced != nil || f.CurrentBytes != 0) {
-				t.Errorf("an unknown download set must leave every size unknown, got Downloads %v Replaced %v CurrentBytes %d", f.Downloads, f.Replaced, f.CurrentBytes)
-			}
-			var sum int64
-			for _, d := range f.Downloads {
-				sum += d.Bytes
-			}
-			if sum != f.ReleaseBytes {
-				t.Errorf("Downloads sum to %d, ReleaseBytes is %d", sum, f.ReleaseBytes)
+			if tc.want == 0 && f.CurrentBytes != 0 {
+				t.Errorf("an unknown download set must leave every size unknown, got CurrentBytes %d", f.CurrentBytes)
 			}
 		})
+	}
+}
+
+// A long season released as one download per episode is sized like a short
+// one, however many downloads it takes.
+func TestSizeCountsEveryDownloadOfALongSeason(t *testing.T) {
+	item := sizedSeries()
+	for e := 13; e <= 65; e++ {
+		item.SeasonEpisodes[1][e] = library.Episode{File: 100 + e, Absolute: e}
+		item.FileBytes[100+e] = heldBytes
+	}
+	f := sizeOne(t, item, mapping.Record{SeasonTvdb: 1}, singles(1, 65))
+	if f.ReleaseBytes != 65*newBytes || f.CurrentBytes != 65*heldBytes {
+		t.Errorf("ReleaseBytes, CurrentBytes = %d, %d, want %d, %d", f.ReleaseBytes, f.CurrentBytes, 65*newBytes, 65*heldBytes)
 	}
 }
 
@@ -340,9 +332,6 @@ func TestSizeMovieReplacesItsOneFile(t *testing.T) {
 	if f.ReleaseBytes != 40*gib || f.CurrentBytes != 30*gib {
 		t.Errorf("ReleaseBytes, CurrentBytes = %d, %d, want %d, %d", f.ReleaseBytes, f.CurrentBytes, 40*gib, 30*gib)
 	}
-	if got, want := replacedKeys(&f), []string{item.FileKey(9)}; !slices.Equal(got, want) {
-		t.Errorf("Replaced = %v, want %v", got, want)
-	}
 }
 
 // TestSizeOnlyUpgradesCarrySizes pins that a manual-review finding and an
@@ -352,12 +341,12 @@ func TestSizeOnlyUpgradesCarrySizes(t *testing.T) {
 	mixed := sizedSeries()
 	mixed.SeasonGroups[1] = []string{"erai-raws", "commie"}
 	f := sizeOne(t, mixed, mapping.Record{SeasonTvdb: 1}, singles(1, 2))
-	if f.Status != StatusMixedGroup || f.ReleaseBytes != 0 || f.Downloads != nil {
-		t.Errorf("mixed-group finding: status %q, ReleaseBytes %d, Downloads %v, want %q and no size", f.Status, f.ReleaseBytes, f.Downloads, StatusMixedGroup)
+	if f.Status != StatusMixedGroup || f.ReleaseBytes != 0 || f.CurrentBytes != 0 {
+		t.Errorf("mixed-group finding: status %q, ReleaseBytes %d, CurrentBytes %d, want %q and no size", f.Status, f.ReleaseBytes, f.CurrentBytes, StatusMixedGroup)
 	}
 	m := match.Match{Item: sizedSeries(), Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 1, Incomplete: true, Torrents: singles(1, 2)}, Record: mapping.Record{SeasonTvdb: 1}}
 	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
-	if len(got) != 1 || got[0].Status != StatusIncomplete || got[0].ReleaseBytes != 0 || got[0].Downloads != nil {
+	if len(got) != 1 || got[0].Status != StatusIncomplete || got[0].ReleaseBytes != 0 || got[0].CurrentBytes != 0 {
 		t.Errorf("incomplete entry: %+v, want one incomplete finding with no size", got)
 	}
 
@@ -416,9 +405,9 @@ func TestSizeOfANewerRevisionIsTheNewerRelease(t *testing.T) {
 	if f.Status != StatusNewerRevision {
 		t.Fatalf("Compare(v2 only on AnimeBytes, toggle off) status = %q, want %q", f.Status, StatusNewerRevision)
 	}
-	if f.ReleaseBytes != 0 || f.Downloads != nil || f.CurrentBytes != 0 || f.Replaced != nil {
-		t.Errorf("Compare(v2 only on AnimeBytes, toggle off) sizes = ReleaseBytes %d Downloads %v CurrentBytes %d Replaced %v, want none",
-			f.ReleaseBytes, f.Downloads, f.CurrentBytes, f.Replaced)
+	if f.ReleaseBytes != 0 || f.CurrentBytes != 0 {
+		t.Errorf("Compare(v2 only on AnimeBytes, toggle off) sizes = ReleaseBytes %d CurrentBytes %d, want none",
+			f.ReleaseBytes, f.CurrentBytes)
 	}
 }
 
@@ -463,9 +452,9 @@ func TestSizeOfAFilmOrSpecialInSeasonZero(t *testing.T) {
 	if f.Status != StatusBetter || f.Scope != "episodes" {
 		t.Fatalf("placed special: status %q scope %q, want %q on episodes", f.Status, f.Scope, StatusBetter)
 	}
-	if f.ReleaseBytes != 2*newBytes || f.CurrentBytes != 0 || f.Replaced != nil {
-		t.Errorf("placed special: ReleaseBytes, CurrentBytes, Replaced = %d, %d, %v, want %d, 0, nil (replaced side unknown)",
-			f.ReleaseBytes, f.CurrentBytes, f.Replaced, 2*newBytes)
+	if f.ReleaseBytes != 2*newBytes || f.CurrentBytes != 0 {
+		t.Errorf("placed special: ReleaseBytes, CurrentBytes = %d, %d, want %d, 0 (replaced side unknown)",
+			f.ReleaseBytes, f.CurrentBytes, 2*newBytes)
 	}
 
 	f = compareOne(film, []int{9, 10})
@@ -473,13 +462,10 @@ func TestSizeOfAFilmOrSpecialInSeasonZero(t *testing.T) {
 		t.Errorf("Radarr copy: status %q, ReleaseBytes, CurrentBytes = %d, %d, want %q, %d, %d",
 			f.Status, f.ReleaseBytes, f.CurrentBytes, StatusBetter, 2*newBytes, heldBytes)
 	}
-	if got, want := replacedKeys(&f), []string{film.FileKey(9)}; !slices.Equal(got, want) {
-		t.Errorf("Radarr copy: Replaced = %v, want %v", got, want)
-	}
 
 	for _, f := range compareAll(series, nil) {
-		if f.Status == StatusBetter || f.Status == StatusNewerRevision || f.ReleaseBytes != 0 || f.Downloads != nil {
-			t.Errorf("unplaced special: status %q, ReleaseBytes %d, Downloads %v, want no upgrade and no size", f.Status, f.ReleaseBytes, f.Downloads)
+		if f.Status == StatusBetter || f.Status == StatusNewerRevision || f.ReleaseBytes != 0 || f.CurrentBytes != 0 {
+			t.Errorf("unplaced special: status %q, ReleaseBytes %d, CurrentBytes %d, want no upgrade and no size", f.Status, f.ReleaseBytes, f.CurrentBytes)
 		}
 	}
 }

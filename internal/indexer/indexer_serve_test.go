@@ -1158,10 +1158,9 @@ func TestServeCompleteFeedReportsNoDeliveryFault(t *testing.T) {
 	}
 }
 
-// TestServeLogsRSSPollAsFeed pins the request-log shape the shipped
-// SeadexScoutFeedNotPolled rule counts: an arr's RSS poll logs its scope with
-// feed=true, and a search logs feed=false, so searches cannot hold the rule
-// quiet while RSS polling has stopped.
+// TestServeLogsRSSPollAsFeed pins the request-log shape the dashboard's feed
+// charts split on: an arr's RSS poll logs its scope with feed=true, and a
+// search logs feed=false, so a chart of searches never counts RSS polls.
 func TestServeLogsRSSPollAsFeed(t *testing.T) {
 	tests := map[string]struct{ query, wantFeed string }{
 		"rss poll": {query: "cat=5070", wantFeed: "true"},
