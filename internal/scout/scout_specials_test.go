@@ -139,13 +139,8 @@ func TestCycleSizesAPlacedSpecialByItsDownloadOnly(t *testing.T) {
 	if got, ok := recorder.AttrValueExact(finding, "recommended_bytes"); !ok || got != "1" {
 		t.Errorf("%q recommended_bytes = %q, %v, want \"1\": the special's download size is known", finding, got, ok)
 	}
-	for _, key := range []string{"current_bytes", "size_change_bytes"} {
-		if got, ok := recorder.AttrValueExact(finding, key); ok {
-			t.Errorf("%q %s = %q, want absent: the files a season-0 special replaces are unknown", finding, key, got)
-		}
-	}
-	if got := recorder.AttrValuesExact("upgrade sizes", "upgrades_unsized"); !slices.Equal(got, []string{"1", "1"}) {
-		t.Errorf("'upgrade sizes' upgrades_unsized = %q, want one unsized upgrade in each view", got)
+	if got, ok := recorder.AttrValueExact(finding, "size_change_bytes"); ok {
+		t.Errorf("%q size_change_bytes = %q, want absent: the files a season-0 special replaces are unknown", finding, got)
 	}
 }
 

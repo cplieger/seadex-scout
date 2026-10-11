@@ -36,16 +36,16 @@ func TestDownloadSetSingleEpisodeProperty(t *testing.T) {
 		if !ok {
 			return
 		}
-		downloads, total, ok := downloadsOf(set)
+		total, ok := downloadBytes(set)
 		if !ok {
-			t.Fatalf("downloadsOf(%d torrents) refused a set of known sizes", len(set))
+			t.Fatalf("downloadBytes(%d torrents) refused a set of known sizes", len(set))
 		}
 		var sum int64
 		for i := range set {
 			sum += payload.TotalSize(set[i].torrent.Files)
 		}
-		if total != sum || len(downloads) != len(set) {
-			t.Fatalf("total = %d over %d records, want %d over %d", total, len(downloads), sum, len(set))
+		if total != sum {
+			t.Fatalf("total = %d over %d torrents, want %d", total, len(set), sum)
 		}
 		h := representative(pool)
 		want := releaseFamily(&h.rel)

@@ -200,8 +200,8 @@ func boundRetained(f *compare.Finding) {
 func capRetainedElem(s string) string { return reboundTo(capAttr(s), maxRetainedElemBytes) }
 
 // emitAll logs every row of the current set in a deterministic order, so a
-// pass is diffable against the one before it, then each view's size summary
-// and rankings, and closes with one summary line. Every line of the pass
+// pass is diffable against the one before it, then each view's upgrade
+// count, and closes with one summary line. Every line of the pass
 // carries pass; the closing line is last, so a reader that finds it can read
 // the whole pass before it.
 func (n *Notifier) emitAll(pass int64, preserved, carried, resolved int) {
@@ -226,9 +226,8 @@ func (n *Notifier) emitAll(pass int64, preserved, carried, resolved int) {
 	for i := range rows {
 		n.emit(&rows[i], pass)
 	}
-	conflicts := map[string]bool{}
 	for i := range views {
-		n.emitView(&views[i], pass, conflicts)
+		n.emitView(&views[i], pass)
 	}
 	n.log.Info("findings reported",
 		"total", len(n.current), "emitted", len(rows),

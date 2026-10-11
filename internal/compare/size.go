@@ -15,28 +15,9 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// maxDownloadsPerFinding bounds Finding.Downloads; a set that would need more
-// leaves the finding's download side unknown.
-const maxDownloadsPerFinding = 64
-
-// Download is one torrent a finding's download set selects, at its full size.
-// ID is the torrent's identity across findings: its info hash, else a digest of
-// its tracker and raw URL, so one torrent two entries share counts once.
-type Download struct {
-	ID    string
-	Bytes int64
-}
-
-// Replacement is one library file a finding's download set replaces whole.
-// Key is library.Item.FileKey, so two findings replacing one file share it.
-type Replacement struct {
-	Key   string
-	Bytes int64
-}
-
-// AddBytes is checked int64 addition over non-negative sizes: ok is false
+// addBytes is checked int64 addition over non-negative sizes: ok is false
 // when the sum would pass math.MaxInt64.
-func AddBytes(a, b int64) (int64, bool) {
+func addBytes(a, b int64) (int64, bool) {
 	if b > math.MaxInt64-a {
 		return 0, false
 	}
@@ -54,13 +35,13 @@ func sized(m *match.Match, d *align.Decision, pool []candidate, f *Finding) *Fin
 	if !ok {
 		return f
 	}
-	downloads, total, ok := downloadsOf(set)
+	total, ok := downloadBytes(set)
 	if !ok {
 		return f
 	}
-	f.Downloads, f.ReleaseBytes = downloads, total
-	if replaced, current, ok := replacedFiles(m, d, set); ok {
-		f.Replaced, f.CurrentBytes = replaced, current
+	f.ReleaseBytes = total
+	if current, ok := replacedBytes(m, d, set); ok {
+		f.CurrentBytes = current
 	}
 	return f
 }
@@ -149,32 +130,29 @@ func releaseFamily(r *release.Release) family {
 	}
 }
 
-// downloadsOf turns a download set into its records and checked total. ok is
-// false for an unknown torrent size, a torrent with no identity, an identity
-// two candidates share (one torrent cannot be two downloads), or a set past
-// maxDownloadsPerFinding.
-func downloadsOf(set []candidate) ([]Download, int64, bool) {
-	if len(set) == 0 || len(set) > maxDownloadsPerFinding {
-		return nil, 0, false
+// downloadBytes is the checked total of a download set. ok is false for an
+// unknown torrent size, a torrent with no identity, or an identity two
+// candidates share (one torrent cannot be two downloads).
+func downloadBytes(set []candidate) (int64, bool) {
+	if len(set) == 0 {
+		return 0, false
 	}
-	downloads := make([]Download, 0, len(set))
 	seen := make(map[string]bool, len(set))
 	var total int64
 	for i := range set {
 		size := payload.TotalSize(set[i].torrent.Files)
 		id := downloadID(&set[i].torrent)
 		if size <= 0 || id == "" || seen[id] {
-			return nil, 0, false
+			return 0, false
 		}
 		seen[id] = true
-		sum, ok := AddBytes(total, size)
+		sum, ok := addBytes(total, size)
 		if !ok {
-			return nil, 0, false
+			return 0, false
 		}
 		total = sum
-		downloads = append(downloads, Download{ID: id, Bytes: size})
 	}
-	return downloads, total, true
+	return total, true
 }
 
 // downloadID is a torrent's identity: "btih:" plus its info hash, else
@@ -190,15 +168,15 @@ func downloadID(t *seadex.Torrent) string {
 	return "src:" + hex.EncodeToString(sum[:])
 }
 
-// replacedFiles lists the library files the download set replaces whole and
-// their checked total. A movie replaces its one file. A season replaces each
+// replacedBytes is the checked total of the library files the download set
+// replaces whole. A movie replaces its one file. A season replaces each
 // file all of whose episodes the set covers. ok is false for every other
 // scope, a season another entry also maps, an episode the set covers that
 // has no file or no clear number, an unknown file size, or nothing replaced.
-func replacedFiles(m *match.Match, d *align.Decision, set []candidate) ([]Replacement, int64, bool) {
+func replacedBytes(m *match.Match, d *align.Decision, set []candidate) (int64, bool) {
 	item := m.Item
 	if item == nil {
-		return nil, 0, false
+		return 0, false
 	}
 	var files []int
 	switch d.Kind {
@@ -208,35 +186,32 @@ func replacedFiles(m *match.Match, d *align.Decision, set []candidate) ([]Replac
 		}
 	case align.ScopeSeason:
 		if slices.Contains(m.SiblingSeasons, d.Season) {
-			return nil, 0, false
+			return 0, false
 		}
 		covered, ok := coveredFiles(item, d.Season, set)
 		if !ok {
-			return nil, 0, false
+			return 0, false
 		}
 		files = covered
 	default:
-		return nil, 0, false
+		return 0, false
 	}
 	if len(files) == 0 {
-		return nil, 0, false
+		return 0, false
 	}
-	slices.Sort(files)
-	replaced := make([]Replacement, 0, len(files))
 	var total int64
 	for _, id := range files {
 		size := item.FileBytes[id]
 		if size <= 0 {
-			return nil, 0, false
+			return 0, false
 		}
-		sum, ok := AddBytes(total, size)
+		sum, ok := addBytes(total, size)
 		if !ok {
-			return nil, 0, false
+			return 0, false
 		}
 		total = sum
-		replaced = append(replaced, Replacement{Key: item.FileKey(id), Bytes: size})
 	}
-	return replaced, total, true
+	return total, true
 }
 
 // coveredFiles maps the set's episodes onto season's files and returns the

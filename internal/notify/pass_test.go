@@ -1,9 +1,7 @@
 package notify
 
 import (
-	"fmt"
 	"log/slog"
-	"math"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -12,17 +10,11 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logcontract"
 	"github.com/cplieger/slogx/capture"
-	"pgregory.net/rapid"
 )
 
-func download(id string, bytes int64) compare.Download { return compare.Download{ID: id, Bytes: bytes} }
-
-const conflictMsg = "one download or file carries two sizes across findings; the finding that brought the second is left out of the size totals"
-
-func sizedFinding(key, title string, releaseBytes, currentBytes int64, downloads ...compare.Download) compare.Finding {
+func sizedFinding(key, title string, releaseBytes, currentBytes int64) compare.Finding {
 	f := testFinding(key, title)
-	f.Downloads, f.ReleaseBytes = downloads, releaseBytes
-	f.Replaced, f.CurrentBytes = []compare.Replacement{{Key: "file-" + key, Bytes: currentBytes}}, currentBytes
+	f.ReleaseBytes, f.CurrentBytes = releaseBytes, currentBytes
 	return f
 }
 
@@ -42,7 +34,7 @@ func lines(recorder *capture.Recorder, msg string) []map[string]slog.Value {
 	return out
 }
 
-func sizes(t *testing.T, recorder *capture.Recorder, tier string) map[string]slog.Value {
+func viewLine(t *testing.T, recorder *capture.Recorder, tier string) map[string]slog.Value {
 	t.Helper()
 	var last map[string]slog.Value
 	for _, l := range lines(recorder, "upgrade sizes") {
@@ -65,14 +57,13 @@ func clockedNotifier(ignored ...int) (*Notifier, *capture.Recorder, *time.Time) 
 	return n, recorder, &now
 }
 
-// TestEveryPassEmitsBothViewsSizes pins that Report, ReportScoped and Reemit
-// each close with one upgrade sizes line per view, before the findings
-// reported line, and that every line of the pass, the size-conflict warning
-// included, carries its pass_id.
-func TestEveryPassEmitsBothViewsSizes(t *testing.T) {
+// TestEveryPassEmitsBothViews pins that Report, ReportScoped and Reemit each
+// close with one upgrade sizes line per view, before the findings reported
+// line, and that every line of the pass carries its pass_id.
+func TestEveryPassEmitsBothViews(t *testing.T) {
 	n, recorder, now := clockedNotifier()
-	f := sizedFinding("a", "Aria", 10, 4, download("x", 10))
-	g := sizedFinding("b", "Bria", 11, 4, download("x", 11))
+	f := sizedFinding("a", "Aria", 10, 4)
+	g := sizedFinding("b", "Bria", 11, 4)
 	g.AniListID = f.AniListID + 1
 	both := []compare.Finding{f, g}
 	passes := map[string]func(){
@@ -106,9 +97,6 @@ func TestEveryPassEmitsBothViewsSizes(t *testing.T) {
 					t.Errorf("%q carries no pass_id, want %d", rec.Message, pass)
 				}
 			}
-			if !slices.Contains(msgs, conflictMsg) {
-				t.Errorf("pass lines = %q, want the size-conflict warning among them", msgs)
-			}
 			if !slices.Equal(tiers, []string{"alt", "none"}) {
 				t.Errorf("upgrade sizes views = %v, want [alt none]", tiers)
 			}
@@ -119,124 +107,16 @@ func TestEveryPassEmitsBothViewsSizes(t *testing.T) {
 	}
 }
 
-// TestSizeTotalsCountEachDownloadAndFileOnce pins the unions: a torrent two
-// findings share, overlapping download sets and a file two findings replace
-// each count once, while each row keeps its own full size.
-func TestSizeTotalsCountEachDownloadAndFileOnce(t *testing.T) {
-	n, recorder, _ := clockedNotifier()
-	a := sizedFinding("a", "Aria", 30, 5, download("x", 10), download("y", 20))
-	b := sizedFinding("b", "Bocchi", 50, 5, download("y", 20), download("z", 30))
-	b.Replaced = a.Replaced
-	n.Report([]compare.Finding{a, b}, nil)
-	got := sizes(t, recorder, "none")
-	if int64Of(got["recommended_bytes_total"]) != 60 || int64Of(got["current_bytes_replaced"]) != 5 || int64Of(got["size_change_bytes"]) != 55 {
-		t.Errorf("totals = %v, want recommended 60, replaced 5, change 55", got)
-	}
-	if int64Of(got["upgrades_sized"]) != 2 || int64Of(got["upgrades_unsized"]) != 0 {
-		t.Errorf("sized, unsized = %v, %v, want 2, 0", got["upgrades_sized"], got["upgrades_unsized"])
-	}
-	for _, l := range lines(recorder, "better release available") {
-		if l["title"].String() == "Bocchi" && int64Of(l["recommended_bytes"]) != 50 {
-			t.Errorf("Bocchi's row recommended_bytes = %v, want its full 50", l["recommended_bytes"])
-		}
-	}
-}
-
-// TestSizeTotalsSkipWhatTheyCannotCount pins the unsized cases: an unknown
-// side, an identity carrying two sizes (one WARN names it), and a sum past
-// math.MaxInt64, each leaving the totals at their last valid value in rank
-// order.
-func TestSizeTotalsSkipWhatTheyCannotCount(t *testing.T) {
-	n, recorder, _ := clockedNotifier()
-	big := sizedFinding("a", "Aria", math.MaxInt64-10, 1, download("big", math.MaxInt64-10))
-	overflow := sizedFinding("b", "Bocchi", 20, 1, download("more", 20))
-	conflict := sizedFinding("c", "Chainsaw", 7, 1, download("big", 7))
-	unknown := testFinding("d", "Dandadan")
-	unknown.ReleaseBytes = 5
-	n.Report([]compare.Finding{big, overflow, conflict, unknown}, nil)
-	got := sizes(t, recorder, "none")
-	if int64Of(got["recommended_bytes_total"]) != math.MaxInt64-10 || int64Of(got["upgrades_sized"]) != 1 || int64Of(got["upgrades_unsized"]) != 3 {
-		t.Errorf("totals = %v, want only the first-ranked finding counted", got)
-	}
-	if n := recorder.CountExact(conflictMsg); n != 1 {
-		t.Errorf("conflict WARN logged %d times, want 1 across both views", n)
-	}
-}
-
-// TestDownloadTotalCountsEveryKnownDownload pins download_bytes_total: an
-// upgrade whose replaced files have no known size still adds its download,
-// a torrent it shares with a sized upgrade counts once, and only an upgrade
-// with no known download is left out of it.
-func TestDownloadTotalCountsEveryKnownDownload(t *testing.T) {
-	n, recorder, _ := clockedNotifier()
-	sized := sizedFinding("a", "Aria", 10, 4, download("x", 10))
-	noCurrent := testFinding("b", "Bocchi")
-	noCurrent.Downloads, noCurrent.ReleaseBytes = []compare.Download{download("y", 20)}, 20
-	shared := testFinding("c", "Chainsaw")
-	shared.Downloads, shared.ReleaseBytes = []compare.Download{download("x", 10)}, 10
-	unknown := testFinding("d", "Dandadan")
-	n.Report([]compare.Finding{sized, noCurrent, shared, unknown}, nil)
-	got := sizes(t, recorder, "none")
-	if int64Of(got["download_bytes_total"]) != 30 || int64Of(got["upgrades_download_unsized"]) != 1 {
-		t.Errorf("download total, download unsized = %v, %v, want 30, 1", got["download_bytes_total"], got["upgrades_download_unsized"])
-	}
-	if int64Of(got["recommended_bytes_total"]) != 10 || int64Of(got["upgrades_unsized"]) != 3 {
-		t.Errorf("sized total, unsized = %v, %v, want 10, 3", got["recommended_bytes_total"], got["upgrades_unsized"])
-	}
-}
-
-// TestDownloadTotalBoundsTheSizedTotalProperty pins download_bytes_total at or
-// above recommended_bytes_total whichever replaced sizes are unknown.
-func TestDownloadTotalBoundsTheSizedTotalProperty(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		n, recorder := newCapturedNotifier()
-		count := rapid.IntRange(0, 6).Draw(t, "findings")
-		var findings []compare.Finding
-		for i := range count {
-			release := rapid.Int64Range(1, math.MaxInt64/8).Draw(t, "release")
-			current := rapid.Int64Range(0, math.MaxInt64/8).Draw(t, "current")
-			findings = append(findings, sizedFinding(fmt.Sprint(i), fmt.Sprint("T", i), release, current, download(fmt.Sprint("d", i%3), release)))
-		}
-		n.Report(findings, nil)
-		for _, l := range lines(recorder, "upgrade sizes") {
-			if floor, sized := int64Of(l["download_bytes_total"]), int64Of(l["recommended_bytes_total"]); floor < sized {
-				t.Fatalf("download_bytes_total = %d, below recommended_bytes_total %d", floor, sized)
-			}
-		}
-	})
-}
-
-// TestSizeChangeIsTheTotalsDifferenceProperty pins size_change_bytes to the
-// difference of the two totals for any non-negative sizes.
-func TestSizeChangeIsTheTotalsDifferenceProperty(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		n, recorder := newCapturedNotifier()
-		count := rapid.IntRange(0, 6).Draw(t, "findings")
-		var findings []compare.Finding
-		for i := range count {
-			release := rapid.Int64Range(1, math.MaxInt64/4).Draw(t, "release")
-			current := rapid.Int64Range(1, math.MaxInt64/4).Draw(t, "current")
-			findings = append(findings, sizedFinding(fmt.Sprint(i), fmt.Sprint("T", i), release, current, download(fmt.Sprint("d", i), release)))
-		}
-		n.Report(findings, nil)
-		for _, l := range lines(recorder, "upgrade sizes") {
-			if got, want := int64Of(l["size_change_bytes"]), int64Of(l["recommended_bytes_total"])-int64Of(l["current_bytes_replaced"]); got != want {
-				t.Fatalf("size_change_bytes = %d, want %d", got, want)
-			}
-		}
-	})
-}
-
 // TestRanksPerView pins the per-view ranks: newer revisions first, then size
 // change descending with an unknown size last, then key order; an alt-tier row
 // has rank_alt 0 and no other row does, and a manual-review row takes no rank.
 func TestRanksPerView(t *testing.T) {
 	n, recorder, _ := clockedNotifier()
-	small := sizedFinding("a", "Small", 10, 5, download("a", 10))
-	large := sizedFinding("b", "Large", 100, 5, download("b", 100))
+	small := sizedFinding("a", "Small", 10, 5)
+	large := sizedFinding("b", "Large", 100, 5)
 	large.Tier = compare.TierAlt
 	unsized := testFinding("c", "Unsized")
-	newer := sizedFinding("d", "Newer", 1, 5, download("d", 1))
+	newer := sizedFinding("d", "Newer", 1, 5)
 	newer.Status = compare.StatusNewerRevision
 	mixed := testFinding("e", "Mixed")
 	mixed.Status = compare.StatusMixedGroup
@@ -253,15 +133,15 @@ func TestRanksPerView(t *testing.T) {
 	}
 	for _, l := range lines(recorder, "better release available") {
 		if l["title"].String() == "Unsized" {
-			for _, key := range []string{"recommended_bytes", "current_bytes", "size_change_bytes"} {
+			for _, key := range []string{"recommended_bytes", "size_change_bytes"} {
 				if _, present := l[key]; present {
 					t.Errorf("an unsized row carries %s", key)
 				}
 			}
 		}
 	}
-	if alt := sizes(t, recorder, "alt"); int64Of(alt["upgrades"]) != 3 || int64Of(alt["upgrades_newer_revision"]) != 1 {
-		t.Errorf("alt view upgrades, newer = %v, %v, want 3, 1", alt["upgrades"], alt["upgrades_newer_revision"])
+	if alt := viewLine(t, recorder, "alt"); int64Of(alt["upgrades"]) != 3 {
+		t.Errorf("alt view upgrades = %v, want 3", alt["upgrades"])
 	}
 }
 
@@ -289,38 +169,13 @@ func TestManualReviewRowsAreNumbered(t *testing.T) {
 	}
 }
 
-// TestBiggestUpgradesAreBoundedAndOrdered pins at most 25 biggest upgrade
-// lines per view, by absolute size change, a shrink as big as a growth.
-func TestBiggestUpgradesAreBoundedAndOrdered(t *testing.T) {
-	n, recorder, _ := clockedNotifier()
-	var findings []compare.Finding
-	for i := range 30 {
-		findings = append(findings, sizedFinding(fmt.Sprint(i), fmt.Sprint("T", i), int64(100+i), 100, download(fmt.Sprint(i), int64(100+i))))
-	}
-	shrink := sizedFinding("s", "Shrink", 10, 1000, download("s", 10))
-	findings = append(findings, shrink)
-	n.Report(findings, nil)
-	var titles []string
-	for _, l := range lines(recorder, "biggest upgrade") {
-		if l["hidden_tier"].String() == "none" {
-			titles = append(titles, l["title"].String())
-			if int64Of(l["rank"]) != int64(len(titles)) {
-				t.Errorf("rank %v at position %d", l["rank"], len(titles))
-			}
-		}
-	}
-	if len(titles) != maxBiggestUpgrades || titles[0] != "Shrink" || titles[1] != "T29" {
-		t.Errorf("biggest = %v, want 25 lines led by Shrink then T29", titles)
-	}
-}
-
 // TestIgnoredFindingsReachNoPassLine pins that an ignored show is in no row,
-// rank, total, ranking or event.
+// rank, count or event.
 func TestIgnoredFindingsReachNoPassLine(t *testing.T) {
 	n, recorder, _ := clockedNotifier(999)
-	ignored := sizedFinding("i", "Ignored", 1000, 1, download("i", 1000))
+	ignored := sizedFinding("i", "Ignored", 1000, 1)
 	ignored.AniListID = 999
-	n.Report([]compare.Finding{ignored, sizedFinding("k", "Kept", 10, 1, download("k", 10))}, nil)
+	n.Report([]compare.Finding{ignored, sizedFinding("k", "Kept", 10, 1)}, nil)
 	n.Report(nil, nil)
 	for _, rec := range recorder.Records() {
 		rec.Attrs(func(a slog.Attr) bool {
@@ -330,8 +185,8 @@ func TestIgnoredFindingsReachNoPassLine(t *testing.T) {
 			return true
 		})
 	}
-	if got := lines(recorder, "upgrade sizes")[1]; int64Of(got["recommended_bytes_total"]) != 10 || int64Of(got["upgrades"]) != 1 {
-		t.Errorf("totals = %v, want only the kept show", got)
+	if got := lines(recorder, "upgrade sizes")[1]; int64Of(got["upgrades"]) != 1 {
+		t.Errorf("view line = %v, want only the kept show counted", got)
 	}
 }
 
@@ -396,11 +251,11 @@ func TestPassLinesCarryTheLogContract(t *testing.T) {
 		t.Fatalf("parse the log contract: %v", err)
 	}
 	n, recorder, now := clockedNotifier()
-	a := sizedFinding("a", "Aria", 10, 4, download("x", 10))
+	a := sizedFinding("a", "Aria", 10, 4)
 	n.Report([]compare.Finding{a}, nil)
 	*now = now.Add(time.Minute)
 	n.Report(nil, nil)
-	for _, msg := range []string{"findings reported", "upgrade sizes", "biggest upgrade", "upgrade found", "upgrade resolved"} {
+	for _, msg := range []string{"findings reported", "upgrade sizes", "upgrade found", "upgrade resolved"} {
 		want := contract.Messages[msg]
 		got := lines(recorder, msg)
 		if len(want) == 0 || len(got) == 0 {
