@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -389,14 +388,10 @@ func TestUpgradeEventsFollowTheSet(t *testing.T) {
 	}
 }
 
-// TestPassLinesCarryTheLogContract pins every pass message alerts/logql.yaml
+// TestPassLinesCarryTheLogContract pins every pass message the log contract
 // declares to the attributes it lists.
 func TestPassLinesCarryTheLogContract(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
-	if err != nil {
-		t.Fatalf("read alerts/logql.yaml: %v", err)
-	}
-	contract, err := logcontract.Parse(raw)
+	contract, err := logcontract.Load(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("parse the log contract: %v", err)
 	}
@@ -414,7 +409,7 @@ func TestPassLinesCarryTheLogContract(t *testing.T) {
 		}
 		for _, key := range want {
 			if _, ok := got[0][key]; !ok {
-				t.Errorf("%q line lacks %q, which alerts/logql.yaml declares stable", msg, key)
+				t.Errorf("%q line lacks %q, which the log contract declares stable", msg, key)
 			}
 		}
 	}

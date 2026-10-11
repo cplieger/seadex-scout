@@ -1,35 +1,43 @@
 package logcontract
 
 import (
-	"os"
 	"slices"
 	"testing"
 )
 
-const header = `# preamble
-#   level=ERROR with condition=...  a lasting condition
-#     attrs: condition, arr
-#   msg="one"                       first message
-#     attrs: a, b
-#     attrs: c
-#   msg="two"                       no attributes
-#                                   msg="prose mention" is not an entry
-#   msg="three"
-#     attrs: d
-groups:
-#   msg="after the header"
-#     attrs: z
-`
+const page = "# Monitoring\n" +
+	"\n" +
+	"| Message | Logged when | Stable attributes |\n" +
+	"| --- | --- | --- |\n" +
+	"| `before` | a table outside the section | `y` |\n" +
+	"\n" +
+	"### Log contract\n" +
+	"\n" +
+	"| Message | Logged when | Stable attributes |\n" +
+	"| --- | --- | --- |\n" +
+	"| `level=ERROR`, no `condition` | a one-off fault | |\n" +
+	"| `level=ERROR` with `condition` | a lasting condition | `condition`, `arr` |\n" +
+	"| `one` | first message, citing `prose` | `a`, `b`, `c` |\n" +
+	"| `two` | no attributes | |\n" +
+	"| `three, with a comma` | | `d` |\n" +
+	"\n" +
+	"Prose naming `not an entry`.\n" +
+	"\n" +
+	"### Next section\n" +
+	"\n" +
+	"| Message | Logged when | Stable attributes |\n" +
+	"| --- | --- | --- |\n" +
+	"| `after` | past the section | `z` |\n"
 
-// TestParseAttachesAttrsToTheirEntry pins the grammar: attrs: lines belong to
-// the nearest entry above, accumulate across lines, the level=ERROR entry
-// feeds Global, and nothing past the leading comment counts.
-func TestParseAttachesAttrsToTheirEntry(t *testing.T) {
-	c, err := Parse([]byte(header))
+// TestParseAttachesAttrsToTheirRow pins the grammar: the first cell's first
+// code span names the row, the third cell's code spans are its attributes,
+// the level=ERROR rows feed Global, and nothing outside the section counts.
+func TestParseAttachesAttrsToTheirRow(t *testing.T) {
+	c, err := Parse([]byte(page))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	want := map[string][]string{"one": {"a", "b", "c"}, "two": nil, "three": {"d"}}
+	want := map[string][]string{"one": {"a", "b", "c"}, "two": nil, "three, with a comma": {"d"}}
 	if len(c.Messages) != len(want) {
 		t.Errorf("Parse messages = %v, want %v", c.Messages, want)
 	}
@@ -46,24 +54,30 @@ func TestParseAttachesAttrsToTheirEntry(t *testing.T) {
 	}
 }
 
-// TestParseRejectsAFileWithoutAContract pins that a header with no attrs:
-// line is an error rather than an empty contract every consumer passes.
-func TestParseRejectsAFileWithoutAContract(t *testing.T) {
-	if _, err := Parse([]byte("#   msg=\"one\"\ngroups:\n")); err == nil {
-		t.Error("Parse(no attrs) = nil error, want errNoContract")
+// TestParseRejects pins that a page with no stable attribute, or a row the
+// grammar cannot read, is an error rather than a contract every consumer passes.
+func TestParseRejects(t *testing.T) {
+	const head = "### Log contract\n\n| Message | Logged when | Stable attributes |\n| --- | --- | --- |\n"
+	for name, raw := range map[string]string{
+		"no section":         "| `one` | x | `a` |\n",
+		"no attribute":       head + "| `one` | x | |\n",
+		"row without a name": head + "| one | x | `a` |\n",
+		"row with two cells": head + "| `one` | `a` |\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(raw)); err == nil {
+				t.Errorf("Parse(%q) = nil error, want an error", raw)
+			}
+		})
 	}
 }
 
-// TestParseShippedRules pins that the shipped file parses into a contract
-// carrying the messages its own rules key on.
-func TestParseShippedRules(t *testing.T) {
-	raw, err := os.ReadFile("../../alerts/logql.yaml")
+// TestLoadShippedContract pins that the shipped page parses into a contract
+// carrying the messages the shipped rules key on.
+func TestLoadShippedContract(t *testing.T) {
+	c, err := Load("../..")
 	if err != nil {
-		t.Fatalf("read alerts/logql.yaml: %v", err)
-	}
-	c, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse(alerts/logql.yaml): %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	for _, msg := range []string{"better release available", "reconcile complete", "indexer request", "library summary"} {
 		if _, ok := c.Messages[msg]; !ok {

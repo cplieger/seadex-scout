@@ -1,7 +1,6 @@
 package audit
 
 import (
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -108,17 +107,13 @@ func TestAuditItemTotals(t *testing.T) {
 
 func libraryContract(t *testing.T, msg string) []string {
 	t.Helper()
-	raw, err := os.ReadFile("../../alerts/logql.yaml")
-	if err != nil {
-		t.Fatalf("read alerts/logql.yaml: %v", err)
-	}
-	c, err := logcontract.Parse(raw)
+	c, err := logcontract.Load("../..")
 	if err != nil {
 		t.Fatalf("parse the log contract: %v", err)
 	}
 	attrs, ok := c.Messages[msg]
 	if !ok || len(attrs) == 0 {
-		t.Fatalf("alerts/logql.yaml declares no attributes for %q", msg)
+		t.Fatalf("the log contract declares no attributes for %q", msg)
 	}
 	return attrs
 }
@@ -146,7 +141,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	summaryAttrs := recordAttrs(recs[0])
 	for _, key := range libraryContract(t, "library summary") {
 		if _, ok := summaryAttrs[key]; !ok {
-			t.Errorf("library summary lacks %q, which alerts/logql.yaml declares stable", key)
+			t.Errorf("library summary lacks %q, which the log contract declares stable", key)
 		}
 	}
 	for key, want := range map[string]int64{

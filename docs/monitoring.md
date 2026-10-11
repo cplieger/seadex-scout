@@ -17,7 +17,7 @@ Informational cases log at `info`. Their statuses are `incomplete`, `theoretical
 Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per report row. A film or special both Sonarr and Radarr hold has a row for each copy, so it logs two.
 
 When the library read was partial, `cycle degraded` has `reason=partial-walk` and `failed_items`, the number of SeaDex entries matched to an item that could not be read. A film both Sonarr and Radarr hold counts once for each.
-Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The `attrs:` lines in [`alerts/logql.yaml`](../alerts/logql.yaml) list the stable attributes of each message.
+Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The [log contract](#log-contract) lists the stable attributes of each message.
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
 
@@ -141,7 +141,36 @@ Thresholds and the `severity` labels are starting points. Change the `container`
 
 ### Log contract
 
-The messages listed at the top of [`alerts/logql.yaml`](../alerts/logql.yaml) are the log contract. The rules and the dashboard match only these messages. Each `attrs:` line names the attributes that are stable on its message, and `msg` and `level` are stable on every line. A listed message is not renamed or retyped without a matching change to that list.
+The messages in this table are the log contract. The rules in [`alerts/logql.yaml`](../alerts/logql.yaml) and the dashboard match only these messages. The last column names the attributes that are stable on each message, and `msg` and `level` are stable on every line. A listed message is not renamed or retyped without a matching change to this table.
+
+| Message | Logged when | Stable attributes |
+| --- | --- | --- |
+| `level=ERROR`, no `condition` | a one-off or local fault. `SeadexScoutCycleError` keys on the level and the missing attribute, not on a message | |
+| `level=ERROR` with `condition` | a lasting problem, on every pass while it holds, by the escalated line or by `degraded condition still standing` | `condition`, `arr` |
+| `better release available` | a better release, or a newer revision of the group on disk with `status=newer_revision`. The three byte sizes are present only when known | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `current_tier`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `info_hash`, `resolution`, `kind`, `tracker`, `release_url`, `nyaa_url`, `public_url`, `public_tracker`, `ab_url`, `ab_tracker`, `current_revision`, `recommended_revision`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_alt`, `rank_none`, `recommended_bytes`, `current_bytes`, `size_change_bytes` |
+| `series spans multiple release groups, manual review` | the files on disk span more than one release group | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_check` |
+| `release group unverifiable, manual review` | an untagged release left a comparison undecided | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_check` |
+| `findings reported` | the last line of each pass of the findings. `manual_review` counts the two manual-review messages, and `rank_check` numbers them | `pass_id`, `emitted`, `manual_review` |
+| `upgrade sizes` | once per pass and `hidden_tier` (`alt` or `none`), with the size totals of the upgrades that view shows | `pass_id`, `hidden_tier`, `upgrades`, `upgrades_better_release`, `upgrades_newer_revision`, `upgrades_sized`, `upgrades_unsized`, `recommended_bytes_total`, `current_bytes_replaced`, `size_change_bytes`, `download_bytes_total`, `upgrades_download_unsized` |
+| `biggest upgrade` | up to 25 per pass and `hidden_tier`, ordered by size change | `pass_id`, `hidden_tier`, `rank`, `current_tier`, `status`, `title`, `al_id`, `arr`, `arr_url`, `season`, `current_group`, `recommended_group`, `recommended_bytes`, `current_bytes`, `size_change_bytes` |
+| `upgrade found` | an upgrade entered the list, with `after_start=true` on the first pass after a start | `pass_id`, `after_start`, `title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_tier`, `current_group`, `recommended_group` |
+| `upgrade resolved` | an upgrade left the list | `pass_id`, `after_start`, `title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_tier`, `current_group`, `recommended_group` |
+| `report written` | a report was written, and `anime` is the number of rows it holds | `anime` |
+| `cycle complete` | a full pass compared, matched by `SeadexScoutScanStalled` | `duration`, `library_items`, `findings`, `specials_unread` |
+| `cycle degraded` | a full pass ran but could not compare, matched by `SeadexScoutScanStalled` | `reason`, `duration`, `library_items`, `findings`, `specials_unread` |
+| `tick complete` | a quick check compared, matched by `SeadexScoutScanStalled` | |
+| `tick degraded` | a quick check ran but could not compare, matched by `SeadexScoutScanStalled` | `reason` |
+| `reconcile started` | a full pass started, also matched by `SeadexScoutScanStalled` | |
+| `reconcile complete` | a full pass finished, matched by `SeadexScoutReconcileStalled` | |
+| `indexer request` | one Torznab request from an arr. `feed=true` marks an RSS poll, which `SeadexScoutFeedNotPolled` counts. `t` is the Torznab function, `returned` the items sent back and `curated` the SeaDex-curated items among them | `scope`, `feed`, `t`, `curated`, `returned` |
+| `indexer feed snapshot written` | the feed was rebuilt or advanced, and `journal_new` counts the releases newly added to the RSS feed | `journal_new`, `scope`, `nyaa_feed`, `ab_feed`, `ab_releases_skipped` |
+| `library summary` | each full pass whose library read was complete, with the daily library counts | `rows`, `have_best`, `have_alt`, `have_older_revision`, `have_unlisted`, `no_file`, `unverified`, `unattributed`, `not_on_seadex`, `anime_items`, `items_with_entry`, `items_all_best`, `items_all_best_or_alt` |
+
+`SeadexScoutScanStalled` matches `(cycle|tick) (complete|degraded)`, and `duration` is a Go duration string. A gated `cycle degraded` line carries no `duration`, `library_items`, `findings` or `specials_unread`.
+
+The `condition` values are `seadex-unreachable`, `seadex-window-oversize`, `seadex-catalogue-fetch-failing`, `anilist-lookups-failing`, `mapping-refresh-rejected`, `library-walk-shrunk` and `library-walk-partial`. Only `library-walk-shrunk` also carries `arr`.
+
+The `reason` values on `cycle degraded` are `library-shrunk`, `partial-walk`, `anilist-degraded`, `mapping-stale`, `tags-emptied-side`, `walk-failed`, `mapping-unusable`, `seadex-fetch-failed` and `seadex-zero-entries`. On `tick degraded` they are `awaiting-first-reconcile`, `probe-failed`, `window-fetch-failed`, `window-oversize` and `mapping-unusable`.
 
 Every other message and attribute seadex-scout logs is diagnostic. It may be reworded, change level or change type in any release. If you build a rule or a dashboard on one, keep your own copy of the text, because it may not survive an upgrade.
 
