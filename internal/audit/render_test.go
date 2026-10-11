@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/keyenc"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/slogx/capture"
@@ -25,13 +25,13 @@ func TestScopeLabel(t *testing.T) {
 	tests := []struct {
 		name string
 		want string
-		row  Row
+		row  reportRow
 	}{
-		{"movie", "movie", Row{Scope: align.ScopeMovie}},
-		{"offered", "offered", Row{Scope: align.ScopeOffered}},
-		{"numbered season", "S2", Row{Scope: align.ScopeSeason, Season: 2}},
-		{"whole series", "series", Row{Scope: align.ScopeWholeSeries}},
-		{"zero value defaults to series", "series", Row{}},
+		{"movie", "movie", reportRow{Scope: align.ScopeMovie}},
+		{"offered", "offered", reportRow{Scope: align.ScopeOffered}},
+		{"numbered season", "S2", reportRow{Scope: align.ScopeSeason, Season: 2}},
+		{"whole series", "series", reportRow{Scope: align.ScopeWholeSeries}},
+		{"zero value defaults to series", "series", reportRow{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -43,22 +43,22 @@ func TestScopeLabel(t *testing.T) {
 }
 
 func TestScopeCellMarksApproxAndQualifier(t *testing.T) {
-	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2, Approx: true}); got != "S2 (approx)" {
+	if got := scopeCell(&reportRow{Scope: align.ScopeSeason, Season: 2, Approx: true}); got != "S2 (approx)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (approx)\"", got)
 	}
-	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2}); got != "S2" {
+	if got := scopeCell(&reportRow{Scope: align.ScopeSeason, Season: 2}); got != "S2" {
 		t.Errorf("scopeCell() = %q, want \"S2\"", got)
 	}
-	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2, Qualifier: QualifierMixed}); got != "S2 (mixed)" {
+	if got := scopeCell(&reportRow{Scope: align.ScopeSeason, Season: 2, Qualifier: QualifierMixed}); got != "S2 (mixed)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (mixed)\"", got)
 	}
-	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2, Approx: true, Qualifier: QualifierTheoretical}); got != "S2 (approx, theoretical)" {
+	if got := scopeCell(&reportRow{Scope: align.ScopeSeason, Season: 2, Approx: true, Qualifier: QualifierTheoretical}); got != "S2 (approx, theoretical)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (approx, theoretical)\"", got)
 	}
 }
 
 func TestDisplayBestGroups(t *testing.T) {
-	rels := []Release{
+	rels := []rowRelease{
 		{Group: "SubsPlease", Best: true},
 		{Group: "subsplease", Best: true},
 		{Group: "Erai", Best: false},
@@ -172,11 +172,11 @@ func TestEscapeLinkURLEncodesQuotes(t *testing.T) {
 }
 
 func TestLinksBuildsArrSeaDexAndBestOnly(t *testing.T) {
-	row := &Row{
+	row := &reportRow{
 		Arr:       "sonarr",
 		ArrURL:    "http://sonarr/series/frieren",
 		SeaDexURL: "https://releases.moe/154587",
-		Releases: []Release{
+		Releases: []rowRelease{
 			{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 			{Best: false, Tracker: "AB", URL: "https://animebytes.tv/x"},
 		},
@@ -197,7 +197,7 @@ func TestLinksBuildsArrSeaDexAndBestOnly(t *testing.T) {
 }
 
 func TestLinksEmptyIsPlaceholder(t *testing.T) {
-	if got := links(&Row{}); got != emptyCell {
+	if got := links(&reportRow{}); got != emptyCell {
 		t.Errorf("links() = %q, want empty-cell placeholder %q", got, emptyCell)
 	}
 }
@@ -206,10 +206,10 @@ func TestRenderMarkdownAndJSON(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest, Season: 1,
 			CurrentGroups: []string{"subsplease"},
-			Releases:      []Release{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
+			Releases:      []rowRelease{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 		}},
 	}
 	md := renderMarkdown(r)
@@ -238,7 +238,7 @@ func TestRenderMarkdownScopePrecedence(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictUnlisted): 2},
-		Rows: []Row{
+		Rows: []reportRow{
 			// A Radarr item scopes as a movie even with a special, seasoned record.
 			a.assess(&match.Match{
 				Item:   movie,
@@ -279,12 +279,12 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNoFile): 2, string(VerdictUnattributed): 3},
-		Rows: []Row{{
+		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNoFile): 2, string(verdictUnattributed): 3},
+		Rows: []reportRow{{
 			Title: "Frieren", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 154587,
 			Qualifier: QualifierMixed,
 			Season:    1, Scope: align.ScopeSeason, Approx: true, CurrentGroups: []string{"subsplease", "erai-raws"},
-			Releases:    []Release{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
+			Releases:    []rowRelease{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 			ArrURL:      "http://sonarr/series/frieren",
 			SeaDexURL:   "https://releases.moe/154587",
 			MatchSource: "id",
@@ -359,7 +359,7 @@ func TestRenderMarkdownCountsNotOnSeaDexSeparately(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNotOnSeaDex): 2},
-		Rows: []Row{
+		Rows: []reportRow{
 			{Title: "Matched", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 1},
 			{Title: "GapA", Arr: library.ArrSonarr, Verdict: VerdictNotOnSeaDex},
 			{Title: "GapB", Arr: library.ArrSonarr, Verdict: VerdictNotOnSeaDex},
@@ -381,7 +381,7 @@ func TestRenderMarkdownCountsAnArrPairAsOneAnime(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 2},
-		Rows: []Row{
+		Rows: []reportRow{
 			{Title: "Film", Arr: library.ArrRadarr, Verdict: VerdictBest, AniListID: 101992},
 			{Title: "Series", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 101992},
 		},
@@ -395,7 +395,7 @@ func TestRenderMarkdownCountsAnArrPairAsOneAnime(t *testing.T) {
 }
 
 func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
-	row := &Row{Releases: []Release{
+	row := &reportRow{Releases: []rowRelease{
 		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{Best: true, Tracker: "  ", URL: "https://example.org/t"},
@@ -449,7 +449,7 @@ func craftedReport() *Report {
 	return &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictUnlisted): 1},
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title:         "Evil\u009bShow\u202e",
 			Arr:           "sonarr",
 			Verdict:       VerdictUnlisted,
@@ -457,7 +457,7 @@ func craftedReport() *Report {
 			SeaDexURL:     "https://releases.moe/1\u200f",
 			MatchSource:   "id\u061c",
 			CurrentGroups: []string{"grp\u009c"},
-			Releases:      []Release{{Group: "g\u0090", Tracker: "trk\u200e", URL: "https://x/\u2028a", Best: true}},
+			Releases:      []rowRelease{{Group: "g\u0090", Tracker: "trk\u200e", URL: "https://x/\u2028a", Best: true}},
 		}},
 	}
 }
@@ -557,7 +557,7 @@ func TestRenderMarkdownOmitsNotOnSeaDexClauseWhenZero(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+		Rows:        []reportRow{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
 	md := renderMarkdown(r)
@@ -571,12 +571,12 @@ func TestRenderMarkdownEscapesUntrustedRowText(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictUnlisted): 1},
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title:         "Evil|Show <img src=x>",
 			Arr:           "sonarr",
 			Verdict:       VerdictUnlisted,
 			CurrentGroups: []string{"bad|group"},
-			Releases:      []Release{{Group: "best[grp]", Best: true}},
+			Releases:      []rowRelease{{Group: "best[grp]", Best: true}},
 		}},
 	}
 
@@ -650,8 +650,8 @@ func TestRenderIncompleteSectionAndCaveat(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
-		Incomplete: []IncompleteEntry{
+		Rows:        []reportRow{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+		Incomplete: []incompleteEntry{
 			{SeaDexURL: "https://releases.moe/20791", AniListID: 20791},
 			{SeaDexURL: "https://releases.moe/99999", AniListID: 99999},
 		},
@@ -692,7 +692,7 @@ func TestRenderSingularIncompleteCaveat(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{},
-		Incomplete:  []IncompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
+		Incomplete:  []incompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
 	}
 	md := renderMarkdown(r)
 	if !strings.Contains(md, "1 SeaDex entry could not be resolved against AniList") {
@@ -711,7 +711,7 @@ func TestRenderCompleteReportOmitsIncompleteSection(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+		Rows:        []reportRow{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
 	md := renderMarkdown(r)
@@ -739,7 +739,7 @@ func TestRenderJSONSanitizesIncompleteEntries(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{},
-		Incomplete:  []IncompleteEntry{{SeaDexURL: crafted, AniListID: 1}},
+		Incomplete:  []incompleteEntry{{SeaDexURL: crafted, AniListID: 1}},
 	}
 
 	data, err := renderJSON(r)
@@ -763,7 +763,7 @@ func TestRenderJSONSanitizesIncompleteEntries(t *testing.T) {
 // group's canonical tags are rendered by the Notes column instead, joined in
 // canonical order and positionally aligned with the best column.
 func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
-	rels := []Release{
+	rels := []rowRelease{
 		{Group: "PMR", Best: true, Warnings: []string{"broken"}},
 		{Group: "pmr", Best: true},
 		{Group: "SEV", Best: true, Warnings: []string{"broken", "incomplete"}},
@@ -773,7 +773,7 @@ func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("displayBestGroups() = %v, want %v", got, want)
 	}
-	if got, want := notesCell(&Row{Releases: rels}), "-; broken, incomplete"; got != want {
+	if got, want := notesCell(&reportRow{Releases: rels}), "-; broken, incomplete"; got != want {
 		t.Errorf("notesCell() = %q, want %q", got, want)
 	}
 }
@@ -789,7 +789,7 @@ func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
 func TestBestAndNotesColumnsDoNotShareANamespace(t *testing.T) {
 	forgeries := []string{"SEV (broken)", `SEV" (broken) "x`}
 	for _, group := range forgeries {
-		row := &Row{Releases: []Release{{Group: group, Best: true}}}
+		row := &reportRow{Releases: []rowRelease{{Group: group, Best: true}}}
 		if got, want := displayBestGroups(row.Releases), []string{group}; !reflect.DeepEqual(got, want) {
 			t.Errorf("displayBestGroups(%q) = %v, want %v (upstream text, verbatim)", group, got, want)
 		}
@@ -798,7 +798,7 @@ func TestBestAndNotesColumnsDoNotShareANamespace(t *testing.T) {
 		}
 	}
 
-	genuine := &Row{Releases: []Release{{Group: "PMR", Best: true, Warnings: []string{"broken"}}}}
+	genuine := &reportRow{Releases: []rowRelease{{Group: "PMR", Best: true, Warnings: []string{"broken"}}}}
 	if got, want := bestCell(genuine), "PMR"; got != want {
 		t.Errorf("bestCell(genuinely broken) = %q, want %q", got, want)
 	}
@@ -806,7 +806,7 @@ func TestBestAndNotesColumnsDoNotShareANamespace(t *testing.T) {
 		t.Errorf("notesCell(genuinely broken) = %q, want %q", got, want)
 	}
 	for _, group := range forgeries {
-		if got := bestCell(&Row{Releases: []Release{{Group: group, Best: true}}}); got == bestCell(genuine) && notesCell(genuine) == emptyCell {
+		if got := bestCell(&reportRow{Releases: []rowRelease{{Group: group, Best: true}}}); got == bestCell(genuine) && notesCell(genuine) == emptyCell {
 			t.Errorf("forged group %q reproduced the genuine rendering", group)
 		}
 	}
@@ -819,7 +819,7 @@ func TestBestAndNotesColumnsDoNotShareANamespace(t *testing.T) {
 // reader can tell WHICH group the note belongs to without the group name ever
 // re-entering the annotation string.
 func TestNotesCellAssociatesNotesWithTheirGroupByPosition(t *testing.T) {
-	row := &Row{Releases: []Release{
+	row := &reportRow{Releases: []rowRelease{
 		{Group: "SubsPlease", Best: true},
 		{Group: "PMR", Best: true, Warnings: []string{"broken"}, Unobtainable: true},
 	}}
@@ -836,10 +836,10 @@ func TestNotesCellAssociatesNotesWithTheirGroupByPosition(t *testing.T) {
 // column and carries "unobtainable" in the Notes column (so the rendered facts
 // explain why the verdict ignored a visible best), an obtainable best of the
 // same group wins the dedupe, and a best that is both warned and unobtainable
-// joins its notes without mutating Release.Warnings.
+// joins its notes without mutating rowRelease.Warnings.
 func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 	warnings := []string{"broken"}
-	rels := []Release{
+	rels := []rowRelease{
 		{Group: "PMR", Best: true, Unobtainable: true},
 		{Group: "pmr", Best: true},
 		{Group: "SEV", Best: true, Warnings: warnings, Unobtainable: true},
@@ -850,7 +850,7 @@ func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("displayBestGroups() = %v, want %v", got, want)
 	}
-	if got, want := notesCell(&Row{Releases: rels}), "-; broken, unobtainable; unobtainable"; got != want {
+	if got, want := notesCell(&reportRow{Releases: rels}), "-; broken, unobtainable; unobtainable"; got != want {
 		t.Errorf("notesCell() = %q, want %q", got, want)
 	}
 	if !reflect.DeepEqual(warnings, []string{"broken"}) {
@@ -869,13 +869,13 @@ func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 	rep := &Report{
 		GeneratedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Totals:      map[string]int{string(VerdictUnlisted): 1},
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title:         "Unobtainable Show",
 			Arr:           "sonarr",
 			SeaDexURL:     "https://releases.moe/11",
 			Verdict:       VerdictUnlisted,
 			CurrentGroups: []string{"other"},
-			Releases: []Release{
+			Releases: []rowRelease{
 				{
 					Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/901",
 					Best: true, Unobtainable: true,
@@ -920,13 +920,13 @@ func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
 	rep := &Report{
 		GeneratedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Totals:      map[string]int{string(VerdictUnlisted): 1},
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title:         "Warned Show",
 			Arr:           "sonarr",
 			SeaDexURL:     "https://releases.moe/10",
 			Verdict:       VerdictUnlisted,
 			CurrentGroups: []string{"pmr"},
-			Releases: []Release{{
+			Releases: []rowRelease{{
 				Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/900",
 				Best: true, Warnings: []string{"broken"},
 			}},
@@ -980,7 +980,7 @@ func TestReportLogCanceledMidRowsStopsEmitting(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 3},
-		Rows: []Row{
+		Rows: []reportRow{
 			{Title: "A", Arr: "sonarr", Verdict: VerdictBest},
 			{Title: "B", Arr: "sonarr", Verdict: VerdictBest},
 			{Title: "C", Arr: "sonarr", Verdict: VerdictBest},
@@ -1007,9 +1007,9 @@ func TestReportLogCanceledMidRowsStopsEmitting(t *testing.T) {
 // when the filter's equality check inverts (rows merely land under the wrong
 // section), so membership must be asserted here.
 func TestRowsWithVerdict(t *testing.T) {
-	rows := []Row{
+	rows := []reportRow{
 		{Title: "a", Verdict: VerdictBest},
-		{Title: "b", Verdict: VerdictAlt},
+		{Title: "b", Verdict: verdictAlt},
 		{Title: "c", Verdict: VerdictBest},
 	}
 	got := rowsWithVerdict(rows, VerdictBest)
@@ -1030,7 +1030,7 @@ func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+		Rows:        []reportRow{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
 	md := renderMarkdown(r)
@@ -1047,10 +1047,10 @@ func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 func TestRenderMarkdownLabelsMisleadingVerdictKeys(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Totals:      map[string]int{string(VerdictNoFile): 1, string(VerdictUnattributed): 1, string(VerdictBest): 1},
-		Rows: []Row{
+		Totals:      map[string]int{string(VerdictNoFile): 1, string(verdictUnattributed): 1, string(VerdictBest): 1},
+		Rows: []reportRow{
 			{Title: "Kyousougiga", Arr: "sonarr", Verdict: VerdictNoFile},
-			{Title: "Code Geass", Arr: "sonarr", Verdict: VerdictUnattributed},
+			{Title: "Code Geass", Arr: "sonarr", Verdict: verdictUnattributed},
 			{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest},
 		},
 	}
@@ -1084,12 +1084,12 @@ func TestRenderMarkdownLegendsStateTheOfferedClass(t *testing.T) {
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals: map[string]int{
 			string(VerdictUnverified):   1,
-			string(VerdictUnattributed): 1,
+			string(verdictUnattributed): 1,
 			string(VerdictNotOnSeaDex):  1,
 		},
-		Rows: []Row{
+		Rows: []reportRow{
 			{Title: "Untagged", Arr: "sonarr", Verdict: VerdictUnverified, Scope: align.ScopeSeason, Season: 1},
-			{Title: "Offered", Arr: "sonarr", Verdict: VerdictUnattributed, Scope: align.ScopeOffered, Approx: true},
+			{Title: "Offered", Arr: "sonarr", Verdict: verdictUnattributed, Scope: align.ScopeOffered, Approx: true},
 			{Title: "Uncovered", Arr: "sonarr", Verdict: VerdictNotOnSeaDex},
 		},
 	}
@@ -1124,8 +1124,8 @@ func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Rows: []Row{{
-			Releases: []Release{
+		Rows: []reportRow{{
+			Releases: []rowRelease{
 				{Group: "pmr", Best: true, Warnings: []string{"broken"}},
 				{Group: "PMR", Best: true},
 				{Group: "SEV", Best: true, Warnings: []string{"broken"}, Unobtainable: true},
@@ -1156,11 +1156,11 @@ func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
 // this report's own.
 func TestReportLogSplitsNotesFromForgedBestGroup(t *testing.T) {
 	log, rec := capture.New()
-	releases := []Release{
+	releases := []rowRelease{
 		{Group: "SEV (broken)", Best: true},
 		{Group: "PMR", Best: true, Warnings: []string{"broken"}},
 	}
-	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Rows: []Row{{Releases: releases}}}
+	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Rows: []reportRow{{Releases: releases}}}
 
 	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
@@ -1180,8 +1180,8 @@ func TestReportLogSplitsNotesFromForgedBestGroup(t *testing.T) {
 		t.Errorf("seadex_best = %q carries app-added quotes or parentheses", got)
 	}
 	// A clean row's attribute carries neither, at all.
-	clean := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Rows: []Row{{
-		Releases: []Release{{Group: "PMR", Best: true, Warnings: []string{"broken"}}},
+	clean := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Rows: []reportRow{{
+		Releases: []rowRelease{{Group: "PMR", Best: true, Warnings: []string{"broken"}}},
 	}}}
 	cleanLog, cleanRec := capture.New()
 	if err := clean.Log(t.Context(), cleanLog); err != nil {
@@ -1195,7 +1195,7 @@ func TestReportLogSplitsNotesFromForgedBestGroup(t *testing.T) {
 		t.Errorf("seadex_best_notes = %q, want %q", got, want)
 	}
 	// Both renderings agree: the Markdown pair splits the same way.
-	row := &Row{Releases: releases}
+	row := &reportRow{Releases: releases}
 	if got := strings.Join(displayBestGroups(releases), ","); got != wantBest {
 		t.Errorf("markdown best cell = %q, want %q (both renderings must agree)", got, wantBest)
 	}
@@ -1215,16 +1215,16 @@ func TestReportLogCapsAggregateAttributes(t *testing.T) {
 	log, rec := capture.New()
 	// Enough annotated bests that the positional notes list alone exceeds the
 	// budget: each contributes a distinct group plus "broken" and a separator.
-	many := make([]Release, 0, 2048)
+	many := make([]rowRelease, 0, 2048)
 	for i := range 2048 {
-		many = append(many, Release{Group: "g" + strconv.Itoa(i), Best: true, Warnings: []string{"broken"}})
+		many = append(many, rowRelease{Group: "g" + strconv.Itoa(i), Best: true, Warnings: []string{"broken"}})
 	}
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Rows: []Row{
+		Rows: []reportRow{
 			{
-				CurrentGroups: []string{strings.Repeat("x", maxAttrBytes+1)},
-				Releases:      []Release{{Group: strings.Repeat("y", maxAttrBytes+1), Best: true}},
+				CurrentGroups: []string{strings.Repeat("x", logattr.MaxBytes+1)},
+				Releases:      []rowRelease{{Group: strings.Repeat("y", logattr.MaxBytes+1), Best: true}},
 			},
 			{Releases: many},
 		},
@@ -1241,8 +1241,8 @@ func TestReportLogCapsAggregateAttributes(t *testing.T) {
 			t.Errorf("%s = %T, want string", key, attrs[key])
 			continue
 		}
-		if len(got) != maxAttrBytes+3 {
-			t.Errorf("len(%s) = %d, want %d", key, len(got), maxAttrBytes+3)
+		if len(got) != logattr.MaxBytes+3 {
+			t.Errorf("len(%s) = %d, want %d", key, len(got), logattr.MaxBytes+3)
 		}
 		if !strings.HasSuffix(got, "...") {
 			t.Errorf("%s = %q, want truncation suffix", key, got)
@@ -1252,9 +1252,9 @@ func TestReportLogCapsAggregateAttributes(t *testing.T) {
 	if !ok {
 		t.Fatalf("seadex_best_notes = %T, want string", recordAttrs(rec.Records()[2])["seadex_best_notes"])
 	}
-	if len(notes) != maxAttrBytes+3 || !strings.HasSuffix(notes, "...") {
+	if len(notes) != logattr.MaxBytes+3 || !strings.HasSuffix(notes, "...") {
 		t.Errorf("seadex_best_notes len = %d suffix-marked = %t, want %d and true (bounded by entry count)",
-			len(notes), strings.HasSuffix(notes, "..."), maxAttrBytes+3)
+			len(notes), strings.HasSuffix(notes, "..."), logattr.MaxBytes+3)
 	}
 }
 
@@ -1267,7 +1267,7 @@ func TestReportLogEmitsIncompleteMappings(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Incomplete: []IncompleteEntry{{
+		Incomplete: []incompleteEntry{{
 			AniListID: 20791,
 			SeaDexURL: "https://releases.moe/20791",
 		}},
@@ -1302,8 +1302,8 @@ func TestReportLogEmitsIncompleteMappings(t *testing.T) {
 // differing only in case must collapse to one in the Markdown column AND in the
 // slog aggregate, whose own emitted output stays bounded.
 func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
-	huge := strings.Repeat("g", 4*maxAttrBytes)
-	releases := []Release{
+	huge := strings.Repeat("g", 4*logattr.MaxBytes)
+	releases := []rowRelease{
 		{Group: huge, Best: true},
 		{Group: strings.ToUpper(huge), Best: true},
 	}
@@ -1317,24 +1317,14 @@ func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 	}
 
 	attr, _ := joinBestAttrs(releases)
-	if len(attr) != maxAttrBytes+3 {
-		t.Errorf("len(joinBestAttrs() groups) = %d, want %d (bounded output)", len(attr), maxAttrBytes+3)
+	if len(attr) != logattr.MaxBytes+3 {
+		t.Errorf("len(joinBestAttrs() groups) = %d, want %d (bounded output)", len(attr), logattr.MaxBytes+3)
 	}
 	if !strings.HasSuffix(attr, "...") {
 		t.Errorf("joinBestAttrs() groups = %q..., want truncation suffix", attr[:16])
 	}
 	if strings.ContainsRune(attr, 'G') {
 		t.Error("joinBestAttrs() groups emitted the deduped upper-case twin")
-	}
-}
-
-// TestAttrBudgetMirrorsKeyBudget pins an equality nothing structural enforces. Both
-// bounds apply to the same untrusted SeaDex values - the attribute budget on the
-// emitted line, the component budget on the dedupe key - and logattr states the mirror
-// in prose only, so nothing else catches a one-sided change.
-func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
-	if maxAttrBytes != keyenc.MaxComponentBytes {
-		t.Errorf("maxAttrBytes = %d, want keyenc.MaxComponentBytes = %d", maxAttrBytes, keyenc.MaxComponentBytes)
 	}
 }
 
@@ -1347,7 +1337,7 @@ func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
 // the on-disk copy unlisted), and the suppression of the grab link for a release the
 // operator's own filters.exclude_tags policy excluded.
 func TestFilteredReleaseIsAnnotatedAndNotLinked(t *testing.T) {
-	rel := Release{Group: "PMR", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1", Filtered: true}
+	rel := rowRelease{Group: "PMR", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1", Filtered: true}
 	if len(rel.Warnings) != 0 {
 		t.Fatal("fixture carries warnings; the Filtered leg would not be the reason the assertions hold")
 	}
@@ -1357,7 +1347,7 @@ func TestFilteredReleaseIsAnnotatedAndNotLinked(t *testing.T) {
 	if !annotated(&rel) {
 		t.Error("a filtered release is not annotated; it would be offered as a grab link and read as unexplained in the report")
 	}
-	if got := links(&Row{Releases: []Release{rel}}); got != emptyCell {
+	if got := links(&reportRow{Releases: []rowRelease{rel}}); got != emptyCell {
 		t.Errorf("links() = %q, want %q (an excluded best must not be offered as a one-click grab)", got, emptyCell)
 	}
 }
@@ -1372,34 +1362,34 @@ func TestFilteredReleaseIsAnnotatedAndNotLinked(t *testing.T) {
 // is not an error.
 func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
 	tests := map[string]struct {
-		rel  Release
+		rel  rowRelease
 		want []string
 	}{
 		"healthy release carries no notes": {
-			rel: Release{URL: "https://nyaa.si/view/1"},
+			rel: rowRelease{URL: "https://nyaa.si/view/1"},
 		},
 		"a refused url value is a url error": {
-			rel:  Release{URLError: true},
+			rel:  rowRelease{URLError: true},
 			want: []string{"url error"},
 		},
 		"an unusable tracker is unobtainable, not a url error": {
-			rel:  Release{URL: "https://animebytes.tv/torrents.php?torrentid=1", Unobtainable: true},
+			rel:  rowRelease{URL: "https://animebytes.tv/torrents.php?torrentid=1", Unobtainable: true},
 			want: []string{"unobtainable"},
 		},
 		"both apply, url error first as the more actionable": {
-			rel:  Release{URLError: true, Unobtainable: true},
+			rel:  rowRelease{URLError: true, Unobtainable: true},
 			want: []string{"url error", "unobtainable"},
 		},
 		"curation warnings still lead": {
-			rel:  Release{Warnings: []string{"broken"}, URLError: true},
+			rel:  rowRelease{Warnings: []string{"broken"}, URLError: true},
 			want: []string{"broken", "url error"},
 		},
 		"a tracker this build does not carry is named as such": {
-			rel:  Release{UnknownTracker: true},
+			rel:  rowRelease{UnknownTracker: true},
 			want: []string{"unknown tracker"},
 		},
 		"an unknown tracker is also unobtainable, in that order": {
-			rel:  Release{UnknownTracker: true, Unobtainable: true},
+			rel:  rowRelease{UnknownTracker: true, Unobtainable: true},
 			want: []string{"unknown tracker", "unobtainable"},
 		},
 	}
@@ -1433,7 +1423,7 @@ func TestReportLogRedactsArrURLCredentials(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title:   "Frieren",
 			Arr:     "sonarr",
 			Verdict: VerdictBest,

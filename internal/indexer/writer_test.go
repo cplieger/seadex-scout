@@ -1924,7 +1924,7 @@ func TestDecodeSnapshotSkipsUnknownFields(t *testing.T) {
 // cannot reach: three maps each exactly at maxSnapshotMapEntries are individually
 // legal, so only the aggregate budget refuses the 750k entries they add up to.
 // Without it json.Unmarshal materializes every entry - tens of bytes of live heap
-// each - inside Run's warm-up reload, OOMing the 256 MiB container while the
+// each - inside run's warm-up reload, OOMing the 256 MiB container while the
 // per-map test keeps passing (CWE-400). The document stays under maxFeedBytes, so
 // the read's byte cap does not catch it either.
 func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {

@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	// DirMode is the mode a report directory this app creates is pinned to.
-	DirMode = 0o700
+	// dirMode is the mode a report directory this app creates is pinned to.
+	dirMode = 0o700
 	// FileMode is the mode every written report half carries.
 	FileMode = 0o600
 )
@@ -33,10 +33,10 @@ func MakeDir(dir string) error {
 	// below then reports fs.ErrExist - skipping the mode enforcement that is
 	// this function's whole point.
 	dir = filepath.Clean(dir)
-	if err := os.MkdirAll(filepath.Dir(dir), DirMode); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
 		return err
 	}
-	switch err := os.Mkdir(dir, DirMode); {
+	switch err := os.Mkdir(dir, dirMode); {
 	case err == nil:
 		return enforceDirMode(dir)
 	case errors.Is(err, fs.ErrExist):
@@ -55,6 +55,6 @@ func enforceDirMode(dir string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	_, err = atomicfile.EnforceMode(f, DirMode)
+	_, err = atomicfile.EnforceMode(f, dirMode)
 	return err
 }

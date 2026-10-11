@@ -58,10 +58,10 @@ func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.B
 // flagging the cycle degraded (a not-found is an answer, not an outage).
 func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 66, Type: "MOVIE"}, // id-less: needs the title fallback
 		{AniListID: 77, Type: "MOVIE"}, // id-less: needs the title fallback
-	})
+	}})
 	fake := &partialBatchAniList{batchMedia: map[int]anilist.Media{
 		66: {Titles: []string{"Returned"}, Format: "MOVIE", Year: 2020},
 	}}
@@ -81,7 +81,7 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 	if res.Degraded {
 		t.Error("Degraded = true, want false: a definitive not-found after a partial batch is not an outage")
 	}
-	if len(res.Matches) != 2 || res.Matches[1].Source != SourceUnmapped {
+	if len(res.Matches) != 2 || res.Matches[1].Source != sourceUnmapped {
 		t.Errorf("matches = %+v, want two entries with the retried one unmapped", res.Matches)
 	}
 }
@@ -91,7 +91,7 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 // requested, an already-memoized LIVE id (positive or negative) is skipped,
 // and an EXPIRED memoized id counts as pending again so the batch renews it.
 func TestPendingAniListIDsDedupesAndSkipsInvalid(t *testing.T) {
-	idx := mapping.NewIndex(nil)
+	idx := mapping.NewIndex(mapping.Source{})
 	lib := NewLibIndex(&library.Snapshot{})
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	memo := Memo{Entries: map[int]MemoEntry{
@@ -122,10 +122,10 @@ func TestMatchSingleFetchRecoversAfterFailedBatch(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", Year: 2020},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the title fallback
 		{AniListID: 22, Type: "MOVIE"}, // id-less: needs the title fallback
-	})
+	}})
 	fake := &partialBatchAniList{
 		batchMedia: map[int]anilist.Media{
 			22: {Titles: []string{"Returned"}, Format: "MOVIE", Year: 2021},
@@ -147,7 +147,7 @@ func TestMatchSingleFetchRecoversAfterFailedBatch(t *testing.T) {
 	if res.Degraded {
 		t.Error("Degraded = true, want false: the single-Fetch retry succeeded")
 	}
-	if len(res.Matches) != 2 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+	if len(res.Matches) != 2 || !res.Matches[0].InLibrary() || res.Matches[0].Source != sourceTitle {
 		t.Errorf("matches = %+v, want a title match to the Radarr movie for the retried entry", res.Matches)
 	}
 }
@@ -180,10 +180,10 @@ func (o *totalOutageAniList) FetchMany(context.Context, []int) (anilist.BatchRes
 // TestMatchMemoizesNotFoundAfterFailedBatch above.
 func TestMatchTotalBatchOutageSkipsPerIDFallback(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the title fallback
 		{AniListID: 22, Type: "MOVIE"}, // id-less: needs the title fallback
-	})
+	}})
 	fake := &totalOutageAniList{}
 
 	res := New(fake, nil).Match(t.Context(),
@@ -202,7 +202,7 @@ func TestMatchTotalBatchOutageSkipsPerIDFallback(t *testing.T) {
 		t.Fatalf("matches = %d, want 2", len(res.Matches))
 	}
 	for i := range res.Matches {
-		if res.Matches[i].InLibrary() || res.Matches[i].Source != SourceUnmapped {
+		if res.Matches[i].InLibrary() || res.Matches[i].Source != sourceUnmapped {
 			t.Errorf("match %d = %+v, want unmapped", i, res.Matches[i])
 		}
 	}
@@ -243,7 +243,7 @@ func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (anilist
 // accounting (Degraded set, failed ids un-memoized so next cycle retries).
 func TestMatchMidBatchOutageTripsFastFailBreaker(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil) // no records: every entry needs the AniList lookup
+	idx := mapping.NewIndex(mapping.Source{}) // no records: every entry needs the AniList lookup
 	fake := &midBatchOutageAniList{}
 	entries := []seadex.Entry{
 		{AniListID: 10}, // returned by the partial batch: memoized, no per-id retry
@@ -310,7 +310,7 @@ func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
 	fake := &recoveringAniList{}
 	entries := []seadex.Entry{{AniListID: 10}, {AniListID: 20}, {AniListID: 30}, {AniListID: 40}, {AniListID: 50}, {AniListID: 60}}
 
-	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(mapping.Source{}), Memo{})
 
 	if fake.fetchCalls != 5 {
 		t.Errorf("single Fetch calls = %d, want 5: success after two failures must reset the breaker streak", fake.fetchCalls)
@@ -356,10 +356,10 @@ func (o *allNotFoundBatchAniList) FetchMany(_ context.Context, ids []int) (anili
 // trip the outage gate, which TestMatchTotalBatchOutageSkipsPerIDFallback pins.
 func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the title fallback
 		{AniListID: 22, Type: "MOVIE"}, // id-less: needs the title fallback
-	})
+	}})
 	fake := &allNotFoundBatchAniList{}
 
 	res := New(fake, nil).Match(t.Context(),
@@ -427,7 +427,7 @@ func TestMatchNotFoundResetsFailureBreaker(t *testing.T) {
 		{AniListID: 80},
 	}
 
-	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	res := New(fake, nil).Match(t.Context(), entries, &library.Snapshot{}, mapping.NewIndex(mapping.Source{}), Memo{})
 
 	if fake.fetchCalls != 6 {
 		t.Errorf("single Fetch calls = %d, want 6: a definitive not-found must reset the consecutive-failure streak", fake.fetchCalls)

@@ -355,9 +355,9 @@ func (m *staleRejectingMapping) Load(_ context.Context, prev *mapping.Cache) (ma
 	c := *prev
 	c.RejectedRefreshes = m.rejections
 	if m.rejections == 0 {
-		return c, mapping.NewIndex(c.Records), nil
+		return c, mapping.NewIndex(mapping.Source{Records: c.Records}), nil
 	}
-	return c, mapping.NewIndex(c.Records), &mapping.StaleMapError{}
+	return c, mapping.NewIndex(mapping.Source{Records: c.Records}), &mapping.StaleMapError{}
 }
 
 // mappingRejectionScout is a Scout reconciling every second iteration over m,

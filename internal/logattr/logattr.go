@@ -7,7 +7,7 @@ package logattr
 import (
 	"strings"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // MaxBytes is the per-attribute volume budget every untrusted value is rendered

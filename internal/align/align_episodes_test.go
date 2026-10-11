@@ -1,7 +1,6 @@
 package align_test
 
 import (
-	"encoding/json"
 	"slices"
 	"testing"
 
@@ -123,17 +122,6 @@ func TestClaimsCoverageIgnoresAPlacedSpecial(t *testing.T) {
 	item := specialsItem()
 	if align.ClaimsCoverage(&item, &mappedZeroOVA) {
 		t.Error("ClaimsCoverage(a season-0 OVA on a Sonarr series) = true, want false")
-	}
-}
-
-func TestScopeKindEpisodesRoundTrips(t *testing.T) {
-	b, err := json.Marshal(align.ScopeEpisodes)
-	if err != nil || string(b) != `"episodes"` {
-		t.Fatalf("json.Marshal(ScopeEpisodes) = %s, %v; want \"episodes\"", b, err)
-	}
-	var k align.ScopeKind
-	if err := json.Unmarshal(b, &k); err != nil || k != align.ScopeEpisodes {
-		t.Errorf("json.Unmarshal(%s) = %v, %v; want ScopeEpisodes", b, k, err)
 	}
 }
 

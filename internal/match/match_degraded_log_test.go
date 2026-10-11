@@ -42,7 +42,7 @@ func (partialOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.Bat
 func TestMatchTransientFailuresLogWarn(t *testing.T) {
 	logger, recorder := capture.New()
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil)
+	idx := mapping.NewIndex(mapping.Source{})
 
 	res := New(partialOutageAniList{}, logger).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
@@ -71,7 +71,7 @@ func TestMatchTransientFailuresLogWarn(t *testing.T) {
 func TestMatchTotalOutageLogsSingleWarn(t *testing.T) {
 	logger, recorder := capture.New()
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil)
+	idx := mapping.NewIndex(mapping.Source{})
 
 	res := New(degradedAniList{}, logger).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})

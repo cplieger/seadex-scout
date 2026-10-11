@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logattr"
@@ -250,12 +250,8 @@ func (n *Notifier) emit(r *row, pass int64) {
 	n.log.Log(context.Background(), level(r.f.Status), message(r.f.Status), kvs...)
 }
 
-// maxAttrBytes is the per-attribute volume budget the emit path enforces on
-// every untrusted value.
-const maxAttrBytes = logattr.MaxBytes
-
 // maxAlertTextBytes is the budget for an ALERT-destined TEXT attribute, and it
-// is deliberately far below maxAttrBytes: that budget is sized for the Loki LOG
+// is deliberately far below logattr.MaxBytes: that budget is sized for the Loki LOG
 // LINE, while these values are interpolated into the Discord annotation
 // alerts/logql.yaml renders.
 const maxAlertTextBytes = 512

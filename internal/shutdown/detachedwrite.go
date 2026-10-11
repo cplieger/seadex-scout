@@ -58,5 +58,5 @@ func DetachedWriteError(ctx context.Context, err error) error {
 	if ctx.Err() == nil || !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return WrapAs(ctx, "report write cut short by shutdown", err)
+	return wrapAs(ctx, "report write cut short by shutdown", err)
 }

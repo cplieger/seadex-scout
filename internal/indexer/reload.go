@@ -103,7 +103,7 @@ type snapshotLoader struct {
 }
 
 // newSnapshotCache builds the cache for the snapshot file at path. It does not
-// load: the caller decides when the reload clock runs (Run starts it eagerly so
+// load: the caller decides when the reload clock runs (run starts it eagerly so
 // a restart serves the last feed immediately).
 func newSnapshotCache(path, abPasskey string, log *slog.Logger) *snapshotCache {
 	c := &snapshotCache{
@@ -131,12 +131,12 @@ var snapshotWatchInterval = time.Minute
 // start begins the cache's own reload clock - the initial load of the persisted
 // snapshot, then one re-stat per snapshotWatchInterval until ctx is done - and
 // waits, briefly, for that first load so a restart serves the last persisted
-// feed immediately rather than empty until the next cycle. Run calls it before
+// feed immediately rather than empty until the next cycle. run calls it before
 // binding, so the work begins under the explicit lifecycle boundary rather than
 // during construction.
 func (c *snapshotCache) start(ctx context.Context) {
 	// One-shot by construction: firstLoad may only be closed once, so a second
-	// Run (a supervisor retrying after a bind failure) must not start a second
+	// run (a supervisor retrying after a bind failure) must not start a second
 	// loader - the close would panic in a goroutine outside the daemon's
 	// recover shield. The first loader is still the one serving.
 	if !c.watchStarted.CompareAndSwap(false, true) {

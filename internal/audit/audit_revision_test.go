@@ -68,7 +68,7 @@ func TestAuditOlderRevisionOnIncompleteEntryIsQualified(t *testing.T) {
 }
 
 func TestOlderRevisionOrderedAfterAltBeforeUnverified(t *testing.T) {
-	alt := slices.Index(verdictOrder, VerdictAlt)
+	alt := slices.Index(verdictOrder, verdictAlt)
 	older := slices.Index(verdictOrder, VerdictOlderRevision)
 	unverified := slices.Index(verdictOrder, VerdictUnverified)
 	if alt < 0 || older != alt+1 || unverified != older+1 {

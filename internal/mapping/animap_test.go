@@ -259,7 +259,7 @@ func TestParseAnimap_placementReachesBothJoins(t *testing.T) {
 	if got := parsed.listFacts(); got != 0 {
 		t.Errorf("parseAnimap listFacts() = %d, want 0: a placement is not a mapping list", got)
 	}
-	idx := buildIndex(parsed.records, parsed.mappings, parsed.parentMappings)
+	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
 	for _, id := range []int{10, 11} {
 		rec, _ := idx.Lookup(id)
 		if got, _ := idx.MappingFor(&rec); !slices.Equal(got.Specials, []int{5, 6}) {

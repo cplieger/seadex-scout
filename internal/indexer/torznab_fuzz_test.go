@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // FuzzParseTorznab exercises the Prowlarr Torznab XML parser on arbitrary bytes.

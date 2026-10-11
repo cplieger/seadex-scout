@@ -23,10 +23,10 @@ const (
 	NameNyaa = "Nyaa"
 	// NameAnimeBytes is the canonical name of the AnimeBytes tracker.
 	NameAnimeBytes = "AnimeBytes"
-	// NameAnimeTosho is the canonical name of the AnimeTosho tracker.
-	NameAnimeTosho = "AnimeTosho"
-	// NameRuTracker is the canonical name of the RuTracker tracker.
-	NameRuTracker = "RuTracker"
+	// nameAnimeTosho is the canonical name of the AnimeTosho tracker.
+	nameAnimeTosho = "AnimeTosho"
+	// nameRuTracker is the canonical name of the RuTracker tracker.
+	nameRuTracker = "RuTracker"
 )
 
 // Type is the obtainability class of a release's tracker.
@@ -79,12 +79,12 @@ var table = []tableEntry{
 		aliases: []string{"ab"},
 	},
 	{
-		tracker: Tracker{Name: NameAnimeTosho, Type: Public, BaseURL: "https://animetosho.xyz"},
+		tracker: Tracker{Name: nameAnimeTosho, Type: Public, BaseURL: "https://animetosho.xyz"},
 		// .xyz is the site's current home; .org labels itself an archive and
 		// .net is the mirror its front page names. All three serve /view/<id>.
 		altHosts: []string{"animetosho.org", "animetosho.net"},
 	},
-	{tracker: Tracker{Name: NameRuTracker, Type: Public, BaseURL: "https://rutracker.org"}},
+	{tracker: Tracker{Name: nameRuTracker, Type: Public, BaseURL: "https://rutracker.org"}},
 }
 
 // byAlias indexes the table by lowercased canonical name and alias for

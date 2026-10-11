@@ -1,7 +1,6 @@
 package audit
 
 import (
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -60,14 +59,14 @@ func TestAuditItemTotals(t *testing.T) {
 			Groups: []string{"meh", "zzz"}, SeasonGroups: map[int][]string{1: {"meh"}, 2: {"zzz"}},
 		},
 	}}
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
 		{AniListID: 4, Type: "TV", TvdbID: 200},
 		{AniListID: 6, Type: "TV", TvdbID: 300},
 		{AniListID: 7, Type: "TV", TvdbID: 400},
 		{AniListID: 9, Type: "TV", TvdbID: 500},
 		{AniListID: 10, Type: "TV", TvdbID: 600},
-	})
+	}})
 	offered := seasonMatch(&snap.Items[4], 8, 0, "best", "")
 	offered.Record = mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonPresent}
 	matches := []match.Match{
@@ -90,17 +89,17 @@ func TestAuditItemTotals(t *testing.T) {
 	}
 	for title, want := range map[string][]Verdict{
 		"AllBest":     {VerdictNoFile, VerdictBest, VerdictBest},
-		"HalfAlt":     {VerdictAlt, VerdictBest},
+		"HalfAlt":     {verdictAlt, VerdictBest},
 		"OnlyNoFile":  {VerdictNoFile},
 		"Uncovered":   {VerdictNotOnSeaDex},
-		"OfferedOnly": {VerdictUnattributed, VerdictNotOnSeaDex},
-		"AltUnlisted": {VerdictUnlisted, VerdictAlt},
+		"OfferedOnly": {verdictUnattributed, VerdictNotOnSeaDex},
+		"AltUnlisted": {VerdictUnlisted, verdictAlt},
 	} {
 		if got := verdicts[title]; !slices.Equal(got, want) {
 			t.Fatalf("%s verdicts = %v, want %v: the fixture no longer builds the case it names", title, got, want)
 		}
 	}
-	want := ItemTotals{Anime: 6, WithEntry: 5, AllBest: 1, AllBestOrAlt: 2}
+	want := itemCounts{Anime: 6, WithEntry: 5, AllBest: 1, AllBestOrAlt: 2}
 	if rep.Items != want {
 		t.Errorf("Audit(...).Items = %+v, want %+v", rep.Items, want)
 	}
@@ -108,17 +107,13 @@ func TestAuditItemTotals(t *testing.T) {
 
 func libraryContract(t *testing.T, msg string) []string {
 	t.Helper()
-	raw, err := os.ReadFile("../../alerts/logql.yaml")
-	if err != nil {
-		t.Fatalf("read alerts/logql.yaml: %v", err)
-	}
-	c, err := logcontract.Parse(raw)
+	c, err := logcontract.Load("../..")
 	if err != nil {
 		t.Fatalf("parse the log contract: %v", err)
 	}
 	attrs, ok := c.Messages[msg]
 	if !ok || len(attrs) == 0 {
-		t.Fatalf("alerts/logql.yaml declares no attributes for %q", msg)
+		t.Fatalf("the log contract declares no attributes for %q", msg)
 	}
 	return attrs
 }
@@ -127,12 +122,12 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Totals:      map[string]int{string(VerdictBest): 4, string(VerdictNoFile): 1, string(VerdictUnverified): 1, string(VerdictAlt): 1},
-		Items:       ItemTotals{Anime: 9, WithEntry: 7, AllBest: 3, AllBestOrAlt: 5},
-		Rows: []Row{
+		Totals:      map[string]int{string(VerdictBest): 4, string(VerdictNoFile): 1, string(VerdictUnverified): 1, string(verdictAlt): 1},
+		Items:       itemCounts{Anime: 9, WithEntry: 7, AllBest: 3, AllBestOrAlt: 5},
+		Rows: []reportRow{
 			{Title: "Gone", AniListID: 1, Arr: library.ArrSonarr, Verdict: VerdictNoFile, SeaDexURL: "https://releases.moe/1"},
 			{Title: "Unknown", AniListID: 2, Arr: library.ArrRadarr, Verdict: VerdictUnverified, SeaDexURL: "https://releases.moe/2"},
-			{Title: "Alt", AniListID: 3, Arr: library.ArrSonarr, Verdict: VerdictAlt},
+			{Title: "Alt", AniListID: 3, Arr: library.ArrSonarr, Verdict: verdictAlt},
 			{Title: "Best", AniListID: 4, Arr: library.ArrSonarr, Verdict: VerdictBest},
 		},
 	}
@@ -146,7 +141,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	summaryAttrs := recordAttrs(recs[0])
 	for _, key := range libraryContract(t, "library summary") {
 		if _, ok := summaryAttrs[key]; !ok {
-			t.Errorf("library summary lacks %q, which alerts/logql.yaml declares stable", key)
+			t.Errorf("library summary lacks %q, which the log contract declares stable", key)
 		}
 	}
 	for key, want := range map[string]int64{
@@ -161,7 +156,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 
 func TestReportSummaryCarriesItemTotals(t *testing.T) {
 	log, rec := capture.New()
-	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Totals: map[string]int{}, Items: ItemTotals{Anime: 3, WithEntry: 2, AllBest: 1, AllBestOrAlt: 2}}
+	r := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Totals: map[string]int{}, Items: itemCounts{Anime: 3, WithEntry: 2, AllBest: 1, AllBestOrAlt: 2}}
 	if err := r.Log(t.Context(), log); err != nil {
 		t.Fatalf("Log: %v", err)
 	}

@@ -121,8 +121,8 @@ type Decision struct {
 
 // Decide resolves the one comparison decision both align consumers project
 // their vocabulary from: the daemon's compare pass maps it to Finding/Status
-// (internal/compare) and the audit report to Row/Verdict/Qualifier
-// (internal/audit). The entry's SiblingSeasons and Seasons both bound a
+// (internal/compare) and the audit report to its report rows' verdicts and
+// qualifiers (internal/audit). The entry's SiblingSeasons and Seasons both bound a
 // whole-series comparison to its own seasons, from two sources: Seasons (its
 // TVDB season ranges from the mapping list) wins when present, else the seasons
 // sibling records map are dropped. Its Specials decide the episodes scope.

@@ -13,7 +13,7 @@ import (
 // fallback. audit only ever reaches Has through the TMDB/TVDB paths, so the
 // IMDb fallback and the zero-TVDB guard are otherwise untested.
 func TestCatalogueHas(t *testing.T) {
-	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{
+	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
 		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
 		// Wrong-arm identifiers must not be catalogued (the HasArrIdentifier
@@ -27,7 +27,7 @@ func TestCatalogueHas(t *testing.T) {
 		{AniListID: 3, Type: "MOVIE", TvdbID: 555},
 		{AniListID: 4, Type: "OVA", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
 		{AniListID: 5, Type: "TV", TvdbID: 700, TmdbMovies: []int{800}},
-	}), nil)
+	}}), nil)
 	tests := []struct {
 		name string
 		item library.Item
@@ -64,11 +64,11 @@ func TestCatalogueHas(t *testing.T) {
 // override id must never be indexed (it would recognize every Radarr item
 // carrying the same whitespace value as anime).
 func TestCatalogueIgnoresBlankMovieIMDbIDs(t *testing.T) {
-	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{{
+	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: []mapping.Record{{
 		AniListID: 1,
 		Type:      "MOVIE",
 		IMDbIDs:   []string{" ", "\t"},
-	}}), nil)
+	}}}), nil)
 	for _, imdb := range []string{" ", "\t"} {
 		item := library.Item{Arr: library.ArrRadarr, ImdbID: imdb}
 		if cat.Has(&item) {
@@ -89,7 +89,7 @@ func TestCatalogueKeep(t *testing.T) {
 		{AniListID: 3, Type: "TV", TvdbID: 600},
 	}
 	keepTV := func(r mapping.Record) bool { return r.Type == "TV" }
-	cat := NewCatalogue(mapping.NewIndex(records), keepTV)
+	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), keepTV)
 
 	ovaOnly := library.Item{Arr: library.ArrSonarr, TvdbID: 500}
 	if cat.Has(&ovaOnly) {
@@ -100,7 +100,7 @@ func TestCatalogueKeep(t *testing.T) {
 		t.Error("a kept sibling record sharing the TVDB id must keep the item catalogued")
 	}
 
-	all := NewCatalogue(mapping.NewIndex(records), nil)
+	all := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), nil)
 	if !all.Has(&ovaOnly) {
 		t.Error("a nil keep predicate must catalogue every record")
 	}

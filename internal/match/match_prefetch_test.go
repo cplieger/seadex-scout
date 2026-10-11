@@ -19,7 +19,7 @@ import (
 // defined in match_test.go.
 func TestPrefetchNegativelyMemoizesOnCompleteBatch(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 77, Type: "MOVIE"}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 77, Type: "MOVIE"}}})
 	fake := &batchCountingAniList{media: map[int]anilist.Media{}}
 	m := New(fake, nil)
 
@@ -37,7 +37,7 @@ func TestPrefetchNegativelyMemoizesOnCompleteBatch(t *testing.T) {
 	if res.Degraded {
 		t.Error("Degraded = true, want false: a definitive not-found is not a degraded cycle")
 	}
-	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped {
+	if len(res.Matches) != 1 || res.Matches[0].Source != sourceUnmapped {
 		t.Errorf("match = %+v, want a single unmapped entry", res.Matches)
 	}
 }
@@ -51,7 +51,7 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 5, Title: "Clannad", TvdbID: 700, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil) // no mapping record at all: the no-record trigger
+	idx := mapping.NewIndex(mapping.Source{}) // no mapping record at all: the no-record trigger
 	fake := &batchCountingAniList{media: map[int]anilist.Media{
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
@@ -64,7 +64,7 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 	if fake.fetchCalls != 0 {
 		t.Errorf("single Fetch calls = %d, want 0 (the batch pre-warms the memo)", fake.fetchCalls)
 	}
-	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != sourceTitle {
 		t.Errorf("matches = %+v, want one title match to the Sonarr series", res.Matches)
 	}
 }
@@ -100,7 +100,7 @@ func TestPrefetchEmptyRecordLocalBatchFallsBackPerID(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 5, Title: "Clannad", TvdbID: 700, Year: 2007},
 	}}
-	idx := mapping.NewIndex(nil)
+	idx := mapping.NewIndex(mapping.Source{})
 	fake := &batchRecordErrAniList{batchCountingAniList{media: map[int]anilist.Media{
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}}
@@ -113,7 +113,7 @@ func TestPrefetchEmptyRecordLocalBatchFallsBackPerID(t *testing.T) {
 	if fake.fetchCalls != 1 {
 		t.Errorf("single Fetch calls = %d, want 1 (record-local empty batch must fall back per id, not fail fast)", fake.fetchCalls)
 	}
-	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != sourceTitle {
 		t.Errorf("matches = %+v, want one title match via the per-id fallback", res.Matches)
 	}
 }
@@ -153,11 +153,11 @@ func (s *scopedBatchRecordAniList) FetchMany(_ context.Context, _ []int) (anilis
 // whole TTL, and refusing to memoize the verified ones dumps the entire pending
 // set into rate-limited per-id fetches.
 func TestPrefetchScopesNegativeMemoToVerifiedChunks(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: pending, answered by the batch
 		{AniListID: 22, Type: "MOVIE"}, // id-less: pending, its chunk is unverified
 		{AniListID: 33, Type: "MOVIE"}, // id-less: pending, absent from a CLEAN chunk
-	})
+	}})
 	fake := &scopedBatchRecordAniList{}
 
 	res := New(fake, nil).Match(t.Context(),
@@ -236,11 +236,11 @@ func (a *abortingBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 // an abort in an early chunk would otherwise turn a handful of batched requests into one
 // request per remaining id, the storm batching exists to remove.
 func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"}, // id-less: answered by the first pass
 		{AniListID: 22, Type: "MOVIE"}, // id-less: abandoned, must be re-batched
 		{AniListID: 33, Type: "MOVIE"}, // id-less: abandoned, must be re-batched
-	})
+	}})
 	fake := &abortingBatchAniList{
 		media: map[int]anilist.Media{
 			11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
@@ -281,11 +281,11 @@ func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 // worklist is progress; re-asking the same one is a spin, and the ids are already
 // covered by the per-id path's own failure breaker.
 func TestPrefetchDoesNotReBatchAWholeAbandonedWorklist(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"},
 		{AniListID: 22, Type: "MOVIE"},
 		{AniListID: 33, Type: "MOVIE"},
-	})
+	}})
 	fake := &abortingBatchAniList{
 		media: map[int]anilist.Media{
 			11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
@@ -314,11 +314,11 @@ func TestPrefetchDoesNotReBatchAWholeAbandonedWorklist(t *testing.T) {
 // isolates it. scopedBatchRecordAniList names id 22 unverified with no
 // unrequested tail.
 func TestPrefetchDoesNotReBatchRecordLocalIDs(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 11, Type: "MOVIE"},
 		{AniListID: 22, Type: "MOVIE"},
 		{AniListID: 33, Type: "MOVIE"},
-	})
+	}})
 	fake := &scopedBatchRecordAniList{}
 
 	New(fake, nil).Match(t.Context(),

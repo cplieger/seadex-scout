@@ -39,7 +39,7 @@ func (f *specialsSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error
 type placedMapping struct{}
 
 func (placedMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
-	return *prev, mapping.NewIndexWithMappings(prev.Records, prev.Mappings), nil
+	return *prev, mapping.NewIndex(mapping.Source{Records: prev.Records, Mappings: prev.Mappings}), nil
 }
 
 const placedOVAID = 5

@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/keyenc"
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // TestMaxBytesMirrorsKeyencBudget is what keeps a change to keyenc from silently

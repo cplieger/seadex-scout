@@ -22,7 +22,7 @@ func TestCompareTierOnBetterRelease(t *testing.T) {
 		held     string
 		others   []seadex.Torrent
 		opts     filter.Options
-		wantTier Tier
+		wantTier findingTier
 	}{
 		{
 			name: "holds a SeaDex alt", held: "erai-raws",
@@ -32,7 +32,7 @@ func TestCompareTierOnBetterRelease(t *testing.T) {
 		{
 			name: "holds nothing SeaDex lists", held: "horriblesubs",
 			others:   []seadex.Torrent{{ReleaseGroup: "Erai-raws", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}},
-			wantTier: TierUnlisted,
+			wantTier: tierUnlisted,
 		},
 		{
 			name: "holds a best the filters exclude", held: "judas",
@@ -115,9 +115,9 @@ func TestCompareTierHidesAnimeBytesWhenOff(t *testing.T) {
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 	for _, tc := range []struct {
 		c    *Comparer
-		want Tier
+		want findingTier
 	}{
-		{c: comparer(filter.Options{}, false), want: TierUnlisted},
+		{c: comparer(filter.Options{}, false), want: tierUnlisted},
 		{c: abComparer(), want: TierAlt},
 	} {
 		got := tc.c.Compare([]match.Match{m})

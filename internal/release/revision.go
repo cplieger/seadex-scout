@@ -10,13 +10,12 @@ import (
 	"github.com/cplieger/seadex-scout/internal/nametoken"
 )
 
-// RevisionMarker names what a revision reading rests on.
-type RevisionMarker uint8
+type revisionMarker uint8
 
 const (
 	// RevisionUnknown means no revision evidence was read at all. It is the zero
 	// value, so a reading nobody took never compares as an original release.
-	RevisionUnknown RevisionMarker = iota
+	RevisionUnknown revisionMarker = iota
 	// RevisionNone means evidence was read and carries no revision token: an
 	// original release, Version 1 in the arrs' numbering.
 	RevisionNone
@@ -30,7 +29,7 @@ const (
 	RevisionProper
 )
 
-// revisionMarkerNames is indexed by RevisionMarker and is the persisted text of
+// revisionMarkerNames is indexed by revisionMarker and is the persisted text of
 // each marker.
 var revisionMarkerNames = [...]string{
 	RevisionUnknown: "unknown",
@@ -41,14 +40,14 @@ var revisionMarkerNames = [...]string{
 }
 
 var (
-	_ encoding.TextMarshaler   = RevisionMarker(0)
-	_ encoding.TextUnmarshaler = (*RevisionMarker)(nil)
+	_ encoding.TextMarshaler   = revisionMarker(0)
+	_ encoding.TextUnmarshaler = (*revisionMarker)(nil)
 	_ fmt.Stringer             = Revision{}
 )
 
 // MarshalText renders the marker under its persisted name. It fails only for a
 // value outside the declared constants.
-func (m RevisionMarker) MarshalText() ([]byte, error) {
+func (m revisionMarker) MarshalText() ([]byte, error) {
 	if int(m) >= len(revisionMarkerNames) {
 		return nil, fmt.Errorf("release: revision marker %d is not a declared marker", m)
 	}
@@ -58,11 +57,11 @@ func (m RevisionMarker) MarshalText() ([]byte, error) {
 // UnmarshalText decodes a persisted marker name. An unrecognized name decodes
 // to RevisionUnknown with a nil error: a decode error in a persisted snapshot
 // quarantines the whole file, and an unknown reading never claims anything.
-func (m *RevisionMarker) UnmarshalText(text []byte) error {
+func (m *revisionMarker) UnmarshalText(text []byte) error {
 	*m = RevisionUnknown
 	for marker, name := range revisionMarkerNames {
 		if string(text) == name {
-			*m = RevisionMarker(marker)
+			*m = revisionMarker(marker)
 			break
 		}
 	}
@@ -74,7 +73,7 @@ func (m *RevisionMarker) UnmarshalText(text []byte) error {
 // a PROPER or a REPACK raises it. The zero value is an unknown reading.
 type Revision struct {
 	Version int            `json:"version,omitempty"`
-	Marker  RevisionMarker `json:"marker,omitempty"`
+	Marker  revisionMarker `json:"marker,omitempty"`
 }
 
 // Known reports whether the reading rests on any evidence at all, including

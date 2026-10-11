@@ -15,16 +15,16 @@ import (
 
 // newerSchemaState reports whether data is what Load classifies as valid newer-schema
 // state: a JSON object envelope whose persisted "version" member decodes to an int beyond
-// SchemaVersion. It reads the wire shape directly (a streaming token decode) rather than
+// currentSchemaVersion. It reads the wire shape directly (a streaming token decode) rather than
 // decoding into State, so the oracle stays independent of production - a change to
 // State.Version's JSON tag or decoding shape moves Load's classification without silently
 // moving this helper with it. Every case-insensitive occurrence of the key must decode to
-// an int and the effective (last) value must exceed SchemaVersion; an invalid occurrence -
+// an int and the effective (last) value must exceed currentSchemaVersion; an invalid occurrence -
 // a JSON null, which encoding/json accepts as a no-op, or a negative value - is corruption.
 func newerSchemaState(data []byte) bool {
 	// Load's bounded read rejects an over-cap file before the version
 	// discriminator can be inspected, so it is quarantined as foreign/corrupt
-	// regardless of a valid newer-schema stamp (see the SchemaVersion doc).
+	// regardless of a valid newer-schema stamp (see the currentSchemaVersion doc).
 	if len(data) > maxStateBytes {
 		return false
 	}
@@ -72,13 +72,13 @@ func newerSchemaState(data []byte) bool {
 	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return false
 	}
-	return found && version > SchemaVersion
+	return found && version > currentSchemaVersion
 }
 
 // FuzzStoreLoadQuarantine drives Load with arbitrary state-file bytes and pins the
 // corruption-recovery invariants: Load never panics; a rejected payload is quarantined at
 // path+".corrupt" with its original bytes and the live path is renamed away - EXCEPT a
-// valid-UTF-8 decoded object whose Version is newer than SchemaVersion, which is valid
+// valid-UTF-8 decoded object whose Version is newer than currentSchemaVersion, which is valid
 // newer-schema state (an image rollback), stays at the live path with no .corrupt copy and
 // blocks Save so this binary cannot overwrite it; an accepted payload is never quarantined
 // and stays usable, unless HTML-escape expansion pushes the re-encoding over the shared
@@ -161,8 +161,8 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 		if loadErr != nil {
 			t.Fatalf("re-Load after Save of an accepted state failed: %v", loadErr)
 		}
-		if again.Version != SchemaVersion {
-			t.Errorf("re-loaded Version = %d, want stamped %d", again.Version, SchemaVersion)
+		if again.Version != currentSchemaVersion {
+			t.Errorf("re-loaded Version = %d, want stamped %d", again.Version, currentSchemaVersion)
 		}
 	})
 }

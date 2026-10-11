@@ -23,16 +23,15 @@ import (
 // arrUnknown labels coverage for an entry whose arr could not be determined.
 const arrUnknown = "unknown"
 
-// Source records how an entry was linked to a library item.
-type Source string
+type source string
 
 const (
 	// SourceID means the AniList ID resolved to an arr ID via the mapping.
-	SourceID Source = "id"
-	// SourceTitle means the AniList title fallback matched a library item.
-	SourceTitle Source = "title"
-	// SourceUnmapped means no library item was found for the entry.
-	SourceUnmapped Source = "unmapped"
+	SourceID source = "id"
+	// sourceTitle means the AniList title fallback matched a library item.
+	sourceTitle source = "title"
+	// sourceUnmapped means no library item was found for the entry.
+	sourceUnmapped source = "unmapped"
 )
 
 // Match is the result of linking one SeaDex entry.
@@ -57,7 +56,7 @@ type Match struct {
 	// one: it holds no file for the entry, yet the entry still covers it.
 	Uncompared *library.Item
 	Arr        string
-	Source     Source
+	Source     source
 	Entry      seadex.Entry
 	Record     mapping.Record
 }
@@ -77,11 +76,11 @@ func (m *Match) AlignEntry() *align.Entry {
 	return &align.Entry{Record: &m.Record, SiblingSeasons: m.SiblingSeasons, Seasons: m.Seasons, Specials: m.Specials}
 }
 
-// Coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
+// coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
 // log line. Hits counts entries whose record carries a usable arr id - the ID
 // bridge resolved an arr id - whether or not the item is in the library (a
 // resolved id absent from the library is a missing item, not a mapping gap).
-type Coverage struct {
+type coverage struct {
 	Hits     map[string]int
 	Unmapped map[string]int
 }
@@ -95,7 +94,7 @@ type Result struct {
 	// at is the pass's single clock reading, carried so PruneMemo prunes against
 	// the same instant every lookup and stamp in the pass compared against.
 	at            time.Time
-	Coverage      Coverage
+	Coverage      coverage
 	Memo          Memo
 	IncompleteIDs map[int]struct{}
 	Matches       []Match
@@ -138,7 +137,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	}
 	now := m.now()
 	m.restampSkewedExpiries(&memo, now)
-	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
+	cov := coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
 	outage := m.prefetch(ctx, entries, idx, lib, &memo, now)
 	run := &matchRun{
 		m:    m,
@@ -199,7 +198,7 @@ type matchRun struct {
 	lib  *LibIndex
 	idx  *mapping.Index
 	memo *Memo
-	cov  *Coverage
+	cov  *coverage
 	// gate carries the fast-fail state for per-id AniList lookups: ids covered
 	// by a totally-failed batch prefetch and, once the consecutive-failure
 	// breaker trips, every remaining uncached id fail fast instead of
@@ -247,7 +246,7 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 		// rate-limited AniList request confirming it (or degrade the whole
 		// cycle when that request fails transiently).
 		r.cov.Unmapped[arrUnknown]++
-		return Match{Entry: *e, Arr: arrUnknown, Source: SourceUnmapped}
+		return Match{Entry: *e, Arr: arrUnknown, Source: sourceUnmapped}
 	}
 	if recOK {
 		return r.matchMappedEntry(ctx, e, &rec, item, needsLookup)
@@ -284,7 +283,7 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	// keeps the fallback off the ~thousands of SeaDex entries the operator
 	// does not have, which otherwise dominate a cold cycle's AniList
 	// traffic.
-	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped})
+	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: sourceUnmapped})
 }
 
 func (r *matchRun) mapped(m *Match) Match {
@@ -355,15 +354,15 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
 		r.cov.Unmapped[arrUnknown]++
-		return Match{Entry: *e, Arr: arrUnknown, Source: SourceUnmapped}
+		return Match{Entry: *e, Arr: arrUnknown, Source: sourceUnmapped}
 	}
 	arr := formatArr(media.Format)
 	r.cov.Unmapped[arr]++
 	item := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log)
 	if item == nil {
-		return Match{Entry: *e, Arr: arr, Source: SourceUnmapped}
+		return Match{Entry: *e, Arr: arr, Source: sourceUnmapped}
 	}
-	return Match{Item: item, Entry: *e, Record: mapping.RecordFromFormat(media.Format), Arr: item.Arr, Source: SourceTitle}
+	return Match{Item: item, Entry: *e, Record: mapping.RecordFromFormat(media.Format), Arr: item.Arr, Source: sourceTitle}
 }
 
 // matchIDLessEntry links an entry whose mapping record exists but carries no arr
@@ -382,7 +381,7 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
 		r.cov.Unmapped[arr]++
-		return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+		return Match{Entry: *e, Record: *rec, Arr: arr, Source: sourceUnmapped}
 	}
 	// An UNTYPED id-less record carries no routing evidence at all: recordArr
 	// routes every non-MOVIE value (including "") to Sonarr, which would
@@ -402,9 +401,9 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	}
 	r.cov.Unmapped[arr]++
 	if matched := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log); matched != nil {
-		return r.mapped(&Match{Item: matched, Entry: *e, Record: *rec, Arr: matched.Arr, Source: SourceTitle})
+		return r.mapped(&Match{Item: matched, Entry: *e, Record: *rec, Arr: matched.Arr, Source: sourceTitle})
 	}
-	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped})
+	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: sourceUnmapped})
 }
 
 // recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).
@@ -591,7 +590,7 @@ func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 // imdbKey canonicalizes a library Item's IMDb id into its index/lookup key.
 // Only library-side inputs reach it: a mapping Record's ids are already
 // canonical, because Record.canonicalize trims them at every producer and
-// mapping.buildIndex reapplies the invariant to a decoded cache, so RoutedIDs
+// mapping.NewIndex reapplies the invariant to a decoded cache, so RoutedIDs
 // cannot return a padded or blank id.
 func imdbKey(id string) string { return strings.TrimSpace(id) }
 

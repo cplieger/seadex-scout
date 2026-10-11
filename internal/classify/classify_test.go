@@ -178,7 +178,7 @@ func TestFallbackPrecedence(t *testing.T) {
 		{"theoretical only", seadex.Entry{TheoreticalBest: "remux"}, FallbackTheoretical},
 		{"theoretical wins over incomplete", seadex.Entry{TheoreticalBest: "remux", Incomplete: true}, FallbackTheoretical},
 		{"incomplete only", seadex.Entry{Incomplete: true}, FallbackIncomplete},
-		{"neither flag", seadex.Entry{}, FallbackNone},
+		{"neither flag", seadex.Entry{}, fallbackNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

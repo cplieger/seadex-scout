@@ -78,7 +78,7 @@ func TestGroupsOverlap(t *testing.T) {
 		want Overlap
 	}{
 		{name: "case and whitespace insensitive known match", a: []string{" SubsPlease "}, b: []string{"subsplease"}, want: OverlapKnown},
-		{name: "disjoint known groups are proven divergence", a: []string{"PMR"}, b: []string{"LostYears"}, want: OverlapNone},
+		{name: "disjoint known groups are proven divergence", a: []string{"PMR"}, b: []string{"LostYears"}, want: overlapNone},
 		{name: "sentinel on both sides is a match", a: []string{""}, b: []string{NoGroup}, want: OverlapKnown},
 		{name: "no-group spelling variants on both sides are a match", a: []string{"no-group"}, b: []string{"nogroup"}, want: OverlapKnown},
 		{name: "sentinel on both sides beside known misses is a match", a: []string{"PMR", NoGroup}, b: []string{"LostYears", NoGroup}, want: OverlapKnown},
@@ -86,9 +86,9 @@ func TestGroupsOverlap(t *testing.T) {
 		{name: "known library side against an unknown set is unknown", a: []string{"SubsPlease"}, b: []string{NoGroup}, want: OverlapUnknown},
 		{name: "unknown member beside a known miss is unknown", a: []string{"SubsPlease", NoGroup}, b: []string{"LostYears"}, want: OverlapUnknown},
 		{name: "known-known match wins over unknown members", a: []string{NoGroup, "PMR"}, b: []string{"LostYears", " pmr "}, want: OverlapKnown},
-		{name: "empty side never overlaps", a: nil, b: []string{"PMR"}, want: OverlapNone},
-		{name: "unknown member against an empty side is none", a: []string{NoGroup}, b: nil, want: OverlapNone},
-		{name: "both sides empty is none", a: nil, b: nil, want: OverlapNone},
+		{name: "empty side never overlaps", a: nil, b: []string{"PMR"}, want: overlapNone},
+		{name: "unknown member against an empty side is none", a: []string{NoGroup}, b: nil, want: overlapNone},
+		{name: "both sides empty is none", a: nil, b: nil, want: overlapNone},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

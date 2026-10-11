@@ -12,34 +12,34 @@ import (
 )
 
 // TestReportJSONWireShapeKeys pins the report JSON's KEY SET, which no round-trip
-// test can see: TestWriteFilesWritesTimestampedPair unmarshals back into Report, so
-// a renamed struct tag round-trips perfectly while every external consumer of
-// report-<stamp>.json breaks. A minimal row pins the omitempty half. "scope" is
-// always present deliberately: it is the comparison the row's verdict was reached
-// under, so a consumer that cannot read it has to re-derive align's dispatch, and it
-// carries align.ScopeKind's own String() vocabulary rather than the iota. The "full"
-// fixture is MAXIMAL rather than realistic, so it carries mutually exclusive facts.
+// test can see: a renamed struct tag round-trips perfectly through Report while
+// every external consumer of report-<stamp>.json breaks. A minimal row pins the
+// omitempty half. "scope" is always present deliberately: it is the comparison
+// the row's verdict was reached under, so a consumer that cannot read it has to
+// re-derive align's dispatch, and it carries align.ScopeKind's own String()
+// vocabulary rather than the iota. The "full" fixture is MAXIMAL rather than
+// realistic, so it carries mutually exclusive facts.
 func TestReportJSONWireShapeKeys(t *testing.T) {
 	t.Run("maximal fixture", func(t *testing.T) {
 		full := &Report{
 			GeneratedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
-			Totals:      map[string]int{string(VerdictAlt): 1},
-			Rows: []Row{{
+			Totals:      map[string]int{string(verdictAlt): 1},
+			Rows: []reportRow{{
 				Title: "Frieren", Arr: "sonarr", ArrURL: "https://sonarr.example/series/frieren",
-				SeaDexURL: "https://releases.moe/154587", Verdict: VerdictAlt, Qualifier: QualifierMixed,
+				SeaDexURL: "https://releases.moe/154587", Verdict: verdictAlt, Qualifier: QualifierMixed,
 				MatchSource: "id", CurrentGroups: []string{"erai"}, AniListID: 154587, Season: 2,
 				Scope:   align.ScopeSeason,
 				Special: true, Incomplete: true, Approx: true, HiddenAnimeBytes: 3, HiddenAnimeBytesBest: 1,
 				GroupsUnknown:   true,
 				CurrentRevision: release.Revision{Version: 1, Marker: release.RevisionNone},
 				BestRevision:    release.Revision{Version: 2, Marker: release.RevisionRepack},
-				Releases: []Release{{
+				Releases: []rowRelease{{
 					Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/1",
 					Warnings: []string{"broken"}, Best: true, Filtered: true,
 					Unobtainable: true, URLError: true, UnknownTracker: true,
 				}},
 			}},
-			Incomplete: []IncompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
+			Incomplete: []incompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
 		}
 
 		data, err := renderJSON(full)
@@ -103,7 +103,7 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 		minimal := &Report{
 			GeneratedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
 			Totals:      map[string]int{},
-			Rows: []Row{{
+			Rows: []reportRow{{
 				Title: "Bare", Arr: "sonarr", SeaDexURL: "https://releases.moe/1",
 				Verdict: VerdictNoFile, MatchSource: "id", AniListID: 1,
 			}},

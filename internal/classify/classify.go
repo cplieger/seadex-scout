@@ -43,7 +43,7 @@ func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
 }
 
 // ABEvidence grades the AnimeBytes evidence in a SeaDex torrent. Like
-// filter.ABVisible it reads the RAW upstream URL (t.URL), never the published
+// filter.Obtainable it reads the RAW upstream URL (t.URL), never the published
 // link, because publishing trusts the tracker label and would rewrite or erase
 // the very host evidence the grading needs; the adapter owns that invariant for
 // compare and audit alike.
@@ -121,8 +121,8 @@ func FileResolution(files []seadex.File) string {
 type EntryFallback int
 
 const (
-	// FallbackNone means the entry warrants no fallback classification.
-	FallbackNone EntryFallback = iota
+	// fallbackNone means the entry warrants no fallback classification.
+	fallbackNone EntryFallback = iota
 	// FallbackTheoretical means the entry names only a theoretical best.
 	FallbackTheoretical
 	// FallbackIncomplete means the entry is incomplete with nothing recommended.
@@ -141,5 +141,5 @@ func Fallback(entry *seadex.Entry) EntryFallback {
 	case entry.Incomplete:
 		return FallbackIncomplete
 	}
-	return FallbackNone
+	return fallbackNone
 }

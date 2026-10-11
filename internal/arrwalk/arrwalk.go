@@ -495,8 +495,8 @@ func (w *Walker) resolveTags(ctx context.Context,
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolving arr_tags: %w", err)
 	}
-	includeIDs = w.resolveOne(tags, w.includeTags)
-	excludeIDs = w.resolveOne(tags, w.excludeTags)
+	includeIDs = resolveOne(tags, w.includeTags)
+	excludeIDs = resolveOne(tags, w.excludeTags)
 	return includeIDs, excludeIDs, nil
 }
 
@@ -506,7 +506,7 @@ func (w *Walker) resolveTags(ctx context.Context,
 // keeping an occasionally-used tag breaks nothing). The one shape worth a
 // warning is a filter that keeps NO items, and warnFilteredEmpty owns that by
 // reading the outcome rather than the config.
-func (w *Walker) resolveOne(tags []arrapi.Tag, labels []string) map[int]struct{} {
+func resolveOne(tags []arrapi.Tag, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
 		return nil
 	}

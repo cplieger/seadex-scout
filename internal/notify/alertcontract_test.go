@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/logcontract"
 )
 
@@ -233,16 +234,16 @@ func TestCapURLAttrHoldsTheAlertBound(t *testing.T) {
 // maxAlertTextBytes rather than the multi-KB Loki log-line budget, which is
 // what makes TestAlertAnnotationBudgetFitsTheEmbedLimit's arithmetic describe
 // the shipped template rather than just its constants. Every other assertion on
-// this function bounds it by maxAttrBytes, 16x looser, so a regression to the
+// this function bounds it by logattr.MaxBytes, 16x looser, so a regression to the
 // log-line budget would let an oversized SeaDex title push the clickable
 // tracker links out of the embed with the whole suite green.
 func TestCapAlertTextAttrHoldsTheAlertBound(t *testing.T) {
 	t.Parallel()
 	for name, raw := range map[string]string{
-		"plain oversized title":  strings.Repeat("A", 4*maxAttrBytes),
-		"escape-growing title":   strings.Repeat("*", 4*maxAttrBytes),
-		"multi-byte CJK title":   strings.Repeat("葬", 4*maxAttrBytes),
-		"oversized group marker": strings.Repeat("[PMR]", maxAttrBytes),
+		"plain oversized title":  strings.Repeat("A", 4*logattr.MaxBytes),
+		"escape-growing title":   strings.Repeat("*", 4*logattr.MaxBytes),
+		"multi-byte CJK title":   strings.Repeat("葬", 4*logattr.MaxBytes),
+		"oversized group marker": strings.Repeat("[PMR]", logattr.MaxBytes),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -264,17 +265,13 @@ func TestCapAlertTextAttrHoldsTheAlertBound(t *testing.T) {
 	}
 }
 
-// TestFindingLinesCarryTheLogContract pins every finding message alerts/logql.yaml
+// TestFindingLinesCarryTheLogContract pins every finding message the log contract
 // declares stable to the attributes it lists for it, so a dashboard or rule
 // built on the contract cannot lose a column to a renamed key. current_tier
 // is asserted with its value too: it is the one attribute the dashboard reads
 // that no alert rule groups by.
 func TestFindingLinesCarryTheLogContract(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "alerts", "logql.yaml"))
-	if err != nil {
-		t.Fatalf("read alerts/logql.yaml: %v", err)
-	}
-	contract, err := logcontract.Parse(raw)
+	contract, err := logcontract.Load(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("parse the log contract: %v", err)
 	}
@@ -283,7 +280,7 @@ func TestFindingLinesCarryTheLogContract(t *testing.T) {
 			msg := message(status)
 			want, ok := contract.Messages[msg]
 			if !ok || len(want) == 0 {
-				t.Fatalf("alerts/logql.yaml declares no attributes for %q", msg)
+				t.Fatalf("the log contract declares no attributes for %q", msg)
 			}
 			f := sizedFinding("k1", "Frieren", 2, 1, download("x", 2))
 			f.Status, f.Tier = status, compare.TierAlt
@@ -303,7 +300,7 @@ func TestFindingLinesCarryTheLogContract(t *testing.T) {
 			}
 			for _, key := range want {
 				if _, ok := got[key]; !ok {
-					t.Errorf("%q line lacks %q, which alerts/logql.yaml declares stable", msg, key)
+					t.Errorf("%q line lacks %q, which the log contract declares stable", msg, key)
 				}
 			}
 			if status == compare.StatusBetter && got["current_tier"] != string(compare.TierAlt) {

@@ -18,7 +18,7 @@ import (
 // title last (the writer then derives from file names). The movie typing and
 // the RESOLVED season ride along whenever the record exists.
 func TestFeedEntryInfoFallbackChain(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
 		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{555}},
 		{AniListID: 3, Type: "MOVIE", IMDbIDs: []string{"tt0000001"}},
@@ -30,7 +30,7 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		// The same untyped shape, but carrying a positive season.tvdb and no
 		// routed arr id: the memo's MOVIE format must win the season too.
 		{AniListID: 21, SeasonTvdb: 3},
-	})
+	}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "Frieren: Beyond Journey's End", Year: 2023},
 		{Arr: library.ArrRadarr, ArrID: 11, TmdbID: 555, Title: "A Silent Voice", Year: 2016},
@@ -127,11 +127,11 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 // items, so a movie whose mapping record carries a TV-colliding id must not
 // take a same-keyed Sonarr item's title (it falls through to the memo).
 func TestFeedEntryInfoArrConsistentRouting(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		// A MOVIE record whose TMDB id collides with a Sonarr item's TmdbID
 		// (disjoint namespaces over the same small-int key space).
 		{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{42}},
-	})
+	}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 5, TmdbID: 42, Title: "Same-Named Series"},
 	}}
@@ -152,7 +152,7 @@ func TestFeedEntryInfoUsesExpiredMemoTitles(t *testing.T) {
 	memo := match.Memo{Entries: map[int]match.MemoEntry{
 		1: {Titles: []string{"Expired Show"}, Expiry: time.Now().Add(-time.Hour)},
 	}}
-	got := feedEntryInfo(mapping.NewIndex(nil), &library.Snapshot{}, memo)(1)
+	got := feedEntryInfo(mapping.NewIndex(mapping.Source{}), &library.Snapshot{}, memo)(1)
 	if got.Title != "Expired Show" {
 		t.Errorf("info(1).Title = %q, want the expired memo title still used", got.Title)
 	}
@@ -163,7 +163,7 @@ func TestFeedEntryInfoUsesExpiredMemoTitles(t *testing.T) {
 // survive an episode-fetch failure, so the feed's title source does not
 // degrade with one flaky walk.
 func TestFeedEntryInfoFailedPlaceholderStillTitles(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123}}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "Flaky Show", Failed: true},
 	}}
@@ -180,7 +180,7 @@ func TestFeedEntryInfoEmptyMemoTitles(t *testing.T) {
 	memo := match.Memo{Entries: map[int]match.MemoEntry{
 		1: {Titles: []string{}, Year: 2020},
 	}}
-	got := feedEntryInfo(mapping.NewIndex(nil), &library.Snapshot{}, memo)(1)
+	got := feedEntryInfo(mapping.NewIndex(mapping.Source{}), &library.Snapshot{}, memo)(1)
 	if got.Title != "" || got.Year != 0 {
 		t.Errorf("info(1) = %+v, want the zero EntryInfo for an empty-titles memo entry", got)
 	}
@@ -199,9 +199,9 @@ func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
 		"whitespace only": " \t ",
 	} {
 		t.Run(name, func(t *testing.T) {
-			idx := mapping.NewIndex([]mapping.Record{
+			idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 				{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
-			})
+			}})
 			lib := &library.Snapshot{Items: []library.Item{
 				{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: arrTitle, Year: 2023},
 			}}
@@ -258,7 +258,7 @@ func TestResolvedSeason(t *testing.T) {
 // monitored series at all. Every other case in this file has only one tier
 // populated, so an inverted chain (memo consulted first) passes them all.
 func TestFeedEntryInfoArrTitleWinsOverMemo(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123}}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "Arr Own Title", Year: 2023},
 	}}
@@ -279,7 +279,7 @@ func TestFeedEntryInfoArrTitleWinsOverMemo(t *testing.T) {
 // never see the show in the RSS feed. The existing format rows use unmapped
 // ids only, so dropping the record-absent guard passes them all.
 func TestFeedEntryInfoMappingTypingWinsOverMemoFormat(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2}}})
 	memo := match.Memo{Entries: map[int]match.MemoEntry{
 		1: {Titles: []string{"Memo Title"}, Year: 2021, Format: "MOVIE"},
 	}}
@@ -304,7 +304,7 @@ func TestFeedEntryInfoMappingTypingWinsOverMemoFormat(t *testing.T) {
 // never sees it. No other row can catch a hoist of applyMemoTyping above the early
 // return: they all lack a library hit.
 func TestFeedEntryInfoLibraryHitKeepsSeriesTyping(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 30, TvdbID: 555, SeasonTvdb: 2}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 30, TvdbID: 555, SeasonTvdb: 2}}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 555, Title: "Untyped But In Sonarr", Year: 2022},
 	}}
@@ -332,7 +332,7 @@ func TestFeedEntryInfoLibraryHitKeepsSeriesTyping(t *testing.T) {
 // in this file has TvdbID 0, so HasArrIdentifier is false there and this arm is
 // otherwise unexercised.
 func TestFeedEntryInfoRoutedUntypedRecordIgnoresMemoMovieFormat(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 31, TvdbID: 556}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 31, TvdbID: 556}}})
 	lib := &library.Snapshot{}
 	memo := match.Memo{Entries: map[int]match.MemoEntry{
 		31: {Titles: []string{"Memo Film Title"}, Year: 2019, Format: "MOVIE"},
@@ -354,12 +354,12 @@ func TestFeedEntryInfoRoutedUntypedRecordIgnoresMemoMovieFormat(t *testing.T) {
 // different work and one Radarr can never match. The film keeps its own
 // SeaDex-derived name and still reports the Sonarr target and the tvdb id.
 func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "MOVIE", TvdbID: 79525, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 2, Type: "MOVIE", TvdbID: 79525, TmdbMovies: []int{5528}, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 3, Type: "TV", TvdbID: 79525, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
 		{AniListID: 4, Type: "MOVIE", TmdbMovies: []int{999}},
-	})
+	}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 79525, Title: "Code Geass", Year: 2006},
 		{Arr: library.ArrRadarr, ArrID: 11, TmdbID: 5528, Title: "Lelouch of the Resurrection", Year: 2019},
@@ -405,7 +405,7 @@ func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
 // every mapped record.
 func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 	ranges := []mapping.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
-	idx := mapping.NewIndexWithMappings([]mapping.Record{
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "MOVIE", TvdbID: 79525, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 2, Type: "MOVIE", TvdbID: 79525, TmdbMovies: []int{5528}, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 3, Type: "TV", TvdbID: 79525, AniDBID: 7949, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
@@ -415,14 +415,14 @@ func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 		{AniListID: 7, Type: "OVA", TvdbID: 79525, AniDBID: 8001, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 8, Type: "MOVIE", TvdbID: 79525, AniDBID: 905, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 9, Type: "MOVIE", TvdbID: 81797, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
-	}, map[int]mapping.Mapping{
+	}, Mappings: map[int]mapping.Mapping{
 		6008: {SpecialEpisode: 4, SpecialsTvdb: 79525},
 		6009: {SpecialEpisode: 4, SpecialsTvdb: 70000},
 		7949: {SpecialEpisode: 1, SpecialsTvdb: 79525},
 		69:   {Seasons: ranges},
 		8001: {Specials: []int{9, 10}, SpecialsTvdb: 79525, SpecialsEpisodes: 2},
 		905:  {SpecialEpisode: 8, Specials: []int{8, 12}, SpecialsTvdb: 79525, SpecialsEpisodes: 3},
-	})
+	}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 79525, Title: "Code Geass", Year: 2006},
 		{Arr: library.ArrRadarr, ArrID: 11, TmdbID: 5528, Title: "Lelouch of the Resurrection", Year: 2019},

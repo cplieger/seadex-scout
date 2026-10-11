@@ -9,12 +9,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/logcontract"
 )
 
 // The bundled grafana-dashboard.json is a consumer of the log contract
-// alerts/logql.yaml publishes, so every message and attribute a panel reads
+// docs/monitoring.md publishes, so every message and attribute a panel reads
 // must be in that contract, and the time windows must follow the operator's
 // Grafana range rather than assume a retention.
 
@@ -42,15 +43,23 @@ var (
 	groupableRe   = regexp.MustCompile(`^(avg|min|max|stddev|stdvar|quantile|first|last)_over_time\($`)
 	outerSumRe    = regexp.MustCompile(`sum\s+by\s*\([^)]*\)\s*\($`)
 	byRe          = regexp.MustCompile(`\bby\s*\(([^)]*)\)`)
-	summaryReadRe = regexp.MustCompile("\\|=\\s*`(upgrade sizes|biggest upgrade|group rank)`")
+	summaryReadRe = regexp.MustCompile("\\|=\\s*`(upgrade sizes|biggest upgrade)`")
 	regexMetaRe   = regexp.MustCompile(`[\\.*+?()\[\]{}^$]`)
 	urlHostRe     = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://([^/"\s:?#]+)`)
 	ipv4Re        = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
 )
 
-// allowedWindows are the fixed windows that encode seadex-scout's own cadence;
-// anything reaching back into history must use Grafana's range.
-var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "26h", "72h"}
+// allowedWindows are the fixed windows that encode seadex-scout's own cadence
+// or a shipped alert rule's window; anything reaching back into history must
+// use Grafana's range.
+var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "6h", "26h", "72h", "7d"}
+
+// rateWindows are the smoothing intervals a rate may take. They hold only
+// under a rate: the same [5m] under count_over_time measures a fixed period.
+var (
+	rateWindows      = []string{"$__rate_interval", "5m"}
+	rateAggregations = []string{"rate", "bytes_rate", "rate_counter"}
+)
 
 type dashTarget struct {
 	datasource any
@@ -67,13 +76,9 @@ type dashPanel struct {
 
 func loadContract(t *testing.T) logcontract.Contract {
 	t.Helper()
-	raw, err := os.ReadFile(alertRulesFile)
+	c, err := logcontract.Load(".")
 	if err != nil {
-		t.Fatalf("read %s: %v", alertRulesFile, err)
-	}
-	c, err := logcontract.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse the log contract in %s: %v", alertRulesFile, err)
+		t.Fatalf("parse the log contract in %s: %v", logcontract.Path, err)
 	}
 	return c
 }
@@ -157,11 +162,15 @@ func pipelineMessages(stages string) (msgs, problems []string) {
 	return msgs, problems
 }
 
-func checkPipeline(c *logcontract.Contract, stages, window string) []string {
+// smoothsARate reports whether window is a rate's smoothing interval, given
+// the expression text before the pipeline it closes.
+func smoothsARate(before, window string) bool {
+	agg := aggregationRe.FindStringSubmatch(before)
+	return agg != nil && slices.Contains(rateAggregations, agg[1]) && slices.Contains(rateWindows, window)
+}
+
+func checkPipeline(c *logcontract.Contract, stages string) []string {
 	var problems []string
-	if !slices.Contains(allowedWindows, window) {
-		problems = append(problems, "window ["+window+"] is neither Grafana's range nor one of the app's cadence windows")
-	}
 	if regexLineRe.MatchString(stages) {
 		problems = append(problems, "a regex or negative line filter cannot be checked; filter on msg instead")
 	}
@@ -198,15 +207,19 @@ func checkPipeline(c *logcontract.Contract, stages, window string) []string {
 // one range pipeline at a time.
 func checkExpr(c *logcontract.Contract, expr string) []string {
 	if m := logQueryRe.FindStringSubmatch(expr); m != nil {
-		return checkPipeline(c, m[1], "$__range")
+		return checkPipeline(c, m[1])
 	}
-	pipes := pipelineRe.FindAllStringSubmatch(expr, -1)
+	pipes := pipelineRe.FindAllStringSubmatchIndex(expr, -1)
 	if len(pipes) == 0 {
 		return []string{"no log pipeline found"}
 	}
 	var problems []string
 	for _, p := range pipes {
-		problems = append(problems, checkPipeline(c, p[1], p[2])...)
+		window := expr[p[4]:p[5]]
+		if !slices.Contains(allowedWindows, window) && !smoothsARate(expr[:p[0]], window) {
+			problems = append(problems, "window ["+window+"] is neither Grafana's range, a rate's smoothing interval, nor one of the app's cadence windows")
+		}
+		problems = append(problems, checkPipeline(c, expr[p[2]:p[3]])...)
 	}
 	problems = append(problems, checkGrouping(expr)...)
 	for _, m := range offsetRe.FindAllStringSubmatch(expr, -1) {
@@ -278,7 +291,7 @@ func matchingParen(s string, open int) int {
 
 // snapshotMessages are the lines a pass re-states in full, so a table over
 // them shows one pass only by joining on the newest pass's pass_id.
-var snapshotMessages = []string{"better release available", "manual review", "biggest upgrade", "group rank"}
+var snapshotMessages = []string{"better release available", "manual review", "biggest upgrade"}
 
 // passMessages are the per-pass lines whose newest pass_id a snapshot joins on.
 var passMessages = []string{"findings reported", "upgrade sizes"}
@@ -361,7 +374,7 @@ func TestDashboardItemTableCheckRejects(t *testing.T) {
 // subtracts byte fields itself, where an unknown size would read as 0, and the
 // net change tile and column read size_change_bytes.
 func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
-	byteField := regexp.MustCompile(`unwrap (recommended_bytes|current_bytes|recommended_bytes_total|current_bytes_replaced)\b[^|]*\)[^)]*\)?\s*[-+]`)
+	byteField := regexp.MustCompile(`unwrap (recommended_bytes|current_bytes|recommended_bytes_total|current_bytes_replaced|download_bytes_total)\b[^|]*\)[^)]*\)?\s*[-+]`)
 	reads := 0
 	for _, tg := range dashboardTargets(loadDashboard(t)) {
 		if byteField.MatchString(tg.expr) {
@@ -373,6 +386,36 @@ func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
 	}
 	if reads < 2 {
 		t.Errorf("%d queries read size_change_bytes, want the net change tile and the upgrades table", reads)
+	}
+}
+
+// The download total leaves out every upgrade whose download size is unknown,
+// so it is a lower bound: its tile must say "at least", and the count it leaves
+// out must be on the dashboard.
+func TestDashboardDownloadTotalReadsAsALowerBound(t *testing.T) {
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	totals, unsized := 0, 0
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		el := elements[name]
+		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
+		for _, q := range queries {
+			expr, _ := field(q, "spec", "query", "spec", "expr").(string)
+			if strings.Contains(expr, "unwrap upgrades_download_unsized ") {
+				unsized++
+			}
+			if !strings.Contains(expr, "unwrap download_bytes_total ") {
+				continue
+			}
+			totals++
+			title, _ := field(el, "spec", "title").(string)
+			shown, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "defaults", "displayName").(string)
+			if !strings.Contains(title+" "+shown, "at least") {
+				t.Errorf("panel %q shows the download total as %q, want it to say at least", title, shown)
+			}
+		}
+	}
+	if totals == 0 || unsized == 0 {
+		t.Fatalf("%s reads the download total %d times and the unsized count %d times, want both", dashboardPath, totals, unsized)
 	}
 }
 
@@ -400,6 +443,8 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 		"global-only key":     sel + " | json level=\"level\", title=\"title\" | level=`ERROR` [1h]",
 		"bare json":           sel + " | json | msg=`library summary` [26h]",
 		"fixed day window":    sel + " | json msg=\"msg\" | msg=`reconcile complete` [30d]",
+		"5m count":            "count_over_time(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [5m])",
+		"rate interval count": "count_over_time(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [$__rate_interval])",
 		"fixed offset":        sel + " | json msg=\"msg\" | msg=`reconcile complete` [2h] offset 7d",
 		"regex alternative":   sel + " | json msg=\"msg\" | msg=~`cycle .*` [3h]",
 		"regex line filter":   sel + " |~ `reconcile (started|complete)` | json msg=\"msg\" | msg=`reconcile complete` [3h]",
@@ -410,7 +455,7 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 		"info_hash grouping":  "count(sum by (info_hash, arr) (count_over_time(" + sel + " |= `better release available` | json msg=\"msg\", info_hash=\"info_hash\" | msg=`better release available` [2h])))",
 		"ungrouped sum":       "sum(sum_over_time(" + sel + " |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
 		"summary of no view":  "last_over_time(" + sel + " |= `upgrade sizes` | json msg=\"msg\", upgrades=\"upgrades\" | msg=`upgrade sizes` | unwrap upgrades [2h]) by ()",
-		"log query bare json": sel + " |= `group rank` | json | msg=`group rank` | hidden_tier=\"$optional\"",
+		"log query bare json": sel + " |= `biggest upgrade` | json | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
 	}
 	for name, expr := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -421,7 +466,9 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 	}
 	for _, ok := range []string{
 		"last_over_time(" + sel + " |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]) by ()",
-		sel + " |= `group rank` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`group rank` | hidden_tier=\"$optional\"",
+		sel + " |= `biggest upgrade` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
+		"sum by () (rate(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [5m]))",
+		"sum by () (rate(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [$__rate_interval]))",
 	} {
 		if problems := checkExpr(&c, ok); len(problems) != 0 {
 			t.Errorf("checkExpr(%q) = %v, want no problem", ok, problems)
@@ -432,8 +479,8 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 // TestDashboardShape pins what makes the file importable into any deployment:
 // a schema v2 resource whose metadata.name is seadex-scout, a datasource
 // variable first and used by every query, a container variable, the
-// optional-upgrades switch defaulting to Hide, no fixed number of days, and no
-// host but the SeaDex site.
+// optional-upgrades switch defaulting to Hide, no fixed number of days outside
+// allowedWindows, and no host but the SeaDex site.
 func TestDashboardShape(t *testing.T) {
 	raw, err := os.ReadFile(dashboardPath)
 	if err != nil {
@@ -478,7 +525,7 @@ func TestDashboardShape(t *testing.T) {
 		}
 	}
 	text := string(raw)
-	if m := regexp.MustCompile(`\b\d+ ?days?\b|\[\d+d\]|offset \d+d`).FindString(text); m != "" {
+	if m := regexp.MustCompile(`\b\d+ ?days?\b|offset \d+d`).FindString(text); m != "" {
 		t.Errorf("dashboard carries %q, want no fixed number of days anywhere", m)
 	}
 	for _, m := range urlHostRe.FindAllStringSubmatch(text, -1) {
@@ -545,6 +592,77 @@ func TestDashboardShowsPerCheckAveragesAsAverages(t *testing.T) {
 	}
 }
 
+// tableColumns maps each table override's matched field to the header it
+// shows: its displayName, else the field name.
+func tableColumns(el any) map[string]map[string]any {
+	columns := map[string]map[string]any{}
+	overrides, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "overrides").([]any)
+	for _, o := range overrides {
+		name, _ := field(o, "matcher", "options").(string)
+		props := map[string]any{"displayName": name}
+		list, _ := field(o, "properties").([]any)
+		for _, p := range list {
+			id, _ := field(p, "id").(string)
+			props[id] = field(p, "value")
+		}
+		columns[name] = props
+	}
+	return columns
+}
+
+func tables(t *testing.T) map[string]any {
+	t.Helper()
+	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
+	out := map[string]any{}
+	for name, el := range elements {
+		if field(el, "spec", "vizConfig", "group") == "table" {
+			out[name] = el
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s carries no table", dashboardPath)
+	}
+	return out
+}
+
+// Grafana sorts by a column's shown header, so a sortBy naming a header no
+// column shows leaves the table unsorted.
+func TestDashboardTablesSortByAShownColumn(t *testing.T) {
+	all := tables(t)
+	for _, name := range slices.Sorted(maps.Keys(all)) {
+		el := all[name]
+		shown := map[string]bool{}
+		for _, props := range tableColumns(el) {
+			header, _ := props["displayName"].(string)
+			shown[header] = true
+		}
+		sortBy, _ := field(el, "spec", "vizConfig", "spec", "options", "sortBy").([]any)
+		for _, s := range sortBy {
+			if header, _ := field(s, "displayName").(string); !shown[header] {
+				t.Errorf("panel %q sorts by %q, which no column shows", field(el, "spec", "title"), header)
+			}
+		}
+	}
+}
+
+// A fixed column narrower than its header plus the filter and sort icons cuts
+// the header: at least 8 px per character plus 56 px.
+func TestDashboardTableColumnsFitTheirHeaders(t *testing.T) {
+	all := tables(t)
+	for _, name := range slices.Sorted(maps.Keys(all)) {
+		el := all[name]
+		for column, props := range tableColumns(el) {
+			header, _ := props["displayName"].(string)
+			floor := float64(utf8.RuneCountInString(header)*8 + 56)
+			for _, key := range []string{"custom.width", "custom.minWidth"} {
+				if width, ok := props[key].(float64); ok && width < floor {
+					t.Errorf("panel %q column %q (%q) has %s %v, want at least %v", field(el, "spec", "title"), column, header, key, width, floor)
+				}
+			}
+		}
+	}
+}
+
 func panelDecimals(fieldConfig any) []float64 {
 	var out []float64
 	if d, ok := field(fieldConfig, "defaults", "decimals").(float64); ok {
@@ -562,29 +680,6 @@ func panelDecimals(fieldConfig any) []float64 {
 		}
 	}
 	return out
-}
-
-// Dividing by a zero items_with_entry yields NaN, which Grafana renders as a
-// value; dividing by (x > 0) yields no series, so the panel shows its no-value text.
-func TestDashboardGuardsTheBestShareDenominator(t *testing.T) {
-	guarded := regexp.MustCompile(`(?s)^\(.*>\s*0\s*\)$`)
-	ratios := map[string]bool{}
-	for _, tg := range dashboardTargets(loadDashboard(t)) {
-		for _, d := range divisors(tg.expr) {
-			if !strings.Contains(d, "items_with_entry") {
-				continue
-			}
-			ratios[tg.panel] = true
-			if !guarded.MatchString(d) {
-				t.Errorf("panel %q divides by %s, want the divisor compared with > 0\nexpr: %s", tg.panel, d, tg.expr)
-			}
-		}
-	}
-	for _, panel := range []string{"SeaDex best", "SeaDex alt"} {
-		if !ratios[panel] {
-			t.Errorf("panel %q does not divide by items_with_entry, want the best-share ratio", panel)
-		}
-	}
 }
 
 // The upgrades tile and table must hide the same optional upgrades, or the
@@ -615,7 +710,7 @@ var errorsOnlyRe = regexp.MustCompile("\\|\\s*level\\s*=\\s*`ERROR`")
 
 // A table that reads only ERROR records cannot show a stopped check, which
 // logs nothing, so its title and its empty text must say errors rather than
-// claim every problem behind Status.
+// claim every problem seadex-scout can have.
 func TestDashboardErrorTablesSayTheyListErrors(t *testing.T) {
 	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
 	n := 0
@@ -646,20 +741,6 @@ func TestDashboardErrorTablesSayTheyListErrors(t *testing.T) {
 	}
 }
 
-// The Status tile sits on another tab than the panels that explain it, so its
-// description must name that tab as a tab.
-func TestDashboardStatusNamesTheHealthTab(t *testing.T) {
-	d := loadDashboard(t)
-	desc, _ := field(d, "spec", "elements", "panel-10", "spec", "description").(string)
-	health := tabHolding(t, d, "panel-52")
-	if home := tabHolding(t, d, "panel-10"); home == health {
-		t.Fatalf("Status and Last check are both on tab %q, want them on different tabs", home)
-	}
-	if !strings.Contains(desc, "the "+health+" tab") {
-		t.Errorf("Status description = %q, want it to name the %s tab", desc, health)
-	}
-}
-
 // A bar chart counting events per $__interval draws one bar per event at a
 // week's range, so every bar chart buckets by day and its title says so.
 func TestDashboardBarChartsCountPerDay(t *testing.T) {
@@ -682,6 +763,151 @@ func TestDashboardBarChartsCountPerDay(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatalf("%s carries no bar chart, so this check checks nothing", dashboardPath)
+	}
+}
+
+// fixedWindows maps each panel that measures over a fixed window, other than
+// a tile held to its alert rule's windows, to the windows it keeps, in query
+// order, and the words of its description that say why it ignores the time
+// range. Pinning the windows keeps one query from moving to the range alone.
+var fixedWindows = map[string]struct {
+	reason  string
+	windows []string
+}{
+	"panel-34": {reason: "whatever time range you pick", windows: []string{"2h", "2h"}},
+}
+
+var (
+	aggregationRe = regexp.MustCompile(`(\w+)\(\s*$`)
+	// A per-day bucket names a unit, not a length, so "per day" is not matched.
+	fixedLengthRe = regexp.MustCompile(`(?i)\b\d+\s*(s|m|h|d|w|y|mo|mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\b|\b(last|past|previous|this)\s+(hour|day|week|month|year)\b|\b(today|yesterday)\b`)
+)
+
+// measuredWindows returns the fixed windows expr measures a period over. A
+// Grafana interval follows the time range, last_over_time reads only the
+// newest line, so its window bridges the gap between two lines, and a rate's
+// smoothing interval sets no period.
+func measuredWindows(expr string) []string {
+	var out []string
+	for _, m := range pipelineRe.FindAllStringSubmatchIndex(expr, -1) {
+		window, before := expr[m[4]:m[5]], expr[:m[0]]
+		if strings.HasPrefix(window, "$__") || smoothsARate(before, window) {
+			continue
+		}
+		if agg := aggregationRe.FindStringSubmatch(before); agg != nil && agg[1] == "last_over_time" {
+			continue
+		}
+		out = append(out, window)
+	}
+	return out
+}
+
+// layoutTitles returns the dashboard's title and every tab and row title.
+func layoutTitles(d map[string]any) []string {
+	title, _ := field(d, "spec", "title").(string)
+	out := []string{title}
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if x["kind"] == "TabsLayoutTab" || x["kind"] == "RowsLayoutRow" {
+				t, _ := field(x, "spec", "title").(string)
+				out = append(out, t)
+			}
+			for _, child := range x {
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(field(d, "spec", "layout"))
+	return out
+}
+
+// A panel that counts, sums or compares over time reads the time range the
+// reader picked, and no title names a length the range could contradict.
+func TestDashboardWindowsFollowTheTimeRange(t *testing.T) {
+	d := loadDashboard(t)
+	titles := layoutTitles(d)
+	if len(titles) < 2 {
+		t.Fatalf("%s has no tab or row title, so the layout walk found nothing", dashboardPath)
+	}
+	for _, title := range titles {
+		if m := fixedLengthRe.FindString(title); m != "" {
+			t.Errorf("tab, row or dashboard title %q names the length %q, want a title true at any time range", title, m)
+		}
+	}
+	elements, _ := field(d, "spec", "elements").(map[string]any)
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		title, _ := field(elements[name], "spec", "title").(string)
+		if m := fixedLengthRe.FindString(title); m != "" {
+			t.Errorf("panel %q names the length %q, want a title true at any time range", title, m)
+		}
+		if alertTiles[name] != "" {
+			continue
+		}
+		desc, _ := field(elements[name], "spec", "description").(string)
+		want, excepted := fixedWindows[name]
+		var fixed []string
+		for _, expr := range panelExprs(d, name) {
+			fixed = append(fixed, measuredWindows(expr)...)
+		}
+		switch {
+		case len(fixed) > 0 && !excepted:
+			t.Errorf("panel %q measures over the fixed windows %v, want $__range", title, fixed)
+		case excepted && !slices.Equal(fixed, want.windows):
+			t.Errorf("panel %q measures over the fixed windows %v, want exactly its excepted %v", title, fixed, want.windows)
+		case excepted && !strings.Contains(desc, want.reason):
+			t.Errorf("panel %q keeps the fixed windows %v, want its description to say %q", title, fixed, want.reason)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(fixedWindows)) {
+		if _, ok := elements[name]; !ok {
+			t.Errorf("fixedWindows names %s, which %s does not carry", name, dashboardPath)
+		}
+	}
+}
+
+func TestDashboardWindowCheckRejects(t *testing.T) {
+	const pipe = `{container="$container"} | json msg="msg" | msg=` + "`reconcile complete`"
+	for name, expr := range map[string]string{
+		"30d count":                 "sum by () (count_over_time(" + pipe + " [30d]))",
+		"7d rate":                   "rate(" + pipe + " [7d])",
+		"24h maximum":               "max_over_time(" + pipe + " | unwrap duration [24h]) by ()",
+		"5m count":                  "sum by () (count_over_time(" + pipe + " [5m]))",
+		"5m sum of unwrapped bytes": "sum by () (sum_over_time(" + pipe + " | unwrap bytes [5m]))",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := measuredWindows(expr); len(got) == 0 {
+				t.Errorf("measuredWindows(%q) = none, want its fixed window", expr)
+			}
+		})
+	}
+	for _, expr := range []string{
+		"count_over_time(" + pipe + " [$__range])",
+		"count_over_time(" + pipe + " [$__interval])",
+		"max(last_over_time(" + pipe + " | unwrap rows [26h]) by ())",
+		"sum by () (rate(" + pipe + " [5m]))",
+		"sum by () (rate(" + pipe + " [$__rate_interval]))",
+		"sum by () (bytes_rate(" + pipe + " [5m]))",
+		pipe,
+	} {
+		if got := measuredWindows(expr); len(got) != 0 {
+			t.Errorf("measuredWindows(%q) = %v, want none", expr, got)
+		}
+	}
+	for _, title := range []string{"Restarts (30d)", "Errors in the last 24 hours", "Feed reads this week", "Checks in 7 days", "Errors today", "Upgrades, last month"} {
+		if !fixedLengthRe.MatchString(title) {
+			t.Errorf("title %q names a length, want it rejected", title)
+		}
+	}
+	for _, title := range []string{"Feed reads per tracker per day", "Errors in this range", "Last full check", "Releases in the RSS feed"} {
+		if fixedLengthRe.MatchString(title) {
+			t.Errorf("title %q names no length, want it accepted", title)
+		}
 	}
 }
 
@@ -717,43 +943,6 @@ func referencesElement(v any, element string) bool {
 		}
 	}
 	return false
-}
-
-// divisors returns the right operand of every '/' in expr, read as one
-// parenthesized group or one function call.
-func divisors(expr string) []string {
-	var out []string
-	for i, c := range expr {
-		if c != '/' {
-			continue
-		}
-		if op := leadingOperand(strings.TrimLeft(expr[i+1:], " \t\n")); op != "" {
-			out = append(out, op)
-		}
-	}
-	return out
-}
-
-func leadingOperand(s string) string {
-	open := strings.IndexFunc(s, func(r rune) bool {
-		return r != '_' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
-	})
-	if open < 0 || s[open] != '(' {
-		return ""
-	}
-	depth := 0
-	for i := open; i < len(s); i++ {
-		switch s[i] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return s[:i+1]
-			}
-		}
-	}
-	return ""
 }
 
 func TestDashboardNamesTheUncomparedSpecialsPlainly(t *testing.T) {

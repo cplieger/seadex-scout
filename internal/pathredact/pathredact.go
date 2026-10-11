@@ -26,10 +26,10 @@ const ReportDirMarker = "[report.dir]"
 // it corrupts the records instead of protecting anything.
 const minRedactablePath = 8
 
-// Text replaces every occurrence of dir - and of each of its path-prefix
+// redactText replaces every occurrence of dir - and of each of its path-prefix
 // ancestors, which an os.PathError for a failed intermediate component
 // (MkdirAll) can carry instead of the full dir - with ReportDirMarker.
-func Text(dir, s string) string {
+func redactText(dir, s string) string {
 	if dir == "" {
 		return s
 	}
@@ -71,7 +71,7 @@ func Err(dir string, err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := Text(dir, err.Error())
+	msg := redactText(dir, err.Error())
 	if msg == err.Error() {
 		return err
 	}
@@ -102,7 +102,7 @@ func Logger(log *slog.Logger, dir string) *slog.Logger {
 // redactingHandler is the slog.Handler behind Logger: a pass-through to the
 // wrapped handler that rewrites string-valued attributes, error-valued
 // attributes (re-emitted as their redacted text), group members, and the
-// record message through Text.
+// record message through redactText.
 type redactingHandler struct {
 	inner slog.Handler
 	dir   string
@@ -114,7 +114,7 @@ func (h *redactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 //nolint:gocritic // hugeParam: the by-value slog.Record is the slog.Handler interface signature.
 func (h *redactingHandler) Handle(ctx context.Context, rec slog.Record) error {
-	out := slog.NewRecord(rec.Time, rec.Level, Text(h.dir, rec.Message), rec.PC)
+	out := slog.NewRecord(rec.Time, rec.Level, redactText(h.dir, rec.Message), rec.PC)
 	rec.Attrs(func(a slog.Attr) bool {
 		out.AddAttrs(h.redactAttr(a))
 		return true
@@ -141,13 +141,13 @@ func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
 	switch v.Kind() {
 	case slog.KindString:
-		return slog.String(a.Key, Text(h.dir, v.String()))
+		return slog.String(a.Key, redactText(h.dir, v.String()))
 	case slog.KindAny:
 		// A typed-nil error (a non-nil interface holding a nil pointer)
 		// would panic in Error(); leave it to the wrapped handler, which
 		// renders it without calling Error() (and it can carry no path).
 		if err, ok := v.Any().(error); ok && err != nil && !isNilErrValue(err) {
-			return slog.String(a.Key, Text(h.dir, err.Error()))
+			return slog.String(a.Key, redactText(h.dir, err.Error()))
 		}
 		return a
 	case slog.KindGroup:

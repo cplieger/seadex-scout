@@ -9,10 +9,10 @@ import "testing"
 func TestNormalize(t *testing.T) {
 	tests := map[string]string{
 		"":          "",
-		"movie":     Movie,
-		"  MOVIE  ": Movie,
-		"\tova\n":   OVA,
-		"tv_short":  TVShort,
+		"movie":     movie,
+		"  MOVIE  ": movie,
+		"\tova\n":   ova,
+		"tv_short":  tvShort,
 		"TV SHORT":  "TV SHORT", // a space is NOT an underscore: still unknown
 		"not_a_fmt": "NOT_A_FMT",
 	}
@@ -30,7 +30,7 @@ func TestNormalize(t *testing.T) {
 // non-canonical value is not - so a token added to the constants without being
 // added to the set fails here instead of silently desynchronizing the halves.
 func TestKnownCoversEveryTokenAndNothingElse(t *testing.T) {
-	for _, tok := range []string{TV, TVShort, Movie, Special, OVA, ONA, Music} {
+	for _, tok := range []string{tv, tvShort, movie, special, ova, ona, music} {
 		if !Known(tok) {
 			t.Errorf("Known(%q) = false, want true for a declared token", tok)
 		}
@@ -55,13 +55,13 @@ func TestClassification(t *testing.T) {
 		movie,
 		special bool
 	}{
-		{Movie, true, false},
-		{TV, false, false},
-		{TVShort, false, false},
-		{OVA, false, true},
-		{ONA, false, true},
-		{Special, false, true},
-		{Music, false, true},
+		{movie, true, false},
+		{tv, false, false},
+		{tvShort, false, false},
+		{ova, false, true},
+		{ona, false, true},
+		{special, false, true},
+		{music, false, true},
 		{"", false, false},
 		{"NOT_A_FORMAT", false, false},
 		{"movie", false, false}, // non-canonical: callers Normalize first

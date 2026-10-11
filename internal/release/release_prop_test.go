@@ -36,7 +36,7 @@ func TestGroupsOverlapProperties(t *testing.T) {
 		if GroupsOverlap(a, b) != GroupsOverlap(b, a) {
 			t.Fatalf("GroupsOverlap not symmetric for %q / %q", a, b)
 		}
-		if GroupsOverlap(a, nil) != OverlapNone || GroupsOverlap(nil, b) != OverlapNone {
+		if GroupsOverlap(a, nil) != overlapNone || GroupsOverlap(nil, b) != overlapNone {
 			t.Fatalf("overlap with an empty side must be None: %q / %q", a, b)
 		}
 
@@ -53,7 +53,7 @@ func TestGroupsOverlapProperties(t *testing.T) {
 		}
 
 		if len(b) > 0 {
-			if got := GroupsOverlap(append(a, NoGroup), b); got == OverlapNone {
+			if got := GroupsOverlap(append(a, NoGroup), b); got == overlapNone {
 				t.Fatalf("an unknown member beside %q against non-empty %q must never prove divergence", a, b)
 			}
 		}

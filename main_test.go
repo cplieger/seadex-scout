@@ -1058,7 +1058,7 @@ func TestBuildIndexer(t *testing.T) {
 
 // TestStartIndexerUnconfiguredIsNoOp pins the socket-less contract: with no
 // Prowlarr Torznab URL configured, startIndexer builds no indexer and starts
-// no goroutine (no log record from an indexer Run/stop path), and the
+// no goroutine (no log record from an indexer Supervise/stop path), and the
 // returned stop func returns immediately instead of waiting on a goroutine.
 // Serial (capture swaps slog.Default).
 func TestStartIndexerUnconfiguredIsNoOp(t *testing.T) {
@@ -1116,10 +1116,10 @@ func TestWriteStarterConfigOwnerOnlyMode(t *testing.T) {
 }
 
 // TestStartIndexerLogsRunErrorAndStops pins the configured half of startIndexer:
-// the feed goroutine is launched, a Run failure is logged as the component=indexer
+// the feed goroutine is launched, a Supervise failure is logged as the component=indexer
 // ERROR fault line, and the returned stop func waits for the goroutine rather than
 // deadlocking or returning before the record is written. The failure used is
-// indexer.Run's fail-closed refusal on an empty feed_api_key, which returns before
+// the indexer's fail-closed refusal on an empty feed_api_key, which returns before
 // any port bind and before every context check, so the message is stable even if
 // stop's cancel wins the race. Serial: capture swaps slog.Default.
 func TestStartIndexerLogsRunErrorAndStops(t *testing.T) {

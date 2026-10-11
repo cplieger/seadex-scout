@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/xmlx"
 )
 
@@ -605,7 +605,7 @@ func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) 
 	if err := x.decodeField(d, &s); err != nil {
 		return err
 	}
-	*dst = runesafe.Untrusted(s)
+	*dst = runesafe.NewUntrusted(s)
 	return nil
 }
 

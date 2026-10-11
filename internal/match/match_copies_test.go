@@ -14,7 +14,7 @@ var placedFilm = mapping.Record{
 }
 
 func copiesIndex(rec mapping.Record, specials []int) *mapping.Index {
-	return mapping.NewIndexWithMappings([]mapping.Record{rec}, map[int]mapping.Mapping{rec.AniDBID: {Specials: specials, SpecialsTvdb: rec.TvdbID}})
+	return mapping.NewIndex(mapping.Source{Records: []mapping.Record{rec}, Mappings: map[int]mapping.Mapping{rec.AniDBID: {Specials: specials, SpecialsTvdb: rec.TvdbID}}})
 }
 
 func radarrFilm(hasFile bool) library.Item {

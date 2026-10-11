@@ -732,15 +732,15 @@ func (c *cancellingSonarr) Series(context.Context) ([]arrapi.Series, error) {
 	return nil, context.Canceled
 }
 
-func (c *cancellingSonarr) EpisodeFiles(context.Context, int) ([]arrapi.EpisodeFile, error) {
+func (*cancellingSonarr) EpisodeFiles(context.Context, int) ([]arrapi.EpisodeFile, error) {
 	return nil, nil
 }
 
-func (c *cancellingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*cancellingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (c *cancellingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*cancellingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 

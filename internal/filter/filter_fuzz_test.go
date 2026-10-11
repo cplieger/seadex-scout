@@ -54,26 +54,26 @@ func FuzzABVisible(f *testing.F) {
 	f.Add("unknown", "/local/path")
 	f.Fuzz(func(t *testing.T, trackerName, rawURL string) {
 		// Toggle on shows everything: the operator has AB access, nothing hides.
-		if !ABVisible(trackerName, rawURL, true) {
-			t.Errorf("ABVisible(%q, %q, true) = false, want true", trackerName, rawURL)
+		if !abVisible(trackerName, rawURL, true) {
+			t.Errorf("abVisible(%q, %q, true) = false, want true", trackerName, rawURL)
 		}
-		off := ABVisible(trackerName, rawURL, false)
+		off := abVisible(trackerName, rawURL, false)
 		// An AB-labeled tracker is always hidden when the toggle is off,
 		// whatever the URL says (cross-function consistency with
 		// tracker.IsAnimeBytes).
 		if tracker.IsAnimeBytes(trackerName) && off {
-			t.Errorf("ABVisible(%q, %q, false) = true, want false for an AB label", trackerName, rawURL)
+			t.Errorf("abVisible(%q, %q, false) = true, want false for an AB label", trackerName, rawURL)
 		}
 		// Metamorphic: production trims the URL, so whitespace padding must not
 		// change the verdict (a padded AB URL must not slip past the gate).
-		if padded := ABVisible(trackerName, " "+rawURL+"\t", false); padded != off {
-			t.Errorf("ABVisible(%q, padded, false) = %v, want %v (url %q)", trackerName, padded, off, rawURL)
+		if padded := abVisible(trackerName, " "+rawURL+"\t", false); padded != off {
+			t.Errorf("abVisible(%q, padded, false) = %v, want %v (url %q)", trackerName, padded, off, rawURL)
 		}
-		// Cross-function consistency: ABVisible must be exactly the grade
+		// Cross-function consistency: abVisible must be exactly the grade
 		// comparison, with no second reading of the evidence, so what is worth
 		// fuzzing is that the policy function and the grader never disagree.
 		if want := tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone; off != want {
-			t.Errorf("ABVisible(%q, %q, false) = %v but tracker.ClassifyAB = %d; the gate must be exactly the ABNone comparison", trackerName, rawURL, off, tracker.ClassifyAB(trackerName, rawURL))
+			t.Errorf("abVisible(%q, %q, false) = %v but tracker.ClassifyAB = %d; the gate must be exactly the ABNone comparison", trackerName, rawURL, off, tracker.ClassifyAB(trackerName, rawURL))
 		}
 		// Totality: every input lands in one of the three named grades, so an
 		// exhaustive consumer switch (notify.classifyTrackerLink) cannot fall
@@ -87,10 +87,10 @@ func FuzzABVisible(f *testing.F) {
 		// the toggle is off, and a lookalike suffix host must not be hidden as
 		// AB. Built from generated input, not by re-running the parser.
 		label := abLabel(rawURL)
-		if ABVisible("Nyaa", "https://"+label+".animebytes.tv/x", false) {
+		if abVisible("Nyaa", "https://"+label+".animebytes.tv/x", false) {
 			t.Errorf("subdomain %q.animebytes.tv surfaced with the toggle off", label)
 		}
-		if !ABVisible("Nyaa", "https://"+label+"animebytes.tv.example/x", false) {
+		if !abVisible("Nyaa", "https://"+label+"animebytes.tv.example/x", false) {
 			t.Errorf("lookalike host %sanimebytes.tv.example was hidden as AnimeBytes", label)
 		}
 	})
@@ -99,7 +99,7 @@ func FuzzABVisible(f *testing.F) {
 // FuzzABToggleNeverPublishesAnimeBytes pins the COMPOSED toggle invariant this
 // package owns only half of: with the animebytes toggle off, no release the
 // obtainability gate admits and no row the audit report keeps may carry a published
-// animebytes.tv link. The hide half is ABVisible over tracker.ClassifyAB and the
+// animebytes.tv link. The hide half is abVisible over tracker.ClassifyAB and the
 // publish half is trackerlink.Publish; the two agree only because every publish
 // path that can emit an AnimeBytes base also grades tracker.ABDefinite, so a change
 // to either ladder could open a leak silently.

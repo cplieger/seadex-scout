@@ -58,7 +58,7 @@ func TestServeMarksResponsesNonCacheable(t *testing.T) {
 	}
 }
 
-// TestRunRefusesEmptyAPIKey pins the fail-closed network boundary: Run with no
+// TestRunRefusesEmptyAPIKey pins the fail-closed network boundary: run with no
 // configured API key returns a configuration error before binding a listener,
 // so an unauthenticated Torznab feed (whose AnimeBytes RSS links embed
 // ab_passkey) can never be served by any construction path. The cancelled
@@ -68,7 +68,7 @@ func TestServeMarksResponsesNonCacheable(t *testing.T) {
 func TestRunRefusesEmptyAPIKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := New(&Config{ABPasskey: "pk"}, nil, nil).Run(ctx)
+	err := New(&Config{ABPasskey: "pk"}, nil, nil).run(ctx)
 	if err == nil {
 		t.Fatal("Run with empty APIKey returned nil, want a configuration error")
 	}
@@ -81,13 +81,13 @@ func TestRunRefusesEmptyAPIKey(t *testing.T) {
 // boundary: a feed_api_key left as a literal ${VAR} reference (the variable
 // unset or outside the expansion allowlist) is a GUESSABLE credential - the
 // placeholder spelling ships in the public config.example - on the only gate
-// protecting the /ab RSS body, whose download links embed ab_passkey. Run must
+// protecting the /ab RSS body, whose download links embed ab_passkey. run must
 // refuse to bind on it exactly as it does on an empty key, and the error must
 // name only the field, never the value.
 func TestRunRefusesUnresolvedAPIKeyPlaceholder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := New(&Config{APIKey: "${SEADEX_SCOUT_FEED_API_KEY}", ABPasskey: "pk"}, nil, nil).Run(ctx)
+	err := New(&Config{APIKey: "${SEADEX_SCOUT_FEED_API_KEY}", ABPasskey: "pk"}, nil, nil).run(ctx)
 	if err == nil {
 		t.Fatal("Run with an unresolved ${VAR} APIKey returned nil, want a configuration error")
 	}
@@ -751,7 +751,7 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 	}
 }
 
-// TestHandlerRoutesTorznabEndpoint pins the mux wiring Run actually serves:
+// TestHandlerRoutesTorznabEndpoint pins the mux wiring run actually serves:
 // the catch-all "/" route hands every path to serve, so a scoped Torznab path
 // like /nyaa reaches serve (200 caps) and an unscoped path 404s at serve, not
 // at the mux.
@@ -838,9 +838,9 @@ func TestLogParamCapsAtRuneBoundary(t *testing.T) {
 	}
 }
 
-// TestRunSurfacesBindFailureSynchronously pins Run's documented bind
+// TestRunSurfacesBindFailureSynchronously pins run's documented bind
 // contract: the listener is bound up front, so a port already in use fails
-// Run synchronously with an error naming the address (startIndexer logs it),
+// run synchronously with an error naming the address (startIndexer logs it),
 // never a silently dead feed goroutine.
 func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -851,7 +851,7 @@ func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 	orig := listenAddr
 	listenAddr = ln.Addr().String()
 	defer func() { listenAddr = orig }()
-	err = New(&Config{APIKey: "k"}, nil, nil).Run(t.Context())
+	err = New(&Config{APIKey: "k"}, nil, nil).run(t.Context())
 	if err == nil {
 		t.Fatal("Run on an occupied port returned nil, want a bind error")
 	}
@@ -860,11 +860,11 @@ func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 	}
 }
 
-// TestRunServesAndShutsDownGracefully pins Run's lifecycle: it binds, logs
+// TestRunServesAndShutsDownGracefully pins run's lifecycle: it binds, logs
 // the listening line, blocks until the shared daemon context is cancelled,
 // then shuts down gracefully returning nil and logging shutdown-complete -
 // the contract startIndexer's goroutine and the daemon's shutdown wait rely
-// on. The capture recorder is mutex-guarded, so polling it while Run's
+// on. The capture recorder is mutex-guarded, so polling it while run's
 // goroutine logs is race-safe; each lifecycle phase carries its own deadline.
 func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	orig := listenAddr
@@ -874,7 +874,7 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- New(&Config{APIKey: "k"}, log, nil).Run(ctx) }()
+	go func() { done <- New(&Config{APIKey: "k"}, log, nil).run(ctx) }()
 	startupDeadline := time.After(10 * time.Second)
 	for !rec.Contains("seadex-scout indexer listening") {
 		select {
@@ -1075,7 +1075,7 @@ func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
 	}
 }
 
-// TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt pins both halves of Run's
+// TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt pins both halves of run's
 // ab_passkey startup diagnostic. An unexpanded ${VAR} passkey cannot build a
 // grabbable AnimeBytes link, so a CONFIGURED AB tracker says so once at
 // startup - field-name-only, because the rejected value is a credential
@@ -1100,7 +1100,7 @@ func TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt(t *testing.T) {
 		APIKey:       "k",
 		ABTorznabURL: "http://prowlarr:9696/2/api",
 		ABPasskey:    ref,
-	}, log, nil).Run(ctx)
+	}, log, nil).run(ctx)
 
 	if !rec.Contains(warnMsg) {
 		t.Fatalf("configured AB tracker with an unexpanded passkey did not warn: %v", rec.Messages())
@@ -1115,7 +1115,7 @@ func TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt(t *testing.T) {
 	}
 
 	offLog, offRec := capture.New()
-	_ = New(&Config{APIKey: "k", ABPasskey: ref}, offLog, nil).Run(ctx)
+	_ = New(&Config{APIKey: "k", ABPasskey: ref}, offLog, nil).run(ctx)
 	if offRec.Contains(warnMsg) {
 		t.Errorf("warned about a parked passkey for a tracker with no ab_torznab_url: %v", offRec.Messages())
 	}

@@ -21,10 +21,7 @@ import (
 // Test-local aliases for the internal/library model the walker produces. The
 // walker itself always names the model explicitly, so the dependency direction
 // stays visible in the production code.
-type (
-	Item     = library.Item
-	Snapshot = library.Snapshot
-)
+type Item = library.Item
 
 const (
 	ArrSonarr = library.ArrSonarr
@@ -395,11 +392,11 @@ func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrap
 	}
 }
 
-func (f *boundedSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*boundedSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *boundedSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*boundedSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -474,11 +471,11 @@ func (f *cancelingSonarr) EpisodeFiles(ctx context.Context, _ int) ([]arrapi.Epi
 	return nil, ctx.Err()
 }
 
-func (f *cancelingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*cancelingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *cancelingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*cancelingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -1105,11 +1102,11 @@ func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi
 	}
 }
 
-func (f *budgetSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*budgetSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
 	return nil, nil
 }
 
-func (f *budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
+func (*budgetSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
@@ -1506,7 +1503,7 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 // TestWalkWarnsWhenTagFilteringEmptiesASide pins the dead-but-resolving-filter
 // diagnostic: every configured arr_tags label resolves to a real tag id but no
 // item carries it, so the side contributes zero items while the cycle still reads
-// healthy. resolveOne warns only when a LABEL missed, so this WARN and the
+// healthy. A label that misses is not reported either, so this WARN and the
 // snapshot's FilteredEmptyArrs are the two signals separating a silently-emptied
 // side from a genuinely empty library, hence the two negative arms below. Counts
 // only: the attrs never carry label values, which pass through ${VAR} expansion.
@@ -1688,7 +1685,7 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 // TestWalkStripsBaseURLCredentialsFromItemArrURL pins the Item-level credential
 // invariant Item.ArrURL documents: the walker builds the deep-link THROUGH
 // SafeLogURL, so a Basic Auth credential in sonarr.url / radarr.public_url never
-// enters an Item, a Snapshot, a Finding or an audit Row. The sink-side SafeLogURL
+// enters an Item, a Snapshot, a Finding or an audit report row. The sink-side SafeLogURL
 // call is belt-and-braces, so nothing else fails if this wrap is dropped. The link
 // must stay usable, so the assertion is the exact credential-free deep-link.
 func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {

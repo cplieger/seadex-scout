@@ -230,7 +230,7 @@ func assertQuarantined(t *testing.T, path, wantBody string) {
 
 // TestStoreLoadNegativeVersionQuarantines pins the version-domain check: the
 // documented legacy envelope's version is absent or zero and Save only stamps
-// SchemaVersion, so a negative decoded version is corruption - quarantined,
+// currentSchemaVersion, so a negative decoded version is corruption - quarantined,
 // never accepted as valid state.
 func TestStoreLoadNegativeVersionQuarantines(t *testing.T) {
 	const body = `{"version":-1}`
@@ -476,9 +476,9 @@ func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	}
 
 	padded := func(n int) *State {
-		// Version mirrors the SchemaVersion stamp Save applies to the copy it
+		// Version mirrors the currentSchemaVersion stamp Save applies to the copy it
 		// writes, so the json.Marshal probe below measures the on-disk shape.
-		return &State{Memo: paddedMemo(n), Version: SchemaVersion}
+		return &State{Memo: paddedMemo(n), Version: currentSchemaVersion}
 	}
 	base, err := json.Marshal(padded(0))
 	if err != nil {
@@ -658,9 +658,9 @@ func TestStorePartialWalkStreakPersistsUnderStableWireKey(t *testing.T) {
 
 // TestStoreSaveEnvelopeNestedShape pins the wire shape of the persisted members other
 // packages own (match.Memo, library.Snapshot). Their json tags define state.json's schema
-// while SchemaVersion, the discriminator that governs a rename, lives here - so a tag moved
+// while currentSchemaVersion, the discriminator that governs a rename, lives here - so a tag moved
 // on the domain side must fail in this package rather than silently zero-load out of every
-// existing state file at the next deploy. A deliberate rename means bumping SchemaVersion
+// existing state file at the next deploy. A deliberate rename means bumping currentSchemaVersion
 // in the same commit (see its doc) and updating the expectations below. The assertions are
 // on the KEY SET only, never the values, so ordinary value changes do not churn them.
 func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
@@ -731,7 +731,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	// library out of every existing state file.
 	wantSnapshotKeys := []string{"items", "partial", "taken_at"}
 	if keys := slices.Sorted(maps.Keys(envelope.Library)); !slices.Equal(keys, wantSnapshotKeys) {
-		t.Errorf("persisted library snapshot keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantSnapshotKeys)
+		t.Errorf("persisted library snapshot keys = %v, want %v (a deliberate rename needs a currentSchemaVersion bump)", keys, wantSnapshotKeys)
 	}
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal(envelope.Library["items"], &items); err != nil {
@@ -745,7 +745,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 		"has_file", "imdb_id", "season_groups", "title", "tmdb_id", "tvdb_id", "year",
 	}
 	if keys := slices.Sorted(maps.Keys(items[0])); !slices.Equal(keys, wantItemKeys) {
-		t.Errorf("persisted library item keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantItemKeys)
+		t.Errorf("persisted library item keys = %v, want %v (a deliberate rename needs a currentSchemaVersion bump)", keys, wantItemKeys)
 	}
 	// The nested release fingerprint is the state file's comparison baseline:
 	// a renamed field there silently zero-loads a group or tracker and
@@ -758,7 +758,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 		"codec", "dual_audio", "group", "kind", "reason", "resolution", "tracker", "tracker_type",
 	}
 	if keys := slices.Sorted(maps.Keys(current)); !slices.Equal(keys, wantCurrentKeys) {
-		t.Errorf("persisted library item current keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantCurrentKeys)
+		t.Errorf("persisted library item current keys = %v, want %v (a deliberate rename needs a currentSchemaVersion bump)", keys, wantCurrentKeys)
 	}
 	entry, ok := envelope.Memo.Entries["1"]
 	if !ok {
@@ -768,7 +768,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 		"expiry", "format", "not_found", "titles", "year",
 	}
 	if keys := slices.Sorted(maps.Keys(entry)); !slices.Equal(keys, wantEntryKeys) {
-		t.Errorf("persisted anilist_memo entry keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", keys, wantEntryKeys)
+		t.Errorf("persisted anilist_memo entry keys = %v, want %v (a deliberate rename needs a currentSchemaVersion bump)", keys, wantEntryKeys)
 	}
 }
 
@@ -917,7 +917,7 @@ func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 }
 
 // TestStoreSaveStampsSchemaVersion pins the envelope versioning contract:
-// Save stamps SchemaVersion into every file it writes (round-tripping through
+// Save stamps currentSchemaVersion into every file it writes (round-tripping through
 // Load), the stamp lands on the copy Save writes - never the caller's State -
 // a legacy pre-version file (no version field) loads without error as
 // version zero, and a file stamped by a newer binary is refused, preserved at
@@ -934,8 +934,8 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
-	if got.Version != SchemaVersion {
-		t.Errorf("Version after disk round trip = %d, want the stamped SchemaVersion %d", got.Version, SchemaVersion)
+	if got.Version != currentSchemaVersion {
+		t.Errorf("Version after disk round trip = %d, want the stamped currentSchemaVersion %d", got.Version, currentSchemaVersion)
 	}
 	if st.Version != 0 {
 		t.Errorf("caller's State mutated by Save: Version = %d, want 0 (the stamp belongs on the written copy)", st.Version)
@@ -976,7 +976,7 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	// and every subsequent Save on this Store is refused — otherwise this
 	// binary would overwrite the newer-schema file with a cold envelope and
 	// rolling forward would silently lose the newer state.
-	newer := fmt.Sprintf(`{"version":%d,"shrunk_walks_by_arr":{"sonarr":1}}`, SchemaVersion+1)
+	newer := fmt.Sprintf(`{"version":%d,"shrunk_walks_by_arr":{"sonarr":1}}`, currentSchemaVersion+1)
 	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
 		t.Fatalf("write newer-version state: %v", err)
 	}
@@ -984,8 +984,8 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if loadErr == nil {
 		t.Fatal("Load of a newer-schema file returned nil error, want refusal")
 	}
-	wantFile := fmt.Sprintf("schema version %d", SchemaVersion+1)
-	wantSupported := fmt.Sprintf("(%d)", SchemaVersion)
+	wantFile := fmt.Sprintf("schema version %d", currentSchemaVersion+1)
+	wantSupported := fmt.Sprintf("(%d)", currentSchemaVersion)
 	if !strings.Contains(loadErr.Error(), wantFile) || !strings.Contains(loadErr.Error(), wantSupported) {
 		t.Errorf("error = %q, want both the file's version (%q) and the supported version (%q) named",
 			loadErr.Error(), wantFile, wantSupported)
@@ -1202,7 +1202,7 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
-			newer := fmt.Sprintf(`{"version":%d}`, SchemaVersion+1)
+			newer := fmt.Sprintf(`{"version":%d}`, currentSchemaVersion+1)
 			if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 				t.Fatalf("write newer-schema state: %v", err)
 			}
@@ -1235,7 +1235,7 @@ func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	store := NewStore(path, testLogger())
 	huge := &State{Memo: paddedMemo(maxStateBytes + 1)}
 	stamped := *huge
-	stamped.Version = SchemaVersion
+	stamped.Version = currentSchemaVersion
 	encoded, err := json.Marshal(&stamped)
 	if err != nil {
 		t.Fatalf("marshal size probe: %v", err)
@@ -1259,7 +1259,7 @@ func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 
 func TestStoreLoadCorruptClearsNewerSchemaSaveBlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	newer := fmt.Sprintf(`{"version":%d}`, SchemaVersion+1)
+	newer := fmt.Sprintf(`{"version":%d}`, currentSchemaVersion+1)
 	if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 		t.Fatalf("write newer-schema state: %v", err)
 	}
@@ -1514,7 +1514,7 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 	t.Run("newer-schema block", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
-		newer := fmt.Sprintf(`{"version":%d,"shrunk_walks_by_arr":{"sonarr":1}}`, SchemaVersion+1)
+		newer := fmt.Sprintf(`{"version":%d,"shrunk_walks_by_arr":{"sonarr":1}}`, currentSchemaVersion+1)
 		if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 			t.Fatalf("write newer-schema state: %v", err)
 		}
@@ -1573,9 +1573,9 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	// 26843544 is maxStateBytes/10*8 (32 MiB), truncated down.
 	const warnThresholdBytes = 26_843_544
 	padded := func(n int) *State {
-		// Version mirrors the SchemaVersion stamp Save applies to the copy it
+		// Version mirrors the currentSchemaVersion stamp Save applies to the copy it
 		// writes, so the json.Marshal probe below measures the staged shape.
-		return &State{Memo: paddedMemo(n), Version: SchemaVersion}
+		return &State{Memo: paddedMemo(n), Version: currentSchemaVersion}
 	}
 	base, err := json.Marshal(padded(0))
 	if err != nil {

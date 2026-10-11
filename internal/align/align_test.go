@@ -65,13 +65,10 @@ func TestScopeKindString(t *testing.T) {
 	}
 }
 
-// TestScopeKindJSONRoundTrip pins the published vocabulary in both directions. The
-// wire form is the String() name rather than the iota, so reordering the constants
-// cannot silently change what a published audit report means; and the decoder is
-// the inverse rather than a lenient reader, so a token this build does not know
-// fails loudly instead of collapsing onto align.ScopeWholeSeries - which String() maps
-// every unknown kind to, and would therefore be a confident wrong answer.
-func TestScopeKindJSONRoundTrip(t *testing.T) {
+// TestScopeKindMarshalJSON pins the published vocabulary: the wire form is the
+// String() name rather than the iota, so reordering the constants cannot silently
+// change what a published audit report means.
+func TestScopeKindMarshalJSON(t *testing.T) {
 	for _, tc := range []struct {
 		kind align.ScopeKind
 		wire string
@@ -80,30 +77,16 @@ func TestScopeKindJSONRoundTrip(t *testing.T) {
 		{align.ScopeMovie, `"movie"`},
 		{align.ScopeSeason, `"season"`},
 		{align.ScopeOffered, `"offered"`},
+		{align.ScopeEpisodes, `"episodes"`},
 	} {
 		t.Run(tc.kind.String(), func(t *testing.T) {
 			data, err := json.Marshal(tc.kind)
 			if err != nil {
-				t.Fatalf("marshal %v: %v", tc.kind, err)
+				t.Fatalf("json.Marshal(%v): %v", tc.kind, err)
 			}
 			if string(data) != tc.wire {
-				t.Errorf("marshal %v = %s, want %s", tc.kind, data, tc.wire)
-			}
-			var back align.ScopeKind
-			if err := json.Unmarshal(data, &back); err != nil {
-				t.Fatalf("unmarshal %s: %v", data, err)
-			}
-			if back != tc.kind {
-				t.Errorf("round trip of %v = %v", tc.kind, back)
+				t.Errorf("json.Marshal(%v) = %s, want %s", tc.kind, data, tc.wire)
 			}
 		})
-	}
-
-	var unknown align.ScopeKind
-	if err := json.Unmarshal([]byte(`"cour"`), &unknown); err == nil {
-		t.Error("an unrecognized scope token must be an error, not the series zero value")
-	}
-	if err := json.Unmarshal([]byte(`3`), &unknown); err == nil {
-		t.Error("a numeric scope must be an error: the wire form is the name, not the iota")
 	}
 }

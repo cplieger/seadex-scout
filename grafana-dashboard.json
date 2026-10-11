@@ -30,141 +30,15 @@
       }
     ],
     "cursorSync": "Crosshair",
-    "description": "Upgrades SeaDex recommends for your anime library with the space they need, findings to check by hand, how your library compares with SeaDex, and whether seadex-scout is healthy.",
+    "description": "Upgrades SeaDex recommends for your anime library with the storage they need, findings to check by hand, and how your library compares with SeaDex. Tiles at the top of the Overview appear only while seadex-scout needs attention.",
     "editable": true,
     "elements": {
-      "panel-10": {
-        "kind": "Panel",
-        "spec": {
-          "id": 10,
-          "title": "Status",
-          "description": "✓ means checks run and nothing fails, and ! means SeaDex, AniList or the anime ID map is down, so there is nothing for you to fix. ✗ means an error you can fix or checks that stopped. On the Scout health tab, Errors behind Status lists those errors, and Last check and Last full check show stopped checks.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "8 * (sum(absent_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded|reconcile started` [3h])) or vector(0))\n+ 4 * (sum(absent_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` [72h])) or vector(0))\n+ 2 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition!~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))\n+ 1 * ((sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition=~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h])) > bool 0) or vector(0))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "background",
-                "graphMode": "none",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "✓",
-                          "color": "green",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "!",
-                          "color": "orange",
-                          "index": 1
-                        }
-                      }
-                    },
-                    {
-                      "type": "range",
-                      "options": {
-                        "from": 2,
-                        "to": 3,
-                        "result": {
-                          "text": "✗",
-                          "color": "red",
-                          "index": 2
-                        }
-                      }
-                    },
-                    {
-                      "type": "range",
-                      "options": {
-                        "from": 4,
-                        "to": 15,
-                        "result": {
-                          "text": "✗",
-                          "color": "red",
-                          "index": 3
-                        }
-                      }
-                    }
-                  ],
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 1,
-                        "color": "orange"
-                      },
-                      {
-                        "value": 2,
-                        "color": "red"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "noValue": "Unknown"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
       "panel-11": {
         "kind": "Panel",
         "spec": {
           "id": 11,
-          "title": "Upgrades and checks",
-          "description": "Upgrades counts the upgrades SeaDex recommends for what you have, after your filters, and turns blue from 1 to show there is something to grab, not a fault. Upgrades where you already have a SeaDex alt are hidden unless you pick Show under Optional upgrades at the top. Check by hand counts the findings seadex-scout could not decide on its own, and turns yellow from 1 because each one waits for you to look. Both read 0 until the first check after a start has run.",
+          "title": "Upgrades",
+          "description": "The upgrades SeaDex recommends for what you have, after your filters. It turns blue from 1 to show there is something to grab, not a fault. Upgrades where you already have a SeaDex alt count only when you pick Show under Optional upgrades. Unknown means no check has counted the upgrades in the last 2 hours, as before the first check after a start.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -186,25 +60,6 @@
                       }
                     },
                     "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\", manual_review=\"manual_review\" | msg=`findings reported` | unwrap manual_review [2h]) by ()",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "B",
                     "hidden": false
                   }
                 }
@@ -230,153 +85,26 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "value_and_name"
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "short",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "noValue": "0"
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "A"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Upgrades"
-                      },
-                      {
-                        "id": "thresholds",
-                        "value": {
-                          "mode": "absolute",
-                          "steps": [
-                            {
-                              "color": "green",
-                              "value": null
-                            },
-                            {
-                              "color": "blue",
-                              "value": 1
-                            }
-                          ]
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "B"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Check by hand"
-                      },
-                      {
-                        "id": "thresholds",
-                        "value": {
-                          "mode": "absolute",
-                          "steps": [
-                            {
-                              "color": "green",
-                              "value": null
-                            },
-                            {
-                              "color": "yellow",
-                              "value": 1
-                            }
-                          ]
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-14": {
-        "kind": "Panel",
-        "spec": {
-          "id": 14,
-          "title": "SeaDex best",
-          "description": "Share of your anime on SeaDex where every season, film or special you have that seadex-scout compares is SeaDex's best release. It updates once a day. No summary yet means no daily library summary has arrived in the last 26 hours, or none of your anime is on SeaDex.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]) by ()) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h]) by ()) > 0) * 100",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percent",
                   "decimals": 0,
-                  "min": 0,
-                  "max": 100,
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
+                        "color": "transparent"
+                      },
+                      {
+                        "value": 1,
                         "color": "blue"
                       }
                     ]
@@ -384,87 +112,7 @@
                   "color": {
                     "mode": "thresholds"
                   },
-                  "noValue": "No summary yet"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-15": {
-        "kind": "Panel",
-        "spec": {
-          "id": 15,
-          "title": "SeaDex alt",
-          "description": "Share of your anime on SeaDex where you have SeaDex's best or an alt, with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts here. It updates once a day. No summary yet means no daily library summary has arrived in the last 26 hours, or none of your anime is on SeaDex.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "(max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best_or_alt=\"items_all_best_or_alt\" | msg=`library summary` | unwrap items_all_best_or_alt [26h]) by ()) - max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_all_best=\"items_all_best\" | msg=`library summary` | unwrap items_all_best [26h]) by ())) / (max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", items_with_entry=\"items_with_entry\" | msg=`library summary` | unwrap items_with_entry [26h]) by ()) > 0) * 100",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percent",
-                  "decimals": 0,
-                  "min": 0,
-                  "max": 100,
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "yellow"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "noValue": "No summary yet"
+                  "noValue": "Unknown"
                 },
                 "overrides": []
               }
@@ -477,7 +125,7 @@
         "spec": {
           "id": 20,
           "title": "Upgrades available",
-          "description": "Up to 200 upgrades SeaDex recommends for your library, newer versions of a group you have first, then by size change, from most added to most freed. The title opens Sonarr or Radarr, and the Upgrades count above counts every upgrade. Size is the download and Size change what your library gains, or frees when negative, with - for an unknown size. First seen is when seadex-scout first saw the upgrade since it started, and No upgrades available means SeaDex lists nothing better than what you have.",
+          "description": "Up to 200 upgrades SeaDex recommends for your library, newer versions of a group you have first, then by size change, from most added to most freed. The title opens Sonarr or Radarr, and the Upgrades tile above counts every upgrade. Size is the download and Size change what your library gains, or frees when negative, with - for an unknown size. First seen is when seadex-scout first saw the upgrade since it started, and No upgrades available means SeaDex lists nothing better than what you have.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -687,6 +335,10 @@
                       {
                         "id": "custom.minWidth",
                         "value": 180
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -764,7 +416,7 @@
                       },
                       {
                         "id": "custom.minWidth",
-                        "value": 120
+                        "value": 144
                       },
                       {
                         "id": "links",
@@ -790,7 +442,7 @@
                       },
                       {
                         "id": "custom.minWidth",
-                        "value": 120
+                        "value": 136
                       }
                     ]
                   },
@@ -1020,7 +672,7 @@
         "spec": {
           "id": 21,
           "title": "Check by hand",
-          "description": "Findings seadex-scout could not decide on its own, up to 100, and the Check by hand count above counts them all. Several groups on disk means your files mix release groups, and Untagged release means your file or SeaDex's release names no group. Open the title and compare it with SeaDex yourself. Nothing to check means every finding was decided.",
+          "description": "Findings seadex-scout could not decide on its own, up to 100, and the To check by hand tile above counts them all. Several groups on disk means your files mix release groups, and Untagged release means your file or SeaDex's release names no group. Open the title and compare it with SeaDex yourself. Nothing to check means every finding was decided.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1057,7 +709,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "{container=\"$container\"} |= `manual review` | json msg=\"msg\", pass_id=\"pass_id\", rank_check=\"rank_check\", title=\"title\", al_id=\"al_id\", arr=\"arr\", arr_url=\"arr_url\", season=\"season\", current_group=\"current_group\", recommended_group=\"recommended_group\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` | rank_check > 0 | rank_check <= 100",
+                        "expr": "{container=\"$container\"} |= `manual review` | json msg=\"msg\", pass_id=\"pass_id\", rank_check=\"rank_check\", title=\"title\", al_id=\"al_id\", arr=\"arr\", arr_url=\"arr_url\", season=\"season\", current_group=\"current_group\", recommended_group=\"recommended_group\" | msg=~`series spans multiple release groups, manual review|release group unverifiable, manual review` | rank_check > 0 | rank_check <= 100 | label_format current_group=`{{ replace \",\" \", \" .current_group }}`",
                         "queryType": "range",
                         "maxLines": 201
                       }
@@ -1206,6 +858,10 @@
                       {
                         "id": "custom.minWidth",
                         "value": 180
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -1286,6 +942,10 @@
                       {
                         "id": "custom.minWidth",
                         "value": 150
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -1522,25 +1182,6 @@
                     "refId": "G",
                     "hidden": false
                   }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max(last_over_time({container=\"$container\"} |= `library summary` | json msg=\"msg\", not_on_seadex=\"not_on_seadex\" | msg=`library summary` | unwrap not_on_seadex [26h]) by ())",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "H",
-                    "hidden": false
-                  }
                 }
               ],
               "transformations": [],
@@ -1554,7 +1195,7 @@
             "spec": {
               "options": {
                 "displayMode": "basic",
-                "namePlacement": "left",
+                "namePlacement": "top",
                 "orientation": "horizontal",
                 "reduceOptions": {
                   "calcs": [
@@ -1725,25 +1366,6 @@
                         }
                       }
                     ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "H"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Not on SeaDex"
-                      },
-                      {
-                        "id": "color",
-                        "value": {
-                          "fixedColor": "text",
-                          "mode": "fixed"
-                        }
-                      }
-                    ]
                   }
                 ]
               }
@@ -1755,8 +1377,8 @@
         "kind": "Panel",
         "spec": {
           "id": 50,
-          "title": "Errors behind Status",
-          "description": "Each error logged in the last hour, which keeps Status from showing ✓, with how often it was logged. An error at SeaDex, AniList or the anime ID map needs nothing from you. Checks that stopped log no error, so Last check and Last full check above show them.",
+          "title": "Errors logged",
+          "description": "Each error logged in this time range, with how often it was logged. An error at SeaDex, AniList or the anime ID map needs nothing from you. On the Overview, Errors in this range counts the errors with no Problem, and Library problem and Upstream outage show a Problem logged in the last hour. Checks that stopped log no error, so the Overview shows them as Last check or Last full check.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1773,42 +1395,16 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "sum by (condition, arr) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", arr=\"arr\" | level=`ERROR` | condition!=`` [1h]))",
+                        "expr": "sum by (condition, arr, msg) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", arr=\"arr\", msg=\"msg\" | level=`ERROR` | label_format msg=`{{ if .condition }}{{ else }}{{ .msg }}{{ end }}` [$__range]))",
                         "queryType": "instant"
                       }
                     },
                     "refId": "A",
                     "hidden": false
                   }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (msg) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", msg=\"msg\" | level=`ERROR` | condition=`` [1h]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
                 }
               ],
               "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "merge",
-                  "spec": {
-                    "options": {}
-                  }
-                },
                 {
                   "kind": "Transformation",
                   "group": "organize",
@@ -1837,7 +1433,12 @@
               "options": {
                 "cellHeight": "sm",
                 "showHeader": true,
-                "sortBy": []
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "Times logged"
+                  }
+                ]
               },
               "fieldConfig": {
                 "defaults": {
@@ -1949,6 +1550,10 @@
                       {
                         "id": "custom.minWidth",
                         "value": 200
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -1956,22 +1561,6 @@
                     "matcher": {
                       "id": "byName",
                       "options": "Value #A"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Times logged"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 152
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Value #B"
                     },
                     "properties": [
                       {
@@ -1997,249 +1586,6 @@
                     ]
                   }
                 ]
-              }
-            }
-          }
-        }
-      },
-      "panel-51": {
-        "kind": "Panel",
-        "spec": {
-          "id": 51,
-          "title": "Last full check",
-          "description": "When the last full check finished. It runs once a day. Over 72 hours ago means the daily check has stopped, so the Upgrades table can be out of date and Status shows ✗.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max(max_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [72h]) by ()) * 1000",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "none",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "dateTimeFromNow",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "text"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "noValue": "Over 72 hours ago"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-52": {
-        "kind": "Panel",
-        "spec": {
-          "id": 52,
-          "title": "Last check",
-          "description": "When the last check of any kind finished. It runs every 15 minutes by default. Over 3 hours ago means seadex-scout has stopped checking, so look at its container and its logs.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max(max_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded` | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts [3h]) by ()) * 1000",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "none",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "dateTimeFromNow",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "text"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "noValue": "Over 3 hours ago"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-53": {
-        "kind": "Panel",
-        "spec": {
-          "id": 53,
-          "title": "New feed releases in this range",
-          "description": "Releases the Torznab feed newly offered Sonarr and Radarr in this time range. It reads 0 when the feed is not set up. A 0 is also normal while SeaDex has curated nothing new.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by () (sum_over_time({container=\"$container\"} |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "none",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "text"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "noValue": "0"
-                },
-                "overrides": []
               }
             }
           }
@@ -2326,6 +1672,13 @@
                       {
                         "id": "displayName",
                         "value": "AnimeBytes"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "purple"
+                        }
                       }
                     ]
                   },
@@ -2338,6 +1691,13 @@
                       {
                         "id": "displayName",
                         "value": "Nyaa"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "blue"
+                        }
                       }
                     ]
                   }
@@ -2351,8 +1711,8 @@
         "kind": "Panel",
         "spec": {
           "id": 16,
-          "title": "Upgrade storage",
-          "description": "Download needed is the space you need to download every upgrade the Optional upgrades switch shows, each torrent counted once, including any beyond the 200 rows Upgrades available lists. Net library size change is how much your library grows if you take every upgrade, or shrinks when negative, once each replaces the files it covers. Without a size counts the upgrades left out of both, because a torrent or a file it replaces has no known size, so the two totals cover the rest only. No sizes yet means no check has run since seadex-scout started.",
+          "title": "Storage needed",
+          "description": "The space to download every upgrade the Optional upgrades switch shows, each torrent counted once, including any beyond the 200 rows Upgrades available lists. It says at least because an upgrade whose download size is unknown adds nothing, and Upgrades not in the size totals, below, counts those upgrades. No sizes yet means no check has run since seadex-scout started.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2369,49 +1729,11 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", recommended_bytes_total=\"recommended_bytes_total\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap recommended_bytes_total [2h]) by ()",
+                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", download_bytes_total=\"download_bytes_total\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap download_bytes_total [2h]) by ()",
                         "queryType": "instant"
                       }
                     },
                     "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", size_change_bytes=\"size_change_bytes\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap size_change_bytes [2h]) by ()",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", upgrades_unsized=\"upgrades_unsized\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap upgrades_unsized [2h]) by ()",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "C",
                     "hidden": false
                   }
                 }
@@ -2429,7 +1751,7 @@
                 "colorMode": "none",
                 "graphMode": "none",
                 "justifyMode": "center",
-                "orientation": "vertical",
+                "orientation": "auto",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -2442,7 +1764,6 @@
                   "titleSize": 14,
                   "valueSize": 28
                 },
-                "wideLayout": true,
                 "showPercentChange": false
               },
               "fieldConfig": {
@@ -2461,54 +1782,10 @@
                   "color": {
                     "mode": "thresholds"
                   },
-                  "noValue": "No sizes yet"
+                  "noValue": "No sizes yet",
+                  "displayName": "for all upgrades, at least"
                 },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "A"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Download needed"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "B"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Net library size change"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "C"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Without a size"
-                      },
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "decimals",
-                        "value": 0
-                      }
-                    ]
-                  }
-                ]
+                "overrides": []
               }
             }
           }
@@ -2719,6 +1996,10 @@
                       {
                         "id": "custom.minWidth",
                         "value": 180
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -2896,595 +2177,12 @@
           }
         }
       },
-      "panel-31": {
-        "kind": "Panel",
-        "spec": {
-          "id": 31,
-          "title": "Upgrades over time",
-          "description": "How many upgrades each check found, as better releases and newer versions of a group you have, stacked so the top edge is the total. It follows the Optional upgrades switch. A drop means upgrades were taken or SeaDex changed its picks. No upgrades in this range means no check logged a count.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", upgrades_better_release=\"upgrades_better_release\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap upgrades_better_release [2h]) by ()",
-                        "queryType": "range",
-                        "legendFormat": "Better release"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", upgrades_newer_revision=\"upgrades_newer_revision\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap upgrades_newer_revision [2h]) by ()",
-                        "queryType": "range",
-                        "legendFormat": "Newer version"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "displayMode": "table",
-                  "placement": "right",
-                  "showLegend": true
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "desc"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "min": 0,
-                  "decimals": 0,
-                  "noValue": "No upgrades in this range",
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "drawStyle": "line",
-                    "lineWidth": 1,
-                    "fillOpacity": 30,
-                    "showPoints": "never",
-                    "spanNulls": true,
-                    "stacking": {
-                      "mode": "normal",
-                      "group": "A"
-                    }
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Better release"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Newer version"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "purple"
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-32": {
-        "kind": "Panel",
-        "spec": {
-          "id": 32,
-          "title": "Recently resolved",
-          "description": "The 25 newest upgrades that left the list in this time range, usually because you took them, sometimes because SeaDex changed its pick. It follows the Optional upgrades switch. Resolved is when seadex-scout first saw the upgrade gone. Nothing resolved in this range means no upgrade left the list.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "{container=\"$container\"} |= `upgrade resolved` | json msg=\"msg\", title=\"title\", al_id=\"al_id\", arr=\"arr\", arr_url=\"arr_url\", season=\"season\", status=\"status\", current_tier=\"current_tier\", current_group=\"current_group\", recommended_group=\"recommended_group\" | msg=`upgrade resolved` | current_tier != \"$optional\"",
-                        "queryType": "range",
-                        "maxLines": 25
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "extractFields",
-                  "spec": {
-                    "options": {
-                      "source": "labels",
-                      "format": "auto",
-                      "replace": false,
-                      "keepTime": false
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "filterFieldsByName",
-                  "spec": {
-                    "options": {
-                      "include": {
-                        "names": [
-                          "Time",
-                          "title",
-                          "season",
-                          "current_group",
-                          "recommended_group",
-                          "al_id",
-                          "arr_url"
-                        ]
-                      }
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "indexByName": {
-                        "Time": 0,
-                        "title": 1,
-                        "season": 2,
-                        "current_group": 3,
-                        "recommended_group": 4,
-                        "al_id": 5,
-                        "arr_url": 6
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Resolved"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "Nothing resolved in this range",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": true
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Time"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Resolved"
-                      },
-                      {
-                        "id": "unit",
-                        "value": "dateTimeFromNow"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 136
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "title"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Title"
-                      },
-                      {
-                        "id": "links",
-                        "value": [
-                          {
-                            "targetBlank": true,
-                            "title": "Open in Sonarr or Radarr",
-                            "url": "${__data.fields.arr_url}"
-                          }
-                        ]
-                      },
-                      {
-                        "id": "custom.minWidth",
-                        "value": 180
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "season"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Season"
-                      },
-                      {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "options": {
-                              "0": {
-                                "index": 0,
-                                "text": "-"
-                              }
-                            },
-                            "type": "value"
-                          }
-                        ]
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 104
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "current_group"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "You had"
-                      },
-                      {
-                        "id": "custom.minWidth",
-                        "value": 150
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "recommended_group"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "SeaDex best"
-                      },
-                      {
-                        "id": "custom.minWidth",
-                        "value": 150
-                      },
-                      {
-                        "id": "links",
-                        "value": [
-                          {
-                            "targetBlank": true,
-                            "title": "Open on releases.moe",
-                            "url": "https://releases.moe/${__data.fields.al_id}"
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": "^(al_id|arr_url)$"
-                    },
-                    "properties": [
-                      {
-                        "id": "custom.hidden",
-                        "value": true
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-33": {
-        "kind": "Panel",
-        "spec": {
-          "id": 33,
-          "title": "Upgrades by reason",
-          "description": "Why upgrades are listed, as the average number per check over the last two hours, for the upgrades the Optional upgrades switch shows. SeaDex alt means you hold a release SeaDex lists as an alt, Neither best nor alt a group SeaDex does not list, and Newer version an older version of SeaDex's best. Better release is an upgrade where what you hold could not be placed. A value between whole numbers means the list changed in the last two hours, and No upgrades means the list is empty.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by () (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", current_tier=\"current_tier\", status=\"status\" | msg=`better release available` | current_tier != \"$optional\" | status=`better_release` | current_tier=`` [2h])) / on () group_left sum by () (count_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\" | msg=`findings reported` [2h]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by () (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", current_tier=\"current_tier\", status=\"status\" | msg=`better release available` | current_tier != \"$optional\" | current_tier=`alt` [2h])) / on () group_left sum by () (count_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\" | msg=`findings reported` [2h]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by () (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", current_tier=\"current_tier\", status=\"status\" | msg=`better release available` | current_tier != \"$optional\" | current_tier=`unlisted` [2h])) / on () group_left sum by () (count_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\" | msg=`findings reported` [2h]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by () (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", current_tier=\"current_tier\", status=\"status\" | msg=`better release available` | current_tier != \"$optional\" | status=`newer_revision` [2h])) / on () group_left sum by () (count_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\" | msg=`findings reported` [2h]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "D",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "bargauge",
-            "version": "",
-            "spec": {
-              "options": {
-                "displayMode": "basic",
-                "namePlacement": "left",
-                "orientation": "horizontal",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showUnfilled": true,
-                "sizing": "manual",
-                "valueMode": "color",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 14
-                },
-                "minVizHeight": 36,
-                "maxVizHeight": 36
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "decimals": 1,
-                  "min": 0,
-                  "noValue": "No upgrades",
-                  "color": {
-                    "mode": "fixed",
-                    "fixedColor": "blue"
-                  },
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "blue"
-                      }
-                    ]
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "A"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Better release"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "B"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "SeaDex alt"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "C"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Neither best nor alt"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "D"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Newer version"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
       "panel-34": {
         "kind": "Panel",
         "spec": {
           "id": 34,
           "title": "Upgrades by format and resolution",
-          "description": "The kind and resolution of the releases SeaDex recommends, as the average number of upgrades per check over the last two hours, for the upgrades the Optional upgrades switch shows. A remux is a disc copy, the largest kind, and an encode is compressed. A value between whole numbers means the list changed in the last two hours, and No upgrades means the list is empty.",
+          "description": "The kind and resolution of the releases SeaDex recommends now, for the upgrades the Optional upgrades switch shows. It is the average number of upgrades per check over the last two hours, whatever time range you pick, so it shows the current list like the Upgrades tile. A remux is a disc copy, the largest kind, and an encode is compressed. A value between whole numbers means the list changed in those two hours, and No upgrades means the list is empty.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3549,7 +2247,7 @@
                 "sortBy": [
                   {
                     "desc": true,
-                    "displayName": "Average per check"
+                    "displayName": "Per check"
                   }
                 ]
               },
@@ -3612,7 +2310,7 @@
                       },
                       {
                         "id": "custom.width",
-                        "value": 120
+                        "value": 136
                       }
                     ]
                   },
@@ -3622,10 +2320,6 @@
                       "options": "Value #A"
                     },
                     "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Average per check"
-                      },
                       {
                         "id": "unit",
                         "value": "short"
@@ -3651,690 +2345,14 @@
                           "mode": "fixed",
                           "fixedColor": "blue"
                         }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-35": {
-        "kind": "Panel",
-        "spec": {
-          "id": 35,
-          "title": "Upgrades by source",
-          "description": "The trackers of the releases SeaDex recommends, as the average number of upgrades per check over the last two hours, for the upgrades the Optional upgrades switch shows. AB is AnimeBytes, which needs an account. A value between whole numbers means the list changed in the last two hours, and No upgrades means the list is empty.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
                       },
-                      "spec": {
-                        "expr": "sum by (tracker) (count_over_time({container=\"$container\"} |= `better release available` | json msg=\"msg\", current_tier=\"current_tier\", tracker=\"tracker\" | msg=`better release available` | current_tier != \"$optional\" [2h])) / on () group_left sum by () (count_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\" | msg=`findings reported` [2h]))",
-                        "queryType": "instant"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "merge",
-                  "spec": {
-                    "options": {}
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true
-                      },
-                      "indexByName": {
-                        "tracker": 0,
-                        "Value #A": 1
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Average per check"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "No upgrades",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": true
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "tracker"
-                    },
-                    "properties": [
                       {
                         "id": "displayName",
-                        "value": "Tracker"
+                        "value": "Per check"
                       },
                       {
-                        "id": "custom.width",
-                        "value": 160
-                      },
-                      {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "options": {
-                              "AB": {
-                                "index": 0,
-                                "text": "AnimeBytes"
-                              }
-                            },
-                            "type": "value"
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Value #A"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Average per check"
-                      },
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "decimals",
-                        "value": 1
-                      },
-                      {
-                        "id": "min",
-                        "value": 0
-                      },
-                      {
-                        "id": "custom.cellOptions",
-                        "value": {
-                          "type": "gauge",
-                          "mode": "basic"
-                        }
-                      },
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-36": {
-        "kind": "Panel",
-        "spec": {
-          "id": 36,
-          "title": "Groups SeaDex recommends for you",
-          "description": "The 15 release groups SeaDex recommends most often across your current upgrades, with how many upgrades name each. A group high on this list is one worth preferring in your Sonarr and Radarr release profiles. It follows the Optional upgrades switch. No upgrades means the list is empty.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "{container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", pass_id=\"pass_id\", hidden_tier=\"hidden_tier\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | keep pass_id",
-                        "queryType": "range",
-                        "maxLines": 1
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "{container=\"$container\"} |= `group rank` | json msg=\"msg\", pass_id=\"pass_id\", hidden_tier=\"hidden_tier\", kind=\"kind\", rank=\"rank\", group=\"group\", upgrades=\"upgrades\" | msg=`group rank` | hidden_tier=\"$optional\" | kind=`recommended`",
-                        "queryType": "range",
-                        "maxLines": 31
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "extractFields",
-                  "spec": {
-                    "options": {
-                      "source": "labels",
-                      "format": "auto",
-                      "replace": false,
-                      "keepTime": false
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "joinByField",
-                  "spec": {
-                    "options": {
-                      "byField": "pass_id",
-                      "mode": "inner"
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "filterFieldsByName",
-                  "spec": {
-                    "options": {
-                      "include": {
-                        "names": [
-                          "group",
-                          "upgrades",
-                          "rank"
-                        ]
-                      }
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "indexByName": {
-                        "group": 0,
-                        "upgrades": 1,
-                        "rank": 2
-                      }
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "convertFieldType",
-                  "spec": {
-                    "options": {
-                      "conversions": [
-                        {
-                          "targetField": "upgrades",
-                          "destinationType": "number"
-                        },
-                        {
-                          "targetField": "rank",
-                          "destinationType": "number"
-                        }
-                      ],
-                      "fields": {}
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "sortBy",
-                  "spec": {
-                    "options": {
-                      "fields": {},
-                      "sort": [
-                        {
-                          "field": "rank",
-                          "desc": false
-                        }
-                      ]
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": []
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "No upgrades",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": true
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "group"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Release group"
-                      },
-                      {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "options": {
-                              "nogrp": {
-                                "index": 0,
-                                "text": "Untagged release"
-                              }
-                            },
-                            "type": "value"
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "upgrades"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Upgrades"
-                      },
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "decimals",
-                        "value": 0
-                      },
-                      {
-                        "id": "min",
-                        "value": 0
-                      },
-                      {
-                        "id": "custom.cellOptions",
-                        "value": {
-                          "type": "gauge",
-                          "mode": "basic"
-                        }
-                      },
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 240
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "rank"
-                    },
-                    "properties": [
-                      {
-                        "id": "custom.hidden",
-                        "value": true
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-37": {
-        "kind": "Panel",
-        "spec": {
-          "id": 37,
-          "title": "Your groups SeaDex rates below",
-          "description": "The 15 release groups you hold most often where SeaDex recommends a better release, with how many upgrades each appears in. A group high on this list is one your release profiles may rank too high, and Untagged release means files with no group. No upgrades means no better release is listed.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "{container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", pass_id=\"pass_id\", hidden_tier=\"hidden_tier\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | keep pass_id",
-                        "queryType": "range",
-                        "maxLines": 1
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "{container=\"$container\"} |= `group rank` | json msg=\"msg\", pass_id=\"pass_id\", hidden_tier=\"hidden_tier\", kind=\"kind\", rank=\"rank\", group=\"group\", upgrades=\"upgrades\" | msg=`group rank` | hidden_tier=\"$optional\" | kind=`held_below`",
-                        "queryType": "range",
-                        "maxLines": 31
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "extractFields",
-                  "spec": {
-                    "options": {
-                      "source": "labels",
-                      "format": "auto",
-                      "replace": false,
-                      "keepTime": false
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "joinByField",
-                  "spec": {
-                    "options": {
-                      "byField": "pass_id",
-                      "mode": "inner"
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "filterFieldsByName",
-                  "spec": {
-                    "options": {
-                      "include": {
-                        "names": [
-                          "group",
-                          "upgrades",
-                          "rank"
-                        ]
-                      }
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "indexByName": {
-                        "group": 0,
-                        "upgrades": 1,
-                        "rank": 2
-                      }
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "convertFieldType",
-                  "spec": {
-                    "options": {
-                      "conversions": [
-                        {
-                          "targetField": "upgrades",
-                          "destinationType": "number"
-                        },
-                        {
-                          "targetField": "rank",
-                          "destinationType": "number"
-                        }
-                      ],
-                      "fields": {}
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "sortBy",
-                  "spec": {
-                    "options": {
-                      "fields": {},
-                      "sort": [
-                        {
-                          "field": "rank",
-                          "desc": false
-                        }
-                      ]
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": []
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "No upgrades",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": true
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "group"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Release group"
-                      },
-                      {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "options": {
-                              "nogrp": {
-                                "index": 0,
-                                "text": "Untagged release"
-                              }
-                            },
-                            "type": "value"
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "upgrades"
-                    },
-                    "properties": [
-                      {
-                        "id": "displayName",
-                        "value": "Upgrades"
-                      },
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "decimals",
-                        "value": 0
-                      },
-                      {
-                        "id": "min",
-                        "value": 0
-                      },
-                      {
-                        "id": "custom.cellOptions",
-                        "value": {
-                          "type": "gauge",
-                          "mode": "basic"
-                        }
-                      },
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 240
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "rank"
-                    },
-                    "properties": [
-                      {
-                        "id": "custom.hidden",
-                        "value": true
+                        "id": "custom.minWidth",
+                        "value": 128
                       }
                     ]
                   },
@@ -4361,7 +2379,7 @@
         "spec": {
           "id": 55,
           "title": "Full check duration per day",
-          "description": "How long the longest full check took each day. A full check reads the whole SeaDex list and your library once a day, and a growing bar means your library or SeaDex grew, or an upstream got slow. A day with no bar had no finished full check, which Status shows as ✗ after 72 hours.",
+          "description": "How long the longest full check took each day. A full check reads the whole SeaDex list and your library once a day, and a growing bar means your library or SeaDex grew, or an upstream got slow. A day with no bar had no finished full check, and after 72 hours without one the Overview shows Last full check.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -4443,7 +2461,7 @@
         "kind": "Panel",
         "spec": {
           "id": 56,
-          "title": "Checks that ran degraded, by reason",
+          "title": "Degraded checks by reason",
           "description": "Checks in this time range that finished without doing their whole job, by reason, with how many times. A full check runs once a day and a quick check every poll interval. One degraded check now and then is normal, and the same reason every check is worth fixing. No degraded checks means every check finished its job.",
           "links": [],
           "data": {
@@ -4626,6 +2644,10 @@
                             "type": "value"
                           }
                         ]
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -4751,6 +2773,13 @@
                       {
                         "id": "displayName",
                         "value": "AnimeBytes"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "purple"
+                        }
                       }
                     ]
                   },
@@ -4763,6 +2792,13 @@
                       {
                         "id": "displayName",
                         "value": "Nyaa"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "blue"
+                        }
                       }
                     ]
                   }
@@ -4776,7 +2812,7 @@
         "kind": "Panel",
         "spec": {
           "id": 58,
-          "title": "Search results SeaDex curates per day",
+          "title": "Curated search results per day",
           "description": "How many search results each day were releases SeaDex curates, the only ones the feed passes back to Sonarr and Radarr, per tracker. Searches that keep finding none mean SeaDex lists nothing for what was searched. No results in this range means no search returned a curated release.",
           "links": [],
           "data": {
@@ -4860,6 +2896,13 @@
                       {
                         "id": "displayName",
                         "value": "AnimeBytes"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "purple"
+                        }
                       }
                     ]
                   },
@@ -4872,6 +2915,13 @@
                       {
                         "id": "displayName",
                         "value": "Nyaa"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "blue"
+                        }
                       }
                     ]
                   }
@@ -4975,7 +3025,38 @@
                     "spanNulls": true
                   }
                 },
-                "overrides": []
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "A"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "blue"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "B"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "purple"
+                        }
+                      }
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -4985,8 +3066,8 @@
         "kind": "Panel",
         "spec": {
           "id": 60,
-          "title": "AnimeBytes releases held back",
-          "description": "AnimeBytes releases the RSS feed could not offer at the last feed update, because indexer.ab_passkey is not set, so no download link can be built. It turns yellow from 1, and 0 means every AnimeBytes release reached the feed. No feed update means the Torznab feed is not set up or has not updated in 2 hours.",
+          "title": "AnimeBytes feed",
+          "description": "Shown only when the last feed update held AnimeBytes releases back from the RSS feed, because indexer.ab_passkey is not set and no download link can be built. Set the passkey to offer them. No shipped alert rule watches this.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -5003,7 +3084,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "last_over_time({container=\"$container\"} |= `indexer feed snapshot written` | json msg=\"msg\", ab_releases_skipped=\"ab_releases_skipped\" | msg=`indexer feed snapshot written` | unwrap ab_releases_skipped [2h]) by ()",
+                        "expr": "last_over_time({container=\"$container\"} |= `indexer feed snapshot written` | json msg=\"msg\", ab_releases_skipped=\"ab_releases_skipped\" | msg=`indexer feed snapshot written` | unwrap ab_releases_skipped [2h]) by () > 0",
                         "queryType": "instant"
                       }
                     },
@@ -5022,7 +3103,90 @@
             "version": "",
             "spec": {
               "options": {
-                "colorMode": "value",
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "suffix: held back",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "yellow"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-12": {
+        "kind": "Panel",
+        "spec": {
+          "id": 12,
+          "title": "To check by hand",
+          "description": "The findings seadex-scout could not decide on its own, listed in Check by hand below. It turns yellow from 1 because each one waits for you to look. Unknown means no check has counted the findings to check in the last 2 hours, as before the first check after a start.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "last_over_time({container=\"$container\"} |= `findings reported` | json msg=\"msg\", manual_review=\"manual_review\" | msg=`findings reported` | unwrap manual_review [2h]) by ()",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
                 "graphMode": "none",
                 "justifyMode": "center",
                 "orientation": "auto",
@@ -5037,20 +3201,19 @@
                 "text": {
                   "titleSize": 14,
                   "valueSize": 28
-                }
+                },
+                "showPercentChange": false
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "short",
                   "decimals": 0,
-                  "min": 0,
-                  "noValue": "No feed update",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
-                        "color": "text"
+                        "color": "transparent"
                       },
                       {
                         "value": 1,
@@ -5060,7 +3223,806 @@
                   },
                   "color": {
                     "mode": "thresholds"
+                  },
+                  "noValue": "Unknown"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-17": {
+        "kind": "Panel",
+        "spec": {
+          "id": 17,
+          "title": "Library growth, sized upgrades",
+          "description": "How much your library grows, or shrinks when negative, once every upgrade the Optional upgrades switch shows replaces the files it covers. It adds only upgrades whose download and replaced files both have a known size, so the true change can be larger or smaller. No sizes yet means no check has run since seadex-scout started.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", size_change_bytes=\"size_change_bytes\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap size_change_bytes [2h]) by ()",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
                   }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "none",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "decbytes",
+                  "decimals": 1,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No sizes yet"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-18": {
+        "kind": "Panel",
+        "spec": {
+          "id": 18,
+          "title": "Upgrades not in the size totals",
+          "description": "Upgrades the Optional upgrades switch shows that a size total leaves out, because a size it needs is unknown. Storage needed needs the download size, and Library growth also needs the size of the files the download replaces, so its count is usually the larger. A torrent or file that two upgrades list with different sizes is left out too, and the monitoring docs list why a size stays unknown.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", upgrades_download_unsized=\"upgrades_download_unsized\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap upgrades_download_unsized [2h]) by ()",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "last_over_time({container=\"$container\"} |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\", upgrades_unsized=\"upgrades_unsized\" | msg=`upgrade sizes` | hidden_tier=\"$optional\" | unwrap upgrades_unsized [2h]) by ()",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "none",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "horizontal",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value_and_name",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No sizes yet"
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "left out of Storage needed"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "left out of Library growth"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-62": {
+        "kind": "Panel",
+        "spec": {
+          "id": 62,
+          "title": "Last check",
+          "description": "Shown only when seadex-scout has logged no check of any kind in the last 3 hours, so the upgrades and the Torznab feed stop updating. The SeadexScoutScanStalled alert reads the same lines and fires 15 minutes later. Rule out a stopped container or log collector, then restart seadex-scout.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "absent_over_time({container=\"$container\"} | json msg=\"msg\" | msg=~`cycle complete|cycle degraded|tick complete|tick degraded|reconcile started` [3h])",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show",
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "1": {
+                          "text": "3+ hours ago",
+                          "color": "red",
+                          "index": 0
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-63": {
+        "kind": "Panel",
+        "spec": {
+          "id": 63,
+          "title": "Last full check",
+          "description": "Shown only when no daily full check has finished in 72 hours, so releases SeaDex removed or edited are missed. The SeadexScoutReconcileStalled alert reads the same lines. Look for degraded checks or errors on the Scout health tab.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "absent_over_time({container=\"$container\"} |= `reconcile complete` | json msg=\"msg\" | msg=`reconcile complete` [72h])",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show",
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "1": {
+                          "text": "72+ hours ago",
+                          "color": "red",
+                          "index": 0
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-61": {
+        "kind": "Panel",
+        "spec": {
+          "id": 61,
+          "title": "Errors in this range",
+          "description": "Shown only when seadex-scout logged an error you can fix in this time range, usually a failed Sonarr or Radarr library read. The SeadexScoutCycleError alert fires on the same lines within the hour. The Errors logged table on the Scout health tab names each one.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum(count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition=`` [$__range])) > 0",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show"
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-65": {
+        "kind": "Panel",
+        "spec": {
+          "id": 65,
+          "title": "Library problem",
+          "description": "Shown only while Sonarr or Radarr keeps returning a library under half its earlier size, or Sonarr keeps failing to list the episodes of some series. Those shows keep their old findings. The tile names the app, the one logged most if both have a problem, and Errors logged on the Scout health tab lists each problem. The SeadexScoutLibraryDegraded alert reads the same lines, and the monitoring docs say what to check.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "topk(1, sum by (arr) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\", arr=\"arr\" | level=`ERROR` | condition=~`library-walk-shrunk|library-walk-partial` | label_format arr=`{{ if .arr }}{{ .arr }}{{ else }}sonarr{{ end }}` [1h]))) > 0",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "/^arr$/",
+                  "values": true
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show",
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "sonarr": {
+                          "text": "Sonarr",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "radarr": {
+                          "text": "Radarr",
+                          "color": "red",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-66": {
+        "kind": "Panel",
+        "spec": {
+          "id": 66,
+          "title": "Feed not read",
+          "description": "Shown when Sonarr or Radarr read this tracker's RSS feed in the last week but not in the last 6 hours, so new releases stop reaching them. If both trackers stopped, the tile names one and the Feed reads chart on the Scout health tab shows both. The SeadexScoutFeedNotPolled alert reads the same lines over the same week, whatever time range you pick. Check whether that indexer is disabled or failing in your apps.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "topk(1,\nsum by (scope) (count_over_time({container=\"$container\"} |= `indexer request` | json msg=\"msg\", scope=\"scope\", feed=\"feed\" | msg=`indexer request` | feed=`true` [7d]))\nunless\nsum by (scope) (count_over_time({container=\"$container\"} |= `indexer request` | json msg=\"msg\", scope=\"scope\", feed=\"feed\" | msg=`indexer request` | feed=`true` [6h]))\n)",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "/^scope$/",
+                  "values": true
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show",
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "ab": {
+                          "text": "AnimeBytes",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "nyaa": {
+                          "text": "Nyaa",
+                          "color": "red",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-64": {
+        "kind": "Panel",
+        "spec": {
+          "id": 64,
+          "title": "Upstream outage",
+          "description": "Shown only while SeaDex, AniList or the anime ID map keeps failing, which needs nothing from you. seadex-scout keeps its findings and the feed until it recovers. The tile names the failing service, the one logged most if several fail, and Errors logged on the Scout health tab lists each. The SeadexScoutUpstreamUnavailable alert reads the same lines.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "topk(1, sum by (condition) (count_over_time({container=\"$container\"} | json level=\"level\", condition=\"condition\" | level=`ERROR` | condition=~`seadex-unreachable|seadex-catalogue-fetch-failing|seadex-window-oversize|anilist-lookups-failing|mapping-refresh-rejected` [1h]))) > 0",
+                        "queryType": "instant"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "vertical",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "/^condition$/",
+                  "values": true
+                },
+                "textMode": "value",
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "orange"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "Nothing to show",
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "seadex-unreachable": {
+                          "text": "SeaDex",
+                          "color": "orange",
+                          "index": 0
+                        },
+                        "seadex-catalogue-fetch-failing": {
+                          "text": "SeaDex",
+                          "color": "orange",
+                          "index": 1
+                        },
+                        "seadex-window-oversize": {
+                          "text": "SeaDex",
+                          "color": "orange",
+                          "index": 2
+                        },
+                        "anilist-lookups-failing": {
+                          "text": "AniList",
+                          "color": "orange",
+                          "index": 3
+                        },
+                        "mapping-refresh-rejected": {
+                          "text": "ID map",
+                          "color": "orange",
+                          "index": 4
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -5084,6 +4046,195 @@
                     {
                       "kind": "RowsLayoutRow",
                       "spec": {
+                        "title": "Needs attention",
+                        "collapse": false,
+                        "hideHeader": true,
+                        "layout": {
+                          "kind": "AutoGridLayout",
+                          "spec": {
+                            "maxColumnCount": 6,
+                            "columnWidthMode": "custom",
+                            "columnWidth": 205,
+                            "rowHeightMode": "custom",
+                            "rowHeight": 120,
+                            "fillScreen": false,
+                            "items": [
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-62"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-63"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-61"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-65"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-66"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-60"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-64"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "RowsLayoutRow",
+                      "spec": {
                         "title": "At a glance",
                         "collapse": false,
                         "layout": {
@@ -5095,21 +4246,8 @@
                                 "spec": {
                                   "x": 0,
                                   "y": 0,
-                                  "width": 5,
-                                  "height": 6,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-10"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 5,
-                                  "y": 0,
-                                  "width": 5,
-                                  "height": 6,
+                                  "width": 6,
+                                  "height": 5,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-11"
@@ -5119,10 +4257,10 @@
                               {
                                 "kind": "GridLayoutItem",
                                 "spec": {
-                                  "x": 10,
+                                  "x": 6,
                                   "y": 0,
-                                  "width": 14,
-                                  "height": 11,
+                                  "width": 18,
+                                  "height": 10,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-41"
@@ -5133,31 +4271,19 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 6,
-                                  "width": 5,
+                                  "y": 5,
+                                  "width": 6,
                                   "height": 5,
                                   "element": {
                                     "kind": "ElementReference",
-                                    "name": "panel-14"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 5,
-                                  "y": 6,
-                                  "width": 5,
-                                  "height": 5,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-15"
+                                    "name": "panel-12"
                                   }
                                 }
                               }
                             ]
                           }
-                        }
+                        },
+                        "hideHeader": true
                       }
                     },
                     {
@@ -5175,19 +4301,6 @@
                                   "x": 0,
                                   "y": 0,
                                   "width": 24,
-                                  "height": 4,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-16"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 4,
-                                  "width": 24,
                                   "height": 11,
                                   "element": {
                                     "kind": "ElementReference",
@@ -5199,7 +4312,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 15,
+                                  "y": 11,
                                   "width": 24,
                                   "height": 7,
                                   "element": {
@@ -5210,7 +4323,8 @@
                               }
                             ]
                           }
-                        }
+                        },
+                        "hideHeader": true
                       }
                     }
                   ]
@@ -5240,88 +4354,8 @@
                                 "spec": {
                                   "x": 0,
                                   "y": 0,
-                                  "width": 24,
-                                  "height": 11,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-30"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Over time",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
                                   "width": 12,
-                                  "height": 8,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-31"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 12,
-                                  "y": 0,
-                                  "width": 12,
-                                  "height": 8,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-32"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Breakdowns",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 8,
-                                  "height": 7,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-33"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 8,
-                                  "y": 0,
-                                  "width": 8,
-                                  "height": 7,
+                                  "height": 9,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-34"
@@ -5331,40 +4365,13 @@
                               {
                                 "kind": "GridLayoutItem",
                                 "spec": {
-                                  "x": 16,
-                                  "y": 0,
-                                  "width": 8,
-                                  "height": 7,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-35"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Release groups",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
+                                  "x": 12,
                                   "y": 0,
                                   "width": 12,
-                                  "height": 9,
+                                  "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
-                                    "name": "panel-36"
+                                    "name": "panel-16"
                                   }
                                 }
                               },
@@ -5372,12 +4379,38 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 12,
-                                  "y": 0,
+                                  "y": 3,
                                   "width": 12,
-                                  "height": 9,
+                                  "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
-                                    "name": "panel-37"
+                                    "name": "panel-17"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 6,
+                                  "width": 12,
+                                  "height": 3,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-18"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 9,
+                                  "width": 24,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-30"
                                   }
                                 }
                               }
@@ -5413,58 +4446,6 @@
                                 "spec": {
                                   "x": 0,
                                   "y": 0,
-                                  "width": 6,
-                                  "height": 3,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-51"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 6,
-                                  "y": 0,
-                                  "width": 6,
-                                  "height": 3,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-52"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 12,
-                                  "y": 0,
-                                  "width": 6,
-                                  "height": 3,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-53"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 18,
-                                  "y": 0,
-                                  "width": 6,
-                                  "height": 3,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-60"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 3,
                                   "width": 24,
                                   "height": 6,
                                   "element": {
@@ -5477,7 +4458,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 9,
+                                  "y": 6,
                                   "width": 12,
                                   "height": 7,
                                   "element": {
@@ -5490,7 +4471,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 12,
-                                  "y": 9,
+                                  "y": 6,
                                   "width": 12,
                                   "height": 7,
                                   "element": {

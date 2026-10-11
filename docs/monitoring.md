@@ -17,13 +17,13 @@ Informational cases log at `info`. Their statuses are `incomplete`, `theoretical
 Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per report row. A film or special both Sonarr and Radarr hold has a row for each copy, so it logs two.
 
 When the library read was partial, `cycle degraded` has `reason=partial-walk` and `failed_items`, the number of SeaDex entries matched to an item that could not be read. A film both Sonarr and Radarr hold counts once for each.
-Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The `attrs:` lines in [`alerts/logql.yaml`](../alerts/logql.yaml) list the stable attributes of each message.
+Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The [log contract](#log-contract) lists the stable attributes of each message.
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
 
 Every line a pass logs about the findings carries `pass_id`, the start of that pass in Unix milliseconds. Every finding line also carries `first_seen`, when seadex-scout first saw the finding since it started. A `better release available` line also carries `rank_alt` and `rank_none`, its place in the upgrades list with Optional upgrades on Hide and on Show, where 0 means that view leaves it out. It carries `recommended_bytes`, `current_bytes` and `size_change_bytes` when each is known. The two manual-review messages carry `rank_check`.
 
-After the findings, each pass logs one `upgrade sizes` line per view, with `hidden_tier` set to `alt` or `none`, carrying the size totals. Up to 25 `biggest upgrade` lines and up to 30 `group rank` lines follow per view, and `findings reported` with its `manual_review` count closes the pass. An upgrade that enters the list logs `upgrade found`, and one that leaves it logs `upgrade resolved`. On the first pass after a start, every `upgrade found` line carries `after_start=true`.
+After the findings, each pass logs one `upgrade sizes` line per view, with `hidden_tier` set to `alt` or `none`, carrying the size totals. Up to 25 `biggest upgrade` lines follow per view, and `findings reported` with its `manual_review` count closes the pass. An upgrade that enters the list logs `upgrade found`, and one that leaves it logs `upgrade resolved`. On the first pass after a start, every `upgrade found` line carries `after_start=true`.
 
 A problem that lasts, such as SeaDex being unreachable, logs an `error` line with a `condition` attribute on every pass until it clears. It saves these problems in its state, so a restart does not clear an alert that is still true.
 
@@ -47,11 +47,9 @@ The dashboard has three variables at the top. **Data source** picks your Loki da
 
 The dashboard has three tabs:
 
-- Overview shows the status, the number of upgrades and of findings to check by hand, two shares of your anime and Library overview, which counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrade storage gives the space the upgrades need, then Upgrades available and Check by hand list them.
-- Upgrades is the deep dive. It shows the biggest size changes, the upgrade count over time and the upgrades recently resolved. It also breaks the upgrades down by reason, format and source, as the average per check over the last two hours, and ranks the release groups involved.
-- Scout health shows when the last checks finished and the errors that keep the status from `✓`. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
-
-The SeaDex best tile is the share of your anime where everything you have is SeaDex's best release. The SeaDex alt tile is the share where you have best or alt releases with at least one alt. SeaDex's best is often a remux, so an anime you keep as encodes usually counts as alt.
+- Overview shows the number of upgrades and the number of findings to check by hand, one above the other. Beside them, Library overview counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrades available and Check by hand list the upgrades and the findings. Above them, a tile appears only while something needs a look, as [Attention tiles](#attention-tiles) describes.
+- Upgrades is the deep dive into sizes, and it describes the current upgrades whatever time range you pick. It breaks the upgrades down by format and resolution, as the average per check over the last two hours. It shows the storage every upgrade needs, how much your library grows once every upgrade with both sizes known replaces its files, how many upgrades each size total leaves out, and the biggest size changes.
+- Scout health lists the errors logged in the selected time range. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
 
 Three Library overview bars need a word. Season not found means no files sit where the entry maps. They are missing, or Sonarr files that season elsewhere, such as under TVDB's specials. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.
 
@@ -63,13 +61,31 @@ Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens t
 
 The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
 
-The status shows `✓`, `!` or `✗`, built from the same conditions as the shipped alert rules. A tick means checks run and nothing fails. An exclamation mark means SeaDex, AniList or the anime ID map is failing, and nothing needs fixing on your side. A cross means an error you can fix or checks that stopped. On the Scout health tab, Errors behind Status lists those errors, and Last check and Last full check show stopped checks.
-
 Upgrades available and Check by hand show the newest check only, up to 200 upgrades and 100 findings, while the counts above them count every one. Upgrades come first when they are a newer version of a group you have, then by size change, from most added to most freed. First seen is when seadex-scout first saw the upgrade since it started, so it resets when the container restarts.
+
+### Attention tiles
+
+The top of the Overview stays empty while seadex-scout runs well. Each tile below appears only while its condition holds, and reads the same lines as the alert rule it names:
+
+| Tile | Appears when | Alert rule |
+| --- | --- | --- |
+| Last check | no check of any kind has finished or started in 3 hours | `SeadexScoutScanStalled` |
+| Last full check | no daily full check has finished in 72 hours | `SeadexScoutReconcileStalled` |
+| Errors in this range | seadex-scout logged an error you can fix in the selected time range | `SeadexScoutCycleError` |
+| Library problem | Sonarr or Radarr keeps returning a much smaller or incomplete library | `SeadexScoutLibraryDegraded` |
+| Feed not read | a tracker's RSS feed was read in the last week but not in the last 6 hours | `SeadexScoutFeedNotPolled` |
+| AnimeBytes feed | the last feed update held AnimeBytes releases back because `indexer.ab_passkey` is not set | none |
+| Upstream outage | SeaDex, AniList or the anime ID map keeps failing, which needs nothing from you | `SeadexScoutUpstreamUnavailable` |
+
+Library problem, Feed not read and Upstream outage name one app, tracker or service. When several have the problem at once, the tile names the one logged most, and Errors logged on the Scout health tab lists them all.
+
+Errors in this range counts every error with no named problem in the time range you pick, so one error keeps the tile up until it leaves the range, while its alert resolves an hour after the error. Library problem and Upstream outage show a problem only while it was logged in the last hour, as their alerts do. Whatever range you pick, Last check, Last full check and Feed not read look back over their alert's own window, and AnimeBytes feed reads the last feed update. On the Scout health tab, Errors logged names each error in the time range, a past problem included.
+
+A tile also hides when its query fails. If your Loki data source is down, every tile stays hidden, and the tiles, Library overview and tables below them show the query error instead.
 
 ### Upgrade sizes
 
-Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. The Download needed and Net library size change tiles add up every upgrade the Optional upgrades setting shows, including any beyond the 200 rows the table lists. Without a size counts the ones left out.
+Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. Storage needed and Library growth add up every upgrade the Optional upgrades setting shows, including any beyond the 200 rows the table lists. Storage needed adds every upgrade whose download size is known. Library growth needs both the download size and the size of the files the download replaces, so it usually leaves out more upgrades than Storage needed. An upgrade is also left out of a total when a torrent or file it shares with another upgrade carries a different size there. Upgrades not in the size totals counts what each total leaves out. Storage needed says at least, because each upgrade it leaves out would add to it. Library growth can be off in either direction, because an upgrade left out can grow or shrink your library.
 
 The download is one set of torrents. A season pack, or a release whose files name no episode, is that torrent alone. A single episode stands for every single episode of the same release, which is the same group, tracker, resolution, codec, kind and dual audio, one torrent per episode. Each torrent counts at its full size, extras and samples included.
 
@@ -87,13 +103,13 @@ A size stays unknown in these cases, among others:
 - A newer revision is listed only on a release you cannot get, such as one on AnimeBytes with `animebytes` off.
 - The entry is a film or special filed in Sonarr's specials. Its copy in Radarr, if you have one, replaces its one file like any film.
 
-The totals count each torrent once, even when two upgrades share it, and each replaced file once. So the rows can add up to more than the tiles.
+The totals count each torrent once, even when two upgrades share it, and each replaced file once. So the rows can add up to more than the totals.
 
-The two share tiles and Library overview show the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available. An anime whose only SeaDex entries have no file, or are only offered in the feed, has an entry but is never at best or alt.
+Library overview shows the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available.
 
 These numbers come from the `library summary` line each full daily check logs, so they lag by up to a day. A full check whose library read was incomplete logs no summary. They then keep the previous summary until it is 26 hours old and are empty after that, until a complete check logs a new one.
 
-With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The status then shows `✗` and the dashboard stays mostly empty.
+With `poll_interval: off`, each check runs in a `docker exec` child whose lines never reach the container log. The Last check and Last full check tiles then show, and the dashboard stays mostly empty.
 
 ## Alerting
 
@@ -125,7 +141,36 @@ Thresholds and the `severity` labels are starting points. Change the `container`
 
 ### Log contract
 
-The messages listed at the top of [`alerts/logql.yaml`](../alerts/logql.yaml) are the log contract. The rules and the dashboard match only these messages. Each `attrs:` line names the attributes that are stable on its message, and `msg` and `level` are stable on every line. A listed message is not renamed or retyped without a matching change to that list.
+The messages in this table are the log contract. The rules in [`alerts/logql.yaml`](../alerts/logql.yaml) and the dashboard match only these messages. The last column names the attributes that are stable on each message, and `msg` and `level` are stable on every line. A listed message is not renamed or retyped without a matching change to this table.
+
+| Message | Logged when | Stable attributes |
+| --- | --- | --- |
+| `level=ERROR`, no `condition` | a one-off or local fault. `SeadexScoutCycleError` keys on the level and the missing attribute, not on a message | |
+| `level=ERROR` with `condition` | a lasting problem, on every pass while it holds, by the escalated line or by `degraded condition still standing` | `condition`, `arr` |
+| `better release available` | a better release, or a newer revision of the group on disk with `status=newer_revision`. The three byte sizes are present only when known | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `current_tier`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `info_hash`, `resolution`, `kind`, `tracker`, `release_url`, `nyaa_url`, `public_url`, `public_tracker`, `ab_url`, `ab_tracker`, `current_revision`, `recommended_revision`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_alt`, `rank_none`, `recommended_bytes`, `current_bytes`, `size_change_bytes` |
+| `series spans multiple release groups, manual review` | the files on disk span more than one release group | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_check` |
+| `release group unverifiable, manual review` | an untagged release left a comparison undecided | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_check` |
+| `findings reported` | the last line of each pass of the findings. `manual_review` counts the two manual-review messages, and `rank_check` numbers them | `pass_id`, `emitted`, `manual_review` |
+| `upgrade sizes` | once per pass and `hidden_tier` (`alt` or `none`), with the size totals of the upgrades that view shows | `pass_id`, `hidden_tier`, `upgrades`, `upgrades_better_release`, `upgrades_newer_revision`, `upgrades_sized`, `upgrades_unsized`, `recommended_bytes_total`, `current_bytes_replaced`, `size_change_bytes`, `download_bytes_total`, `upgrades_download_unsized` |
+| `biggest upgrade` | up to 25 per pass and `hidden_tier`, ordered by size change | `pass_id`, `hidden_tier`, `rank`, `current_tier`, `status`, `title`, `al_id`, `arr`, `arr_url`, `season`, `current_group`, `recommended_group`, `recommended_bytes`, `current_bytes`, `size_change_bytes` |
+| `upgrade found` | an upgrade entered the list, with `after_start=true` on the first pass after a start | `pass_id`, `after_start`, `title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_tier`, `current_group`, `recommended_group` |
+| `upgrade resolved` | an upgrade left the list | `pass_id`, `after_start`, `title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_tier`, `current_group`, `recommended_group` |
+| `report written` | a report was written, and `anime` is the number of rows it holds | `anime` |
+| `cycle complete` | a full pass compared, matched by `SeadexScoutScanStalled` | `duration`, `library_items`, `findings`, `specials_unread` |
+| `cycle degraded` | a full pass ran but could not compare, matched by `SeadexScoutScanStalled` | `reason`, `duration`, `library_items`, `findings`, `specials_unread` |
+| `tick complete` | a quick check compared, matched by `SeadexScoutScanStalled` | |
+| `tick degraded` | a quick check ran but could not compare, matched by `SeadexScoutScanStalled` | `reason` |
+| `reconcile started` | a full pass started, also matched by `SeadexScoutScanStalled` | |
+| `reconcile complete` | a full pass finished, matched by `SeadexScoutReconcileStalled` | |
+| `indexer request` | one Torznab request from an arr. `feed=true` marks an RSS poll, which `SeadexScoutFeedNotPolled` counts. `t` is the Torznab function, `returned` the items sent back and `curated` the SeaDex-curated items among them | `scope`, `feed`, `t`, `curated`, `returned` |
+| `indexer feed snapshot written` | the feed was rebuilt or advanced, and `journal_new` counts the releases newly added to the RSS feed | `journal_new`, `scope`, `nyaa_feed`, `ab_feed`, `ab_releases_skipped` |
+| `library summary` | each full pass whose library read was complete, with the daily library counts | `rows`, `have_best`, `have_alt`, `have_older_revision`, `have_unlisted`, `no_file`, `unverified`, `unattributed`, `not_on_seadex`, `anime_items`, `items_with_entry`, `items_all_best`, `items_all_best_or_alt` |
+
+`SeadexScoutScanStalled` matches `(cycle|tick) (complete|degraded)`, and `duration` is a Go duration string. A gated `cycle degraded` line carries no `duration`, `library_items`, `findings` or `specials_unread`.
+
+The `condition` values are `seadex-unreachable`, `seadex-window-oversize`, `seadex-catalogue-fetch-failing`, `anilist-lookups-failing`, `mapping-refresh-rejected`, `library-walk-shrunk` and `library-walk-partial`. Only `library-walk-shrunk` also carries `arr`.
+
+The `reason` values on `cycle degraded` are `library-shrunk`, `partial-walk`, `anilist-degraded`, `mapping-stale`, `tags-emptied-side`, `walk-failed`, `mapping-unusable`, `seadex-fetch-failed` and `seadex-zero-entries`. On `tick degraded` they are `awaiting-first-reconcile`, `probe-failed`, `window-fetch-failed`, `window-oversize` and `mapping-unusable`.
 
 Every other message and attribute seadex-scout logs is diagnostic. It may be reworded, change level or change type in any release. If you build a rule or a dashboard on one, keep your own copy of the text, because it may not survive an upgrade.
 

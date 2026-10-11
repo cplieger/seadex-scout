@@ -53,7 +53,7 @@ type Item struct {
 	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
 	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
 	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an
-	// audit Row. The sink-side SafeLogURL calls are belt-and-braces for an Item
+	// audit report row. The sink-side SafeLogURL calls are belt-and-braces for an Item
 	// built outside the walker (tests, future construction paths).
 	ArrURL    string          `json:"arr_url,omitempty"`
 	AltTitles []string        `json:"alt_titles,omitempty"`

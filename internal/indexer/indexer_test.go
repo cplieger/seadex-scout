@@ -1746,7 +1746,7 @@ func TestParsePubDate(t *testing.T) {
 }
 
 // TestServeFailsClosedWithoutConfiguredAPIKey pins serve's independent
-// fail-closed guard for an unconfigured feed_api_key: Run refuses to bind in
+// fail-closed guard for an unconfigured feed_api_key: run refuses to bind in
 // that state, but any other construction path reaching serve must get a 503,
 // never a served feed - an absent apikey param also hashes to sha256(""), so
 // skipping straight to the constant-time compare would OPEN the gate and serve

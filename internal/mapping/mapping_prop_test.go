@@ -9,7 +9,7 @@ import (
 )
 
 // TestDeduplicateRecordsIndexOracle property-checks deduplicateRecords against
-// buildIndex, the consumer whose semantics it exists to mirror: for any record
+// NewIndex, the consumer whose semantics it exists to mirror: for any record
 // list, the deduplicated slice must index bijectively (len == index len) and
 // produce exactly the same effective index as the raw input, every surviving ID
 // must be positive and unique, each survivor must be the WHOLE last occurrence of
@@ -41,14 +41,14 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			r.IMDbIDs = slices.Clone(r.IMDbIDs)
 			frozen[i] = r
 		}
-		rawIdx := buildIndex(frozen, nil, nil)
+		rawIdx := NewIndex(Source{Records: frozen})
 
 		out := deduplicateRecords(records)
 
-		if got, want := buildIndex(out, nil, nil).Len(), len(out); got != want {
+		if got, want := NewIndex(Source{Records: out}).Len(), len(out); got != want {
 			t.Fatalf("deduplicated set indexes to %d entries, want bijective %d", got, want)
 		}
-		outIdx := buildIndex(out, nil, nil)
+		outIdx := NewIndex(Source{Records: out})
 		if rawIdx.Len() != outIdx.Len() {
 			t.Fatalf("index size diverged: raw %d, deduplicated %d", rawIdx.Len(), outIdx.Len())
 		}
@@ -61,7 +61,7 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 				t.Fatalf("deduplicated set repeats ID %d", r.AniListID)
 			}
 			seen[r.AniListID] = struct{}{}
-			// buildIndex is the last-write-wins oracle: the survivor must be
+			// NewIndex is the last-write-wins oracle: the survivor must be
 			// the WHOLE last occurrence, every field intact. It canonicalizes on
 			// insertion, so the comparison is against the canonical form of the
 			// survivor - canonicalize allocates fresh slices, so this cannot

@@ -20,7 +20,7 @@ func TestMakeDirEnforcesTheModeOfTheDirectoryItCreated(t *testing.T) {
 	}
 
 	witness := filepath.Join(parent, "witness")
-	if err := os.Mkdir(witness, DirMode); err != nil {
+	if err := os.Mkdir(witness, dirMode); err != nil {
 		t.Fatal(err)
 	}
 	wfi, err := os.Lstat(witness)
@@ -30,7 +30,7 @@ func TestMakeDirEnforcesTheModeOfTheDirectoryItCreated(t *testing.T) {
 	if wfi.Mode()&os.ModeSetgid == 0 {
 		t.Skipf("kernel did not widen a %#o mkdir under a setgid parent (got %v); "+
 			"this filesystem stores every requested mode, so the test cannot tell "+
-			"an enforced mode from a requested one", os.FileMode(DirMode), wfi.Mode())
+			"an enforced mode from a requested one", os.FileMode(dirMode), wfi.Mode())
 	}
 
 	dir := filepath.Join(parent, "reports")
@@ -41,7 +41,7 @@ func TestMakeDirEnforcesTheModeOfTheDirectoryItCreated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := fi.Mode(), os.ModeDir|DirMode; got != want {
+	if got, want := fi.Mode(), os.ModeDir|dirMode; got != want {
 		t.Fatalf("created report dir mode = %v, want %v: the mode it created was not enforced",
 			got, want)
 	}
@@ -97,8 +97,8 @@ func TestMakeDirCreatesOwnerOnly(t *testing.T) {
 	if !fi.IsDir() {
 		t.Fatal("not a directory")
 	}
-	if got := fi.Mode().Perm(); got != DirMode {
-		t.Fatalf("mode = %v, want %v", got, os.FileMode(DirMode))
+	if got := fi.Mode().Perm(); got != dirMode {
+		t.Fatalf("mode = %v, want %v", got, os.FileMode(dirMode))
 	}
 }
 
@@ -118,9 +118,9 @@ func TestMakeDirCleansATrailingSeparator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fi.Mode().Perm(); got != DirMode {
+	if got := fi.Mode().Perm(); got != dirMode {
 		t.Fatalf("mode = %v, want %v: the trailing separator skipped enforcement",
-			got, os.FileMode(DirMode))
+			got, os.FileMode(dirMode))
 	}
 }
 

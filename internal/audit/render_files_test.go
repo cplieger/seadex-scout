@@ -17,16 +17,23 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+type writtenReport struct {
+	Rows []struct {
+		Title   string  `json:"title"`
+		Verdict Verdict `json:"verdict"`
+	} `json:"rows"`
+}
+
 // TestWriteFilesWritesTimestampedPair pins the on-disk report contract the
 // README documents: a report-<UTC timestamp>.md + .json pair (colon-free,
 // sortable, second precision) written into the report dir, which is created
-// when missing, with the JSON round-tripping back to the report.
+// when missing, with the JSON decoding back to the written rows.
 func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows:        []Row{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
+		Rows:        []reportRow{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
 	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
@@ -45,7 +52,7 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json not written at the timestamped path: %v", err)
 	}
-	var back Report
+	var back writtenReport
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("written json does not parse: %v", err)
 	}
@@ -60,7 +67,7 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 // WithMode(reportfs.FileMode) would publish every report to any local account able to
 // traverse the bind-mounted /config tree with nothing failing. Only the FILE mode is
 // asserted: a default ACL on the parent (containers, group-writable bind mounts) can
-// widen a freshly created directory beyond reportfs.DirMode, so a directory-mode
+// widen a freshly created directory beyond the mode reportfs pins, so a directory-mode
 // assertion would fail on an honest tree.
 func TestWriteFilesReportPairIsOwnerOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
@@ -92,7 +99,7 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Totals:      map[string]int{},
-		Rows:        []Row{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
+		Rows:        []reportRow{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
 	if err := os.Symlink("missing-target", base+".md"); err != nil {
@@ -111,7 +118,7 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("JSON half must remain after the Markdown write fails: %v", readErr)
 	}
-	var back Report
+	var back writtenReport
 	if unmarshalErr := json.Unmarshal(data, &back); unmarshalErr != nil {
 		t.Fatalf("surviving JSON half does not parse: %v", unmarshalErr)
 	}
@@ -132,9 +139,9 @@ func TestWriteFilesReportWrittenLineCarriesAlertAttributes(t *testing.T) {
 	var buf strings.Builder
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
-		Rows: []Row{
+		Rows: []reportRow{
 			{Title: "Sound! Euphonium the Movie", AniListID: 101992, Arr: "radarr", Verdict: VerdictBest},
-			{Title: "Sound! Euphonium the Movie", AniListID: 101992, Arr: "sonarr", Verdict: VerdictAlt},
+			{Title: "Sound! Euphonium the Movie", AniListID: 101992, Arr: "sonarr", Verdict: verdictAlt},
 		},
 	}
 
@@ -167,7 +174,7 @@ func TestWriteFilesRedactsArrURLCredentials(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Totals:      map[string]int{string(VerdictBest): 1},
-		Rows: []Row{{
+		Rows: []reportRow{{
 			Title:   "Frieren",
 			Arr:     "sonarr",
 			Verdict: VerdictBest,
@@ -300,8 +307,8 @@ func TestWriteFilesSameSecondRerunKeepsBothPairs(t *testing.T) {
 	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	stamp := time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC)
-	first := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []Row{{Title: "First", Arr: "sonarr", Verdict: VerdictBest}}}
-	second := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []Row{{Title: "Second", Arr: "sonarr", Verdict: VerdictBest}}}
+	first := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []reportRow{{Title: "First", Arr: "sonarr", Verdict: VerdictBest}}}
+	second := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []reportRow{{Title: "Second", Arr: "sonarr", Verdict: VerdictBest}}}
 
 	if err := first.WriteFiles(t.Context(), dir, log); err != nil {
 		t.Fatalf("first WriteFiles: %v", err)

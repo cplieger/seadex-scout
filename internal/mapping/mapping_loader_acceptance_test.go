@@ -470,7 +470,7 @@ func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
 // deduplicateRecords' documented last-record-wins and stable-order semantics
 // on an ACCEPTED refresh: the persisted Cache.Records (and hence the served
 // index) must carry the LAST duplicate's data at the last-occurrence
-// position, matching buildIndex's map-overwrite semantics. The existing
+// position, matching NewIndex's map-overwrite semantics. The existing
 // duplicate-ID tests only exercise REJECTED refreshes, where which duplicate
 // survives is never observable.
 func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
@@ -508,7 +508,7 @@ func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 		}
 	}
 	if rec9 := next.Records[1]; rec9.AniListID != 9 || rec9.TvdbID != 901 {
-		t.Errorf("accepted refresh record[1] = %+v, want the duplicated id 9 carrying the LAST record's TvdbID 901 (matching buildIndex)", rec9)
+		t.Errorf("accepted refresh record[1] = %+v, want the duplicated id 9 carrying the LAST record's TvdbID 901 (matching NewIndex)", rec9)
 	}
 }
 
