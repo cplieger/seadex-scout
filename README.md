@@ -3,7 +3,7 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)](https://github.com/cplieger/seadex-scout/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
 <!-- hub-overview BEGIN -->
-seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://releases.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
+seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://seadex.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
 
 ![The seadex-scout Grafana dashboard showing 10 upgrades, 2 findings to check by hand, a breakdown of the library by verdict, and the table of upgrades available](docs/images/dashboard.png)
 
@@ -20,7 +20,7 @@ You can leave out remuxes, require dual audio, skip specials and add AnimeBytes 
 
 ## Who it is for
 
-seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
+seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on SeaDex and compare its release groups with your files by hand.
 
 You need a Sonarr instance, a Radarr instance or both, with anime in them. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 
@@ -70,7 +70,7 @@ On Unraid, open the **Apps** tab, search for seadex-scout and click **Install**.
 
 ## Reading the results
 
-The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known, and the Upgrades tab gives the storage all the upgrades need together. The dashboard also shows how much of your library is at SeaDex's best or alt. Tiles at the top appear only while the scout needs a look, such as checks that stopped or an error to fix. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
+The Grafana dashboard each release ships, for Grafana 13.2 or newer, lists up to 200 current upgrades with links to the release and the show in Sonarr or Radarr. Each row shows the download size and the size change when they are known. The dashboard also shows how much of your library is at SeaDex's best or alt. Tiles at the top appear only while the scout needs a look, such as checks that stopped or an error to fix. [Monitoring and alerts](docs/monitoring.md#dashboard) shows how to import it.
 
 With the rules from step 4 loaded, your Alertmanager sends each new upgrade to Discord, email or any receiver it supports, with a link to the release. To stop the messages for one show, add its `al_id` to `filters.ignore`.
 
@@ -152,7 +152,7 @@ The healthcheck runs `seadex-scout health`, which reads a marker file each compl
 
 ## Monitoring
 
-seadex-scout writes JSON logs to standard output and has no metrics endpoint. Nine Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard for Grafana 13.2 or newer ships with every release as `grafana-dashboard.json`. On Grafana 13.1 or older, take it from release [v2.12.1](https://github.com/cplieger/seadex-scout/releases/tag/v2.12.1), the last one in the older dashboard format, and maintain it yourself. [Monitoring and alerts](docs/monitoring.md) explains both and shows how to load them.
+seadex-scout writes JSON logs to standard output and has no metrics endpoint. Eight Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml), and a Grafana dashboard for Grafana 13.2 or newer ships with every release as `grafana-dashboard.json`. On Grafana 13.1 or older, take it from release [v2.12.1](https://github.com/cplieger/seadex-scout/releases/tag/v2.12.1), the last one in the older dashboard format, and maintain it yourself. [Monitoring and alerts](docs/monitoring.md) explains both and shows how to load them.
 
 ## Documentation
 

@@ -484,7 +484,7 @@ func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 
 // TestAuditIncompleteMappings pins the incomplete-mapping section's data
 // shape: the transiently-unresolved AniList ids render as incompleteEntry
-// rows sorted by id, each carrying its releases.moe link, and a fully
+// rows sorted by id, each carrying its SeaDex link, and a fully
 // resolved run (nil or empty set) carries none - so the section (and the
 // JSON key, via omitempty) only ever appears when something actually failed.
 func TestAuditIncompleteMappings(t *testing.T) {
@@ -493,11 +493,11 @@ func TestAuditIncompleteMappings(t *testing.T) {
 	rep := a.Audit(nil, nil, nil, map[int]struct{}{99: {}, 7: {}})
 
 	want := []incompleteEntry{
-		{SeaDexURL: "https://releases.moe/7", AniListID: 7},
-		{SeaDexURL: "https://releases.moe/99", AniListID: 99},
+		{SeaDexURL: "https://seadex.moe/7/", AniListID: 7},
+		{SeaDexURL: "https://seadex.moe/99/", AniListID: 99},
 	}
 	if !reflect.DeepEqual(rep.Incomplete, want) {
-		t.Errorf("Incomplete = %+v, want %+v (sorted by AniList id with releases.moe links)", rep.Incomplete, want)
+		t.Errorf("Incomplete = %+v, want %+v (sorted by AniList id with SeaDex links)", rep.Incomplete, want)
 	}
 
 	if got := a.Audit(nil, nil, nil, nil).Incomplete; got != nil {

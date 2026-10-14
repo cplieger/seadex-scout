@@ -282,7 +282,7 @@ func TestFindingLinesCarryTheLogContract(t *testing.T) {
 			if !ok || len(want) == 0 {
 				t.Fatalf("the log contract declares no attributes for %q", msg)
 			}
-			f := sizedFinding("k1", "Frieren", 2, 1, download("x", 2))
+			f := sizedFinding("k1", "Frieren", 2, 1)
 			f.Status, f.Tier = status, compare.TierAlt
 			notifier, recorder := newCapturedNotifier()
 			notifier.Report([]compare.Finding{f}, nil)

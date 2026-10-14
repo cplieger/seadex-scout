@@ -468,8 +468,8 @@ func TestRenderJournalItemDeterministicSynthesisSource(t *testing.T) {
 			if it.AniListID != 1 {
 				t.Errorf("AniListID = %d, want 1 (synthesis source must be the lowest AniList id, not the first occurrence)", it.AniListID)
 			}
-			if !strings.HasSuffix(it.InfoURL, "/1") {
-				t.Errorf("InfoURL = %q, want the lowest AniList id's releases.moe/1 link", it.InfoURL)
+			if !strings.HasSuffix(it.InfoURL, "/1/") {
+				t.Errorf("InfoURL = %q, want the lowest AniList id's SeaDex /1/ link", it.InfoURL)
 			}
 		})
 	}
@@ -1095,7 +1095,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	if len(pmrNyaa.Categories) != 1 || pmrNyaa.Categories[0] != catAnime {
 		t.Errorf("PMR nyaa categories = %v, want [%d]", pmrNyaa.Categories, catAnime)
 	}
-	if pmrNyaa.InfoURL != "https://releases.moe/154587" {
+	if pmrNyaa.InfoURL != "https://seadex.moe/154587/" {
 		t.Errorf("PMR nyaa infoURL = %q", pmrNyaa.InfoURL)
 	}
 	if pmrNyaa.Size != 400_000_000+7_500_699_108+7_497_267_058 {

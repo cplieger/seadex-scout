@@ -187,7 +187,7 @@ func (s *Scout) logTickDegraded(reason string, attrs ...any) {
 // keeps firing while the condition holds.
 func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 	s.escalate(standingKey{cond: degradation.SeaDexUnreachable}, s.unreachableRun, s.latchTicks(), msg,
-		"SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
+		"SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect seadex.moe reachability and egress",
 		attrError, logSafeUpstreamError(err),
 		"consecutive_unreachable_ticks", s.unreachableRun)
 }

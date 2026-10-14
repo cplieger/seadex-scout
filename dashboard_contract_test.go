@@ -43,7 +43,7 @@ var (
 	groupableRe   = regexp.MustCompile(`^(avg|min|max|stddev|stdvar|quantile|first|last)_over_time\($`)
 	outerSumRe    = regexp.MustCompile(`sum\s+by\s*\([^)]*\)\s*\($`)
 	byRe          = regexp.MustCompile(`\bby\s*\(([^)]*)\)`)
-	summaryReadRe = regexp.MustCompile("\\|=\\s*`(upgrade sizes|biggest upgrade)`")
+	summaryReadRe = regexp.MustCompile("\\|=\\s*`upgrade sizes`")
 	regexMetaRe   = regexp.MustCompile(`[\\.*+?()\[\]{}^$]`)
 	urlHostRe     = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://([^/"\s:?#]+)`)
 	ipv4Re        = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
@@ -52,7 +52,7 @@ var (
 // allowedWindows are the fixed windows that encode seadex-scout's own cadence
 // or a shipped alert rule's window; anything reaching back into history must
 // use Grafana's range.
-var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "6h", "26h", "72h", "7d"}
+var allowedWindows = []string{"$__range", "$__interval", "1h", "2h", "3h", "26h", "72h"}
 
 // rateWindows are the smoothing intervals a rate may take. They hold only
 // under a rate: the same [5m] under count_over_time measures a fixed period.
@@ -291,7 +291,7 @@ func matchingParen(s string, open int) int {
 
 // snapshotMessages are the lines a pass re-states in full, so a table over
 // them shows one pass only by joining on the newest pass's pass_id.
-var snapshotMessages = []string{"better release available", "manual review", "biggest upgrade"}
+var snapshotMessages = []string{"better release available", "manual review"}
 
 // passMessages are the per-pass lines whose newest pass_id a snapshot joins on.
 var passMessages = []string{"findings reported", "upgrade sizes"}
@@ -372,9 +372,9 @@ func TestDashboardItemTableCheckRejects(t *testing.T) {
 // TestDashboardSizeChangeSkipsUnknownSizes pins that every size the dashboard
 // shows is one the app computed over known sizes only: no query adds or
 // subtracts byte fields itself, where an unknown size would read as 0, and the
-// net change tile and column read size_change_bytes.
+// size change column reads size_change_bytes.
 func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
-	byteField := regexp.MustCompile(`unwrap (recommended_bytes|current_bytes|recommended_bytes_total|current_bytes_replaced|download_bytes_total)\b[^|]*\)[^)]*\)?\s*[-+]`)
+	byteField := regexp.MustCompile(`unwrap recommended_bytes\b[^|]*\)[^)]*\)?\s*[-+]`)
 	reads := 0
 	for _, tg := range dashboardTargets(loadDashboard(t)) {
 		if byteField.MatchString(tg.expr) {
@@ -384,38 +384,8 @@ func TestDashboardSizeChangeSkipsUnknownSizes(t *testing.T) {
 			reads++
 		}
 	}
-	if reads < 2 {
-		t.Errorf("%d queries read size_change_bytes, want the net change tile and the upgrades table", reads)
-	}
-}
-
-// The download total leaves out every upgrade whose download size is unknown,
-// so it is a lower bound: its tile must say "at least", and the count it leaves
-// out must be on the dashboard.
-func TestDashboardDownloadTotalReadsAsALowerBound(t *testing.T) {
-	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
-	totals, unsized := 0, 0
-	for _, name := range slices.Sorted(maps.Keys(elements)) {
-		el := elements[name]
-		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
-		for _, q := range queries {
-			expr, _ := field(q, "spec", "query", "spec", "expr").(string)
-			if strings.Contains(expr, "unwrap upgrades_download_unsized ") {
-				unsized++
-			}
-			if !strings.Contains(expr, "unwrap download_bytes_total ") {
-				continue
-			}
-			totals++
-			title, _ := field(el, "spec", "title").(string)
-			shown, _ := field(el, "spec", "vizConfig", "spec", "fieldConfig", "defaults", "displayName").(string)
-			if !strings.Contains(title+" "+shown, "at least") {
-				t.Errorf("panel %q shows the download total as %q, want it to say at least", title, shown)
-			}
-		}
-	}
-	if totals == 0 || unsized == 0 {
-		t.Fatalf("%s reads the download total %d times and the unsized count %d times, want both", dashboardPath, totals, unsized)
+	if reads == 0 {
+		t.Errorf("no query reads size_change_bytes, want the upgrades table to")
 	}
 }
 
@@ -455,7 +425,7 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 		"info_hash grouping":  "count(sum by (info_hash, arr) (count_over_time(" + sel + " |= `better release available` | json msg=\"msg\", info_hash=\"info_hash\" | msg=`better release available` [2h])))",
 		"ungrouped sum":       "sum(sum_over_time(" + sel + " |= `indexer feed snapshot written` | json msg=\"msg\", journal_new=\"journal_new\" | msg=`indexer feed snapshot written` | unwrap journal_new [$__range]))",
 		"summary of no view":  "last_over_time(" + sel + " |= `upgrade sizes` | json msg=\"msg\", upgrades=\"upgrades\" | msg=`upgrade sizes` | unwrap upgrades [2h]) by ()",
-		"log query bare json": sel + " |= `biggest upgrade` | json | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
+		"log query bare json": sel + " |= `upgrade sizes` | json | msg=`upgrade sizes` | hidden_tier=\"$optional\"",
 	}
 	for name, expr := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -466,7 +436,7 @@ func TestDashboardContractCheckRejects(t *testing.T) {
 	}
 	for _, ok := range []string{
 		"last_over_time(" + sel + " |= `library summary` | json msg=\"msg\", have_best=\"have_best\" | msg=`library summary` | unwrap have_best [26h]) by ()",
-		sel + " |= `biggest upgrade` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`biggest upgrade` | hidden_tier=\"$optional\"",
+		sel + " |= `upgrade sizes` | json msg=\"msg\", hidden_tier=\"hidden_tier\" | msg=`upgrade sizes` | hidden_tier=\"$optional\"",
 		"sum by () (rate(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [5m]))",
 		"sum by () (rate(" + sel + " | json msg=\"msg\" | msg=`reconcile complete` [$__rate_interval]))",
 	} {
@@ -499,10 +469,10 @@ func TestDashboardShape(t *testing.T) {
 		name, _ := field(v, "spec", "name").(string)
 		names = append(names, name)
 	}
-	if !slices.Equal(names, []string{"datasource", "container", "optional"}) {
-		t.Errorf("variables = %v, want [datasource container optional]", names)
+	if !slices.Equal(names, []string{"datasource", "container", "optional", "spanread", "span", "spanunit"}) {
+		t.Errorf("variables = %v, want [datasource container optional spanread span spanunit]", names)
 	}
-	if len(vars) == 3 {
+	if len(vars) == 6 {
 		opt := vars[2]
 		kind, query, cur := field(opt, "kind"), field(opt, "spec", "query"), field(opt, "spec", "current")
 		if kind != "CustomVariable" || query != "Hide : alt, Show : none" ||
@@ -529,8 +499,8 @@ func TestDashboardShape(t *testing.T) {
 		t.Errorf("dashboard carries %q, want no fixed number of days anywhere", m)
 	}
 	for _, m := range urlHostRe.FindAllStringSubmatch(text, -1) {
-		if m[1] != "releases.moe" {
-			t.Errorf("dashboard links to host %q, want only releases.moe", m[1])
+		if m[1] != "seadex.moe" {
+			t.Errorf("dashboard links to host %q, want only seadex.moe", m[1])
 		}
 	}
 	if m := ipv4Re.FindString(text); m != "" {
@@ -557,38 +527,6 @@ func TestDashboardReadsTheLatestSummaries(t *testing.T) {
 		if reads[msg] == 0 {
 			t.Errorf("%s reads no %s line through a range aggregation", dashboardPath, msg)
 		}
-	}
-}
-
-// A breakdown that divides finding lines by findings reported lines over a
-// window is an average per check, fractional whenever the set changed in the
-// window, so its panel must say so and show a decimal rather than round it
-// into a count that disagrees with the Upgrades tile.
-func TestDashboardShowsPerCheckAveragesAsAverages(t *testing.T) {
-	perCheckRe := regexp.MustCompile("/\\s*on\\s*\\(\\)\\s*group_left\\s+sum\\s+by\\s*\\(\\)\\s*\\(count_over_time\\(\\{[^{}]*\\}\\s*\\|=\\s*`findings reported`")
-	elements, _ := field(loadDashboard(t), "spec", "elements").(map[string]any)
-	n := 0
-	for _, name := range slices.Sorted(maps.Keys(elements)) {
-		el := elements[name]
-		title, _ := field(el, "spec", "title").(string)
-		queries, _ := field(el, "spec", "data", "spec", "queries").([]any)
-		if !slices.ContainsFunc(queries, func(q any) bool {
-			expr, _ := field(q, "spec", "query", "spec", "expr").(string)
-			return perCheckRe.MatchString(expr)
-		}) {
-			continue
-		}
-		n++
-		if desc, _ := field(el, "spec", "description").(string); !strings.Contains(strings.ToLower(desc), "average") {
-			t.Errorf("panel %q shows a per-check average, but its description never says average: %q", title, desc)
-		}
-		decimals := panelDecimals(field(el, "spec", "vizConfig", "spec", "fieldConfig"))
-		if len(decimals) == 0 || slices.ContainsFunc(decimals, func(d float64) bool { return d < 1 }) {
-			t.Errorf("panel %q shows a per-check average with decimals %v, want at least one decimal everywhere it sets them", title, decimals)
-		}
-	}
-	if n == 0 {
-		t.Fatalf("%s carries no per-check average, so this check checks nothing", dashboardPath)
 	}
 }
 
@@ -663,30 +601,11 @@ func TestDashboardTableColumnsFitTheirHeaders(t *testing.T) {
 	}
 }
 
-func panelDecimals(fieldConfig any) []float64 {
-	var out []float64
-	if d, ok := field(fieldConfig, "defaults", "decimals").(float64); ok {
-		out = append(out, d)
-	}
-	overrides, _ := field(fieldConfig, "overrides").([]any)
-	for _, o := range overrides {
-		props, _ := field(o, "properties").([]any)
-		for _, p := range props {
-			if field(p, "id") == "decimals" {
-				if d, ok := field(p, "value").(float64); ok {
-					out = append(out, d)
-				}
-			}
-		}
-	}
-	return out
-}
-
 // The upgrades tile and table must hide the same optional upgrades, or the
 // count and the list disagree, so every finding, event and ranking read
 // carries the filter.
 func TestDashboardFiltersOptionalUpgradesEverywhere(t *testing.T) {
-	findingRe := regexp.MustCompile("\\{[^{}]*\\}\\s*\\|=\\s*`(better release available|upgrade resolved|upgrade found|biggest upgrade)`")
+	findingRe := regexp.MustCompile("\\{[^{}]*\\}\\s*\\|=\\s*`(better release available|upgrade resolved|upgrade found)`")
 	const filter = `| current_tier != "$optional"`
 	n := 0
 	for _, tg := range dashboardTargets(loadDashboard(t)) {
@@ -766,17 +685,6 @@ func TestDashboardBarChartsCountPerDay(t *testing.T) {
 	}
 }
 
-// fixedWindows maps each panel that measures over a fixed window, other than
-// a tile held to its alert rule's windows, to the windows it keeps, in query
-// order, and the words of its description that say why it ignores the time
-// range. Pinning the windows keeps one query from moving to the range alone.
-var fixedWindows = map[string]struct {
-	reason  string
-	windows []string
-}{
-	"panel-34": {reason: "whatever time range you pick", windows: []string{"2h", "2h"}},
-}
-
 var (
 	aggregationRe = regexp.MustCompile(`(\w+)\(\s*$`)
 	// A per-day bucket names a unit, not a length, so "per day" is not matched.
@@ -849,24 +757,12 @@ func TestDashboardWindowsFollowTheTimeRange(t *testing.T) {
 		if alertTiles[name] != "" {
 			continue
 		}
-		desc, _ := field(elements[name], "spec", "description").(string)
-		want, excepted := fixedWindows[name]
 		var fixed []string
 		for _, expr := range panelExprs(d, name) {
 			fixed = append(fixed, measuredWindows(expr)...)
 		}
-		switch {
-		case len(fixed) > 0 && !excepted:
+		if len(fixed) > 0 {
 			t.Errorf("panel %q measures over the fixed windows %v, want $__range", title, fixed)
-		case excepted && !slices.Equal(fixed, want.windows):
-			t.Errorf("panel %q measures over the fixed windows %v, want exactly its excepted %v", title, fixed, want.windows)
-		case excepted && !strings.Contains(desc, want.reason):
-			t.Errorf("panel %q keeps the fixed windows %v, want its description to say %q", title, fixed, want.reason)
-		}
-	}
-	for _, name := range slices.Sorted(maps.Keys(fixedWindows)) {
-		if _, ok := elements[name]; !ok {
-			t.Errorf("fixedWindows names %s, which %s does not carry", name, dashboardPath)
 		}
 	}
 }
@@ -904,7 +800,7 @@ func TestDashboardWindowCheckRejects(t *testing.T) {
 			t.Errorf("title %q names a length, want it rejected", title)
 		}
 	}
-	for _, title := range []string{"Feed reads per tracker per day", "Errors in this range", "Last full check", "Releases in the RSS feed"} {
+	for _, title := range []string{"Feed reads per tracker per day", "Errors in ${span} ${spanunit}", "Errors in the range", "Last full check", "Releases in the RSS feed"} {
 		if fixedLengthRe.MatchString(title) {
 			t.Errorf("title %q names no length, want it accepted", title)
 		}

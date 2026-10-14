@@ -1417,7 +1417,7 @@ func TestRenderSynthesizedItem(t *testing.T) {
 	out, _ := renderFeed([]item{{
 		Title:                "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
 		GUID:                 "https://nyaa.si/view/1961373",
-		InfoURL:              "https://releases.moe/154587",
+		InfoURL:              "https://seadex.moe/154587/",
 		DownloadURL:          "https://nyaa.si/download/1961373.torrent",
 		InfoHash:             "143ed15e5e3df072ae91adaeb149973a887590dd",
 		DownloadVolumeFactor: dvfBest,
@@ -1428,7 +1428,7 @@ func TestRenderSynthesizedItem(t *testing.T) {
 	want := []string{
 		"<title>Frieren Beyond Journey&#39;s End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]</title>",
 		`<enclosure url="https://nyaa.si/download/1961373.torrent" length="22497965274" type="application/x-bittorrent"/>`,
-		`<comments>https://releases.moe/154587</comments>`,
+		`<comments>https://seadex.moe/154587/</comments>`,
 		`<torznab:attr name="category" value="5070"/>`,
 		`<torznab:attr name="infohash" value="143ed15e5e3df072ae91adaeb149973a887590dd"/>`,
 		`<torznab:attr name="downloadvolumefactor" value="0.75"/>`,
@@ -1868,7 +1868,7 @@ func twinBearingStoredItem() journalItem {
 	return journalItem{
 		PubDate: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
 		Title:   "Lelouch of the Resurrection 1080p [G]", GUID: "https://nyaa.si/view/2133634",
-		InfoURL: "https://releases.moe/21519", DownloadURL: "https://nyaa.si/download/2133634.torrent",
+		InfoURL: "https://seadex.moe/21519/", DownloadURL: "https://nyaa.si/download/2133634.torrent",
 		InfoHash: strings.Repeat("c", 40), DownloadVolumeFactor: dvfBest,
 		Categories: []int{catMovies}, Size: 7, Seeders: 3, Leechers: 1, TvdbID: 79525,
 		SonarrTitle: "Code Geass S00E04 1080p [G]", SonarrGUID: "https://nyaa.si/view/2133634#sonarr",

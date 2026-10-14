@@ -85,12 +85,6 @@ type Episode struct {
 	Absolute int `json:"absolute,omitempty"`
 }
 
-// FileKey identifies one of the item's files across the library: the arr and
-// the file id, which each arr numbers on its own.
-func (it *Item) FileKey(fileID int) string {
-	return keyenc.Join(it.Arr, "file", strconv.Itoa(fileID))
-}
-
 // Key identifies the item by its arr source and arr ID ("arr:id") - the
 // item's semantic identity across snapshots and packages. Snapshot diffing
 // (indexByKey) and the audit's covered-item map both key on it, so the

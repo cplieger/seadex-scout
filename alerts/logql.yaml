@@ -55,7 +55,7 @@ groups:
             {{- end}}
           description: >-
             {{if eq $labels.condition "seadex-unreachable" -}}
-            seadex-scout has not reached SeaDex at releases.moe for about 2
+            seadex-scout has not reached SeaDex at seadex.moe for about 2
             hours, usually an outage at SeaDex itself. Findings and the Torznab
             feed are kept, and the alert resolves on its own. If other websites
             fail too, check this host's network.
@@ -150,29 +150,6 @@ groups:
             failing or not running. Removed or edited SeaDex releases are
             missed, and a release you already upgraded keeps being reported.
             Look for repeated `cycle degraded` or arr errors.
-      # Per scope, a tracker polled in the last 7 days but not in 6 hours. A
-      # tracker you keep disabled never fires.
-      - alert: SeadexScoutFeedNotPolled
-        expr: |
-          sum by (scope) (count_over_time(
-            {container="seadex-scout"} |= `indexer request`
-            | json msg="msg", scope="scope", feed="feed" | msg=`indexer request` | feed=`true` [7d]
-          ))
-          unless
-          sum by (scope) (count_over_time(
-            {container="seadex-scout"} |= `indexer request`
-            | json msg="msg", scope="scope", feed="feed" | msg=`indexer request` | feed=`true` [6h]
-          ))
-        for: 15m
-        labels:
-          severity: warning
-        annotations:
-          summary: "The arrs stopped reading the seadex-scout {{$labels.scope}} feed"
-          description: >
-            No arr has read the seadex-scout {{$labels.scope}} RSS feed in 6
-            hours, so new releases on that tracker are not reaching your arrs.
-            Check whether the indexer is disabled or failing. If
-            SeadexScoutScanStalled fires too, fix that first.
       # Grouped by the finding's identity. info_hash and seadex_tags turn a
       # changed recommendation into a new alert. Loki's ruler has no
       # keep_firing_for, so the [12h] window holds the alert between passes.
@@ -189,7 +166,7 @@ groups:
         annotations:
           summary: '{{$labels.alert_title}}: new SeaDex release'
           description: >-
-            [New release](https://releases.moe/{{$labels.al_id}}) for {{$labels.alert_title}}
+            [New release](https://seadex.moe/{{$labels.al_id}}/) for {{$labels.alert_title}}
             {{- if $labels.arr_url}} ([open in {{$labels.arr}}]({{$labels.arr_url}})){{end}}
             {{- if and $labels.season (ne $labels.season "0")}} Season {{$labels.season}}{{end}}
             ({{$labels.alert_recommended_group}}, {{$labels.seadex_tags}}).
@@ -211,7 +188,7 @@ groups:
         annotations:
           summary: '{{$labels.alert_title}}: SeaDex release needs manual review'
           description: >-
-            [SeaDex](https://releases.moe/{{$labels.al_id}}) recommends
+            [SeaDex](https://seadex.moe/{{$labels.al_id}}/) recommends
             {{$labels.alert_recommended_group}}
             {{- if $labels.seadex_tags}} ({{$labels.seadex_tags}}){{end}} for
             {{$labels.alert_title}}

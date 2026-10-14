@@ -21,9 +21,9 @@ Every full pass whose library read was complete also logs one `library summary` 
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
 
-Every line a pass logs about the findings carries `pass_id`, the start of that pass in Unix milliseconds. Every finding line also carries `first_seen`, when seadex-scout first saw the finding since it started. A `better release available` line also carries `rank_alt` and `rank_none`, its place in the upgrades list with Optional upgrades on Hide and on Show, where 0 means that view leaves it out. It carries `recommended_bytes`, `current_bytes` and `size_change_bytes` when each is known. The two manual-review messages carry `rank_check`.
+Every line a pass logs about the findings carries `pass_id`, the start of that pass in Unix milliseconds. Every finding line also carries `first_seen`, when seadex-scout first saw the finding since it started. A `better release available` line also carries `rank_alt` and `rank_none`, its place in the upgrades list with Optional upgrades on Hide and on Show, where 0 means that view leaves it out. It carries `recommended_bytes` and `size_change_bytes` when each is known. The two manual-review messages carry `rank_check`.
 
-After the findings, each pass logs one `upgrade sizes` line per view, with `hidden_tier` set to `alt` or `none`, carrying the size totals. Up to 25 `biggest upgrade` lines follow per view, and `findings reported` with its `manual_review` count closes the pass. An upgrade that enters the list logs `upgrade found`, and one that leaves it logs `upgrade resolved`. On the first pass after a start, every `upgrade found` line carries `after_start=true`.
+After the findings, each pass logs one `upgrade sizes` line per view, with `hidden_tier` set to `alt` or `none`, carrying the number of upgrades in `upgrades`. Then `findings reported` with its `manual_review` count closes the pass. An upgrade that enters the list logs `upgrade found`, and one that leaves it logs `upgrade resolved`. On the first pass after a start, every `upgrade found` line carries `after_start=true`.
 
 A problem that lasts, such as SeaDex being unreachable, logs an `error` line with a `condition` attribute on every pass until it clears. It saves these problems in its state, so a restart does not clear an alert that is still true.
 
@@ -45,10 +45,9 @@ The dashboard has three variables at the top. **Data source** picks your Loki da
 
 **Optional upgrades** decides whether the upgrades list shows upgrades where you already have a SeaDex alt. **Hide** is the default and leaves them out. Pick **Show** to see them too. The Upgrades count at the top follows the same setting, so the count matches the list.
 
-The dashboard has three tabs:
+The dashboard has two tabs:
 
 - Overview shows the number of upgrades and the number of findings to check by hand, one above the other. Beside them, Library overview counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrades available and Check by hand list the upgrades and the findings. Above them, a tile appears only while something needs a look, as [Attention tiles](#attention-tiles) describes.
-- Upgrades is the deep dive into sizes, and it describes the current upgrades whatever time range you pick. It breaks the upgrades down by format and resolution, as the average per check over the last two hours. It shows the storage every upgrade needs, how much your library grows once every upgrade with both sizes known replaces its files, how many upgrades each size total leaves out, and the biggest size changes.
 - Scout health lists the errors logged in the selected time range. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
 
 Three Library overview bars need a word. Season not found means no files sit where the entry maps. They are missing, or Sonarr files that season elsewhere, such as under TVDB's specials. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.
@@ -57,7 +56,7 @@ Episode not known means a film or special in Sonarr's specials that seadex-scout
 
 In the upgrades list, You have, SeaDex best and SeaDex alt name the release groups. On a newer version they also show the version, such as `smol v1` against `smol v2`. SeaDex alt shows `-` when SeaDex lists no alt.
 
-Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens the entry on releases.moe. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
+Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens the show's entry on seadex.moe. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
 
 The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
 
@@ -71,21 +70,20 @@ The top of the Overview stays empty while seadex-scout runs well. Each tile belo
 | --- | --- | --- |
 | Last check | no check of any kind has finished or started in 3 hours | `SeadexScoutScanStalled` |
 | Last full check | no daily full check has finished in 72 hours | `SeadexScoutReconcileStalled` |
-| Errors in this range | seadex-scout logged an error you can fix in the selected time range | `SeadexScoutCycleError` |
+| Errors in 7 days | seadex-scout logged an error you can fix in the selected time range | `SeadexScoutCycleError` |
 | Library problem | Sonarr or Radarr keeps returning a much smaller or incomplete library | `SeadexScoutLibraryDegraded` |
-| Feed not read | a tracker's RSS feed was read in the last week but not in the last 6 hours | `SeadexScoutFeedNotPolled` |
 | AnimeBytes feed | the last feed update held AnimeBytes releases back because `indexer.ab_passkey` is not set | none |
 | Upstream outage | SeaDex, AniList or the anime ID map keeps failing, which needs nothing from you | `SeadexScoutUpstreamUnavailable` |
 
-Library problem, Feed not read and Upstream outage name one app, tracker or service. When several have the problem at once, the tile names the one logged most, and Errors logged on the Scout health tab lists them all.
+Library problem and Upstream outage name one app or service. When several have the problem at once, the tile names the one logged most, or any one of them when they are logged as often, and Errors logged on the Scout health tab lists them all.
 
-Errors in this range counts every error with no named problem in the time range you pick, so one error keeps the tile up until it leaves the range, while its alert resolves an hour after the error. Library problem and Upstream outage show a problem only while it was logged in the last hour, as their alerts do. Whatever range you pick, Last check, Last full check and Feed not read look back over their alert's own window, and AnimeBytes feed reads the last feed update. On the Scout health tab, Errors logged names each error in the time range, a past problem included.
+The Errors tile names the length of the time range you pick, such as Errors in 7 days or Errors in 24 hours. The length is worked out from seadex-scout's own log lines, so the title says Errors in the range while it loads, when seadex-scout logged nothing in the range, and when Loki cannot answer on the first load. If Loki stops answering after a title has named a length, Grafana keeps that length until Loki answers again, while every panel shows the query error. The Errors logged and Degraded checks tables on the Scout health tab name it the same way. The Errors tile counts every error with no named problem in that range, so one error keeps the tile up until it leaves the range, while its alert resolves an hour after the error. Library problem and Upstream outage show a problem only while it was logged in the last hour, as their alerts do. Whatever range you pick, Last check and Last full check look back over their alert's own window, and AnimeBytes feed reads the last feed update. On the Scout health tab, Errors logged names each error in the time range, a past problem included.
 
-A tile also hides when its query fails. If your Loki data source is down, every tile stays hidden, and the tiles, Library overview and tables below them show the query error instead.
+A tile also hides when its query fails. If your Loki data source is down, every attention tile stays hidden, and the panels that are always shown, Upgrades, To check by hand, Library overview, Upgrades available and Check by hand, show the query error instead.
 
 ### Upgrade sizes
 
-Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. Storage needed and Library growth add up every upgrade the Optional upgrades setting shows, including any beyond the 200 rows the table lists. Storage needed adds every upgrade whose download size is known. Library growth needs both the download size and the size of the files the download replaces, so it usually leaves out more upgrades than Storage needed. An upgrade is also left out of a total when a torrent or file it shares with another upgrade carries a different size there. Upgrades not in the size totals counts what each total leaves out. Storage needed says at least, because each upgrade it leaves out would add to it. Library growth can be off in either direction, because an upgrade left out can grow or shrink your library.
+Size is what the upgrade downloads, and Size change is how much your library grows when you take it, negative when it frees space. A `-` means the size is unknown. Sort the Upgrades available table by either column to see the largest downloads or changes first.
 
 The download is one set of torrents. A season pack, or a release whose files name no episode, is that torrent alone. A single episode stands for every single episode of the same release, which is the same group, tracker, resolution, codec, kind and dual audio, one torrent per episode. Each torrent counts at its full size, extras and samples included.
 
@@ -94,7 +92,7 @@ The size it replaces is the files of yours that download covers whole. A file ho
 A size stays unknown in these cases, among others:
 
 - The release mixes a pack with single episodes, two torrents name the same episode, or a file names no episode.
-- A torrent has no size or has neither an info hash nor a link, two torrents of one download share an info hash or a link, or the set needs more than 64 torrents.
+- A torrent has no size or has neither an info hash nor a link, or two torrents of one download share an info hash or a link.
 - Sonarr's episode list for the series could not be read or marks a file without saying which, or a file names an episode of another season.
 - A covered episode has no file, or Sonarr or Radarr reports a file without its size.
 - An absolute episode number is carried by no episode of the series, by several, or by one in another season.
@@ -102,8 +100,6 @@ A size stays unknown in these cases, among others:
 - The entry covers your whole series rather than one season, or another SeaDex entry maps the same season.
 - A newer revision is listed only on a release you cannot get, such as one on AnimeBytes with `animebytes` off.
 - The entry is a film or special filed in Sonarr's specials. Its copy in Radarr, if you have one, replaces its one file like any film.
-
-The totals count each torrent once, even when two upgrades share it, and each replaced file once. So the rows can add up to more than the totals.
 
 Library overview shows the SeaDex view, like the report. Your remux and dual-audio filters are not applied, so their numbers can disagree with Upgrades available.
 
@@ -122,16 +118,15 @@ seadex-scout reports its findings and its own state through its log. Load the ru
 | `SeadexScoutLibraryDegraded` | Sonarr or Radarr keeps returning a much smaller or incomplete library | warning |
 | `SeadexScoutScanStalled` | no `tick` or `cycle` completion line and no `reconcile started` in 3h, so the check loop has stopped | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` in 72h, so the daily full pass has stopped while quick checks keep the other stall rule quiet | warning |
-| `SeadexScoutFeedNotPolled` | no arr has read one tracker's RSS feed in 6h, though one did in the last 7 days | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommends a better release than the one on disk, or a newer revision of the group on disk | info |
 | `SeadexScoutMixedGroupManual` | the files on disk span more than one release group, so the app cannot say which one you have | info |
 | `SeadexScoutReportWritten` | a report run wrote its Markdown and JSON report pair | info |
 
 Route `SeadexScoutUpstreamUnavailable` and `SeadexScoutLibraryDegraded` to a receiver that sends resolved notifications, with a `repeat_interval` longer than an outage lasts. Each outage then sends one message when it starts and one when it ends. [Notes on each alert](#notes-on-each-alert) explains the routing for every rule.
 
-The rules assume the default `log.level: info` and the JSON log format. Seven of the messages they match log at `info`. They are `tick complete`, `cycle complete`, `reconcile started`, `reconcile complete`, `report written`, `series spans multiple release groups, manual review` and `indexer request`. At `warn`, the report rule, the mixed-group rule and the feed rule never fire. Both stall rules then fire all the time on a healthy app, because only the `degraded` completion lines still log.
+The rules assume the default `log.level: info` and the JSON log format. Six of the messages they match log at `info`. They are `tick complete`, `cycle complete`, `reconcile started`, `reconcile complete`, `report written` and `series spans multiple release groups, manual review`. At `warn`, the report rule and the mixed-group rule never fire. Both stall rules then fire all the time on a healthy app, because only the `degraded` completion lines still log.
 
-Drop those five rules before you raise the level, and expect the dashboard to stay mostly empty. For `log.format: text`, replace each `| json` stage with `| logfmt`, which reads the same fields from the text format.
+Drop those four rules before you raise the level, and expect the dashboard to stay mostly empty. For `log.format: text`, replace each `| json` stage with `| logfmt`, which reads the same fields from the text format.
 
 The stall window assumes a `poll_interval` of 1h or less, and the default is 15m. For a longer interval, widen the window to at least three times the interval. The error rule and the two lasting-problem rules use a 1h window, which assumes a `poll_interval` of 20m or less. Above that, widen their windows to at least three times the interval too.
 
@@ -147,12 +142,11 @@ The messages in this table are the log contract. The rules in [`alerts/logql.yam
 | --- | --- | --- |
 | `level=ERROR`, no `condition` | a one-off or local fault. `SeadexScoutCycleError` keys on the level and the missing attribute, not on a message | |
 | `level=ERROR` with `condition` | a lasting problem, on every pass while it holds, by the escalated line or by `degraded condition still standing` | `condition`, `arr` |
-| `better release available` | a better release, or a newer revision of the group on disk with `status=newer_revision`. The three byte sizes are present only when known | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `current_tier`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `info_hash`, `resolution`, `kind`, `tracker`, `release_url`, `nyaa_url`, `public_url`, `public_tracker`, `ab_url`, `ab_tracker`, `current_revision`, `recommended_revision`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_alt`, `rank_none`, `recommended_bytes`, `current_bytes`, `size_change_bytes` |
+| `better release available` | a better release, or a newer revision of the group on disk with `status=newer_revision`. The two byte sizes are present only when known | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `current_tier`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `info_hash`, `resolution`, `kind`, `tracker`, `release_url`, `nyaa_url`, `public_url`, `public_tracker`, `ab_url`, `ab_tracker`, `current_revision`, `recommended_revision`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_alt`, `rank_none`, `recommended_bytes`, `size_change_bytes` |
 | `series spans multiple release groups, manual review` | the files on disk span more than one release group | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_check` |
 | `release group unverifiable, manual review` | an untagged release left a comparison undecided | `title`, `alert_title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_group`, `recommended_group`, `alert_recommended_group`, `seadex_tags`, `alt_groups`, `episodes`, `pass_id`, `first_seen`, `rank_check` |
 | `findings reported` | the last line of each pass of the findings. `manual_review` counts the two manual-review messages, and `rank_check` numbers them | `pass_id`, `emitted`, `manual_review` |
-| `upgrade sizes` | once per pass and `hidden_tier` (`alt` or `none`), with the size totals of the upgrades that view shows | `pass_id`, `hidden_tier`, `upgrades`, `upgrades_better_release`, `upgrades_newer_revision`, `upgrades_sized`, `upgrades_unsized`, `recommended_bytes_total`, `current_bytes_replaced`, `size_change_bytes`, `download_bytes_total`, `upgrades_download_unsized` |
-| `biggest upgrade` | up to 25 per pass and `hidden_tier`, ordered by size change | `pass_id`, `hidden_tier`, `rank`, `current_tier`, `status`, `title`, `al_id`, `arr`, `arr_url`, `season`, `current_group`, `recommended_group`, `recommended_bytes`, `current_bytes`, `size_change_bytes` |
+| `upgrade sizes` | once per pass and `hidden_tier` (`alt` or `none`), with the number of upgrades that view shows | `pass_id`, `hidden_tier`, `upgrades` |
 | `upgrade found` | an upgrade entered the list, with `after_start=true` on the first pass after a start | `pass_id`, `after_start`, `title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_tier`, `current_group`, `recommended_group` |
 | `upgrade resolved` | an upgrade left the list | `pass_id`, `after_start`, `title`, `al_id`, `arr`, `arr_url`, `season`, `status`, `current_tier`, `current_group`, `recommended_group` |
 | `report written` | a report was written, and `anime` is the number of rows it holds | `anime` |
@@ -162,7 +156,7 @@ The messages in this table are the log contract. The rules in [`alerts/logql.yam
 | `tick degraded` | a quick check ran but could not compare, matched by `SeadexScoutScanStalled` | `reason` |
 | `reconcile started` | a full pass started, also matched by `SeadexScoutScanStalled` | |
 | `reconcile complete` | a full pass finished, matched by `SeadexScoutReconcileStalled` | |
-| `indexer request` | one Torznab request from an arr. `feed=true` marks an RSS poll, which `SeadexScoutFeedNotPolled` counts. `t` is the Torznab function, `returned` the items sent back and `curated` the SeaDex-curated items among them | `scope`, `feed`, `t`, `curated`, `returned` |
+| `indexer request` | one Torznab request from an arr or Prowlarr. `feed=true` marks a request with no search query: an RSS poll or an indexer test. `t` is the Torznab function, `returned` the items sent back and `curated` the SeaDex-curated items among them | `scope`, `feed`, `t`, `curated`, `returned` |
 | `indexer feed snapshot written` | the feed was rebuilt or advanced, and `journal_new` counts the releases newly added to the RSS feed | `journal_new`, `scope`, `nyaa_feed`, `ab_feed`, `ab_releases_skipped` |
 | `library summary` | each full pass whose library read was complete, with the daily library counts | `rows`, `have_best`, `have_alt`, `have_older_revision`, `have_unlisted`, `no_file`, `unverified`, `unattributed`, `not_on_seadex`, `anime_items`, `items_with_entry`, `items_all_best`, `items_all_best_or_alt` |
 
@@ -228,14 +222,6 @@ The rule cannot tell why the log went quiet. A stopped or renamed container, or 
 This rule watches the daily full pass alone. Most loop iterations are quick checks over a bounded window of recent SeaDex changes, and their `tick complete` lines keep the stall rule satisfied. That window cannot see a deletion, a de-curation, an in-place torrent edit, the other entries that share a torrent, an outage longer than the window, or a clock wrong by more than it. The full pass catches all of these. It also refreshes the copy of your Sonarr and Radarr libraries that quick checks compare against, so while it is stopped, a release you already upgraded keeps being reported.
 
 The full pass runs every 24h over the whole catalogue and the whole arr library, and it rebuilds the whole feed and search index. It logs `reconcile complete` even when it ends degraded, because it still did all of that work, and the `cycle degraded` line beside it carries the quality signal. No `reconcile complete` in 72h means the full pass keeps failing or the loop's schedule is wrong. The 72h window is three reconcile intervals, so two missed passes are tolerated and a third fires the rule. The `poll_interval: off` caveat of the stall rule applies here too.
-
-#### `SeadexScoutFeedNotPolled`
-
-Each arr polls an enabled Torznab indexer on its own RSS interval, and every poll logs an `indexer request` line with `feed=true`. An arr that marks the indexer failed, or an indexer disabled by hand, stops polling. seadex-scout logs no error for it, and new SeaDex releases stop reaching the arr. Open the indexer in Prowlarr, Sonarr or Radarr, check whether it is disabled or marked as failing, and run its test.
-
-The rule fires for each tracker, `nyaa` or `ab`, that was polled in the last 7 days and has been silent for 6 hours. A tracker you keep disabled never fires. The alert resolves at the first evaluation after the next poll. It also resolves on its own once a tracker has been silent for the whole 7 days, which counts as disabled on purpose. The 6-hour window is several times the usual RSS interval of 15 to 60 minutes, so raise it if your arrs poll less often.
-
-Route it to a receiver with `send_resolved: true`. It also fires when seadex-scout itself is down or its logs stop reaching Loki. `SeadexScoutScanStalled` then fires beside it and names the cause.
 
 #### `SeadexScoutBetterReleaseFound`
 
