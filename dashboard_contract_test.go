@@ -499,8 +499,8 @@ func TestDashboardShape(t *testing.T) {
 		t.Errorf("dashboard carries %q, want no fixed number of days anywhere", m)
 	}
 	for _, m := range urlHostRe.FindAllStringSubmatch(text, -1) {
-		if m[1] != "releases.moe" {
-			t.Errorf("dashboard links to host %q, want only releases.moe", m[1])
+		if m[1] != "seadex.moe" {
+			t.Errorf("dashboard links to host %q, want only seadex.moe", m[1])
 		}
 	}
 	if m := ipv4Re.FindString(text); m != "" {

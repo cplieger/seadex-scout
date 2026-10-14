@@ -3,7 +3,7 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/size.json)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/seadex-scout/pkgs/container/seadex-scout) [![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)](https://github.com/cplieger/seadex-scout/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/seadex-scout/badges/mutation.json)](https://github.com/cplieger/seadex-scout/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/seadex-scout/releases)
 
 <!-- hub-overview BEGIN -->
-seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://releases.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
+seadex-scout keeps your Sonarr and Radarr anime library in sync with the best releases on [SeaDex](https://seadex.moe), the community list of the best release for each show. It shows where a better release exists and leaves downloads to Sonarr and Radarr.
 
 ![The seadex-scout Grafana dashboard showing 10 upgrades, 2 findings to check by hand, a breakdown of the library by verdict, and the table of upgrades available](docs/images/dashboard.png)
 
@@ -20,7 +20,7 @@ You can leave out remuxes, require dual audio, skip specials and add AnimeBytes 
 
 ## Who it is for
 
-seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on releases.moe and compare its release groups with your files by hand.
+seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on SeaDex and compare its release groups with your files by hand.
 
 You need a Sonarr instance, a Radarr instance or both, with anime in them. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 

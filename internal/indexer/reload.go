@@ -623,9 +623,10 @@ func (c *snapshotCache) warnDroppedItems(scrub snapshotScrub) {
 }
 
 // warnBlankedInfoURLs reports the info-URL scrub PER TRACKER, one line per
-// affected feed. The attribution is the point: a tampered or hand-edited
-// feed.json is the only way these URLs get there, and an operator seeing a
-// single summed count cannot tell which journal was touched. Scopes are
+// affected feed. The attribution is the point: a feed.json written under
+// another SeaDex site base, or a tampered or hand-edited one, is the only way
+// these URLs get there, and an operator seeing a single summed count cannot
+// tell which journal was touched. Scopes are
 // iterated in a fixed order so the lines are deterministic for a test to pin and
 // for a human to diff across reloads.
 func (c *snapshotCache) warnBlankedInfoURLs(scrub snapshotScrub) {
@@ -758,7 +759,7 @@ func (c *snapshotCache) rebuildNyaaDownloadURLs(feed []journalItem) []journalIte
 	return out
 }
 
-// seadexInfoHost is the canonical releases.moe hostname persisted InfoURLs
+// seadexInfoHost is the canonical SeaDex hostname persisted InfoURLs
 // must live on, derived once from the same constant the writer builds them
 // from (feed.go's defaultSeaDexBaseURL) so the two ends cannot drift.
 var seadexInfoHost = sync.OnceValue(func() string {
@@ -786,7 +787,7 @@ func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 		if cleaned, ok := snapshotInfoURLAllowed(feed[i].InfoURL, host); ok {
 			// Store the VOUCHED spelling, never the original. The gate reads urlform's
 			// WHATWG-preprocessed form, so an edge-padded persisted value
-			// ("\thttps://releases.moe/123") is vouched on the BROWSER's reading of it
+			// ("\thttps://seadex.moe/123/") is vouched on the BROWSER's reading of it
 			// - and renderFeed would then hand the arr UI the padded original as its
 			// clickable <comments> link.
 			feed[i].InfoURL = cleaned

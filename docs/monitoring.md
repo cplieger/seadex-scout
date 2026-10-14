@@ -56,7 +56,7 @@ Episode not known means a film or special in Sonarr's specials that seadex-scout
 
 In the upgrades list, You have, SeaDex best and SeaDex alt name the release groups. On a newer version they also show the version, such as `smol v1` against `smol v2`. SeaDex alt shows `-` when SeaDex lists no alt.
 
-Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens the entry on releases.moe. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
+Each title opens the series or film in Sonarr or Radarr, and SeaDex best opens the show's entry on seadex.moe. The Nyaa, AnimeBytes and Other columns open the recommended release on that site. A column shows only when some upgrade has a link there, so AnimeBytes shows only when you turn AnimeBytes on.
 
 The Why column says what kind of upgrade it is. `v2 available` is a fixed version of the group you have. `SeaDex alt` means you have an alt and SeaDex's best is the upgrade. `Neither best nor alt` means SeaDex lists your group as neither its best nor an alt.
 

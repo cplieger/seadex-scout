@@ -367,8 +367,8 @@ func TestReportDegradedMatching(t *testing.T) {
 		if len(rep.Incomplete) != 1 || rep.Incomplete[0].AniListID != 999 {
 			t.Fatalf("rep.Incomplete = %+v, want the one affected entry (al_id 999)", rep.Incomplete)
 		}
-		if rep.Incomplete[0].SeaDexURL != "https://releases.moe/999" {
-			t.Errorf("incomplete entry SeaDexURL = %q, want the releases.moe link", rep.Incomplete[0].SeaDexURL)
+		if rep.Incomplete[0].SeaDexURL != "https://seadex.moe/999/" {
+			t.Errorf("incomplete entry SeaDexURL = %q, want the SeaDex link", rep.Incomplete[0].SeaDexURL)
 		}
 		// The unaffected majority still audits: the mapping-catalogued library
 		// item (covered by no SeaDex match) renders as its not_on_seadex row.

@@ -19,7 +19,7 @@ func TestEntryHasTheoreticalBest(t *testing.T) {
 }
 
 // TestValidInfoHash pins the info-hash sanitizer at its home in the seadex
-// package (the releases.moe contract: 40-char SHA-1 hex, lowercased, trimmed;
+// package (the SeaDex contract: 40-char SHA-1 hex, lowercased, trimmed;
 // anything else - the <redacted> placeholder, a wrong length, a non-hex byte -
 // drops to ""). The indexer's TestValidInfoHash covers only its thin delegate.
 func TestValidInfoHash(t *testing.T) {

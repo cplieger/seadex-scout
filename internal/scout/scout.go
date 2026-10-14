@@ -878,7 +878,7 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.feed != nil}
 	s.escalate(key, st.SeadexFailures, degradation.ReconcileEscalationThreshold,
 		"seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle",
-		"seadex fetch failed repeatedly; skipping comparison, findings re-stated unchanged this cycle - inspect SeaDex (releases.moe) reachability and egress",
+		"seadex fetch failed repeatedly; skipping comparison, findings re-stated unchanged this cycle - inspect SeaDex (seadex.moe) reachability and egress",
 		attrs...)
 }
 

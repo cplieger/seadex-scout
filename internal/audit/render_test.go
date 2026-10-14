@@ -175,7 +175,7 @@ func TestLinksBuildsArrSeaDexAndBestOnly(t *testing.T) {
 	row := &reportRow{
 		Arr:       "sonarr",
 		ArrURL:    "http://sonarr/series/frieren",
-		SeaDexURL: "https://releases.moe/154587",
+		SeaDexURL: "https://seadex.moe/154587/",
 		Releases: []rowRelease{
 			{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 			{Best: false, Tracker: "AB", URL: "https://animebytes.tv/x"},
@@ -185,7 +185,7 @@ func TestLinksBuildsArrSeaDexAndBestOnly(t *testing.T) {
 	if !strings.Contains(got, "http://sonarr/series/frieren") {
 		t.Error("links must include the arr deep-link")
 	}
-	if !strings.Contains(got, "https://releases.moe/154587") {
+	if !strings.Contains(got, "https://seadex.moe/154587/") {
 		t.Error("links must include the SeaDex entry link")
 	}
 	if !strings.Contains(got, "https://nyaa.si/view/1") {
@@ -286,7 +286,7 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 			Season:    1, Scope: align.ScopeSeason, Approx: true, CurrentGroups: []string{"subsplease", "erai-raws"},
 			Releases:    []rowRelease{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 			ArrURL:      "http://sonarr/series/frieren",
-			SeaDexURL:   "https://releases.moe/154587",
+			SeaDexURL:   "https://seadex.moe/154587/",
 			MatchSource: "id",
 		}},
 	}
@@ -324,7 +324,7 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		// No best carries an annotation, so the notes twin is empty.
 		"seadex_best_notes": "",
 		"arr_url":           "http://sonarr/series/frieren",
-		"seadex_url":        "https://releases.moe/154587",
+		"seadex_url":        "https://seadex.moe/154587/",
 		"match_source":      "id",
 	}
 	for k, v := range want {
@@ -454,7 +454,7 @@ func craftedReport() *Report {
 			Arr:           "sonarr",
 			Verdict:       VerdictUnlisted,
 			ArrURL:        "http://sonarr/series/x\u009d",
-			SeaDexURL:     "https://releases.moe/1\u200f",
+			SeaDexURL:     "https://seadex.moe/1/\u200f",
 			MatchSource:   "id\u061c",
 			CurrentGroups: []string{"grp\u009c"},
 			Releases:      []rowRelease{{Group: "g\u0090", Tracker: "trk\u200e", URL: "https://x/\u2028a", Best: true}},
@@ -644,7 +644,7 @@ func TestRenderJSONNilRowsIsEmptyArray(t *testing.T) {
 // TestRenderIncompleteSectionAndCaveat pins the degraded report's rendered
 // shape: the Markdown header carries the
 // completeness caveat, the affected entries render under the "incomplete
-// (transient AniList failure)" header with their AniList ids and releases.moe
+// (transient AniList failure)" header with their AniList ids and SeaDex
 // links, and the JSON carries the same list under incomplete_mappings.
 func TestRenderIncompleteSectionAndCaveat(t *testing.T) {
 	r := &Report{
@@ -652,8 +652,8 @@ func TestRenderIncompleteSectionAndCaveat(t *testing.T) {
 		Totals:      map[string]int{string(VerdictBest): 1},
 		Rows:        []reportRow{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
 		Incomplete: []incompleteEntry{
-			{SeaDexURL: "https://releases.moe/20791", AniListID: 20791},
-			{SeaDexURL: "https://releases.moe/99999", AniListID: 99999},
+			{SeaDexURL: "https://seadex.moe/20791/", AniListID: 20791},
+			{SeaDexURL: "https://seadex.moe/99999/", AniListID: 99999},
 		},
 	}
 
@@ -664,7 +664,7 @@ func TestRenderIncompleteSectionAndCaveat(t *testing.T) {
 	if !strings.Contains(md, "## incomplete (transient AniList failure) (2)") {
 		t.Errorf("markdown is missing the incomplete-mapping section header:\n%s", md)
 	}
-	for _, want := range []string{"| 20791 | [seadex](https://releases.moe/20791) |", "| 99999 | [seadex](https://releases.moe/99999) |"} {
+	for _, want := range []string{"| 20791 | [seadex](https://seadex.moe/20791/) |", "| 99999 | [seadex](https://seadex.moe/99999/) |"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown incomplete section missing row %q:\n%s", want, md)
 		}
@@ -692,7 +692,7 @@ func TestRenderSingularIncompleteCaveat(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{},
-		Incomplete:  []incompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
+		Incomplete:  []incompleteEntry{{SeaDexURL: "https://seadex.moe/7/", AniListID: 7}},
 	}
 	md := renderMarkdown(r)
 	if !strings.Contains(md, "1 SeaDex entry could not be resolved against AniList") {
@@ -735,7 +735,7 @@ func TestRenderCompleteReportOmitsIncompleteSection(t *testing.T) {
 // carrying C1/bidi runes is sanitized in the JSON copy without mutating the
 // canonical report.
 func TestRenderJSONSanitizesIncompleteEntries(t *testing.T) {
-	crafted := "https://releases.moe/1\u009b\u202e"
+	crafted := "https://seadex.moe/1/\u009b\u202e"
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{},
@@ -862,7 +862,7 @@ func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 // SeaDex-listed but unobtainable best: obtainability keeps controlling the verdict, and
 // BOTH projections surface the divergence - the Markdown SeaDex-best column carries the
 // "(unobtainable)" annotation and does NOT offer the release as a grab link (the
-// releases.moe link still renders), while the JSON release carries an explicit
+// SeaDex link still renders), while the JSON release carries an explicit
 // "unobtainable": true marker so machine consumers can see why the visible best was
 // ignored. An obtainable release's JSON shape is unchanged.
 func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
@@ -872,7 +872,7 @@ func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 		Rows: []reportRow{{
 			Title:         "Unobtainable Show",
 			Arr:           "sonarr",
-			SeaDexURL:     "https://releases.moe/11",
+			SeaDexURL:     "https://seadex.moe/11/",
 			Verdict:       VerdictUnlisted,
 			CurrentGroups: []string{"other"},
 			Releases: []rowRelease{
@@ -893,7 +893,7 @@ func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 	if strings.Contains(md, "https://nyaa.si/view/901") {
 		t.Errorf("markdown offers the unobtainable release as a grab link:\n%s", md)
 	}
-	if !strings.Contains(md, "https://releases.moe/11") {
+	if !strings.Contains(md, "https://seadex.moe/11/") {
 		t.Errorf("markdown lost the SeaDex entry link:\n%s", md)
 	}
 
@@ -913,7 +913,7 @@ func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 // for a curation-warned best: the group stays in the SeaDex-best column and the
 // warning rides the adjacent Notes column (`| PMR | broken |`) so the row stays
 // complete and self-explanatory, while the links cell does NOT offer the
-// warned release as a grab link (the releases.moe link still renders). The
+// warned release as a grab link (the SeaDex link still renders). The
 // needle carries the cell pipes so it cannot be satisfied by the legend, which
 // teaches the same spelling.
 func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
@@ -923,7 +923,7 @@ func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
 		Rows: []reportRow{{
 			Title:         "Warned Show",
 			Arr:           "sonarr",
-			SeaDexURL:     "https://releases.moe/10",
+			SeaDexURL:     "https://seadex.moe/10/",
 			Verdict:       VerdictUnlisted,
 			CurrentGroups: []string{"pmr"},
 			Releases: []rowRelease{{
@@ -940,7 +940,7 @@ func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
 	if strings.Contains(md, "https://nyaa.si/view/900") {
 		t.Errorf("markdown offers the warned release as a grab link:\n%s", md)
 	}
-	if !strings.Contains(md, "https://releases.moe/10") {
+	if !strings.Contains(md, "https://seadex.moe/10/") {
 		t.Errorf("markdown lost the SeaDex entry link:\n%s", md)
 	}
 }
@@ -1269,7 +1269,7 @@ func TestReportLogEmitsIncompleteMappings(t *testing.T) {
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Incomplete: []incompleteEntry{{
 			AniListID: 20791,
-			SeaDexURL: "https://releases.moe/20791",
+			SeaDexURL: "https://seadex.moe/20791/",
 		}},
 	}
 
@@ -1292,7 +1292,7 @@ func TestReportLogEmitsIncompleteMappings(t *testing.T) {
 	if got := attrs["al_id"]; got != int64(20791) {
 		t.Errorf("al_id = %v, want 20791", got)
 	}
-	if got, want := attrs["seadex_url"], "https://releases.moe/20791"; got != want {
+	if got, want := attrs["seadex_url"], "https://seadex.moe/20791/"; got != want {
 		t.Errorf("seadex_url = %q, want %q", got, want)
 	}
 }

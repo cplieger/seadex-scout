@@ -1,4 +1,4 @@
-// Package seadexapi is the read client for the SeaDex (releases.moe) PocketBase
+// Package seadexapi is the read client for the SeaDex (seadex.moe) PocketBase
 // API.
 //
 // It pages through the entries collection with the torrents relation expanded,
@@ -177,7 +177,7 @@ func WithLogger(l *slog.Logger) Option {
 	return func(c *cfg) { c.logger = l }
 }
 
-// NewClient returns a SeaDex client for baseURL (e.g. "https://releases.moe")
+// NewClient returns a SeaDex client for baseURL (e.g. "https://seadex.moe")
 // using the given HTTP client.
 func NewClient(httpClient *http.Client, baseURL string, opts ...Option) *Client {
 	c := &cfg{}

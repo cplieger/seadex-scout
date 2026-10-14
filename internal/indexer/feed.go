@@ -20,7 +20,7 @@ import (
 // info links under (entryURL) and the reader's InfoURL allowlist is derived
 // from (reload.go's seadexInfoHost) - the ONE source for both ends of the
 // persisted feed.json contract. It references the canonical constant in
-// internal/seadex (the package that owns the releases.moe contract) so it
+// internal/seadex (the package that owns the SeaDex contract) so it
 // cannot drift from it.
 const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 
@@ -715,7 +715,7 @@ func isContentMediaFile(name string) bool {
 // and through it the reader's InfoURL allowlist - is derived from), or "" when
 // the id is unknown - the per-item info URL (the feed <comments>), so the
 // operator can see why a release is curated. The URL rule is the shared
-// releases.moe contract in internal/seadex; this is a thin delegate, like
+// SeaDex contract in internal/seadex; this is a thin delegate, like
 // validInfoHash.
 func entryURL(alID int) string {
 	return seadex.EntryURL(alID)

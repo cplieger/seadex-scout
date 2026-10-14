@@ -423,8 +423,8 @@
                         "value": [
                           {
                             "targetBlank": true,
-                            "title": "Open on releases.moe",
-                            "url": "https://releases.moe/${__data.fields.al_id}"
+                            "title": "Open on SeaDex",
+                            "url": "https://seadex.moe/${__data.fields.al_id}/"
                           }
                         ]
                       }
@@ -968,8 +968,8 @@
                         "value": [
                           {
                             "targetBlank": true,
-                            "title": "Open on releases.moe",
-                            "url": "https://releases.moe/${__data.fields.al_id}"
+                            "title": "Open on SeaDex",
+                            "url": "https://seadex.moe/${__data.fields.al_id}/"
                           }
                         ]
                       }

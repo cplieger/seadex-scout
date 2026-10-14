@@ -250,7 +250,7 @@ func failingProbeScout(logger *slog.Logger) (*Scout, *fakeSeaDex) {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		return 0, errors.New("releases.moe unreachable")
+		return 0, errors.New("seadex.moe unreachable")
 	}
 	s, _ := newTickScout(logger, sea, nil, nil, 96)
 	return s, sea
@@ -301,7 +301,7 @@ func TestSeaDexUnreachableStaysStandingAcrossTheReconcile(t *testing.T) {
 	ctx := t.Context()
 	runToReconcile(ctx, t, s, recorder)
 
-	sea.err = errors.New("releases.moe unreachable")
+	sea.err = errors.New("seadex.moe unreachable")
 	lines := cycleLines(ctx, t, s, recorder)
 	want := conditionLine{msg: msgStillStandingContract, condition: "seadex-unreachable"}
 	if len(lines) != 1 || lines[0] != want {
@@ -425,7 +425,7 @@ func TestStandingConditionFollowsTheStreakItObserves(t *testing.T) {
 		ctx := t.Context()
 		cycleLines(ctx, t, s, recorder)
 		cycleLines(ctx, t, s, recorder)
-		sea.err = errors.New("releases.moe unreachable")
+		sea.err = errors.New("seadex.moe unreachable")
 		store.st.SeadexFailures = degradation.ReconcileEscalationThreshold - 1
 		cycleLines(ctx, t, s, recorder)
 		cycleLines(ctx, t, s, recorder)
@@ -451,7 +451,7 @@ func TestCatalogueConditionClearsOnASuccessfulFetch(t *testing.T) {
 	ctx := t.Context()
 	cycleLines(ctx, t, s, recorder)
 	cycleLines(ctx, t, s, recorder)
-	sea.err = errors.New("releases.moe unreachable")
+	sea.err = errors.New("seadex.moe unreachable")
 	store.st.SeadexFailures = degradation.ReconcileEscalationThreshold - 1
 	cycleLines(ctx, t, s, recorder)
 	cycleLines(ctx, t, s, recorder)
@@ -575,7 +575,7 @@ func TestSeaDexUnreachableSurvivesARestart(t *testing.T) {
 	deps, store := tickDeps(logger, &fakeSeaDex{entries: seadexFrierenEntry()}, nil, nil, 96)
 	sea := deps.SeaDex.(*fakeSeaDex)
 	sea.countFn = func(context.Context, time.Time) (int, error) {
-		return 0, errors.New("releases.moe unreachable")
+		return 0, errors.New("seadex.moe unreachable")
 	}
 	ctx := t.Context()
 	old := New(deps)
@@ -588,7 +588,7 @@ func TestSeaDexUnreachableSurvivesARestart(t *testing.T) {
 	}
 
 	restarted := restartedScout(deps)
-	sea.err = errors.New("releases.moe unreachable")
+	sea.err = errors.New("seadex.moe unreachable")
 	restated := conditionLine{msg: msgStillStandingContract, condition: "seadex-unreachable"}
 	if lines := cycleLines(ctx, t, restarted, recorder); len(lines) != 1 || lines[0] != restated {
 		t.Errorf("first pass of the new process emitted %+v, want exactly %+v", lines, restated)
@@ -613,7 +613,7 @@ func TestSeaDexUnreachableSurvivesARestart(t *testing.T) {
 // condition, which a reconcile alone can clear, stays standing.
 func TestRestoredSeaDexUnreachableClearsWhenAProbeAnswers(t *testing.T) {
 	logger, recorder := capture.New()
-	probeErr := errors.New("releases.moe unreachable")
+	probeErr := errors.New("seadex.moe unreachable")
 	deps, store := tickDeps(logger, &fakeSeaDex{entries: seadexFrierenEntry()}, nil, nil, 96)
 	sea := deps.SeaDex.(*fakeSeaDex)
 	sea.countFn = func(context.Context, time.Time) (int, error) { return 0, probeErr }
@@ -660,13 +660,13 @@ func TestRestoredOversizeSettlesOnTheNotReadyProbe(t *testing.T) {
 			return seadexapi.MaxWindowEntries, nil
 		}},
 		{name: "probe fails", standing: true, probe: func(context.Context, time.Time) (int, error) {
-			return 0, errors.New("releases.moe unreachable")
+			return 0, errors.New("seadex.moe unreachable")
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, recorder := capture.New()
-			sea := &fakeSeaDex{entries: seadexFrierenEntry(), err: errors.New("releases.moe unreachable"), countFn: tc.probe}
+			sea := &fakeSeaDex{entries: seadexFrierenEntry(), err: errors.New("seadex.moe unreachable"), countFn: tc.probe}
 			deps, store := tickDeps(logger, sea, nil, nil, 96)
 			store.st.Standing = []state.StandingCondition{{Condition: degradation.SeaDexWindowOversize}}
 			s := New(deps)
@@ -759,7 +759,7 @@ func TestRestoredStandingKeepsOnlyConditionsThisProcessObserves(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, recorder := capture.New()
-			sea := &fakeSeaDex{entries: seadexFrierenEntry(), countFn: emptyProbe, err: errors.New("releases.moe unreachable")}
+			sea := &fakeSeaDex{entries: seadexFrierenEntry(), countFn: emptyProbe, err: errors.New("seadex.moe unreachable")}
 			deps, store := tickDeps(logger, sea, nil, nil, 96)
 			if tc.external {
 				deps.PollInterval = 0

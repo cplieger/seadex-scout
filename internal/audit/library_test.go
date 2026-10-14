@@ -125,8 +125,8 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 		Totals:      map[string]int{string(VerdictBest): 4, string(VerdictNoFile): 1, string(VerdictUnverified): 1, string(verdictAlt): 1},
 		Items:       itemCounts{Anime: 9, WithEntry: 7, AllBest: 3, AllBestOrAlt: 5},
 		Rows: []reportRow{
-			{Title: "Gone", AniListID: 1, Arr: library.ArrSonarr, Verdict: VerdictNoFile, SeaDexURL: "https://releases.moe/1"},
-			{Title: "Unknown", AniListID: 2, Arr: library.ArrRadarr, Verdict: VerdictUnverified, SeaDexURL: "https://releases.moe/2"},
+			{Title: "Gone", AniListID: 1, Arr: library.ArrSonarr, Verdict: VerdictNoFile, SeaDexURL: "https://seadex.moe/1/"},
+			{Title: "Unknown", AniListID: 2, Arr: library.ArrRadarr, Verdict: VerdictUnverified, SeaDexURL: "https://seadex.moe/2/"},
 			{Title: "Alt", AniListID: 3, Arr: library.ArrSonarr, Verdict: verdictAlt},
 			{Title: "Best", AniListID: 4, Arr: library.ArrSonarr, Verdict: VerdictBest},
 		},
