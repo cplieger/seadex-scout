@@ -609,17 +609,17 @@ func TestReloadDropsCrossKeySnapshotGUIDs(t *testing.T) {
 // TestReloadSanitizesSnapshotInfoURLs pins the load-boundary display-URL gate
 // (sanitizeSnapshotInfoURLs): a tampered but structurally valid feed.json
 // cannot plant a javascript:/data: or foreign-host clickable info link that
-// renderFeed would hand the arr UI as <comments> - only the canonical
-// releases.moe entry URL the writer persists (entryURL) survives; anything
-// else is blanked (never dropped), mirroring the search path's
-// sanitizeDisplayURL.
+// renderFeed would hand the arr UI as <comments> - a userinfo-free absolute
+// http(s) URL on the canonical SeaDex host survives (the path is not
+// checked); a foreign host, another scheme, userinfo or a smuggling form is
+// blanked (never dropped), mirroring the search path's sanitizeDisplayURL.
 func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
 		Owners:    owns(),
 		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
-			{Title: "canonical", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587", Key: "nyaa:42"},
+			{Title: "canonical", GUID: "https://nyaa.si/view/42", InfoURL: "https://seadex.moe/154587/", Key: "nyaa:42"},
 			{Title: "scheme", GUID: "https://nyaa.si/view/43", InfoURL: "javascript:alert(1)", Key: "nyaa:43"},
 			{Title: "foreign", GUID: "https://nyaa.si/view/44", InfoURL: "https://evil.example/phish", Key: "nyaa:44"},
 		},
@@ -635,7 +635,7 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 		t.Fatalf("nyaa feed = %d items (%+v), want 3: the gate blanks InfoURL, never drops the item", len(got), got)
 	}
 	want := map[string]string{
-		"canonical": "https://releases.moe/154587",
+		"canonical": "https://seadex.moe/154587/",
 		"scheme":    "",
 		"foreign":   "",
 	}
@@ -673,19 +673,19 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 // what it counted before.
 func TestSanitizeSnapshotInfoURLsStoresVouchedSpelling(t *testing.T) {
 	feed := []journalItem{
-		{Title: "clean", InfoURL: "https://releases.moe/154587"},
-		{Title: "leading tab", InfoURL: "\thttps://releases.moe/123"},
-		{Title: "trailing c0", InfoURL: "https://releases.moe/456\x01"},
+		{Title: "clean", InfoURL: "https://seadex.moe/154587/"},
+		{Title: "leading tab", InfoURL: "\thttps://seadex.moe/123/"},
+		{Title: "trailing c0", InfoURL: "https://seadex.moe/456/\x01"},
 		{Title: "no link", InfoURL: ""},
 		{Title: "foreign host", InfoURL: "https://evil.example/phish"},
-		{Title: "userinfo", InfoURL: "https://evil@releases.moe/1"},
+		{Title: "userinfo", InfoURL: "https://evil@seadex.moe/1/"},
 		{Title: "non-http", InfoURL: "javascript:alert(1)"},
-		{Title: "backslash", InfoURL: "https:\\\\releases.moe\\1"},
+		{Title: "backslash", InfoURL: "https:\\\\seadex.moe\\1"},
 	}
 	want := map[string]string{
-		"clean":        "https://releases.moe/154587",
-		"leading tab":  "https://releases.moe/123",
-		"trailing c0":  "https://releases.moe/456",
+		"clean":        "https://seadex.moe/154587/",
+		"leading tab":  "https://seadex.moe/123/",
+		"trailing c0":  "https://seadex.moe/456/",
 		"no link":      "",
 		"foreign host": "",
 		"userinfo":     "",
@@ -718,31 +718,28 @@ func TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs(t *testing.T) {
 		raw  string
 		want bool
 	}{
-		"canonical https accepted":             {"https://releases.moe/154587", true},
-		"canonical http accepted":              {"http://releases.moe/154587", true},
-		"uppercase host accepted":              {"https://RELEASES.MOE/154587", true},
-		"userinfo on canonical host rejected":  {"https://evil@releases.moe/154587", false},
-		"user:pass on canonical host rejected": {"https://u:p@releases.moe/154587", false},
-		"unparseable URL rejected":             {"https://releases.moe/%zz", false},
-		"scheme-relative rejected":             {"//releases.moe/154587", false},
-		"ftp scheme rejected":                  {"ftp://releases.moe/154587", false},
-		// The urlform adoption: host evidence is matched under an
-		// ASCII-only fold behind IsASCIIHost, so a homograph cannot fold into
-		// the allowlisted name - the old strings.EqualFold was the full-Unicode
-		// simple fold, safe here only incidentally (UTS46 happens to map U+017F
-		// back to 's' for this hostname). Smuggling forms a browser reads
-		// differently from net/url are refused outright.
-		"long-s homograph host rejected":       {"https://relea\u017fes.moe/154587", false},
-		"turkish dotted-I homograph rejected":  {"https://releases.mo\u0130/154587", false},
-		"backslash authority rejected":         {"https:\\\\releases.moe\\154587", false},
-		"tab-smuggled host rejected":           {"https://relea\tses.moe/154587", false},
-		"newline-smuggled host rejected":       {"https://releases.moe\n.evil.example/1", false},
-		"foreign host on a subdomain rejected": {"https://releases.moe.evil.example/1", false},
-		"canonical host with a query accepted": {"https://releases.moe/154587?x=1", true},
-		// A port passes, unchanged by the adoption: urlform.Host excludes it,
-		// exactly as the previous u.Hostname() did. The host is still bound to
+		"canonical https accepted":             {"https://seadex.moe/154587/", true},
+		"canonical http accepted":              {"http://seadex.moe/154587/", true},
+		"uppercase host accepted":              {"https://SEADEX.MOE/154587/", true},
+		"userinfo on canonical host rejected":  {"https://evil@seadex.moe/154587/", false},
+		"user:pass on canonical host rejected": {"https://u:p@seadex.moe/154587/", false},
+		"unparseable URL rejected":             {"https://seadex.moe/%zz", false},
+		"scheme-relative rejected":             {"//seadex.moe/154587/", false},
+		"ftp scheme rejected":                  {"ftp://seadex.moe/154587/", false},
+		// Host evidence is matched under an ASCII-only fold behind
+		// IsASCIIHost, so a homograph cannot fold into the allowlisted name
+		// (strings.EqualFold's full-Unicode fold maps U+017F to 's'). Smuggling
+		// forms a browser reads differently from net/url are refused outright.
+		"long-s homograph host rejected":       {"https://\u017feadex.moe/154587/", false},
+		"turkish dotted-I homograph rejected":  {"https://seadex.mo\u0130/154587/", false},
+		"backslash authority rejected":         {"https:\\\\seadex.moe\\154587", false},
+		"tab-smuggled host rejected":           {"https://sea\tdex.moe/154587/", false},
+		"newline-smuggled host rejected":       {"https://seadex.moe\n.evil.example/1", false},
+		"foreign host on a subdomain rejected": {"https://seadex.moe.evil.example/1", false},
+		"canonical host with a query accepted": {"https://seadex.moe/154587/?x=1", true},
+		// A port passes: urlform.Host excludes it. The host is still bound to
 		// the canonical name, so a nonstandard port is at worst a dead link.
-		"canonical host with a port accepted": {"https://releases.moe:8443/154587", true},
+		"canonical host with a port accepted": {"https://seadex.moe:8443/154587/", true},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -1671,10 +1668,10 @@ func TestReloadHealthySnapshotEmitsNoScrubDiagnostics(t *testing.T) {
 		Owners:    owns(),
 		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
-			{Title: "nyaa healthy", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587", Key: "nyaa:42", FirstSeen: past},
+			{Title: "nyaa healthy", GUID: "https://nyaa.si/view/42", InfoURL: "https://seadex.moe/154587/", Key: "nyaa:42", FirstSeen: past},
 		},
 		ABFeed: []journalItem{
-			{Title: "ab healthy", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777", InfoURL: "https://releases.moe/154588", Key: "ab:777", FirstSeen: past},
+			{Title: "ab healthy", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777", InfoURL: "https://seadex.moe/154588/", Key: "ab:777", FirstSeen: past},
 		},
 	})
 	log, rec := capture.New()

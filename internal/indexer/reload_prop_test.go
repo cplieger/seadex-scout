@@ -23,8 +23,8 @@ func TestSnapshotInfoURLAllowedProperty(t *testing.T) {
 			strings.ToUpper(seadexInfoHost()),
 			"evil.example",
 			seadexInfoHost() + ".evil.example",
-			"relea\u017fes.moe",
-			"releases.mo\u0130",
+			"\u017feadex.moe",
+			"seadex.mo\u0130",
 			"",
 		}).Draw(t, "host")
 		userinfo := rapid.SampledFrom([]string{"", "user@", "user:pass@"}).Draw(t, "userinfo")

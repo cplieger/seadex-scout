@@ -1,5 +1,5 @@
 // Package main is seadex-scout: a watcher that compares a Sonarr/Radarr anime
-// library against SeaDex (releases.moe) and emits a structured slog line
+// library against SeaDex (seadex.moe) and emits a structured slog line
 // whenever SeaDex recommends a better release than the one on disk. It never
 // downloads or touches a torrent client; it tells the operator what to go get.
 //

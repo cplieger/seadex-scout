@@ -70,12 +70,12 @@ func TestStripExt(t *testing.T) {
 }
 
 // TestEntryURL pins the info-link contract: a positive AniList id yields the
-// releases.moe entry page (under the canonical site base) and a zero/negative
-// id yields no link at all. The base-normalization rule belongs to
-// seadex.EntryURL and is covered by internal/seadex/urls_test.go.
+// SeaDex entry page (under the canonical site base) and a zero/negative id
+// yields no link at all. The URL rule belongs to seadex.EntryURL and is
+// covered by internal/seadex/urls_test.go.
 func TestEntryURL(t *testing.T) {
-	if got := entryURL(154587); got != "https://releases.moe/154587" {
-		t.Errorf("entryURL(154587) = %q, want the releases.moe entry page", got)
+	if got := entryURL(154587); got != "https://seadex.moe/154587/" {
+		t.Errorf("entryURL(154587) = %q, want the SeaDex entry page", got)
 	}
 	if got := entryURL(0); got != "" {
 		t.Errorf("entryURL(0) = %q, want empty", got)

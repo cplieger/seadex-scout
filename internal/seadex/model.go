@@ -1,4 +1,4 @@
-// Package seadex is the releases.moe (SeaDex) vocabulary: the value objects
+// Package seadex is the SeaDex (seadex.moe) vocabulary: the value objects
 // and contract predicates every consumer of the SeaDex model reads.
 //
 // SeaDex curates the best available release per anime, keyed by AniList ID. The model
@@ -29,7 +29,7 @@ type Torrent struct {
 }
 
 // ValidInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,
-// else "" (covers the releases.moe "<redacted>" placeholder and any other
+// else "" (covers the SeaDex "<redacted>" placeholder and any other
 // junk value).
 func ValidInfoHash(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))

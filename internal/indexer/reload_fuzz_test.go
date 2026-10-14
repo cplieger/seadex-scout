@@ -15,20 +15,20 @@ import (
 // accepted after that consumer's parse/re-render round trip. The independent parse reads
 // the VOUCHED spelling the gate returns, which is what sanitizeSnapshotInfoURLs stores.
 func FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks(f *testing.F) {
-	f.Add("https://releases.moe/154587")
-	f.Add("http://releases.moe/154587")
-	f.Add("https://RELEASES.MOE/154587")
+	f.Add("https://seadex.moe/154587/")
+	f.Add("http://seadex.moe/154587/")
+	f.Add("https://SEADEX.MOE/154587/")
 	f.Add("https:///154587")
-	f.Add("//releases.moe/154587")
+	f.Add("//seadex.moe/154587/")
 	f.Add("javascript:alert(1)")
-	f.Add("https://evil@releases.moe/154587")
-	f.Add("https://releases.moe@evil.example/phish")
-	f.Add("https://releases%2emoe/154587")
-	f.Add("https://releases.moe:8443/154587")
+	f.Add("https://evil@seadex.moe/154587/")
+	f.Add("https://seadex.moe@evil.example/phish")
+	f.Add("https://seadex%2emoe/154587/")
+	f.Add("https://seadex.moe:8443/154587/")
 	f.Add("https://evil.example/154587")
-	f.Add("https://releases.moe.evil.example/154587")
-	f.Add("\thttps://releases.moe/154587")
-	f.Add("https://releases.moe/154587\x01")
+	f.Add("https://seadex.moe.evil.example/154587")
+	f.Add("\thttps://seadex.moe/154587/")
+	f.Add("https://seadex.moe/154587/\x01")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, raw string) {
 		if _, ok := snapshotInfoURLAllowed(raw, ""); ok {

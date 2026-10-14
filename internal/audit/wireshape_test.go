@@ -26,7 +26,7 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 			Totals:      map[string]int{string(verdictAlt): 1},
 			Rows: []reportRow{{
 				Title: "Frieren", Arr: "sonarr", ArrURL: "https://sonarr.example/series/frieren",
-				SeaDexURL: "https://releases.moe/154587", Verdict: verdictAlt, Qualifier: QualifierMixed,
+				SeaDexURL: "https://seadex.moe/154587/", Verdict: verdictAlt, Qualifier: QualifierMixed,
 				MatchSource: "id", CurrentGroups: []string{"erai"}, AniListID: 154587, Season: 2,
 				Scope:   align.ScopeSeason,
 				Special: true, Incomplete: true, Approx: true, HiddenAnimeBytes: 3, HiddenAnimeBytesBest: 1,
@@ -39,7 +39,7 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 					Unobtainable: true, URLError: true, UnknownTracker: true,
 				}},
 			}},
-			Incomplete: []incompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
+			Incomplete: []incompleteEntry{{SeaDexURL: "https://seadex.moe/7/", AniListID: 7}},
 		}
 
 		data, err := renderJSON(full)
@@ -104,7 +104,7 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 			GeneratedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
 			Totals:      map[string]int{},
 			Rows: []reportRow{{
-				Title: "Bare", Arr: "sonarr", SeaDexURL: "https://releases.moe/1",
+				Title: "Bare", Arr: "sonarr", SeaDexURL: "https://seadex.moe/1/",
 				Verdict: VerdictNoFile, MatchSource: "id", AniListID: 1,
 			}},
 		}

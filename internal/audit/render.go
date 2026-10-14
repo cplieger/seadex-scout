@@ -188,7 +188,7 @@ func writeIncompleteCaveat(b *strings.Builder, n int) {
 
 // writeIncompleteSection renders the incomplete-mapping section: one row per
 // SeaDex entry whose library mapping could not be resolved this run, listed by
-// AniList id with its releases.moe link. Omitted on a fully resolved run.
+// AniList id with its SeaDex link. Omitted on a fully resolved run.
 func writeIncompleteSection(b *strings.Builder, incomplete []incompleteEntry) {
 	if len(incomplete) == 0 {
 		return
@@ -956,7 +956,7 @@ func sanitizedReleases(rels []rowRelease) []rowRelease {
 }
 
 // sanitizedIncomplete returns a sanitized clone of the incomplete-mapping
-// entries (the releases.moe link); a nil or empty slice is returned as-is.
+// entries (the SeaDex link); a nil or empty slice is returned as-is.
 func sanitizedIncomplete(inc []incompleteEntry) []incompleteEntry {
 	if len(inc) == 0 {
 		return inc

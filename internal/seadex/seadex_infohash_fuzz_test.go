@@ -18,7 +18,7 @@ func asciiUpper(s string) string {
 	return string(b)
 }
 
-// FuzzValidInfoHash is the invariant net over the releases.moe info-hash
+// FuzzValidInfoHash is the invariant net over the SeaDex info-hash
 // sanitizer. Its output is not a display string: the indexer keys its curation
 // set on it and matches Prowlarr results by it, so anything ValidInfoHash
 // admits becomes a lookup key. Whatever the upstream value, an accepted result
