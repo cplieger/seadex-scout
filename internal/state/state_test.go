@@ -861,11 +861,15 @@ const legacyMappingState = `{
 var (
 	legacyAnimapState   = strings.Replace(legacyMappingState, `"mapping":{`, `"animap":{`, 1)
 	legacyAnimapV2State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v2":{`, 1)
+	legacyAnimapV3State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v3":{`, 1)
 )
 
 func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 	for _, tc := range []struct{ key, body string }{
-		{"mapping", legacyMappingState}, {"animap", legacyAnimapState}, {"animap_v2", legacyAnimapV2State},
+		{"mapping", legacyMappingState},
+		{"animap", legacyAnimapState},
+		{"animap_v2", legacyAnimapV2State},
+		{"animap_v3", legacyAnimapV3State},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
@@ -1145,7 +1149,7 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 
 func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	body := `{"animap_v3":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"animap-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
+	body := `{"animap_v4":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"animap-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write state fixture: %v", err)
 	}

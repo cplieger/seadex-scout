@@ -102,19 +102,19 @@ func TestLoader_Load_mappingListFactsTravelWithTheirRecords(t *testing.T) {
 				fetchedAt = time.Now()
 			}
 			prev := &Cache{
-				FetchedAt:      fetchedAt,
-				ETag:           "v1",
-				Records:        []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-				Mappings:       maps.Clone(prevMappings),
-				ParentMappings: maps.Clone(prevParent),
+				FetchedAt:       fetchedAt,
+				ETag:            "v1",
+				Records:         []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+				Mappings:        maps.Clone(prevMappings),
+				AniListMappings: maps.Clone(prevParent),
 			}
 			l := NewLoader(ts.Client(), ts.URL, WithRefresh(tc.refresh), WithLogger(discardLogger()))
 			next, _, _ := l.Load(t.Context(), prev)
 			if !maps.EqualFunc(next.Mappings, tc.want, sameMapping) {
 				t.Errorf("Load().Mappings = %+v, want %+v", next.Mappings, tc.want)
 			}
-			if !maps.EqualFunc(next.ParentMappings, tc.wantParent, sameMapping) {
-				t.Errorf("Load().ParentMappings = %+v, want %+v", next.ParentMappings, tc.wantParent)
+			if !maps.EqualFunc(next.AniListMappings, tc.wantParent, sameMapping) {
+				t.Errorf("Load().AniListMappings = %+v, want %+v", next.AniListMappings, tc.wantParent)
 			}
 		})
 	}

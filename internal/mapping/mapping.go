@@ -197,11 +197,11 @@ type Cache struct {
 	// carries one, AniList-keyed or not, so an override naming an AniDB id joins
 	// the facts animap publishes for it.
 	Mappings map[int]Mapping `json:"mappings,omitempty"`
-	// ParentMappings holds the facts of a record AniDB files as another anime's
-	// specials, keyed by AniList id: such a record carries no AniDB id of its own.
-	ParentMappings map[int]Mapping `json:"parent_mappings,omitempty"`
-	ETag           string          `json:"etag,omitempty"`
-	LastModified   string          `json:"last_modified,omitempty"`
+	// AniListMappings holds the facts of a record with no AniDB id, keyed by
+	// AniList id: animap's overlay links give such records their placement.
+	AniListMappings map[int]Mapping `json:"anilist_mappings,omitempty"`
+	ETag            string          `json:"etag,omitempty"`
+	LastModified    string          `json:"last_modified,omitempty"`
 	// RefusedETag / RefusedLastModified are the validators of the last body a
 	// refresh REFUSED. While they are set the conditional GET asks about THAT
 	// body, so a persistent refusal costs one 304 per cycle instead of a ~2.3 MB
@@ -228,20 +228,19 @@ type Index struct {
 	// "does a SIBLING map this season" for a record that maps it too, which is
 	// the cour-split shape.
 	seasonsByTvdb map[int]map[int]int
-	// mappings and parentMappings are Cache's two fact maps, reached only through
-	// MappingFor so the join keys have one reader. parentMappings is the index's
-	// own copy, because an override deletes its entry.
-	mappings       map[int]Mapping
-	parentMappings map[int]Mapping
+	// mappings and aniListMappings are Cache's two fact maps, reached only
+	// through MappingFor so the join keys have one reader. aniListMappings is
+	// the index's own copy, because an override deletes its entry.
+	mappings        map[int]Mapping
+	aniListMappings map[int]Mapping
 }
 
 // MappingFor returns what the mapping list and placement say about rec, and
 // false when they say nothing. A record with an AniDB id joins on it; one
-// without joins on its AniList id, which only a specials-of-parent record has
-// facts under. An override joins through the AniDB id it names: it replaces the
-// upstream record wholesale, its facts included, and an override naming another
-// tvdb_id drops the placement and the special episode, whose episode numbers
-// belong to animap's series.
+// without joins on its AniList id. An override joins through the AniDB id it
+// names: it replaces the upstream record wholesale, its facts included, and an
+// override naming another tvdb_id or season drops the placement and the
+// special episode, whose episode numbers belong to animap's series and season.
 func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
 	if i == nil || rec == nil {
 		return Mapping{}, false
@@ -250,10 +249,13 @@ func (i *Index) MappingFor(rec *Record) (Mapping, bool) {
 	if rec.AniDBID > 0 {
 		m = i.mappings[rec.AniDBID]
 	} else {
-		m = i.parentMappings[rec.AniListID]
+		m = i.aniListMappings[rec.AniListID]
 	}
 	if m.SpecialsTvdb != rec.TvdbID {
 		m.Specials, m.SpecialEpisode, m.SpecialsTvdb, m.SpecialsEpisodes = nil, 0, 0, 0
+	}
+	if rec.TvdbID != m.EpisodesTvdb || rec.SeasonTvdb != m.EpisodesSeason {
+		m.Episodes, m.EpisodesTvdb, m.EpisodesSeason = nil, 0, 0
 	}
 	return m, !m.empty()
 }
@@ -343,9 +345,9 @@ type Source struct {
 	Records []Record
 	// Mappings holds the mapping-list facts keyed by AniDB id.
 	Mappings map[int]Mapping
-	// ParentMappings holds a specials-of-parent record's facts, keyed by its
-	// AniList id.
-	ParentMappings map[int]Mapping
+	// AniListMappings holds the facts of a record with no AniDB id, keyed by
+	// its AniList id.
+	AniListMappings map[int]Mapping
 	// Overrides replace the record of their AniList id wholesale, facts
 	// included, after the index is built. They are canonical already and leave
 	// the sibling-season summary as the records built it.
@@ -356,7 +358,7 @@ type Source struct {
 // SeaDex lookups use positive AniList IDs, so a zero or negative key could
 // never resolve an entry). A later record with the same ID overwrites an
 // earlier one, and src.Overrides are applied on top. Mappings is stored as
-// given and ParentMappings copied (nil is a valid empty map for either).
+// given and AniListMappings copied (nil is a valid empty map for either).
 func NewIndex(src Source) *Index {
 	byAniList := make(map[int]Record, len(src.Records))
 	for _, r := range src.Records {
@@ -382,12 +384,12 @@ func NewIndex(src Source) *Index {
 		}
 		seasons[r.SeasonTvdb]++
 	}
-	parentMappings := maps.Clone(src.ParentMappings)
+	aniListMappings := maps.Clone(src.AniListMappings)
 	for i := range src.Overrides {
 		byAniList[src.Overrides[i].AniListID] = src.Overrides[i]
-		delete(parentMappings, src.Overrides[i].AniListID)
+		delete(aniListMappings, src.Overrides[i].AniListID)
 	}
-	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: src.Mappings, parentMappings: parentMappings}
+	return &Index{byAniList: byAniList, seasonsByTvdb: seasonsByTvdb, mappings: src.Mappings, aniListMappings: aniListMappings}
 }
 
 // indexedRecordCount returns how many records survive into the served index
@@ -521,10 +523,10 @@ func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 	}
 	next, err := l.refreshCache(ctx, canonicalPrev)
 	idx := NewIndex(Source{
-		Records:        next.Records,
-		Mappings:       next.Mappings,
-		ParentMappings: next.ParentMappings,
-		Overrides:      l.effectiveOverrides(ctx),
+		Records:         next.Records,
+		Mappings:        next.Mappings,
+		AniListMappings: next.AniListMappings,
+		Overrides:       l.effectiveOverrides(ctx),
 	})
 	return next, idx, err
 }
@@ -846,7 +848,8 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 		"season_scoped_records", pop.positiveSeason,
 		"special_records", pop.special,
 		"mapping_list_records", parsed.listFacts(),
-		"placed_special_records", placedSpecials(parsed.mappings, parsed.parentMappings),
+		"placed_special_records", placedSpecials(parsed.mappings, parsed.aniListMappings),
+		"placed_episode_records", placedEpisodes(parsed.mappings, parsed.aniListMappings),
 		"revalidatable", res.Validators.ETag != "" || res.Validators.LastModified != "",
 	}
 	if prev.RejectedRefreshes > 0 {
@@ -856,12 +859,12 @@ func (l *Loader) evaluateRefresh(prev *Cache, res httpx.ConditionalResult) (Cach
 	// The zero RejectedRefreshes, RefusedETag and RefusedLastModified are the
 	// accepted refresh's resets; the rules are on Cache.
 	return Cache{
-		FetchedAt:      time.Now(),
-		Records:        records,
-		Mappings:       parsed.mappings,
-		ParentMappings: parsed.parentMappings,
-		ETag:           res.Validators.ETag,
-		LastModified:   res.Validators.LastModified,
+		FetchedAt:       time.Now(),
+		Records:         records,
+		Mappings:        parsed.mappings,
+		AniListMappings: parsed.aniListMappings,
+		ETag:            res.Validators.ETag,
+		LastModified:    res.Validators.LastModified,
 	}, nil
 }
 
@@ -1000,8 +1003,8 @@ func validateRoutingCoverage(previous, candidate populations, previousMinimum in
 // mapping-list fact population: a document that keeps its records while losing
 // most of its mapping lists would silently drop every film's special episode
 // and every season range. The populations are guarded apart, because the
-// AniDB-keyed one is large enough to hide the loss of every specials-of-parent
-// fact, and both to hide the loss of every placed special. The significance
+// AniDB-keyed one is large enough to hide the loss of every AniList-keyed
+// fact, and both to hide the loss of every placed special or season episode. The significance
 // gate is the record guards' own 1% floor.
 func validateListFacts(prev *Cache, parsed *animapParseResult) error {
 	if !cacheUsable(prev.Records) {
@@ -1011,18 +1014,30 @@ func validateListFacts(prev *Cache, parsed *animapParseResult) error {
 	if err := validatePopulation("mapping-list", listFactCount(prev.Mappings), listFactCount(parsed.mappings), previousMinimum); err != nil {
 		return err
 	}
-	if err := validatePopulation("specials-of-parent mapping-list", listFactCount(prev.ParentMappings), listFactCount(parsed.parentMappings), previousMinimum); err != nil {
+	if err := validatePopulation("AniList-keyed mapping-list", listFactCount(prev.AniListMappings), listFactCount(parsed.aniListMappings), previousMinimum); err != nil {
 		return err
 	}
-	return validatePopulation("special-episode placement", placedSpecials(prev.Mappings, prev.ParentMappings),
-		placedSpecials(parsed.mappings, parsed.parentMappings), previousMinimum)
+	if err := validatePopulation("special-episode placement", placedSpecials(prev.Mappings, prev.AniListMappings),
+		placedSpecials(parsed.mappings, parsed.aniListMappings), previousMinimum); err != nil {
+		return err
+	}
+	return validatePopulation("season-episode placement", placedEpisodes(prev.Mappings, prev.AniListMappings),
+		placedEpisodes(parsed.mappings, parsed.aniListMappings), previousMinimum)
 }
 
 func placedSpecials(fact ...map[int]Mapping) int {
+	return countFacts(func(f *Mapping) bool { return len(f.Specials) > 0 }, fact...)
+}
+
+func placedEpisodes(fact ...map[int]Mapping) int {
+	return countFacts(func(f *Mapping) bool { return len(f.Episodes) > 0 }, fact...)
+}
+
+func countFacts(has func(*Mapping) bool, fact ...map[int]Mapping) int {
 	n := 0
 	for _, m := range fact {
 		for _, f := range m {
-			if len(f.Specials) > 0 {
+			if has(&f) {
 				n++
 			}
 		}

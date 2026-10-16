@@ -18,6 +18,8 @@ func FuzzParseAnimap(f *testing.F) {
 	f.Add([]byte(animapDoc(`[{"anidb_id":9,"tvdb_id":1,"mapping_list":[{"anidb_season":1,"tvdb_season":2,"start":14,"end":30}]}]`)))
 	f.Add([]byte(animapDoc(`[{"anilist_id":5,"anidb_parent":{"anidb_id":6,"specials":[1]},"tvdb_id":1,"tvdb_season":0,` +
 		`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]}]`)))
+	f.Add([]byte(animapDoc(`[{"anilist_id":7,"type":"MOVIE","tvdb_id":82099,"tvdb_season":1,"episodes":1,` +
+		`"tvdb_placement":[{"start":1,"end":1,"season":1,"episode":1}]}]`)))
 	f.Add([]byte(animapDoc(`[{"anilist_id":-1,"tmdb_movie_ids":[-3,0,4],"imdb_ids":[" ",""]},{"anilist_id":"x"},5,null]`)))
 	f.Add([]byte(`{"version":2,"records":[]}`))
 	f.Add([]byte(`{"records":[],"records":[]}`))
@@ -29,7 +31,7 @@ func FuzzParseAnimap(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		parsed, err := parseAnimap(data, discardLogger())
 		if err != nil {
-			if parsed.records != nil || parsed.mappings != nil || parsed.parentMappings != nil || parsed.elements != 0 {
+			if parsed.records != nil || parsed.mappings != nil || parsed.aniListMappings != nil || parsed.elements != 0 {
 				t.Errorf("parseAnimap error %v with a non-empty result: %+v", err, parsed)
 			}
 			return
@@ -53,10 +55,14 @@ func FuzzParseAnimap(f *testing.F) {
 		if retained > maxRetainedTotal {
 			t.Errorf("parseAnimap retained %d identifiers, want at most %d", retained, maxRetainedTotal)
 		}
-		for _, facts := range []map[int]Mapping{parsed.mappings, parsed.parentMappings} {
+		for _, facts := range []map[int]Mapping{parsed.mappings, parsed.aniListMappings} {
 			for k, m := range facts {
 				if k <= 0 || m.empty() {
 					t.Errorf("parseAnimap kept facts %+v under key %d, want non-empty facts under a positive key", m, k)
+				}
+				if m.Episodes != nil && (m.EpisodesTvdb <= 0 || m.EpisodesSeason < 1 || len(m.Episodes) > maxSpecialEpisodes ||
+					!slices.IsSorted(m.Episodes) || m.Episodes[0] < 1) {
+					t.Errorf("parseAnimap kept episodes %+v, want ascending positive episodes of a positive season, at most %d", m, maxSpecialEpisodes)
 				}
 			}
 		}

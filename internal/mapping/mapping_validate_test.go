@@ -147,13 +147,13 @@ func TestAcceptRefresh_mappingListCollapseRejected(t *testing.T) {
 	}
 }
 
-// TestAcceptRefresh_specialsOfParentFactsExtinctionRejected pins that the two
+// TestAcceptRefresh_aniListKeyedFactsExtinctionRejected pins that the two
 // mapping-list populations are guarded apart: a body that keeps every
-// AniDB-keyed fact but loses every specials-of-parent fact would pass a guard
-// over their sum, and silently drop each such special's TVDB episode.
-func TestAcceptRefresh_specialsOfParentFactsExtinctionRejected(t *testing.T) {
+// AniDB-keyed fact but loses every AniList-keyed fact would pass a guard over
+// their sum, and silently drop each such entry's TVDB episode.
+func TestAcceptRefresh_aniListKeyedFactsExtinctionRejected(t *testing.T) {
 	const records = 200
-	prev := &Cache{Mappings: map[int]Mapping{}, ParentMappings: map[int]Mapping{}}
+	prev := &Cache{Mappings: map[int]Mapping{}, AniListMappings: map[int]Mapping{}}
 	for id := 1; id <= records; id++ {
 		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, Type: "TV", TvdbID: id})
 		if id <= 10 {
@@ -161,7 +161,7 @@ func TestAcceptRefresh_specialsOfParentFactsExtinctionRejected(t *testing.T) {
 		}
 	}
 	prev.Records = append(prev.Records, Record{AniListID: 1000, Type: "OVA", TvdbID: 1})
-	prev.ParentMappings[1000] = Mapping{SpecialEpisode: 2}
+	prev.AniListMappings[1000] = Mapping{SpecialEpisode: 2}
 	body := func(withParent bool) []byte {
 		var b strings.Builder
 		b.WriteByte('[')
@@ -188,17 +188,17 @@ func TestAcceptRefresh_specialsOfParentFactsExtinctionRejected(t *testing.T) {
 	next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(false)})
 	stale, ok := errors.AsType[*StaleMapError](err)
 	if !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
-		t.Fatalf("acceptRefresh(every specials-of-parent fact lost) error = %v, want the stale map with stale_reason refresh validation failed", err)
+		t.Fatalf("acceptRefresh(every AniList-keyed fact lost) error = %v, want the stale map with stale_reason refresh validation failed", err)
 	}
-	if len(next.ParentMappings) != 1 || len(next.Mappings) != 10 {
-		t.Errorf("refused refresh kept %d parent and %d AniDB-keyed facts, want the stale 1 and 10", len(next.ParentMappings), len(next.Mappings))
+	if len(next.AniListMappings) != 1 || len(next.Mappings) != 10 {
+		t.Errorf("refused refresh kept %d AniList-keyed and %d AniDB-keyed facts, want the stale 1 and 10", len(next.AniListMappings), len(next.Mappings))
 	}
 	next, err = l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(true)})
 	if err != nil {
-		t.Fatalf("acceptRefresh(specials-of-parent fact kept) error = %v, want acceptance", err)
+		t.Fatalf("acceptRefresh(AniList-keyed fact kept) error = %v, want acceptance", err)
 	}
-	if len(next.ParentMappings) != 1 {
-		t.Errorf("accepted refresh carries %d specials-of-parent facts, want the body's 1", len(next.ParentMappings))
+	if len(next.AniListMappings) != 1 {
+		t.Errorf("accepted refresh carries %d AniList-keyed facts, want the body's 1", len(next.AniListMappings))
 	}
 }
 
@@ -250,5 +250,42 @@ func TestAcceptRefresh_placedSpecialsExtinctionRejected(t *testing.T) {
 	}
 	if got := next.Mappings[15].Specials; !slices.Equal(got, []int{15}) {
 		t.Errorf("accepted refresh Mappings[15].Specials = %v, want the body's [15]", got)
+	}
+}
+
+func TestAcceptRefresh_placedEpisodesExtinctionRejected(t *testing.T) {
+	const records = 200
+	prev := &Cache{Mappings: map[int]Mapping{}}
+	for id := 1; id <= records; id++ {
+		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, Type: "TV", TvdbID: id})
+		if id <= 10 {
+			prev.Mappings[id] = Mapping{Episodes: []int{1}, EpisodesTvdb: id, EpisodesSeason: 1}
+		}
+	}
+	body := func(withPlacement bool) []byte {
+		var b strings.Builder
+		b.WriteByte('[')
+		for id := 1; id <= records; id++ {
+			if id > 1 {
+				b.WriteByte(',')
+			}
+			if id <= 10 && withPlacement {
+				fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d,"tvdb_season":1,"episodes":1,`+
+					`"tvdb_placement":[{"start":1,"end":1,"season":1,"episode":1}]}`, id, id, id)
+				continue
+			}
+			fmt.Fprintf(&b, `{"anilist_id":%d,"anidb_id":%d,"type":"TV","tvdb_id":%d,"tvdb_season":1}`, id, id, id)
+		}
+		b.WriteByte(']')
+		return animapBody(b.String())
+	}
+	l := &Loader{log: discardLogger()}
+	_, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(false)})
+	if stale, ok := errors.AsType[*StaleMapError](err); !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
+		t.Fatalf("acceptRefresh(every season placement dropped) error = %v, want the stale map with stale_reason refresh validation failed", err)
+	}
+	next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body(true)})
+	if err != nil || !slices.Equal(next.Mappings[5].Episodes, []int{1}) {
+		t.Fatalf("acceptRefresh(placements kept) = %+v, %v; want acceptance with Mappings[5].Episodes [1]", next.Mappings[5], err)
 	}
 }

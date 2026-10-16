@@ -177,7 +177,7 @@ func TestTickKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 func TestPreservedAddsOnlyPlacedEntriesOnAnUnreadSeries(t *testing.T) {
 	unread := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"oz"}}}
 	read := unread
-	read.Specials = map[int]library.SpecialEpisode{9: {Group: "oz", HasFile: true}}
+	read.Specials = map[int]library.ListedEpisode{9: {Group: "oz", HasFile: true}}
 	matches := []match.Match{
 		{Entry: seadex.Entry{AniListID: 1}, Item: &unread, Specials: []int{9}},
 		{Entry: seadex.Entry{AniListID: 2}, Item: &unread},
@@ -209,7 +209,7 @@ func copyFindings() []compare.Finding {
 func TestPreservedKeepsOnlyTheArrCopyWithoutEvidence(t *testing.T) {
 	unreadSonarr := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"oz"}}}
 	readSonarr := unreadSonarr
-	readSonarr.Specials = map[int]library.SpecialEpisode{9: {Group: "oz", HasFile: true}}
+	readSonarr.Specials = map[int]library.ListedEpisode{9: {Group: "oz", HasFile: true}}
 	filelessRadarr := library.Item{Arr: library.ArrRadarr}
 	failedRadarr := library.Item{Arr: library.ArrRadarr, Failed: true}
 	entry := seadex.Entry{AniListID: placedOVAID}

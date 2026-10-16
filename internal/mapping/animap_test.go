@@ -253,13 +253,13 @@ func TestParseAnimap_placementReachesBothJoins(t *testing.T) {
 	if got := parsed.mappings[100]; !slices.Equal(got.Specials, []int{5, 6}) || got.SpecialsEpisodes != 2 {
 		t.Errorf("parseAnimap mappings[100] = %+v, want Specials [5 6] answering 2 episodes", got)
 	}
-	if got := parsed.parentMappings[11].Specials; !slices.Equal(got, []int{5, 6}) {
-		t.Errorf("parseAnimap parentMappings[11].Specials = %v, want [5 6]", got)
+	if got := parsed.aniListMappings[11].Specials; !slices.Equal(got, []int{5, 6}) {
+		t.Errorf("parseAnimap aniListMappings[11].Specials = %v, want [5 6]", got)
 	}
 	if got := parsed.listFacts(); got != 0 {
 		t.Errorf("parseAnimap listFacts() = %d, want 0: a placement is not a mapping list", got)
 	}
-	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
+	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, AniListMappings: parsed.aniListMappings})
 	for _, id := range []int{10, 11} {
 		rec, _ := idx.Lookup(id)
 		if got, _ := idx.MappingFor(&rec); !slices.Equal(got.Specials, []int{5, 6}) {
@@ -269,9 +269,8 @@ func TestParseAnimap_placementReachesBothJoins(t *testing.T) {
 }
 
 // TestParseAnimap_keysFactsByTheirJoin pins where each record's facts land: under
-// its AniDB id whether or not it carries an AniList id, under its AniList id
-// when it is a specials-of-parent record with no AniDB id, and nowhere for an
-// AniList-only record without a valid anidb_parent, whose facts have no join.
+// its AniDB id whether or not it carries an AniList id, and under its AniList
+// id when it has no AniDB id, anidb_parent or not.
 func TestParseAnimap_keysFactsByTheirJoin(t *testing.T) {
 	special := `"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]`
 	body := animapBody(`[` +
@@ -289,14 +288,49 @@ func TestParseAnimap_keysFactsByTheirJoin(t *testing.T) {
 	if !maps.EqualFunc(parsed.mappings, want, sameMapping) {
 		t.Errorf("parseAnimap mappings = %+v, want %+v (a record with no facts keeps no entry)", parsed.mappings, want)
 	}
-	wantParent := map[int]Mapping{11: {SpecialEpisode: 8}}
-	if !maps.EqualFunc(parsed.parentMappings, wantParent, sameMapping) {
-		t.Errorf("parseAnimap parent mappings = %+v, want %+v", parsed.parentMappings, wantParent)
+	wantAniList := map[int]Mapping{11: {SpecialEpisode: 8}, 13: {SpecialEpisode: 8}, 14: {SpecialEpisode: 8}}
+	if !maps.EqualFunc(parsed.aniListMappings, wantAniList, sameMapping) {
+		t.Errorf("parseAnimap AniList-keyed mappings = %+v, want %+v", parsed.aniListMappings, wantAniList)
 	}
 }
 
 func sameMapping(a, b Mapping) bool {
-	return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons) && slices.Equal(a.Specials, b.Specials)
+	return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons) && slices.Equal(a.Specials, b.Specials) &&
+		slices.Equal(a.Episodes, b.Episodes) && a.EpisodesTvdb == b.EpisodesTvdb && a.EpisodesSeason == b.EpisodesSeason
+}
+
+// A placement wholly on the record's positive season gives the episodes it
+// names; any other placement gives none.
+func TestParseAnimap_episodesOfAPositiveSeason(t *testing.T) {
+	for _, tc := range []struct {
+		name, record string
+		want         []int
+	}{
+		{"one film of a season", `"tvdb_id":82099,"tvdb_season":1,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":1,"episode":1}]`, []int{1}},
+		{"a season in two runs", `"tvdb_id":5,"tvdb_season":2,"episodes":3,"tvdb_placement":[{"start":1,"end":2,"season":2,"episode":4},{"start":3,"end":3,"season":2,"episode":9}]`, []int{4, 5, 9}},
+		{"one episode on two targets", `"tvdb_id":5,"tvdb_season":2,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4},{"start":1,"end":1,"season":2,"episode":5}]`, []int{4, 5}},
+		{"season 0", `"tvdb_id":5,"tvdb_season":0,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":4}]`, nil},
+		{"a run on another season", `"tvdb_id":5,"tvdb_season":2,"episodes":2,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4},{"start":2,"end":2,"season":3,"episode":1}]`, nil},
+		{"an episode on none", `"tvdb_id":5,"tvdb_season":2,"episodes":2,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4},{"start":2,"end":2}]`, nil},
+		{"a placement short of the count", `"tvdb_id":5,"tvdb_season":2,"episodes":3,"tvdb_placement":[{"start":1,"end":2,"season":2,"episode":4}]`, nil},
+		{"no tvdb_id", `"tvdb_season":2,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4}]`, nil},
+		{"a run past the expansion cap", `"tvdb_id":5,"tvdb_season":2,"episodes":2000,"tvdb_placement":[{"start":1,"end":2000,"season":2,"episode":1}]`, nil},
+		{"no placement", `"tvdb_id":5,"tvdb_season":2,"episodes":1`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parseAnimap(animapBody(`[{"anilist_id":7,`+tc.record+`}]`), discardLogger())
+			if err != nil {
+				t.Fatalf("parseAnimap error: %v", err)
+			}
+			got := parsed.aniListMappings[7]
+			if !slices.Equal(got.Episodes, tc.want) {
+				t.Errorf("Episodes = %v, want %v", got.Episodes, tc.want)
+			}
+			if tc.want != nil && (got.EpisodesTvdb <= 0 || got.EpisodesSeason < 1) {
+				t.Errorf("Episodes on TVDB %d season %d, want the record's series and season", got.EpisodesTvdb, got.EpisodesSeason)
+			}
+		})
+	}
 }
 
 func TestParseAnimap_refusesWhatIsNotAVersionOneDocument(t *testing.T) {

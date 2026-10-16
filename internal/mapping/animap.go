@@ -64,23 +64,26 @@ type SeasonRange struct {
 }
 
 // Mapping is what a record's mapping list and placement say beyond its ids:
-// the season-0 episode a film filed in a series' specials IS (SpecialEpisode,
-// 0 when none), the season-0 episodes its regular episodes are (Specials,
-// ascending, nil unless animap places every one in season 0 or nowhere), and
-// the TVDB seasons an absolute-numbered run falls into (Seasons). SpecialsTvdb
-// is the series both number episodes of. SpecialsEpisodes, the AniDB episode
-// count, is set only for a placement wholly in season 0; Placed marks any.
+// the season-0 episode a film filed in a series' specials IS (SpecialEpisode),
+// the season-0 episodes a placement wholly in season 0 or nowhere names
+// (Specials, of series SpecialsTvdb, with the AniDB count SpecialsEpisodes),
+// the episodes a placement wholly on positive season EpisodesSeason of series
+// EpisodesTvdb names (Episodes), and the TVDB seasons an absolute-numbered run
+// falls into (Seasons). Episode lists ascend; Placed marks any placement.
 type Mapping struct {
 	Seasons          []SeasonRange `json:"seasons,omitempty"`
 	Specials         []int         `json:"specials,omitempty"`
+	Episodes         []int         `json:"episodes,omitempty"`
 	SpecialEpisode   int           `json:"special_episode,omitempty"`
 	SpecialsTvdb     int           `json:"specials_tvdb,omitempty"`
 	SpecialsEpisodes int           `json:"specials_episodes,omitempty"`
+	EpisodesTvdb     int           `json:"episodes_tvdb,omitempty"`
+	EpisodesSeason   int           `json:"episodes_season,omitempty"`
 	Placed           bool          `json:"placed,omitempty"`
 }
 
 func (m *Mapping) empty() bool {
-	return m.SpecialEpisode == 0 && len(m.Seasons) == 0 && len(m.Specials) == 0
+	return m.SpecialEpisode == 0 && len(m.Seasons) == 0 && len(m.Specials) == 0 && len(m.Episodes) == 0
 }
 
 // SpecialRun is the one reader of which TVDB season-0 episodes this entry is:
@@ -143,7 +146,6 @@ var errIdentifierBudgetExceeded = fmt.Errorf("mapping: animap retained values ex
 // strictly per field: a member of the wrong JSON type rejects its record.
 type animapRecord struct {
 	TVDBSeason    *int            `json:"tvdb_season"`
-	AniDBParent   *animapParent   `json:"anidb_parent"`
 	Type          string          `json:"type"`
 	IMDbIDs       []string        `json:"imdb_ids"`
 	TMDBMovieIDs  []int           `json:"tmdb_movie_ids"`
@@ -163,16 +165,6 @@ type animapSegment struct {
 	Episode *int `json:"episode"`
 	Start   int  `json:"start"`
 	End     int  `json:"end"`
-}
-
-// animapParent is a record's anidb_parent: the anime AniDB files it under as
-// specials. Only its id is read; its presence is what marks the record.
-type animapParent struct {
-	AniDBID int `json:"anidb_id"`
-}
-
-func (r *animapRecord) parentSpecial() bool {
-	return r.AniDBID <= 0 && r.AniListID > 0 && r.AniDBParent != nil && r.AniDBParent.AniDBID > 0
 }
 
 // animapRow is one mapping_list row. Each Episodes element is [anidb, target...]:
@@ -219,7 +211,35 @@ func (r *animapRecord) mapping() Mapping {
 	if m.Specials != nil && !slices.ContainsFunc(r.TVDBPlacement, func(s animapSegment) bool { return s.unplaced() }) {
 		m.SpecialsEpisodes = r.Episodes
 	}
+	if m.Episodes = r.seasonEpisodes(); m.Episodes != nil {
+		m.EpisodesTvdb, m.EpisodesSeason = r.TVDBID, *r.TVDBSeason
+	}
 	return m
+}
+
+// seasonEpisodes reads which episodes of its positive tvdb_season a record
+// IS, from a placement that answers every regular episode and puts each on
+// that season. It is nil for any other placement, and for one expanding past
+// maxSpecialEpisodes.
+func (r *animapRecord) seasonEpisodes() []int {
+	if r.TVDBID <= 0 || r.TVDBSeason == nil || *r.TVDBSeason < 1 || !placesEvery(r.TVDBPlacement, r.Episodes) {
+		return nil
+	}
+	seen := make(map[int]struct{})
+	work := 0
+	for i := range r.TVDBPlacement {
+		s := &r.TVDBPlacement[i]
+		n := s.End - s.Start + 1
+		if s.Season == nil || s.Episode == nil || *s.Season != *r.TVDBSeason || *s.Episode < 1 ||
+			*s.Episode > math.MaxInt-maxSpecialEpisodes || n > maxSpecialEpisodes-work {
+			return nil
+		}
+		work += n
+		for k := range n {
+			seen[*s.Episode+k] = struct{}{}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
 }
 
 // specialEpisodes reads, from animap's resolved placement, which TVDB season-0
@@ -365,16 +385,16 @@ func rangeOf(row *animapRow) (SeasonRange, bool) {
 // records-array element observed whatever its outcome, so the acceptance floors
 // cannot shrink their denominator with their numerator.
 type animapParseResult struct {
-	mappings       map[int]Mapping
-	parentMappings map[int]Mapping
-	records        []Record
-	elements       int
+	mappings        map[int]Mapping
+	aniListMappings map[int]Mapping
+	records         []Record
+	elements        int
 }
 
 // listFacts counts the records whose mapping list yields a fact; a record
-// known only through its placement is placedSpecials' count.
+// known only through its placement is placedSpecials' or placedEpisodes' count.
 func (p *animapParseResult) listFacts() int {
-	return listFactCount(p.mappings) + listFactCount(p.parentMappings)
+	return listFactCount(p.mappings) + listFactCount(p.aniListMappings)
 }
 
 func listFactCount(facts map[int]Mapping) int {
@@ -424,7 +444,7 @@ func parseAnimap(data []byte, log *slog.Logger) (animapParseResult, error) {
 	}
 	logParseDiagnostics(log, &doc.counts)
 	c := &doc.counts
-	return animapParseResult{records: c.records, mappings: c.mappings, parentMappings: c.parentMappings, elements: c.elements}, nil
+	return animapParseResult{records: c.records, mappings: c.mappings, aniListMappings: c.aniListMappings, elements: c.elements}, nil
 }
 
 type documentMembers struct {
@@ -509,7 +529,7 @@ func decodeRecords(dec *jsoncap.Decoder) (decodeCounts, error) {
 	if !ok {
 		return decodeCounts{}, fmt.Errorf("%w: records is null", errNotAnimapDocument)
 	}
-	counts := decodeCounts{mappings: make(map[int]Mapping), parentMappings: make(map[int]Mapping)}
+	counts := decodeCounts{mappings: make(map[int]Mapping), aniListMappings: make(map[int]Mapping)}
 	for seen := 0; dec.More(); seen++ {
 		if seen == maxRecords {
 			return decodeCounts{}, errRecordCapExceeded
@@ -530,20 +550,20 @@ func decodeRecords(dec *jsoncap.Decoder) (decodeCounts, error) {
 }
 
 type decodeCounts struct {
-	firstErr       error
-	mappings       map[int]Mapping
-	parentMappings map[int]Mapping
-	records        []Record
-	elements       int
-	skipped        int
-	anidbOnly      int
-	retained       int
+	firstErr        error
+	mappings        map[int]Mapping
+	aniListMappings map[int]Mapping
+	records         []Record
+	elements        int
+	skipped         int
+	anidbOnly       int
+	retained        int
 }
 
 // add folds one raw record in: a decode failure counts as skipped, keeping the
 // first error; a record breaching the retained budget fails the document. A
-// record's mapping-list facts are keyed by its AniDB id, or by its AniList id
-// when it is a specials-of-parent record; any other record's facts join nothing.
+// record's mapping-list facts are keyed by its AniDB id, else by its AniList
+// id: animap gives a record with no AniDB id facts only from an overlay link.
 func (c *decodeCounts) add(msg json.RawMessage) error {
 	r, err := decodeRecord(msg)
 	if err != nil {
@@ -555,7 +575,7 @@ func (c *decodeCounts) add(msg json.RawMessage) error {
 	}
 	rec := r.toRecord()
 	m := r.mapping()
-	n := len(rec.IMDbIDs) + len(rec.TmdbMovies) + len(m.Seasons) + len(m.Specials)
+	n := len(rec.IMDbIDs) + len(rec.TmdbMovies) + len(m.Seasons) + len(m.Specials) + len(m.Episodes)
 	if c.retained+n > maxRetainedTotal {
 		return errIdentifierBudgetExceeded
 	}
@@ -564,8 +584,8 @@ func (c *decodeCounts) add(msg json.RawMessage) error {
 		switch {
 		case rec.AniDBID > 0:
 			c.mappings[rec.AniDBID] = m
-		case r.parentSpecial():
-			c.parentMappings[rec.AniListID] = m
+		case rec.AniListID > 0:
+			c.aniListMappings[rec.AniListID] = m
 		}
 	}
 	if rec.AniListID <= 0 {
