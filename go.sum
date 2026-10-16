@@ -2,8 +2,8 @@ github.com/cplieger/arrapi/v2 v2.3.0 h1:Q2JLGSTr3uJ62LBnlW9CurshDLZgEOgThN0PLKvp
 github.com/cplieger/arrapi/v2 v2.3.0/go.mod h1:LObWO75R26+DhuINTY1RJhknpk1zPLs+lGlctyIiO20=
 github.com/cplieger/atomicfile/v4 v4.1.0 h1:vBF59l/60iLtJhTdE+XCMVpvm5OVc9eGK60TzxG1yfs=
 github.com/cplieger/atomicfile/v4 v4.1.0/go.mod h1:C3RUdajRwohBoXTS7pgGj4fMGpVk0f4mYuqHuRz7zHE=
-github.com/cplieger/envx/yamlenv/v2 v2.0.3 h1:ED9OyefBaGKA1zu3zeiJEmX6+hbRJqjdV/IVbaXf7aM=
-github.com/cplieger/envx/yamlenv/v2 v2.0.3/go.mod h1:xFCFAHUJC/SvFw2vBxj8zH6jZdCVyBQN8XjF7fvfpRY=
+github.com/cplieger/envx/yamlenv/v2 v2.1.0-dev.1 h1:I9IybraIF3mJ0JR8F0IB+YiikjKgk6oxJp250DQnhKc=
+github.com/cplieger/envx/yamlenv/v2 v2.1.0-dev.1/go.mod h1:xFCFAHUJC/SvFw2vBxj8zH6jZdCVyBQN8XjF7fvfpRY=
 github.com/cplieger/health v1.8.2 h1:diGNLq2UwTYpprTMJg0Dc5sd5l4Ec1wNFk1Ri8vaEGQ=
 github.com/cplieger/health v1.8.2/go.mod h1:uiQm1zh3/7TGZffTX9W0p+GRTbVXfEM9POyWe1Rf0PU=
 github.com/cplieger/httpx/v5 v5.0.5 h1:A2h/B2WJfjdGsY+r/jTID3Y86vY7Dfyg1DV+p77ili8=
