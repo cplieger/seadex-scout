@@ -6,7 +6,7 @@ This page explains how seadex-scout checks your library, matches shows to SeaDex
 
 seadex-scout runs one full pass when it starts and every 24 hours after that. A full pass has four steps:
 
-1. It reads the Sonarr and Radarr anime library, honouring the `arr_tags` include and exclude lists, and records each item's current release. That record holds the release group, resolution, codec, whether it is a remux or an encode, and whether it has dual audio. For each Sonarr series with files it also reads which file holds each episode, one extra request per series, so an upgrade's size can count the files it replaces.
+1. It reads the Sonarr and Radarr anime library, honouring the `arr_tags` include and exclude lists, and records each item's current release. That record holds the release group, resolution, codec, whether it is a remux or an encode, and whether it has dual audio. For each Sonarr series it also reads the episode list, one extra request per series. That list says which file holds each episode, for an upgrade's size, and which episodes each season has, for an entry that is part of a season.
 2. It matches each SeaDex entry to a library item by AniList ID, through the [animap](https://github.com/cplieger/animap) ID map. Entries that do not map fall back to an AniList title match.
 3. It filters SeaDex's recommended releases by your settings for remuxes, AnimeBytes and dual audio.
 4. It compares the recommendation that is left with what you have, and logs a `warn` line when SeaDex has something better.
@@ -27,11 +27,13 @@ The report has a row for each SeaDex entry in your library. Each SeaDex entry co
 | `have_alt` | You have a listed alternative, and SeaDex marks a different release best. |
 | `have_older_revision` | You have SeaDex's best group, but an older revision, such as v1 against SeaDex's v2. The Scope cell shows both, as `revision v1, SeaDex v2`. |
 | `have_unlisted` | You have a release SeaDex does not list. |
-| `no_file` | Season not found. No files sit where the entry maps, because they are missing or Sonarr files that season under specials. For a film or special, none of its special episodes has a file. |
+| `no_file` | Season not found. No files sit where the entry maps, because they are missing or Sonarr files that season under specials. For an entry compared on its own episodes, such as a film or special, none of those episodes has a file. |
 | `unverified` | Files are present, but one side has no release group, or the files could not be read. Two untagged sides count as a match. |
 | `unattributed` | Episode not known. A film or special in Sonarr's season 0 that the animap ID map does not tie to an episode Sonarr lists. It is not compared, and neither is one whose season 0 Sonarr could not list. The groups shown are everything in season 0. The indexer still offers it, and your profile decides. |
 
 A film or special that TVDB files under a series' specials is compared on its own special episodes when the map says which they are. The Scope cell then names them, such as `S00E09-E10`, and the report judges only the files on those episodes, as it judges a season. A film in two parts with only one on disk is judged on that part, and the Scope cell adds `missing S00E10`. Such a film is looked up in both Sonarr and Radarr. When both hold a copy, each gets its own row.
+
+An entry that is part of a regular season is compared on its own episodes too, when the map places it there and Sonarr lists more episodes in that season. One film of a season of seven films is judged on its episode alone, with a Scope cell such as `S01E01`. When the map places the entry on the whole season, or Sonarr's episode list could not be read, the entry is compared on the season.
 
 A trailing `not_on_seadex` section lists the library items recognized as anime, through the animap ID map, that no comparable SeaDex entry covers. It shows which of your titles have no recommendation to compare against. That includes an item whose only SeaDex entries are films or specials, because a special answers for its own episodes and not for the series. A row there means nothing comparable covers those files, which is not always the same as SeaDex never having heard of the show. A `not_on_seadex` row links only the library item, because it has no comparable SeaDex entry.
 
@@ -59,9 +61,13 @@ Every full pass and every quick check that downloads SeaDex changes asks GitHub 
 
 ### Episode mapping
 
-Each record's mapping list and `tvdb_placement` in `animap.json` add three facts. A record finds them by its AniDB ID. A special that AniDB files under another anime has no AniDB ID of its own, so it finds them by its AniList ID. The first is which TVDB special episodes a film or special filed under a series is. It is read from `tvdb_placement`, which animap works out for every episode. That lets the report compare it and the indexer offer it to Sonarr under a title Sonarr can match. The indexer does that only when every episode of the entry has a special episode, so an entry with some episodes left off TVDB gets no series-titled item. An `animap.json` without that field leaves those films and specials uncompared.
+Each record's mapping list and `tvdb_placement` in `animap.json` add four facts. A record finds them by its AniDB ID. A record with no AniDB ID, such as an entry AniDB files as part of another anime, finds them by its AniList ID. The first is which TVDB special episodes a film or special filed under a series is. It is read from `tvdb_placement`, which animap works out for every episode. That lets the report compare it and the indexer offer it to Sonarr under a title Sonarr can match. The indexer does that only when every episode of the entry has a special episode, so an entry with some episodes left off TVDB gets no series-titled item. An `animap.json` without that field leaves those films and specials uncompared.
 
 The second is the one TVDB special episode a mapping list row names for a film filed under a series. The indexer reads it only when the record has no `tvdb_placement`, and only for a film, because a row may name one episode of a longer OVA. Where both exist and differ, `tvdb_placement` wins, because it answers every episode of the entry and a row may answer only some. The third is which TVDB seasons an absolute-numbered run's episodes fall in. That lets a pack with no season in its file names carry its season. It also lets the report judge a split show against its own seasons.
+
+The fourth is which episodes of one regular TVDB season an entry is. It is read from `tvdb_placement` when that puts every episode of the entry on the record's own `tvdb_season`. One cour of a split season is such an entry, and so is one film of a season of films. The report compares the entry on those episodes alone when Sonarr lists each of them and more besides.
+
+Otherwise the entry is compared on the whole season. That happens when it covers every episode Sonarr lists there, when Sonarr's episode list could not be read, or when the list lacks a placed episode.
 
 ### Overrides
 
@@ -78,7 +84,7 @@ To pin an entry the ID map misses or gets wrong, put a `/config/overrides.json` 
 | `season_tvdb` | The TVDB season to compare against. |
 | `season_kind` | Whether upstream maps a TVDB season for the entry at all, `present` or `absent`. |
 
-With `season_kind: present`, a positive `season_tvdb` compares against that season. A `season_tvdb` of 0 means the entry lands in Sonarr's season 0. It is compared there only when animap's record for the `anidb_id` says which special episodes it is, and names the same `tvdb_id`. With `season_kind: absent`, the entry is judged against the whole series. Leave `season_kind` out and a positive `season_tvdb` still picks that season. Only an entry without one is routed by its `type`.
+With `season_kind: present`, a positive `season_tvdb` compares against that season. When animap's record for the `anidb_id` places the entry on part of that season and names the same `tvdb_id`, the entry is compared on those episodes, as [Episode mapping](#episode-mapping) describes. A `season_tvdb` of 0 means the entry lands in Sonarr's season 0. It is compared there only when animap's record for the `anidb_id` says which special episodes it is, and names the same `tvdb_id`. With `season_kind: absent`, the entry is judged against the whole series. Leave `season_kind` out and a positive `season_tvdb` still picks that season. Only an entry without one is routed by its `type`.
 
 These are the only field names read. Other spellings, such as `imdb_id`, `themoviedb_id` and `season`, are ignored with a warning naming the key. An override replaces the whole mapping record for its `anilist_id`, with no field-by-field merge. When you correct an entry animap already has, restate every field the entry needs.
 

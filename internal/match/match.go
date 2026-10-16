@@ -52,6 +52,10 @@ type Match struct {
 	// (mapping.Index.MappingFor), nil when the map does not place it there or
 	// its record is not offered on season 0 (align.ScopeOffered).
 	Specials []int
+	// Episodes are the episodes of its positive TVDB season the entry IS
+	// (mapping.Index.MappingFor), nil when the map does not place it there or
+	// its record is not scoped to that season (align.ScopeSeason).
+	Episodes []int
 	// Uncompared is the entry's copy in the other arr when copies judged only
 	// one: it holds no file for the entry, yet the entry still covers it.
 	Uncompared *library.Item
@@ -73,7 +77,7 @@ func (m *Match) SpecialsUnknown() bool {
 
 // AlignEntry is the match as align.Decide reads it. It aliases m.Record.
 func (m *Match) AlignEntry() *align.Entry {
-	return &align.Entry{Record: &m.Record, SiblingSeasons: m.SiblingSeasons, Seasons: m.Seasons, Specials: m.Specials}
+	return &align.Entry{Record: &m.Record, SiblingSeasons: m.SiblingSeasons, Seasons: m.Seasons, Specials: m.Specials, Episodes: m.Episodes}
 }
 
 // coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
@@ -290,8 +294,11 @@ func (r *matchRun) mapped(m *Match) Match {
 	m.SiblingSeasons = r.idx.SiblingSeasons(&m.Record)
 	if facts, ok := r.idx.MappingFor(&m.Record); ok {
 		m.Seasons = facts.Seasons
-		if kind, _ := align.RecordSeason(&m.Record); kind == align.ScopeOffered {
+		switch kind, _ := align.RecordSeason(&m.Record); kind {
+		case align.ScopeOffered:
 			m.Specials = facts.Specials
+		case align.ScopeSeason:
+			m.Episodes = facts.Episodes
 		}
 	}
 	return *m

@@ -200,7 +200,7 @@ func TestTwinVote(t *testing.T) {
 // across the feed token and the report's Scope cell (align.EpisodeLabel).
 func TestTwinTokenSpellsTheRunAsTheReportDoes(t *testing.T) {
 	for _, run := range [][]int{{1}, {4}, {9, 10}, {4, 5, 6}, {21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}, {999}} {
-		if got, want := twinToken(run[0], run[len(run)-1]), align.EpisodeLabel(run); got != want {
+		if got, want := twinToken(run[0], run[len(run)-1]), align.EpisodeLabel(0, run); got != want {
 			t.Errorf("twinToken(%d, %d) = %q, want align.EpisodeLabel(%v) = %q", run[0], run[len(run)-1], got, run, want)
 		}
 	}

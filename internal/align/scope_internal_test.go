@@ -93,7 +93,7 @@ func TestScope(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := scope(&tt.item, &tt.rec, nil)
+			got := scope(&tt.item, &tt.rec, nil, nil)
 			if !reflect.DeepEqual(got.Groups, tt.wantGroups) {
 				t.Errorf("Groups = %v, want %v", got.Groups, tt.wantGroups)
 			}

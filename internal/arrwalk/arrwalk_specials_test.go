@@ -3,10 +3,13 @@ package arrwalk
 import (
 	"errors"
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/slogx/capture"
 )
@@ -35,8 +38,8 @@ func TestWalkSonarrReadsSeasonZeroEpisodeFiles(t *testing.T) {
 		t.Fatalf("Walk items = %d, want 1", len(snap.Items))
 	}
 	it := snap.Items[0]
-	file := library.SpecialEpisode{Group: "mtbb", Revision: release.ArrRevision(2, false), HasFile: true}
-	want := map[int]library.SpecialEpisode{5: file, 6: file, 7: {}}
+	file := library.ListedEpisode{Group: "mtbb", Revision: release.ArrRevision(2, false), HasFile: true}
+	want := map[int]library.ListedEpisode{5: file, 6: file, 7: {}}
 	if !maps.Equal(it.Specials, want) {
 		t.Errorf("Walk Specials = %+v, want %+v", it.Specials, want)
 	}
@@ -99,7 +102,7 @@ func TestWalkSonarrEpisodeListFailureLeavesSpecialsUnknown(t *testing.T) {
 		t.Errorf("Walk after a failed episode list read = specials %+v episodes %v failed %v partial %v groups %v; want unknown specials and sizes on a comparable item",
 			it.Specials, it.SeasonEpisodes, it.Failed, snap.Partial, it.SeasonGroups)
 	}
-	if !rec.HasAttr("sonarr episode list read failed; this series' upgrade sizes are unknown and its films and specials stay uncompared", "id", "1") {
+	if !rec.HasAttr("sonarr episode list read failed; this series' upgrade sizes and episode listing are unknown and its films and specials stay uncompared", "id", "1") {
 		t.Errorf("messages = %q, want the episode list failure WARN naming series 1 and its specials", rec.Messages())
 	}
 }
@@ -110,7 +113,7 @@ func TestSpecialEpisodesSkipsWhatIsNotASeasonZeroEpisode(t *testing.T) {
 		{SeasonNumber: 0, EpisodeNumber: 0},
 		{SeasonNumber: 0, EpisodeNumber: 4},
 	})
-	if want := map[int]library.SpecialEpisode{4: {}}; !ok || !maps.Equal(got, want) {
+	if want := map[int]library.ListedEpisode{4: {}}; !ok || !maps.Equal(got, want) {
 		t.Errorf("specialEpisodes(mixed) = %+v, %v, want %+v, true", got, ok, want)
 	}
 	if got, ok := specialEpisodes(nil); got != nil || !ok {
@@ -155,5 +158,65 @@ func TestWalkSonarrSeasonZeroFileWithNoListedEpisodeWarns(t *testing.T) {
 	}
 	if !rec.HasAttr("sonarr specials episode list names no season-0 episode beside a season-0 file; the series' films and specials stay uncompared", "id", "1") {
 		t.Errorf("messages = %q, want the empty-list WARN naming series 1", rec.Messages())
+	}
+}
+
+// Listed holds every positive-season episode Sonarr lists, with or without a
+// file, and leaves out a season whose file state the list does not send.
+func TestWalkSonarrListsEveryPositiveSeasonEpisode(t *testing.T) {
+	v2 := &arrapi.QualityModel{Revision: &arrapi.Revision{Version: 2}}
+	held := &arrapi.EpisodeFile{ID: 10, SeasonNumber: 1, ReleaseGroup: "MTBB", Quality: v2}
+	fs := &fakeSonarr{
+		series: []arrapi.Series{{ID: 1, Title: "Films"}},
+		files:  map[int][]arrapi.EpisodeFile{1: {*held}},
+		episodes: map[int][]arrapi.Episode{1: {
+			{SeasonNumber: 1, EpisodeNumber: 1, HasFile: true, EpisodeFile: held},
+			{SeasonNumber: 1, EpisodeNumber: 2},
+			{SeasonNumber: 2, EpisodeNumber: 1, HasFile: true},
+			{SeasonNumber: 2, EpisodeNumber: 2},
+			specialEp(1, nil),
+		}},
+	}
+	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	want := map[int]map[int]library.ListedEpisode{1: {
+		1: {Group: "mtbb", Revision: release.ArrRevision(2, false), HasFile: true},
+		2: {},
+	}}
+	if got := snap.Items[0].Listed; !maps.EqualFunc(got, want, maps.Equal) {
+		t.Errorf("Walk Listed = %+v, want %+v: season 1 in full, season 2 unknown, no season 0", got, want)
+	}
+	fs.episodesErr = map[int]error{1: errors.New("boom")}
+	if snap, err = NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context()); err != nil || snap.Items[0].Listed != nil {
+		t.Errorf("Walk with the episode list unreadable: Listed = %+v, %v; want nil", snap.Items[0].Listed, err)
+	}
+}
+
+// A series with no file still has Sonarr's episode list, so an entry placed
+// on part of a season is judged on its own episodes, there missing.
+func TestWalkSonarrFilelessSeriesListsItsEpisodes(t *testing.T) {
+	season := make([]arrapi.Episode, 7)
+	for i := range season {
+		season[i] = arrapi.Episode{SeasonNumber: 1, EpisodeNumber: i + 1}
+	}
+	fs := &fakeSonarr{
+		series:   []arrapi.Series{{ID: 1, Title: "Films", TvdbID: 42}},
+		files:    map[int][]arrapi.EpisodeFile{1: {}},
+		episodes: map[int][]arrapi.Episode{1: season},
+	}
+	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	item := snap.Items[0]
+	if item.HasFile || len(item.Listed[1]) != 7 {
+		t.Fatalf("Walk(fileless) HasFile %v, Listed %+v; want no file and season 1's seven episodes listed", item.HasFile, item.Listed)
+	}
+	rec := mapping.Record{Type: "MOVIE", TvdbID: 42, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
+	d := align.Decide(&item, &align.Entry{Record: &rec, Episodes: []int{1}}, &align.Listing{Best: []string{"mtbb"}})
+	if d.Kind != align.ScopeEpisodes || d.Season != 1 || !slices.Equal(d.Episodes, []int{1}) || !slices.Equal(d.MissingEpisodes, []int{1}) {
+		t.Errorf("Decide(S01E01 of a fileless season) = %v season %d episodes %v missing %v; want episodes on season 1, E1 placed and missing", d.Kind, d.Season, d.Episodes, d.MissingEpisodes)
 	}
 }

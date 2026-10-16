@@ -117,7 +117,7 @@ type reportRow struct {
 	CurrentGroups []string     `json:"current_groups,omitempty"`
 	Releases      []rowRelease `json:"releases,omitempty"`
 	// Episodes and MissingEpisodes are set only on an "episodes" row: the
-	// season-0 episodes the entry is, and those of them with no file.
+	// episodes of Season, 0 or positive, the entry is, and those with no file.
 	Episodes        []int `json:"episodes,omitempty"`
 	MissingEpisodes []int `json:"missing_episodes,omitempty"`
 	// CurrentRevision and BestRevision are set only on a have_older_revision

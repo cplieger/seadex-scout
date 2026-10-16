@@ -111,8 +111,8 @@ type Finding struct {
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
 	CurrentGroups []string
-	// Episodes are the season-0 episodes an "episodes" scope judged
-	// (align.Decision.Episodes).
+	// Episodes are the episodes of Season, 0 or positive, an "episodes"
+	// scope judged (align.Decision.Episodes).
 	Episodes []int
 	// CurrentRevision and RecommendedRevision are set only for a same-group
 	// revision gap (StatusNewerRevision, or StatusIncomplete downgraded from

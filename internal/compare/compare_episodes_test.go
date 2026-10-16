@@ -19,11 +19,11 @@ func TestComparePlacedSpecialAlertsLikeASeason(t *testing.T) {
 	item := func(group string) *library.Item {
 		it := &library.Item{
 			Title: "Series", Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"mtbb", "oz"}},
-			Specials: map[int]library.SpecialEpisode{4: {Group: "mtbb", HasFile: true}, 9: {}, 10: {}},
+			Specials: map[int]library.ListedEpisode{4: {Group: "mtbb", HasFile: true}, 9: {}, 10: {}},
 		}
 		if group != "" {
-			it.Specials[9] = library.SpecialEpisode{Group: group, HasFile: true}
-			it.Specials[10] = library.SpecialEpisode{Group: group, HasFile: true}
+			it.Specials[9] = library.ListedEpisode{Group: group, HasFile: true}
+			it.Specials[10] = library.ListedEpisode{Group: group, HasFile: true}
 		}
 		return it
 	}

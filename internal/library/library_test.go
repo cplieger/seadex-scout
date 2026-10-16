@@ -308,11 +308,11 @@ func TestDiffSnapshotsDetectsSeasonZeroEpisodeChange(t *testing.T) {
 		return Item{
 			Arr: ArrSonarr, ArrID: 1, Groups: []string{"g"}, HasFile: true,
 			SeasonGroups: map[int][]string{0: {"g"}},
-			Specials:     map[int]SpecialEpisode{5: {Group: "g", HasFile: true}, 6: {}},
+			Specials:     map[int]ListedEpisode{5: {Group: "g", HasFile: true}, 6: {}},
 		}
 	}
 	moved := base()
-	moved.Specials = map[int]SpecialEpisode{5: {}, 6: {Group: "g", HasFile: true}}
+	moved.Specials = map[int]ListedEpisode{5: {}, 6: {Group: "g", HasFile: true}}
 	unread := base()
 	unread.Specials = nil
 	for _, tc := range []struct {
@@ -331,8 +331,35 @@ func TestDiffSnapshotsDetectsSeasonZeroEpisodeChange(t *testing.T) {
 	}
 }
 
+func TestDiffSnapshotsDetectsAListedEpisodeChange(t *testing.T) {
+	base := func() Item {
+		return Item{
+			Arr: ArrSonarr, ArrID: 1, Groups: []string{"g"}, HasFile: true, SeasonGroups: map[int][]string{1: {"g"}},
+			Listed: map[int]map[int]ListedEpisode{1: {1: {Group: "g", HasFile: true}, 2: {}}},
+		}
+	}
+	added := base()
+	added.Listed[1][3] = ListedEpisode{}
+	unread := base()
+	unread.Listed = nil
+	for _, tc := range []struct {
+		desc string
+		cur  Item
+		want int
+	}{
+		{"Sonarr lists another episode", added, 1},
+		{"the listing became unknown", unread, 1},
+		{"unchanged", base(), 0},
+	} {
+		d := DiffSnapshots(&Snapshot{Items: []Item{base()}}, &Snapshot{Items: []Item{tc.cur}})
+		if d.Changed != tc.want || d.Added != 0 || d.Removed != 0 {
+			t.Errorf("DiffSnapshots [%s] = %+v, want Changed=%d only", tc.desc, d, tc.want)
+		}
+	}
+}
+
 func TestItemSpecialsRoundTripAndLegacyReadsUnknown(t *testing.T) {
-	in := Item{Arr: ArrSonarr, ArrID: 1, Specials: map[int]SpecialEpisode{
+	in := Item{Arr: ArrSonarr, ArrID: 1, Specials: map[int]ListedEpisode{
 		9:  {Group: "mtbb", Revision: release.Revision{Version: 2, Marker: release.RevisionVersion}, HasFile: true},
 		10: {},
 	}}

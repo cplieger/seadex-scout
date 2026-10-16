@@ -48,11 +48,12 @@ const currentSchemaVersion = 1
 // State is the persisted cross-cycle cache.
 type State struct {
 	Memo match.Memo `json:"anilist_memo"`
-	// Never the keys "mapping", "animap" or "animap_v2": older files hold
-	// another upstream's cache, or facts decoded without the placement or its
-	// episode count, which a 304 would keep serving; all must be ignored rather
-	// than served or revalidated.
-	Mapping mapping.Cache `json:"animap_v3"`
+	// Never the keys "mapping", "animap", "animap_v2" or "animap_v3": older
+	// files hold another upstream's cache, or facts decoded without the
+	// placement, its episode count or the AniList-keyed facts of every record
+	// with no AniDB id, which a 304 would keep serving; all must be ignored
+	// rather than served or revalidated.
+	Mapping mapping.Cache `json:"animap_v4"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
 	// judged that arr's fresh item count a suspicious truncation and carried its prior
 	// items forward instead.

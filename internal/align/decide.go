@@ -104,7 +104,7 @@ type Decision struct {
 	// SeaDex lists across them.
 	SupersededGroups []string
 	// Episodes and MissingEpisodes are set only for ScopeEpisodes: the placed
-	// season-0 episodes judged, and those of them with no file.
+	// episodes of Season judged, and those of them with no file.
 	Episodes        []int
 	MissingEpisodes []int
 	HeldRevision    release.Revision
@@ -113,7 +113,8 @@ type Decision struct {
 	Standing        Standing
 	Outcome         Outcome
 	// Season is the shared non-negative TVDB season label both consumers stamp on
-	// their output: Record.SeasonTvdb for a ScopeSeason comparison, else 0.
+	// their output: Record.SeasonTvdb for a ScopeSeason comparison, the placed
+	// episodes' season for ScopeEpisodes, else 0.
 	Season int
 	Approx bool
 	NoBest bool
@@ -125,10 +126,11 @@ type Decision struct {
 // qualifiers (internal/audit). The entry's SiblingSeasons and Seasons both bound a
 // whole-series comparison to its own seasons, from two sources: Seasons (its
 // TVDB season ranges from the mapping list) wins when present, else the seasons
-// sibling records map are dropped. Its Specials decide the episodes scope.
+// sibling records map are dropped. Its Specials or Episodes decide the
+// episodes scope.
 func Decide(item *library.Item, e *Entry, listing *Listing) Decision {
 	rec := e.Record
-	scoped := scope(item, rec, e.Specials)
+	scoped := scope(item, rec, e.Specials, e.Episodes)
 	d := Decision{Kind: scoped.Kind, NoBest: len(listing.Best) == 0}
 	switch scoped.Kind {
 	case ScopeSeason:
@@ -137,7 +139,7 @@ func Decide(item *library.Item, e *Entry, listing *Listing) Decision {
 		// other scope leaves it 0.
 		d.Season = rec.SeasonTvdb
 	case ScopeEpisodes:
-		d.Episodes, d.MissingEpisodes = slices.Clone(e.Specials), scoped.Missing
+		d.Season, d.Episodes, d.MissingEpisodes = scoped.Season, slices.Clone(scoped.Episodes), scoped.Missing
 	}
 	switch {
 	case !item.Comparable():

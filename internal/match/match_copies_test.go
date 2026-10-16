@@ -29,10 +29,10 @@ func sonarrSeries(fileOnSpecial bool) library.Item {
 	it := library.Item{
 		Arr: library.ArrSonarr, ArrID: 7, TvdbID: 500, ImdbID: "tt0000500",
 		SeasonGroups: map[int][]string{0: {"oz"}},
-		Specials:     map[int]library.SpecialEpisode{4: {Group: "oz", HasFile: true}, 9: {}},
+		Specials:     map[int]library.ListedEpisode{4: {Group: "oz", HasFile: true}, 9: {}},
 	}
 	if fileOnSpecial {
-		it.Specials[9] = library.SpecialEpisode{Group: "mtbb", HasFile: true}
+		it.Specials[9] = library.ListedEpisode{Group: "mtbb", HasFile: true}
 	}
 	return it
 }

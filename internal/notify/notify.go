@@ -337,7 +337,7 @@ func findingKVs(f *compare.Finding) []any {
 		"arr", f.Arr,
 		"arr_url", capURLAttr(f.ArrURL),
 		"season", f.Season,
-		"episodes", align.EpisodeLabel(f.Episodes),
+		"episodes", align.EpisodeLabel(f.Season, f.Episodes),
 		"scope", f.Scope,
 		"approx", f.Approx,
 		"current_group", capAttr(f.CurrentGroup),

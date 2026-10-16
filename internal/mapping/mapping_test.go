@@ -357,7 +357,7 @@ func TestMapping_SpecialRunTakesThePlacementOverAPartialRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAnimap(anidb 905) error: %v", err)
 	}
-	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
+	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, AniListMappings: parsed.aniListMappings})
 	rec, _ := idx.Lookup(901)
 	m, ok := idx.MappingFor(&rec)
 	if !ok || m.SpecialEpisode != 8 {
@@ -403,7 +403,7 @@ func TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero(t *testing.T) 
 			if err != nil {
 				t.Fatalf("parseAnimap(%s) error: %v", tc.record, err)
 			}
-			idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
+			idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, AniListMappings: parsed.aniListMappings})
 			rec, _ := idx.Lookup(tc.alID)
 			m, _ := idx.MappingFor(&rec)
 			if !slices.Equal(m.Specials, tc.wantSpecials) || m.SpecialEpisode != tc.wantRow {
@@ -416,17 +416,44 @@ func TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero(t *testing.T) 
 	}
 }
 
-// TestIndex_MappingForJoinsAParentRecordOnItsAniListID pins the second join: a
-// record with no AniDB id reads the facts kept under its AniList id, and a
-// record with an AniDB id never does, whatever its AniList id.
-func TestIndex_MappingForJoinsAParentRecordOnItsAniListID(t *testing.T) {
+// TestIndex_MappingForJoinsARecordWithoutAniDBOnItsAniListID pins the second
+// join: a record with no AniDB id reads the facts kept under its AniList id,
+// and a record with an AniDB id never does, whatever its AniList id.
+func TestIndex_MappingForJoinsARecordWithoutAniDBOnItsAniListID(t *testing.T) {
 	parent := Mapping{SpecialEpisode: 8}
-	idx := NewIndex(Source{Records: []Record{{AniListID: 21777, Type: "SPECIAL"}}, ParentMappings: map[int]Mapping{21777: parent}})
+	idx := NewIndex(Source{Records: []Record{{AniListID: 21777, Type: "SPECIAL"}}, AniListMappings: map[int]Mapping{21777: parent}})
 	if got, ok := idx.MappingFor(&Record{AniListID: 21777}); !ok || !sameMapping(got, parent) {
 		t.Errorf("MappingFor(no AniDB id, AniList 21777) = %+v ok=%v, want %+v", got, ok, parent)
 	}
 	if got, ok := idx.MappingFor(&Record{AniListID: 21777, AniDBID: 5}); ok {
 		t.Errorf("MappingFor(AniDB 5, AniList 21777) = %+v ok=true, want the AniDB join only", got)
+	}
+}
+
+// MappingFor keeps a record's positive-season episodes only on the series
+// and season they number: an override moving the record drops them.
+func TestIndex_MappingForDropsEpisodesOfAnotherSeriesOrSeason(t *testing.T) {
+	facts := Mapping{Episodes: []int{1}, EpisodesTvdb: 82099, EpisodesSeason: 1}
+	idx := NewIndex(Source{AniListMappings: map[int]Mapping{2593: facts}, Mappings: map[int]Mapping{4932: facts}})
+	for _, tc := range []struct {
+		rec  Record
+		name string
+		want []int
+	}{
+		{Record{AniListID: 2593, TvdbID: 82099, SeasonTvdb: 1}, "its own season, AniList join", []int{1}},
+		{Record{AniListID: 1, AniDBID: 4932, TvdbID: 82099, SeasonTvdb: 1}, "its own season, AniDB join", []int{1}},
+		{Record{AniListID: 2593, TvdbID: 82099, SeasonTvdb: 2}, "another season", nil},
+		{Record{AniListID: 2593, TvdbID: 5, SeasonTvdb: 1}, "another series", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := idx.MappingFor(&tc.rec)
+			if !slices.Equal(got.Episodes, tc.want) || ok != (tc.want != nil) {
+				t.Errorf("MappingFor(%+v) = %+v ok=%v, want episodes %v", tc.rec, got, ok, tc.want)
+			}
+			if tc.want == nil && (got.EpisodesTvdb != 0 || got.EpisodesSeason != 0) {
+				t.Errorf("MappingFor(%+v) kept the dropped episodes' series and season: %+v", tc.rec, got)
+			}
+		})
 	}
 }
 
@@ -460,11 +487,11 @@ func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
 	}
 }
 
-// TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts pins that the
-// facts a specials-of-parent record carries under its AniList id go with the
+// TestLoader_Load_overrideReplacesAnAniListKeyedRecordsFacts pins that the
+// facts a record with no AniDB id carries under its AniList id go with the
 // record an override replaces: the override reaches facts only through an
 // anidb_id it names, exactly as for every other record.
-func TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts(t *testing.T) {
+func TestLoader_Load_overrideReplacesAnAniListKeyedRecordsFacts(t *testing.T) {
 	body := animapBody(`[{"anilist_id":21777,"anidb_parent":{"anidb_id":11500,"specials":[1]},"type":"SPECIAL",` +
 		`"tvdb_id":303073,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]},` +
 		`{"anilist_id":2,"type":"tv","tvdb_id":200}]`)
@@ -494,8 +521,8 @@ func TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts(t *testing.T)
 	if m, ok := idx.MappingFor(&rec); ok {
 		t.Errorf("MappingFor(overridden 21777) = %+v ok=true, want no facts: the override names no anidb_id", m)
 	}
-	if len(cache.ParentMappings) != 1 {
-		t.Errorf("the override deleted %d persisted parent facts, want the cache left intact", 1-len(cache.ParentMappings))
+	if len(cache.AniListMappings) != 1 {
+		t.Errorf("the override deleted %d persisted AniList-keyed facts, want the cache left intact", 1-len(cache.AniListMappings))
 	}
 }
 

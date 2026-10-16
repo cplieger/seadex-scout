@@ -46,10 +46,15 @@ type Item struct {
 	// Specials is, per Sonarr season-0 episode number, the file on it. It is
 	// read only for a series holding a season-0 file, so nil means unknown,
 	// never "no specials".
-	Specials map[int]SpecialEpisode `json:"specials,omitempty"`
-	Arr      string                 `json:"arr"`
-	ImdbID   string                 `json:"imdb_id,omitempty"`
-	Title    string                 `json:"title"`
+	Specials map[int]ListedEpisode `json:"specials,omitempty"`
+	// Listed is, per positive season and episode number, every episode Sonarr
+	// lists and the file on it. A season missing from it, or a nil Listed, is
+	// unknown: the episode list was not read, or it holds a file it sent no
+	// payload for.
+	Listed map[int]map[int]ListedEpisode `json:"listed,omitempty"`
+	Arr    string                        `json:"arr"`
+	ImdbID string                        `json:"imdb_id,omitempty"`
+	Title  string                        `json:"title"`
 	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
 	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
 	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an
@@ -70,9 +75,9 @@ type Item struct {
 	Failed bool `json:"failed,omitempty"`
 }
 
-// SpecialEpisode is one season-0 episode of a series: whether a file sits on
-// it, and that file's normalized group and revision.
-type SpecialEpisode struct {
+// ListedEpisode is one episode Sonarr lists for a series: whether a file sits
+// on it, and that file's normalized group and revision.
+type ListedEpisode struct {
 	Group    string           `json:"group,omitempty"`
 	Revision release.Revision `json:"revision,omitzero"`
 	HasFile  bool             `json:"has_file,omitempty"`
@@ -135,8 +140,8 @@ type Diff struct {
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its file presence, group set, per-season group
-// attribution, revision readings, season-0 episode files, file sizes,
-// episode-to-file map, or current fingerprint differs.
+// attribution, revision readings, season-0 episode files, listed episodes,
+// file sizes, episode-to-file map, or current fingerprint differs.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey, prevFailed := indexByKey(prev)
 	curByKey, curFailed := indexByKey(cur)
@@ -215,6 +220,7 @@ func sameItem(a, b *Item) bool {
 		maps.EqualFunc(a.SeasonRevisions, b.SeasonRevisions, maps.Equal) &&
 		maps.Equal(a.Revisions, b.Revisions) &&
 		maps.Equal(a.Specials, b.Specials) &&
+		maps.EqualFunc(a.Listed, b.Listed, maps.Equal) &&
 		maps.Equal(a.FileBytes, b.FileBytes) &&
 		maps.EqualFunc(a.SeasonEpisodes, b.SeasonEpisodes, maps.Equal)
 }

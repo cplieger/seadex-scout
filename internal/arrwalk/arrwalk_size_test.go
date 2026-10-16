@@ -104,7 +104,7 @@ func TestWalkSonarrEpisodeListFailureLeavesSizesUnknown(t *testing.T) {
 	if snap.Items[1].SeasonEpisodes == nil {
 		t.Error("the other series lost its episode map")
 	}
-	if n := rec.CountExact("sonarr episode list read failed; this series' upgrade sizes are unknown"); n != 1 {
+	if n := rec.CountExact("sonarr episode list read failed; this series' upgrade sizes and episode listing are unknown"); n != 1 {
 		t.Errorf("episode list WARN logged %d times, want 1", n)
 	}
 }

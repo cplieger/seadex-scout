@@ -274,7 +274,7 @@ func scopeCell(row *reportRow) string {
 		notes = append(notes, "revision "+row.CurrentRevision.String()+", SeaDex "+row.BestRevision.String())
 	}
 	if len(row.MissingEpisodes) > 0 {
-		notes = append(notes, "missing "+align.EpisodeLabel(row.MissingEpisodes))
+		notes = append(notes, "missing "+align.EpisodeLabel(row.Season, row.MissingEpisodes))
 	}
 	if row.Approx {
 		notes = append(notes, "approx")
@@ -289,8 +289,8 @@ func scopeCell(row *reportRow) string {
 }
 
 // scopeLabel renders the comparison scope recorded on the row at build time:
-// "movie", "offered", the TVDB season ("S2"), the season-0 episodes
-// ("S00E09-E10"), or "series" for a whole-series comparison. A pure reader of
+// "movie", "offered", the TVDB season ("S2"), the placed episodes
+// ("S00E09-E10", "S01E01"), or "series" for a whole-series comparison. A pure reader of
 // reportRow.Scope, so the label cannot drift from the comparison actually performed;
 // the JSON renderer publishes the same value through
 // align.ScopeKind.MarshalJSON, keeping kind and numbers separable.
@@ -299,7 +299,7 @@ func scopeLabel(row *reportRow) string {
 	case row.Scope == align.ScopeSeason:
 		return "S" + strconv.Itoa(row.Season)
 	case row.Scope == align.ScopeEpisodes && len(row.Episodes) > 0:
-		return align.EpisodeLabel(row.Episodes)
+		return align.EpisodeLabel(row.Season, row.Episodes)
 	}
 	return row.Scope.String()
 }
