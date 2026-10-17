@@ -2,66 +2,48 @@ package mapping
 
 import (
 	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
-// Acceptance-guard tests for Loader.refreshCache, split from
-// mapping_loader_test.go: the refresh-rejection guards (empty/keyless/
-// low-coverage/collapse/shrink bodies keep the stale cache) and their
-// acceptance-floor counterparts.
+// Acceptance-guard tests for Loader.refreshCache: the refresh-rejection
+// guards (empty, keyless, low-coverage, collapsed and shrunk documents keep
+// the stale cache) and their acceptance-floor counterparts.
+
+// coverage is total entries, the first covered of them on a TVDB series.
+func coverage(covered, total int) []entry {
+	es := make([]entry, 0, total)
+	for i := 1; i <= total; i++ {
+		e := entry{AniList: i, Type: "tv"}
+		if i <= covered {
+			e.TVDB = i
+		}
+		es = append(es, e)
+	}
+	return es
+}
 
 func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[]`))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	next, err := refresh(t, staleCache(""), encode(t, document(nil, nil)))
 	if err == nil {
 		t.Fatal("empty refresh returned nil error, want degraded error")
 	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("empty refresh records = %+v, want stale record id 1", next.Records)
-	}
-	if next.Records[0].TvdbID != 100 {
-		t.Errorf("empty refresh stale TvdbID = %d, want 100", next.Records[0].TvdbID)
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 || next.Records[0].TvdbID != 100 {
+		t.Fatalf("empty refresh records = %+v, want stale record id 1 on TVDB 100", next.Records)
 	}
 }
 
-// TestLoader_refreshCache_noArrIdentifierKeepsStale covers the acceptance guard:
-// a refresh whose records carry only anilist_id/type (a wholesale upstream loss
-// of the arr-ID fields, which the tolerant decoders zero rather than reject)
-// must be treated like the zero-record branch and retain the usable stale map.
+// TestLoader_refreshCache_noArrIdentifierKeepsStale covers the acceptance
+// guard: a document whose entries reach no arr identifier (a wholesale loss
+// of the series and film ids) is treated like an empty one and keeps the
+// usable stale map.
 func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":1,"type":"tv"},{"anilist_id":2,"type":"movie"}]`))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	next, err := refresh(t, staleCache(""), entriesBody(t, entry{AniList: 1, Type: "tv"}, entry{AniList: 2, Type: "movie"}))
 	if err == nil {
 		t.Fatal("refresh with no arr identifiers returned nil error, want degraded error")
 	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("no-arr-id refresh records = %+v, want stale record id 1", next.Records)
-	}
-	if next.Records[0].TvdbID != 100 {
-		t.Errorf("no-arr-id refresh stale TvdbID = %d, want 100", next.Records[0].TvdbID)
+	if len(next.Records) != 1 || next.Records[0].TvdbID != 100 {
+		t.Fatalf("no-arr-id refresh records = %+v, want stale record id 1 on TVDB 100", next.Records)
 	}
 	if next.RejectedRefreshes != 1 {
 		t.Errorf("no-arr-id refresh RejectedRefreshes = %d, want 1 (the validation floor is an acceptance-guard rejection)", next.RejectedRefreshes)
@@ -69,497 +51,172 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 }
 
 // TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale covers the
-// coverage floor: a refresh where only 1 of 200+ records retains an arr
-// identifier is a wholesale degradation (below the 1% floor) and must keep the
-// usable stale map rather than accepting the near-useless record set.
+// coverage floor: 1 routed entry of 250 is a wholesale degradation (below
+// the 1% floor) and keeps the usable stale map.
 func TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale(t *testing.T) {
-	var b strings.Builder
-	b.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":100}`)
-	for i := 2; i <= 250; i++ {
-		fmt.Fprintf(&b, `,{"anilist_id":%d,"type":"tv"}`, i)
-	}
-	b.WriteByte(']')
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(b.String()))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	next, err := refresh(t, staleCache(""), entriesBody(t, coverage(1, 250)...))
 	if err == nil {
 		t.Fatal("refresh with 1/250 arr-identifier coverage returned nil error, want degraded error")
 	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("low-coverage refresh records = %+v, want stale record id 1", next.Records)
-	}
-	if next.Records[0].TvdbID != 100 {
-		t.Errorf("low-coverage refresh stale TvdbID = %d, want 100", next.Records[0].TvdbID)
+	if len(next.Records) != 1 || next.Records[0].TvdbID != 100 {
+		t.Fatalf("low-coverage refresh records = %+v, want stale record id 1 on TVDB 100", next.Records)
 	}
 }
 
-// TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor pins the accepting
-// side of the arr-identifier coverage guard: a first boot whose body carries
-// exactly max(1, len(records)/100) records with an arr identifier (1 of 100)
-// must be accepted, not rejected with the no-cache error.
-func TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor(t *testing.T) {
-	var bodyBuilder strings.Builder
-	bodyBuilder.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":100}`)
-	for i := 2; i <= 100; i++ {
-		fmt.Fprintf(&bodyBuilder, `,{"anilist_id":%d,"type":"tv"}`, i)
-	}
-	bodyBuilder.WriteByte(']')
-	body := bodyBuilder.String()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(body))
-	}))
-	defer ts.Close()
-
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), &Cache{})
-	if err != nil {
-		t.Fatalf("refresh with exactly 1/100 arr identifiers returned error: %v", err)
-	}
-	if len(next.Records) != 100 {
-		t.Errorf("refresh with exactly 1/100 arr identifiers kept %d records, want 100", len(next.Records))
-	}
-}
-
-// TestLoader_refreshCache_coverageFloorCeiling pins the ceiling arithmetic of
-// the arr-identifier coverage minimum: for 199 records the documented 1% floor
-// is 2 (ceiling), so 1/199 must be rejected while 2/199 is accepted — floor
-// division would wrongly admit 1/199.
-func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
-	tests := []struct {
+// TestLoader_refreshCache_coverageFloor pins the ceiling arithmetic of the
+// arr-identifier coverage minimum on a first boot: 1 of 100 is exactly the
+// floor and accepted; for 199 entries the floor is 2 (ceiling), so 1/199 is
+// rejected and 2/199 accepted - floor division would wrongly admit 1/199.
+func TestLoader_refreshCache_coverageFloor(t *testing.T) {
+	for _, tc := range []struct {
 		name       string
 		covered    int
 		total      int
 		wantAccept bool
 	}{
-		{name: "1 of 199 rejected", covered: 1, total: 199, wantAccept: false},
+		{name: "1 of 100 accepted", covered: 1, total: 100, wantAccept: true},
+		{name: "1 of 199 rejected", covered: 1, total: 199},
 		{name: "2 of 199 accepted", covered: 2, total: 199, wantAccept: true},
-	}
-	for _, tc := range tests {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var b strings.Builder
-			b.WriteByte('[')
-			for i := 1; i <= tc.total; i++ {
-				if i > 1 {
-					b.WriteByte(',')
-				}
-				if i <= tc.covered {
-					fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, i, i)
-				} else {
-					fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv"}`, i)
-				}
-			}
-			b.WriteByte(']')
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write(animapBody(b.String()))
-			}))
-			defer ts.Close()
-
-			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-			next, err := l.refreshCache(t.Context(), &Cache{})
+			next, err := refresh(t, &Cache{}, entriesBody(t, coverage(tc.covered, tc.total)...))
 			if tc.wantAccept {
-				if err != nil {
-					t.Fatalf("refresh with %d/%d arr identifiers returned error: %v", tc.covered, tc.total, err)
-				}
-				if len(next.Records) != tc.total {
-					t.Errorf("refresh with %d/%d arr identifiers kept %d records, want %d", tc.covered, tc.total, len(next.Records), tc.total)
+				if err != nil || len(next.Records) != tc.total {
+					t.Fatalf("refresh with %d/%d arr identifiers = %d records, %v, want all %d accepted", tc.covered, tc.total, len(next.Records), err, tc.total)
 				}
 				return
 			}
-			if err == nil {
-				t.Fatalf("refresh with %d/%d arr identifiers returned nil error, want below-minimum rejection", tc.covered, tc.total)
-			}
-			if len(next.Records) != 0 {
-				t.Errorf("rejected refresh with no prior cache produced %d records, want 0", len(next.Records))
+			if err == nil || len(next.Records) != 0 {
+				t.Fatalf("refresh with %d/%d arr identifiers = %d records, %v, want the below-minimum rejection", tc.covered, tc.total, len(next.Records), err)
 			}
 		})
 	}
 }
 
 // TestLoader_refreshCache_truncatedRefreshKeepsStale covers truncated-refresh
-// rejection: a syntactically valid refresh that shrinks the map to less than
-// half the previous record count (here 1 valid mapped record replacing 4) must
-// degrade to the stale cache with an error, not replace it. For this all-series
-// shape the series-routed population-collapse guard fires before the whole-map
-// below-half shrink guard, which is pinned separately by
-// TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale.
+// rejection: a valid document that shrinks the map to less than half the
+// previous record count (1 replacing 4) degrades to the stale cache, here
+// through the series-routed collapse guard, which fires before the whole-map
+// shrink guard (TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale).
 func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
-	}))
-	defer ts.Close()
-
-	prevRecords := []Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
-		{AniListID: 3, Type: "TV", TvdbID: 300},
-		{AniListID: 4, Type: "TV", TvdbID: 400},
-	}
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   prevRecords,
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	prev := fourSeries()
+	next, err := refresh(t, prev, entriesBody(t, entry{AniList: 9, Type: "tv", TVDB: 900}))
 	if err == nil {
 		t.Fatal("truncated refresh (1 record replacing 4) returned nil error, want degraded error")
 	}
-	if len(next.Records) != len(prevRecords) {
-		t.Fatalf("truncated refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
-	}
-	for i, want := range prevRecords {
-		got := next.Records[i]
-		if got.AniListID != want.AniListID || got.TvdbID != want.TvdbID || got.Type != want.Type {
-			t.Errorf("truncated refresh record[%d] = %+v, want unchanged %+v", i, got, want)
-		}
-	}
-}
-
-// TestLoader_refreshCache_duplicateIDCollapseKeepsStale pins that cache
-// acceptance measures the effective AniList-keyed dataset, not the transport
-// row count: a 200 whose mapped rows all repeat one AniList ID collapses to a
-// single effective record, which the acceptance floors must reject against a
-// 4-record stale cache (the typed population-collapse floor fires first for
-// this all-typed shape) instead of persisting a refresh that indexes to
-// length one.
-func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[` +
-			`{"anilist_id":9,"type":"tv","tvdb_id":900},` +
-			`{"anilist_id":9,"type":"tv","tvdb_id":901},` +
-			`{"anilist_id":9,"type":"tv","tvdb_id":902},` +
-			`{"anilist_id":9,"type":"tv","tvdb_id":903}]`))
-	}))
-	defer ts.Close()
-
-	prevRecords := []Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
-		{AniListID: 3, Type: "TV", TvdbID: 300},
-		{AniListID: 4, Type: "TV", TvdbID: 400},
-	}
-	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: prevRecords}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if _, ok := errors.AsType[*StaleMapError](err); !ok {
-		t.Fatalf("duplicate-collapse refresh error = %v, want a *StaleMapError", err)
-	}
-	if len(next.Records) != len(prevRecords) {
-		t.Fatalf("duplicate-collapse refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
-	}
-	for i, want := range prevRecords {
-		got := next.Records[i]
-		if got.AniListID != want.AniListID || got.TvdbID != want.TvdbID {
-			t.Errorf("duplicate-collapse refresh record[%d] = %+v, want unchanged %+v", i, got, want)
-		}
+	if len(next.Records) != 4 || next.Records[3].AniListID != 4 || next.Records[3].TvdbID != 400 {
+		t.Fatalf("truncated refresh kept %+v, want the 4 stale records unchanged", next.Records)
 	}
 }
 
 // TestLoader_refreshCache_routingCollapseKeepsStale covers the
-// routing-distribution acceptance floor: a fresh body that keeps 100% typed
-// coverage but collapses one routing population must be rejected in favour of
-// the stale map. Both directions are pinned — every movie type renamed to an
-// unrecognized string (FILM: all records route to Sonarr) and every record
-// stamped MOVIE (all records route to Radarr) — since either silently sends an
-// entire side of the catalogue to the wrong arr while passing the typed and
-// arr-identifier floors.
+// routing-distribution floor: a document that keeps every type valid but
+// collapses one routing population is refused in favour of the stale map,
+// both ways - every film losing its movie route (typed TV, so it routes to
+// Sonarr with no series) and every entry typed MOVIE.
 func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "movie types renamed to FILM",
-			body: `[{"anilist_id":1,"type":"film","tmdb_movie_ids":[42]},` +
-				`{"anilist_id":2,"type":"film","tmdb_movie_ids":[43]},` +
-				`{"anilist_id":3,"type":"tv","tvdb_id":300},` +
-				`{"anilist_id":4,"type":"tv","tvdb_id":400}]`,
+	for name, es := range map[string][]entry{
+		"films typed as series": {
+			{AniList: 1, Type: "tv", Movies: []int{42}},
+			{AniList: 2, Type: "tv", Movies: []int{43}},
+			{AniList: 3, Type: "tv", TVDB: 300},
+			{AniList: 4, Type: "tv", TVDB: 400},
 		},
-		{
-			name: "every record stamped MOVIE",
-			body: `[{"anilist_id":1,"type":"movie","tmdb_movie_ids":[42]},` +
-				`{"anilist_id":2,"type":"movie","tmdb_movie_ids":[43]},` +
-				`{"anilist_id":3,"type":"movie","tmdb_movie_ids":[44]},` +
-				`{"anilist_id":4,"type":"movie","tmdb_movie_ids":[45]}]`,
+		"every entry typed MOVIE": {
+			{AniList: 1, Type: "movie", Movies: []int{42}},
+			{AniList: 2, Type: "movie", Movies: []int{43}},
+			{AniList: 3, Type: "movie", Movies: []int{44}},
+			{AniList: 4, Type: "movie", Movies: []int{45}},
 		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write(animapBody(tc.body))
-			}))
-			defer ts.Close()
-
+	} {
+		t.Run(name, func(t *testing.T) {
 			prev := routingFloorPrevCache()
-			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-			next, err := l.refreshCache(t.Context(), prev)
+			next, err := refresh(t, prev, entriesBody(t, es...))
 			if _, ok := errors.AsType[*StaleMapError](err); !ok {
 				t.Fatalf("routing-collapse refresh error = %v, want a *StaleMapError guard rejection", err)
 			}
-			if len(next.Records) != len(prev.Records) {
-				t.Errorf("routing-collapse refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prev.Records))
-			}
-			if next.RejectedRefreshes != 1 {
-				t.Errorf("routing-collapse RejectedRefreshes = %d, want 1 (the routing floor is an acceptance-guard rejection)", next.RejectedRefreshes)
+			if len(next.Records) != len(prev.Records) || next.RejectedRefreshes != 1 {
+				t.Errorf("routing-collapse refresh = %d records, streak %d, want the %d stale records and a streak of 1", len(next.Records),
+					next.RejectedRefreshes, len(prev.Records))
 			}
 		})
 	}
 }
 
-// TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor pins the accepting
-// side of the routing-distribution floor: a normal additive catalogue update
-// that grows both routing populations must be accepted (and reset the
-// rejection streak), not rejected on growth alone.
-func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":1,"type":"movie","tmdb_movie_ids":[42]},` +
-			`{"anilist_id":2,"type":"movie","tmdb_movie_ids":[43]},` +
-			`{"anilist_id":3,"type":"tv","tvdb_id":300},` +
-			`{"anilist_id":4,"type":"tv","tvdb_id":400},` +
-			`{"anilist_id":5,"type":"movie","tmdb_movie_ids":[44]},` +
-			`{"anilist_id":6,"type":"tv","tvdb_id":600}]`))
-	}))
-	defer ts.Close()
+// routingFloorPrevCache returns a previously accepted cache with both routing
+// populations above the 1% floor: two films and two series.
+func routingFloorPrevCache() *Cache {
+	prev := staleCache("v2026.10.16")
+	prev.Records = []Record{
+		{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{42}},
+		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{43}},
+		{AniListID: 3, Type: "TV", TvdbID: 300},
+		{AniListID: 4, Type: "TV", TvdbID: 400},
+	}
+	return prev
+}
 
+// TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor pins the accepting
+// side of the routing floor: an additive update growing both routing
+// populations is accepted and resets the rejection streak.
+func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 	prev := routingFloorPrevCache()
 	prev.RejectedRefreshes = 3
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	next, err := refresh(t, prev, entriesBody(t,
+		entry{AniList: 1, Type: "movie", Movies: []int{42}}, entry{AniList: 2, Type: "movie", Movies: []int{43}},
+		entry{AniList: 3, Type: "tv", TVDB: 300}, entry{AniList: 4, Type: "tv", TVDB: 400},
+		entry{AniList: 5, Type: "movie", Movies: []int{44}}, entry{AniList: 6, Type: "tv", TVDB: 600}))
 	if err != nil {
 		t.Fatalf("additive refresh growing both routing sides returned error %v, want accepted", err)
 	}
-	if len(next.Records) != 6 {
-		t.Errorf("accepted refresh records = %d, want 6", len(next.Records))
-	}
-	if next.RejectedRefreshes != 0 {
-		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
+	if len(next.Records) != 6 || next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh = %d records, streak %d, want 6 and 0", len(next.Records), next.RejectedRefreshes)
 	}
 }
 
 // TestLoader_refreshCache_firstBootKeylessBodyRejected pins the AniList-key
-// coverage floor's denominator: on first boot (no previous cache, so the
-// relative shrink guard cannot fire) a valid 200-element body where 199
-// records lack an anilist_id and only one is fully mapped must be rejected as
-// wholesale key loss — not reinterpreted as a healthy 1/1 map after the
-// parser drops the keyless rows. The floor validates the survivor count
-// against the top-level source-element count (parseAnimap), which
-// destructive filtering cannot shrink.
+// coverage floor's denominator: on first boot a document of 200 entries of
+// which 199 have no AniList id is wholesale key loss, not a healthy 1/1 map,
+// because the floor counts every entry row.
 func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
-	var b strings.Builder
-	b.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":100}`)
+	es := []entry{{AniList: 1, Type: "tv", TVDB: 100}}
 	for i := 2; i <= 200; i++ {
-		b.WriteString(`,{"type":"tv","tvdb_id":100}`)
+		es = append(es, entry{AniList: i, Type: "tv", TVDB: 100, Keyless: true})
 	}
-	b.WriteByte(']')
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(b.String()))
-	}))
-	defer ts.Close()
-
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), &Cache{})
-	if err == nil {
-		t.Fatal("first-boot refresh with 1/200 AniList-keyed records returned nil error, want below-minimum rejection")
-	}
-	if len(next.Records) != 0 {
-		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
+	next, err := refresh(t, &Cache{}, entriesBody(t, es...))
+	if err == nil || len(next.Records) != 0 || !strings.Contains(err.Error(), "AniList-key coverage 1/200") {
+		t.Fatalf("first-boot refresh with 1/200 AniList-keyed entries = %d records, %v, want the AniList-key floor's rejection", len(next.Records), err)
 	}
 }
 
-// TestLoader_refreshCache_firstBootDuplicateAmplificationRejected pins that
-// the AniList-key floor's denominator survives deduplication too: a
-// first-boot body of 200 rows all repeating one valid AniList ID collapses to
-// a single effective record, which must be rejected against the original
-// 200-element source count instead of passing every floor as a 1/1 map.
-func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.T) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 1; i <= 200; i++ {
-		if i > 1 {
-			b.WriteByte(',')
-		}
-		b.WriteString(`{"anilist_id":9,"type":"tv","tvdb_id":900}`)
-	}
-	b.WriteByte(']')
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(b.String()))
-	}))
-	defer ts.Close()
-
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), &Cache{})
-	if err == nil {
-		t.Fatal("first-boot refresh of 200 duplicates of one AniList ID returned nil error, want below-minimum rejection")
-	}
-	if len(next.Records) != 0 {
-		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
-	}
-}
-
-// TestLoader_refreshCache_negativeOnlyCacheNotUsable pins the positive-ID
-// half of the effective-record contract on the persisted-cache path: a
-// state.json record set whose only keys are unique negative AniList IDs
-// (which real SeaDex lookups can never resolve) must not make the cache
-// usable, so the fresh-cache fast path falls through to the fetch instead of
-// serving an index that cannot resolve any entry.
-func TestLoader_refreshCache_negativeOnlyCacheNotUsable(t *testing.T) {
-	records := []Record{
-		{AniListID: -1, Type: "TV", TvdbID: 100},
-		{AniListID: -2, Type: "TV", TvdbID: 200},
-	}
-	if cacheUsable(records) {
-		t.Fatal("cacheUsable = true, want false: negative AniList IDs can never resolve a SeaDex lookup")
-	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now(), // inside the refresh window: freshness alone would reuse it
-		Records:   records,
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
-	}
-}
-
-// TestLoader_refreshCache_firstBootNegativeIDBodyRejected pins that the
-// positive-ID rule holds at the acceptance boundary too: a first-boot body of
-// 200 rows with unique NEGATIVE AniList IDs and valid arr identifiers must be
-// rejected (the parser drops the rows as keyless, so the AniList-key floor
-// fires against the 200-element source count) instead of being accepted as a
-// map no real SeaDex lookup could ever resolve against.
-func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 1; i <= 200; i++ {
-		if i > 1 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, -i, i)
-	}
-	b.WriteByte(']')
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(b.String()))
-	}))
-	defer ts.Close()
-
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), &Cache{})
-	if err == nil {
-		t.Fatal("first-boot refresh of 200 negative-ID records returned nil error, want rejection")
-	}
-	if len(next.Records) != 0 {
-		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
-	}
-}
-
-// TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord pins
-// deduplicateRecords' documented last-record-wins and stable-order semantics
-// on an ACCEPTED refresh: the persisted Cache.Records (and hence the served
-// index) must carry the LAST duplicate's data at the last-occurrence
-// position, matching NewIndex's map-overwrite semantics. The existing
-// duplicate-ID tests only exercise REJECTED refreshes, where which duplicate
-// survives is never observable.
-func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[` +
-			`{"anilist_id":9,"type":"tv","tvdb_id":900},` +
-			`{"anilist_id":1,"type":"tv","tvdb_id":100},` +
-			`{"anilist_id":9,"type":"tv","tvdb_id":901},` +
-			`{"anilist_id":2,"type":"tv","tvdb_id":200},` +
-			`{"anilist_id":3,"type":"tv","tvdb_id":300}]`))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records: []Record{
-			{AniListID: 1, Type: "TV", TvdbID: 100},
-			{AniListID: 2, Type: "TV", TvdbID: 200},
-			{AniListID: 3, Type: "TV", TvdbID: 300},
-			{AniListID: 4, Type: "TV", TvdbID: 400},
-		},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refresh with one duplicated ID returned error %v, want accepted (4 effective records against 4 stale)", err)
-	}
-	if len(next.Records) != 4 {
-		t.Fatalf("accepted refresh kept %d records, want 4 (duplicate collapsed to one effective record)", len(next.Records))
-	}
-	wantIDs := []int{1, 9, 2, 3}
-	for i, want := range wantIDs {
-		if next.Records[i].AniListID != want {
-			t.Errorf("accepted refresh record[%d].AniListID = %d, want %d (stable last-occurrence order)", i, next.Records[i].AniListID, want)
-		}
-	}
-	if rec9 := next.Records[1]; rec9.AniListID != 9 || rec9.TvdbID != 901 {
-		t.Errorf("accepted refresh record[1] = %+v, want the duplicated id 9 carrying the LAST record's TvdbID 901 (matching NewIndex)", rec9)
-	}
-}
-
-// TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale pins acceptRefresh's
-// whole-map below-half shrink guard on a shape the per-population floors cannot
-// intercept: the guarded populations (typed, season, special, both routing sides)
-// are fully retained while the TOTAL record count drops below half (100 -> 40, via
-// loss of bare id-only records). The guard must reject with the FIXED "refresh
-// shrank below half of previous" reason (a Loki-queryable class discriminator),
-// carry the live counts as structured stale_returned/stale_previous facts, advance
-// the persisted rejection streak, and keep the stale map unchanged.
+// TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale pins the whole-map
+// below-half shrink guard on a shape the per-population floors cannot
+// intercept: the guarded populations are fully retained while the TOTAL
+// record count drops below half (100 -> 40, via loss of bare records). The
+// guard rejects with the FIXED "refresh shrank below half of previous"
+// reason, carries the live counts as structured stale_returned and
+// stale_previous facts, advances the streak and keeps the stale map.
 func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 1; i <= 10; i++ {
-		if i > 1 {
-			b.WriteByte(',')
+	prev := staleCache("")
+	prev.Records = nil
+	for i := 1; i <= 100; i++ {
+		r := Record{AniListID: i}
+		if i <= 10 {
+			r.Type, r.TvdbID = "TV", i
 		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, i, i)
+		prev.Records = append(prev.Records, r)
 	}
-	for i := 11; i <= 40; i++ {
-		fmt.Fprintf(&b, `,{"anilist_id":%d}`, i)
+	es := coverage(10, 40)
+	for i := 10; i < 40; i++ {
+		es[i].Type = ""
 	}
-	b.WriteByte(']')
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(b.String()))
-	}))
-	defer ts.Close()
-
-	prevRecords := make([]Record, 0, 100)
-	for i := 1; i <= 10; i++ {
-		prevRecords = append(prevRecords, Record{AniListID: i, Type: "TV", TvdbID: i})
-	}
-	for i := 11; i <= 100; i++ {
-		prevRecords = append(prevRecords, Record{AniListID: i})
-	}
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   prevRecords,
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	next, err := refresh(t, prev, entriesBody(t, es...))
 	stale, ok := errors.AsType[*StaleMapError](err)
 	if !ok {
 		t.Fatalf("below-half refresh error = %v, want a *StaleMapError guard rejection", err)
 	}
-	if len(next.Records) != len(prevRecords) {
-		t.Errorf("below-half refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
-	}
-	if next.RejectedRefreshes != 1 {
-		t.Errorf("below-half refresh RejectedRefreshes = %d, want 1 (the shrink guard is an acceptance-guard rejection)", next.RejectedRefreshes)
+	if len(next.Records) != 100 || next.RejectedRefreshes != 1 {
+		t.Errorf("below-half refresh = %d records, streak %d, want the 100 stale records and a streak of 1", len(next.Records), next.RejectedRefreshes)
 	}
 	if !strings.Contains(stale.Error(), "refresh shrank below half of previous (returned 40, previous 100)") {
 		t.Errorf("StaleMapError text = %q, want the fixed reason with the shrink counts parenthetical", stale.Error())
@@ -579,47 +236,22 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_exactHalfShrinkAccepted pins the exact-half acceptance
-// boundary shared by acceptRefresh's whole-map shrink guard and
-// populationCollapsed: both use a strict below-half comparison
-// (degradation.Shrunk's count*factor < prevCount), so a refresh retaining EXACTLY
-// half of the previous records (4 of 8, every guarded population halved together)
-// must be accepted and reset the rejection streak. The existing shrink tests pin
-// only below-half rejection and above-half acceptance, leaving the <= boundary
-// mutant alive in both guards.
+// TestLoader_refreshCache_exactHalfShrinkAccepted pins the exact-half
+// acceptance boundary shared by the whole-map shrink guard and
+// populationCollapsed: both are strictly below-half, so 4 of 8 is accepted
+// and resets the streak.
 func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 1; i <= 4; i++ {
-		if i > 1 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, i, i)
-	}
-	b.WriteByte(']')
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(b.String()))
-	}))
-	defer ts.Close()
-
-	prevRecords := make([]Record, 0, 8)
+	prev := staleCache("")
+	prev.Records = nil
 	for i := 1; i <= 8; i++ {
-		prevRecords = append(prevRecords, Record{AniListID: i, Type: "TV", TvdbID: i})
+		prev.Records = append(prev.Records, Record{AniListID: i, Type: "TV", TvdbID: i})
 	}
-	prev := &Cache{
-		FetchedAt:         time.Now().Add(-2 * time.Hour),
-		Records:           prevRecords,
-		RejectedRefreshes: 3,
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	prev.RejectedRefreshes = 3
+	next, err := refresh(t, prev, entriesBody(t, coverage(4, 4)...))
 	if err != nil {
 		t.Fatalf("exactly-half refresh (4 of 8) returned error %v, want accepted (the guards are strictly below-half)", err)
 	}
-	if len(next.Records) != 4 {
-		t.Errorf("accepted refresh records = %d, want 4", len(next.Records))
-	}
-	if next.RejectedRefreshes != 0 {
-		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
+	if len(next.Records) != 4 || next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh = %d records, streak %d, want 4 and 0", len(next.Records), next.RejectedRefreshes)
 	}
 }

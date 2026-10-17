@@ -35,14 +35,15 @@ type EntryInfo struct {
 	// SpecialEpisodes: the second title the twin is labeled with, since Title
 	// keeps the entry's own name.
 	SeriesTitle string
-	// Seasons are the TVDB seasons this entry's absolute-numbered episodes fall
-	// into, from the mapping list; nil when the list names none. The
-	// RANGES, never a scalar: three measured entries need 6, 8 and 2 distinct
-	// seasons across their packs, so one season per entry mislabels most of them.
+	// Seasons are the TVDB seasons this entry's episodes fall into, as runs
+	// of entry episodes from the map; nil for a film or when the map names
+	// none. The RANGES, never a scalar: three measured entries need 6, 8 and
+	// 2 distinct seasons across their packs, so one season per entry
+	// mislabels most of them.
 	Seasons []SeasonRange
 	// SpecialEpisodes are the TVDB season-0 episodes of SeriesTitle this offered
 	// entry is, ascending, nil when the map names none; SpecialsEpisodes is the
-	// AniDB episode count they answer, 0 when unknown. They let the feed serve a
+	// entry episode count they answer, 0 when unknown. They let the feed serve a
 	// release a second time as "<SeriesTitle> S00Exx", which Sonarr can parse.
 	SpecialEpisodes  []int
 	SpecialsEpisodes int
@@ -58,10 +59,10 @@ type EntryInfo struct {
 	IsMovie     bool
 }
 
-// SeasonRange is one TVDB season an absolute-numbered run's episodes fall into:
-// episodes First..Last are season Season, with Last 0 meaning open-ended. This
-// package's own copy of the mapping-list fact (it imports neither mapping nor
-// align, and EntryInfo is its only channel).
+// SeasonRange is one TVDB season a run of the entry's episodes falls into:
+// entry episodes First..Last are season Season. This package's own copy of
+// the map's fact (it imports neither mapping nor align, and EntryInfo is its
+// only channel).
 type SeasonRange struct {
 	Season int
 	First  int
@@ -69,10 +70,9 @@ type SeasonRange struct {
 }
 
 // contains reports whether the whole episode span first..last sits inside the
-// range. An open-ended range (Last 0) contains a span only from its First on, so
-// it never claims a span that starts before it.
+// range.
 func (r SeasonRange) contains(first, last int) bool {
-	return r.First <= first && (r.Last == 0 || last <= r.Last)
+	return r.First <= first && last <= r.Last
 }
 
 // EntryInfoFunc resolves the per-show (per-AniList-id) metadata the feed
@@ -223,7 +223,7 @@ func episodeLabel(e int) string { return fmt.Sprintf("E%02d", e) }
 // packSeasonLabel resolves the season token a PACK is labeled with, in the one
 // precedence both title paths share: the entry's resolved season outvotes the
 // pack's own file-season evidence (fansub numbering is cour-local), which
-// outvotes the mapping-list's season ranges - so a token a release name already
+// outvotes the map's season ranges - so a token a release name already
 // carries is never rewritten by a range. ok is false when no source pins a
 // season, so each caller supplies its own fallback (no marker on the assembled
 // path, the file's own season half on the derived one).
@@ -241,10 +241,10 @@ func packSeasonLabel(t *seadex.Torrent, meta *EntryInfo) (string, bool) {
 }
 
 // rangeSeason resolves the season a tokenless absolute-numbered pack is labeled
-// with from the entry's mapping-list ranges: the pack's absolute episode span,
-// then EXACTLY one range containing the whole span. Zero or several containing
-// ranges (a pack straddling a season boundary, or a span an open range and a
-// bounded sibling both claim) yield no season: the label is written only where
+// with from the entry's season ranges: the pack's absolute episode span, then
+// EXACTLY one range containing the whole span. Zero or several containing
+// ranges (a pack straddling a season boundary, or a span two ranges both
+// claim) yield no season: the label is written only where
 // the mapping places the WHOLE release inside one TVDB season.
 func rangeSeason(ranges []SeasonRange, files []seadex.File) (int, bool) {
 	if len(ranges) == 0 {

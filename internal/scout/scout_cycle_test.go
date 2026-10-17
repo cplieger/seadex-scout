@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -1085,10 +1084,7 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// One record replacing four trips the below-half-size acceptance
 			// guard on every refresh.
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
-			}))
-			defer ts.Close()
+			client, src := animapRelease(t, 0, seriesDocument(t, 9))
 			logger, recorder := capture.New()
 			st := state.State{Mapping: mapping.Cache{
 				FetchedAt: time.Now().Add(-2 * time.Hour),
@@ -1102,7 +1098,7 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 			}}
 			s := New(&Deps{
 				Logger:  logger,
-				Mapping: mapping.NewLoader(ts.Client(), ts.URL, mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
+				Mapping: mapping.NewLoader(client, src, mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 			})
 
 			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)
@@ -1405,7 +1401,7 @@ func reportSummaryCounter(recorder *capture.Recorder, key string) (int64, bool) 
 
 // cancellingMappingTransport cancels the shared cycle context from inside the
 // mapping loader's refresh request and fails it, modelling a SIGTERM/redeploy
-// landing while the mapping conditional GET is in flight.
+// landing while the mapping refresh's request is in flight.
 type cancellingMappingTransport struct{ cancel context.CancelFunc }
 
 func (c cancellingMappingTransport) RoundTrip(*http.Request) (*http.Response, error) {
@@ -1432,7 +1428,7 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotMapping(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, noSource, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 	})
 
@@ -1905,10 +1901,7 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 		"500 never escalates":            {http.StatusInternalServerError, degradation.TickEscalationThreshold - 1, degradation.TickEscalationThreshold - 1, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "boom", tc.status)
-			}))
-			defer ts.Close()
+			client, src := animapRelease(t, tc.status, nil)
 			logger, recorder := capture.New()
 			st := state.State{Mapping: mapping.Cache{
 				FetchedAt:         time.Now().Add(-2 * time.Hour),
@@ -1917,7 +1910,7 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 			}}
 			s := New(&Deps{
 				Logger:  logger,
-				Mapping: mapping.NewLoader(ts.Client(), ts.URL, mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
+				Mapping: mapping.NewLoader(client, src, mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 			})
 
 			mapCache, _, mapErr := s.loadMapping(t.Context(), &st)

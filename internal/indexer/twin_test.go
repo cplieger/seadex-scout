@@ -112,9 +112,9 @@ func TestTwinTitle(t *testing.T) {
 		},
 		{name: "episode 999", files: film, info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{999}, SpecialsEpisodes: 1, SeriesTitle: "S"}, dualAudio: true, want: "S S00E999 1080p Dual Audio [G]"},
 		{name: "episode 1000", files: film, info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{1000}, SpecialsEpisodes: 1, SeriesTitle: "S"}},
-		{name: "the mapping-list fallback on one file", files: film, info: fallback, dualAudio: true, want: "Code Geass S00E04 1080p Dual Audio [G]"},
-		{name: "the mapping-list fallback for an OVA on one file", files: film, info: ovaFallback},
-		{name: "the mapping-list fallback on two files", files: twinFiles(numberedFiles("[G] Code Geass Akito - %02d (BD 1080p).mkv", 1, 2, 3<<30)), info: fallback},
+		{name: "the single-special fallback on one file", files: film, info: fallback, dualAudio: true, want: "Code Geass S00E04 1080p Dual Audio [G]"},
+		{name: "the single-special fallback for an OVA on one file", files: film, info: ovaFallback},
+		{name: "the single-special fallback on two files", files: twinFiles(numberedFiles("[G] Code Geass Akito - %02d (BD 1080p).mkv", 1, 2, 3<<30)), info: fallback},
 		{name: "no episode", files: film, info: EntryInfo{IsMovie: true, SeriesTitle: "Code Geass"}},
 		{name: "blank series title", files: film, info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "  "}},
 	}

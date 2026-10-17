@@ -1014,7 +1014,7 @@ func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
 }
 
 // TestAuditFairyTailOwnSeasonsAreTruthful is what the declined half above wanted
-// and the mapping list delivers: with each entry's OWN TVDB seasons
+// and the map's season ranges deliver: with each entry's OWN TVDB seasons
 // on its Match, the three Fairy Tail entries stay whole-series and comparable
 // (no not_on_seadex row) and each verdict reads its own seasons - S1-S4 best,
 // S5-S7 alt, S8 unlisted - instead of three contaminated copies of one.
@@ -1034,9 +1034,9 @@ func TestAuditFairyTailOwnSeasonsAreTruthful(t *testing.T) {
 		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
 		{AniListID: 99749, Type: "TV", TvdbID: 114801, AniDBID: 13295, SeasonKind: mapping.SeasonAbsent},
 	}, Mappings: map[int]mapping.Mapping{
-		6662:  {Seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 48}, {Season: 2, First: 49, Last: 96}, {Season: 3, First: 97, Last: 150}, {Season: 4, First: 151, Last: 175}}},
-		9980:  {Seasons: []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}, {Season: 7, First: 91, Last: 102}}},
-		13295: {Seasons: []mapping.SeasonRange{{Season: 8, First: 1, Last: 51}}},
+		6662:  {Seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 48}, {Season: 2, First: 49, Last: 96}, {Season: 3, First: 97, Last: 150}, {Season: 4, First: 151, Last: 175}}, SeasonsTvdb: 114801},
+		9980:  {Seasons: []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}, {Season: 7, First: 91, Last: 102}}, SeasonsTvdb: 114801},
+		13295: {Seasons: []mapping.SeasonRange{{Season: 8, First: 1, Last: 51}}, SeasonsTvdb: 114801},
 	}})
 	torrents := []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "CBT", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},

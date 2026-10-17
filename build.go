@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/cplieger/animap/mapread"
 	"github.com/cplieger/arrapi/v2"
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/anilist"
@@ -86,7 +87,6 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 
 	seadexHTTP := httpx.NewClient(seadexTimeout)
 	mappingHTTP := httpx.NewClient(mappingTimeout)
-	mappingHTTP.CheckRedirect = mapping.RedirectPolicy
 	anilistHTTP := httpx.NewClient(anilistTimeout)
 	pingArrs(ctx, sonarr, radarr)
 
@@ -110,7 +110,7 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL,
+		mapping: mapping.NewLoader(mappingHTTP, mapread.Source{Repo: mapping.DefaultRepo},
 			mapping.WithOverridesPath(config.DefaultMappingOverrides),
 			mapping.WithRefresh(mapping.DefaultRefresh), mapping.WithLogger(log)),
 		seadex: seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL,

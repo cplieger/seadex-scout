@@ -125,7 +125,7 @@ type Decision struct {
 // (internal/compare) and the audit report to its report rows' verdicts and
 // qualifiers (internal/audit). The entry's SiblingSeasons and Seasons both bound a
 // whole-series comparison to its own seasons, from two sources: Seasons (its
-// TVDB season ranges from the mapping list) wins when present, else the seasons
+// TVDB season ranges from the map) wins when present, else the seasons
 // sibling records map are dropped. Its Specials or Episodes decide the
 // episodes scope.
 func Decide(item *library.Item, e *Entry, listing *Listing) Decision {

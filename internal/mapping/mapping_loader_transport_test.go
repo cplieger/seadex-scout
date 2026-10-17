@@ -4,32 +4,30 @@ import (
 	"errors"
 	"net/http"
 	"testing"
-	"time"
+
+	"github.com/cplieger/animap/mapread"
 )
 
-// errTransport fails every request with a plain (non-transient) error, so
-// httpx.Do returns after the first attempt without sleeping.
+// errTransport fails every request with a plain error httpx does not retry,
+// so a refresh returns after the first attempt without sleeping.
 type errTransport struct{}
 
 func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("transport refused by test")
 }
 
-// TestLoader_refreshCache_transportErrorKeepsStale pins conditionalGet's
-// http.Do error branch: a request that fails at the transport (no response at
-// all, as opposed to request construction failing or an HTTP error status) degrades to
-// the stale map with an error rather than losing the cached records.
+// TestLoader_refreshCache_transportErrorKeepsStale pins the transport arm: a
+// request that gets no response at all degrades to the stale map with no
+// streak and keeps the cache unchanged.
 func TestLoader_refreshCache_transportErrorKeepsStale(t *testing.T) {
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
+	prev := staleCache("v2026.10.16")
+	prev.RejectedRefreshes = 3
+	l := NewLoader(&http.Client{Transport: errTransport{}}, mapread.Source{Repo: DefaultRepo}, WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
-	if err == nil {
-		t.Fatal("transport-error refresh returned nil error, want degraded error")
+	if _, ok := errors.AsType[*StaleMapError](err); !ok {
+		t.Fatalf("transport-error refresh error = %v, want a *StaleMapError", err)
 	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("transport-error refresh records = %+v, want stale record id 1", next.Records)
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 || next.Tag != "v2026.10.16" || next.RejectedRefreshes != 3 {
+		t.Errorf("transport-error refresh = %+v, want the stale cache with its streak of 3", next)
 	}
 }

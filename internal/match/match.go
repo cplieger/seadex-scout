@@ -43,8 +43,8 @@ type Match struct {
 	// comparison drops them from its aggregate; every other scope ignores them.
 	// Nil for a record with no tvdb id and for an unmapped entry.
 	SiblingSeasons []int
-	// Seasons are the entry's OWN TVDB seasons from the mapping list
-	// (mapping.Index.MappingFor), nil when the list names none. A whole-series
+	// Seasons are the entry's OWN TVDB season ranges from the map
+	// (mapping.Index.MappingFor), nil when the map names none. A whole-series
 	// comparison judges exactly these seasons when present, so a split show's
 	// entries are each judged against their own run.
 	Seasons []mapping.SeasonRange

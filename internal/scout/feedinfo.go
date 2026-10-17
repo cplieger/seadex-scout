@@ -31,7 +31,7 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 			info.TvdbID = rec.TvdbID
 			info.Season, info.SeasonKnown = resolvedSeason(&rec)
 			it := li.FindByID(&rec)
-			applyMappingList(idx, &rec, li, &info)
+			applyEpisodeFacts(idx, &rec, li, &info)
 			// The item's title is taken only when the item is the entry's own work.
 			// FindByID resolves a MOVIE record to the Sonarr series TVDB files it
 			// under, and that series is a DIFFERENT work, so a film on a Sonarr item
@@ -56,26 +56,24 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 	}
 }
 
-// applyMappingList projects the mapping facts onto the feed metadata. The
-// entry's TVDB season ranges ride along whatever the target (a pack's season
-// token is a per-torrent decision the indexer makes over them). The twin's
-// season-0 run (mapping.Mapping.SpecialRun) is stamped only for the OFFERED
-// class - a record whose season scope is the season-0 bucket - with the titled
-// Sonarr series it is filed under, whichever arr FindByID resolved: a series
-// node carrying an identically shaped row for one of its own specials must not
-// gain a twin on every pack, and a film also in Radarr still needs its twin.
-func applyMappingList(idx *mapping.Index, rec *mapping.Record, li *match.LibIndex, info *indexer.EntryInfo) {
+// applyEpisodeFacts projects the map's episode facts onto the feed metadata.
+// The season ranges ride along whatever the target (the indexer picks each
+// pack's season token), except for a film, which pins no season
+// (resolvedSeason). The twin's season-0 run is stamped only for the OFFERED
+// class (season scope 0) with the titled Sonarr series it is filed under,
+// whichever arr FindByID resolved: a film also in Radarr still needs its twin.
+func applyEpisodeFacts(idx *mapping.Index, rec *mapping.Record, li *match.LibIndex, info *indexer.EntryInfo) {
 	m, mapped := idx.MappingFor(rec)
 	if !mapped {
 		return
 	}
-	if len(m.Seasons) > 0 {
+	if len(m.Seasons) > 0 && !rec.IsMovie() {
 		info.Seasons = make([]indexer.SeasonRange, len(m.Seasons))
 		for i, r := range m.Seasons {
 			info.Seasons[i] = indexer.SeasonRange{Season: r.Season, First: r.First, Last: r.Last}
 		}
 	}
-	run, anidbEpisodes := m.SpecialRun()
+	run, entryEpisodes := m.SpecialRun()
 	if len(run) == 0 {
 		return
 	}
@@ -86,7 +84,7 @@ func applyMappingList(idx *mapping.Index, rec *mapping.Record, li *match.LibInde
 	if series == nil || strings.TrimSpace(series.Title) == "" {
 		return
 	}
-	info.SpecialEpisodes, info.SpecialsEpisodes, info.SeriesTitle = run, anidbEpisodes, series.Title
+	info.SpecialEpisodes, info.SpecialsEpisodes, info.SeriesTitle = run, entryEpisodes, series.Title
 }
 
 // applyMemoTyping fills the media typing - and the season that typing implies -

@@ -1,452 +1,480 @@
 package mapping
 
 import (
-	"cmp"
+	"bytes"
 	"errors"
-	"fmt"
-	"io"
-	"log/slog"
 	"maps"
+	"os"
 	"slices"
-	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/cplieger/animap/mapread"
 )
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.DiscardHandler)
+// facts is one projected entry: its Record and the facts MappingFor serves
+// for it.
+type facts struct {
+	rec Record
+	m   Mapping
 }
 
-func animapDoc(records string) string {
-	return `{"version":1,"records":` + records + `}`
-}
-
-func animapBody(records string) []byte { return []byte(animapDoc(records)) }
-
-func keyedRecordsBody(n int) []byte {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := range n {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"anilist_id":%d}`, i+1)
-	}
-	b.WriteByte(']')
-	return animapBody(b.String())
-}
-
-func TestParseAnimap_decodesTheFieldsConsumersRead(t *testing.T) {
-	body := animapBody(`[
-		{"anilist_id":1,"anidb_id":23,"mal_id":1,"type":"TV","episodes":26,"tvdb_id":76885,"tvdb_season":1,"tmdb_tv_id":30991,"tmdb_season":1},
-		{"anilist_id":2,"anidb_id":69,"type":"tv","tvdb_id":81797,"tvdb_absolute":true},
-		{"anilist_id":3,"anidb_id":70,"type":"MOVIE","tvdb_id":500,"tvdb_season":0,"tmdb_movie_ids":[0,42],"imdb_ids":["tt0000042"]},
-		{"anilist_id":4,"type":"SPECIAL","episodes":1},
-		{"anidb_id":99,"tvdb_id":600,"tvdb_season":2}
-	]`)
-	parsed, err := parseAnimap(body, discardLogger())
+// projected decodes doc's encoding, as a refresh does, and projects it into
+// an Index's view of each AniList entry.
+func projected(t *testing.T, body []byte) (projection, map[int]facts) {
+	t.Helper()
+	doc, err := mapread.Decode(bytes.NewReader(body), mapread.Limits{})
 	if err != nil {
-		t.Fatalf("parseAnimap error: %v", err)
+		t.Fatalf("mapread.Decode: %v", err)
 	}
-	want := []Record{
-		{AniListID: 1, AniDBID: 23, Type: "TV", TvdbID: 76885, SeasonKind: SeasonPresent, SeasonTvdb: 1},
-		{AniListID: 2, AniDBID: 69, Type: "TV", TvdbID: 81797, SeasonKind: SeasonAbsent},
-		{AniListID: 3, AniDBID: 70, Type: "MOVIE", TvdbID: 500, SeasonKind: SeasonPresent, TmdbMovies: []int{42}, IMDbIDs: []string{"tt0000042"}},
-		{AniListID: 4, Type: "SPECIAL", SeasonKind: SeasonAbsent},
-	}
-	if len(parsed.records) != len(want) {
-		t.Fatalf("parseAnimap records = %+v, want %d AniList-keyed records", parsed.records, len(want))
-	}
-	for i := range want {
-		got, w := parsed.records[i], want[i]
-		if got.AniListID != w.AniListID || got.AniDBID != w.AniDBID || got.Type != w.Type || got.TvdbID != w.TvdbID ||
-			got.SeasonKind != w.SeasonKind || got.SeasonTvdb != w.SeasonTvdb ||
-			!slices.Equal(got.TmdbMovies, w.TmdbMovies) || !slices.Equal(got.IMDbIDs, w.IMDbIDs) {
-			t.Errorf("parseAnimap record %d = %+v, want %+v", i, got, w)
-		}
-	}
-	if parsed.elements != 5 {
-		t.Errorf("parseAnimap elements = %d, want 5 (the AniDB-keyed record counts)", parsed.elements)
-	}
-}
-
-func TestParseAnimap_filmEpisode(t *testing.T) {
-	tests := []struct {
-		name   string
-		record string
-		want   int
-	}{
-		{
-			name: "one pair names the episode", want: 8,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]}`,
-		},
-		{
-			name: "every pair names the same episode", want: 3,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,3],[2,3]]}]}`,
-		},
-		{
-			name: "pairs disagree", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,3],[2,4]]}]}`,
-		},
-		{
-			name: "no counterpart", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1]]}]}`,
-		},
-		{
-			name: "a pair with no counterpart beside one that names an episode", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8],[2]]}]}`,
-		},
-		{
-			name: "one episode spans two", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,5,6]]}]}`,
-		},
-		{
-			name: "series filed under a real season", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":1,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[10,1]]}]}`,
-		},
-		{
-			name: "a range row is not the film's own row", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"start":1,"end":2,"offset":4}]}`,
-		},
-		{
-			name: "a range row's single episodes do not join the film's own row", want: 8,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]},` +
-				`{"anidb_season":1,"tvdb_season":0,"start":2,"end":3,"offset":4,"episodes":[[2,9]]}]}`,
-		},
-		{
-			name: "a specials row is not the film's own row", want: 0,
-			record: `{"anidb_id":7,"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":0,"tvdb_season":0,"episodes":[[1,9]]}]}`,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			parsed, err := parseAnimap(animapBody(`[`+tc.record+`]`), discardLogger())
-			if err != nil {
-				t.Fatalf("parseAnimap(%s) error: %v", tc.record, err)
-			}
-			if got := parsed.mappings[7].SpecialEpisode; got != tc.want {
-				t.Errorf("parseAnimap(%s) special episode = %d, want %d", tc.record, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseAnimap_seasonRanges(t *testing.T) {
-	tests := []struct {
-		name string
-		rows string
-		want []SeasonRange
-	}{
-		{
-			name: "ranges sorted with an open end",
-			rows: `{"anidb_season":1,"tvdb_season":2,"start":9,"end":30},{"anidb_season":1,"tvdb_season":1,"start":1,"end":8},{"anidb_season":1,"tvdb_season":23,"start":1156}`,
-			want: []SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}, {Season: 23, First: 1156}},
-		},
-		{
-			name: "uncovered leading run is the season below the lowest named",
-			rows: `{"anidb_season":1,"tvdb_season":2,"start":14,"end":30}`,
-			want: []SeasonRange{{Season: 1, First: 1, Last: 13}, {Season: 2, First: 14, Last: 30}},
-		},
-		{
-			name: "a TMDB row is not a TVDB range",
-			rows: `{"anidb_season":1,"tmdb_season":1,"start":1,"end":61}`,
-		},
-		{
-			name: "a season-0 target is not a range",
-			rows: `{"anidb_season":1,"tvdb_season":0,"start":1,"end":2}`,
-		},
-		{
-			name: "a specials row is not a range",
-			rows: `{"anidb_season":0,"tvdb_season":2,"start":1,"end":2}`,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			record := `{"anidb_id":7,"tvdb_id":1,"tvdb_absolute":true,"mapping_list":[` + tc.rows + `]}`
-			parsed, err := parseAnimap(animapBody(`[`+record+`]`), discardLogger())
-			if err != nil {
-				t.Fatalf("parseAnimap(%s) error: %v", record, err)
-			}
-			if got := parsed.mappings[7].Seasons; !slices.Equal(got, tc.want) {
-				t.Errorf("parseAnimap(%s) seasons = %+v, want %+v", record, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseAnimap_specialEpisodes(t *testing.T) {
-	tests := []struct {
-		name      string
-		season    string
-		placement string
-		want      []int
-		episodes  int
-		tvdb      string
-	}{
-		{name: "one film on one special", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":8}]`, want: []int{8}},
-		{
-			name: "runs, a span and an episode with no counterpart", season: `0`, episodes: 4,
-			placement: `[{"start":1,"end":2,"season":0,"episode":9},{"start":3,"end":3},{"start":4,"end":4,"season":0,"episode":12},{"start":4,"end":4,"season":0,"episode":13}]`,
-			want:      []int{9, 10, 12, 13},
-		},
-		{
-			name: "overlapping runs of episodes that each span two", season: `0`, episodes: 2,
-			placement: `[{"start":1,"end":1,"season":0,"episode":1},{"start":1,"end":2,"season":0,"episode":2},{"start":2,"end":2,"season":0,"episode":4}]`,
-			want:      []int{1, 2, 3, 4},
-		},
-		{name: "runs out of order", season: `0`, episodes: 2, placement: `[{"start":2,"end":2,"season":0,"episode":10},{"start":1,"end":1,"season":0,"episode":9}]`, want: []int{9, 10}},
-		{name: "two episodes on one special count once", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":3},{"start":2,"end":2,"season":0,"episode":3}]`, want: []int{3}},
-		{name: "no counterpart at all", season: `0`, episodes: 2, placement: `[{"start":1,"end":2}]`},
-		{name: "a run on a real season", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":3},{"start":2,"end":2,"season":2,"episode":54}]`},
-		{name: "a series filed under a real season", season: `1`, episodes: 12, placement: `[{"start":1,"end":12,"season":1,"episode":1}]`},
-		{name: "a real-season record placed wholly in season 0", season: `1`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":3}]`},
-		{name: "no placement", season: `0`, episodes: 1},
-		{name: "no tvdb id", tvdb: `0`, season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":3}]`},
-		{name: "no episode count", season: `0`, placement: `[{"start":1,"end":1,"season":0,"episode":3}]`},
-		{name: "an episode left unplaced", season: `0`, episodes: 2, placement: `[{"start":2,"end":2,"season":0,"episode":9}]`},
-		{name: "the last episode left unplaced", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":9}]`},
-		{name: "a gap between runs", season: `0`, episodes: 3, placement: `[{"start":1,"end":1,"season":0,"episode":9},{"start":3,"end":3,"season":0,"episode":11}]`},
-		{name: "a run past the last episode", season: `0`, episodes: 1, placement: `[{"start":1,"end":2,"season":0,"episode":9}]`},
-		{name: "an episode both placed and without a counterpart", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":9},{"start":1,"end":1}]`},
-		{name: "a run without a counterpart overlapping a placed one", season: `0`, episodes: 2, placement: `[{"start":1,"end":2},{"start":2,"end":2,"season":0,"episode":9}]`},
-		{name: "a season without an episode", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0}]`},
-		{name: "an episode without a season", season: `0`, episodes: 2, placement: `[{"start":1,"end":1,"season":0,"episode":9},{"start":2,"end":2,"episode":4}]`},
-		{name: "a run ending before it starts", season: `0`, episodes: 3, placement: `[{"start":1,"end":3,"season":0,"episode":1},{"start":3,"end":2,"season":0,"episode":4}]`},
-		{name: "a run starting below episode 1", season: `0`, episodes: 1, placement: `[{"start":0,"end":1,"season":0,"episode":4}]`},
-		{name: "a target below episode 1", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":0}]`},
-		{name: "a run past the cap", season: `0`, episodes: 1025, placement: `[{"start":1,"end":1025,"season":0,"episode":1}]`},
-		{name: "a run too long to expand", season: `0`, episodes: 1000000000000, placement: `[{"start":1,"end":1000000000000,"season":0,"episode":1}]`},
-		{name: "runs past the cap together", season: `0`, episodes: 1100, placement: `[{"start":1,"end":1000,"season":0,"episode":1},{"start":1001,"end":1100,"season":0,"episode":2001}]`},
-		{
-			name: "repeated runs on the same targets past the cap", season: `0`, episodes: 1000,
-			placement: `[{"start":1,"end":1000,"season":0,"episode":1},{"start":1,"end":1000,"season":0,"episode":1}]`,
-		},
-		{name: "a target at the integer ceiling", season: `0`, episodes: 1, placement: `[{"start":1,"end":1,"season":0,"episode":9223372036854775807}]`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			record := `{"anidb_id":7,"tvdb_id":` + cmp.Or(tc.tvdb, `1`) + `,"tvdb_season":` + tc.season + `,"episodes":` + strconv.Itoa(tc.episodes)
-			if tc.placement != "" {
-				record += `,"tvdb_placement":` + tc.placement
-			}
-			record += `}`
-			parsed, err := parseAnimap(animapBody(`[`+record+`]`), discardLogger())
-			if err != nil {
-				t.Fatalf("parseAnimap(%s) error: %v", record, err)
-			}
-			if got := parsed.mappings[7].Specials; !slices.Equal(got, tc.want) {
-				t.Errorf("parseAnimap(%s) specials = %v, want %v", record, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseAnimap_placementReachesBothJoins(t *testing.T) {
-	placed := `"tvdb_id":1,"tvdb_season":0,"tvdb_episode_offset":4,"episodes":2,"tvdb_placement":[{"start":1,"end":2,"season":0,"episode":5}]`
-	body := animapBody(`[` +
-		`{"anilist_id":10,"anidb_id":100,` + placed + `},` +
-		`{"anilist_id":11,"anidb_parent":{"anidb_id":500,"specials":[1,2]},` + placed + `}]`)
-	parsed, err := parseAnimap(body, discardLogger())
+	p, err := project(doc, maxAnimeEpisodes)
 	if err != nil {
-		t.Fatalf("parseAnimap error: %v", err)
+		t.Fatalf("project: %v", err)
 	}
-	if got := parsed.mappings[100]; !slices.Equal(got.Specials, []int{5, 6}) || got.SpecialsEpisodes != 2 {
-		t.Errorf("parseAnimap mappings[100] = %+v, want Specials [5 6] answering 2 episodes", got)
+	idx := NewIndex(Source{Records: p.records, Mappings: p.mappings, AniListMappings: p.aniListMappings})
+	out := make(map[int]facts, len(p.records))
+	for _, r := range p.records {
+		m, _ := idx.MappingFor(&r)
+		out[r.AniListID] = facts{rec: r, m: m}
 	}
-	if got := parsed.aniListMappings[11].Specials; !slices.Equal(got, []int{5, 6}) {
-		t.Errorf("parseAnimap aniListMappings[11].Specials = %v, want [5 6]", got)
-	}
-	if got := parsed.listFacts(); got != 0 {
-		t.Errorf("parseAnimap listFacts() = %d, want 0: a placement is not a mapping list", got)
-	}
-	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, AniListMappings: parsed.aniListMappings})
-	for _, id := range []int{10, 11} {
-		rec, _ := idx.Lookup(id)
-		if got, _ := idx.MappingFor(&rec); !slices.Equal(got.Specials, []int{5, 6}) {
-			t.Errorf("MappingFor(AniList %d) Specials = %v, want [5 6] on the record's own series", id, got.Specials)
-		}
-	}
-}
-
-// TestParseAnimap_keysFactsByTheirJoin pins where each record's facts land: under
-// its AniDB id whether or not it carries an AniList id, and under its AniList
-// id when it has no AniDB id, anidb_parent or not.
-func TestParseAnimap_keysFactsByTheirJoin(t *testing.T) {
-	special := `"tvdb_id":1,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]`
-	body := animapBody(`[` +
-		`{"anilist_id":10,"anidb_id":100,` + special + `},` +
-		`{"anilist_id":11,"anidb_parent":{"anidb_id":500,"specials":[1]},` + special + `},` +
-		`{"anilist_id":13,` + special + `},` +
-		`{"anilist_id":14,"anidb_parent":{"specials":[1]},` + special + `},` +
-		`{"anidb_id":200,` + special + `},` +
-		`{"anilist_id":12,"anidb_id":300,"tvdb_id":1,"tvdb_season":1}]`)
-	parsed, err := parseAnimap(body, discardLogger())
-	if err != nil {
-		t.Fatalf("parseAnimap error: %v", err)
-	}
-	want := map[int]Mapping{100: {SpecialEpisode: 8}, 200: {SpecialEpisode: 8}}
-	if !maps.EqualFunc(parsed.mappings, want, sameMapping) {
-		t.Errorf("parseAnimap mappings = %+v, want %+v (a record with no facts keeps no entry)", parsed.mappings, want)
-	}
-	wantAniList := map[int]Mapping{11: {SpecialEpisode: 8}, 13: {SpecialEpisode: 8}, 14: {SpecialEpisode: 8}}
-	if !maps.EqualFunc(parsed.aniListMappings, wantAniList, sameMapping) {
-		t.Errorf("parseAnimap AniList-keyed mappings = %+v, want %+v", parsed.aniListMappings, wantAniList)
-	}
+	return p, out
 }
 
 func sameMapping(a, b Mapping) bool {
-	return a.SpecialEpisode == b.SpecialEpisode && slices.Equal(a.Seasons, b.Seasons) && slices.Equal(a.Specials, b.Specials) &&
-		slices.Equal(a.Episodes, b.Episodes) && a.EpisodesTvdb == b.EpisodesTvdb && a.EpisodesSeason == b.EpisodesSeason
+	return slices.Equal(a.Seasons, b.Seasons) && a.SeasonsTvdb == b.SeasonsTvdb &&
+		slices.Equal(a.Specials, b.Specials) && slices.Equal(a.Episodes, b.Episodes) && a.SpecialsTvdb == b.SpecialsTvdb && a.SpecialsEpisodes == b.SpecialsEpisodes &&
+		a.EpisodesTvdb == b.EpisodesTvdb && a.EpisodesSeason == b.EpisodesSeason && a.SpecialEpisode == b.SpecialEpisode
 }
 
-// A placement wholly on the record's positive season gives the episodes it
-// names; any other placement gives none.
-func TestParseAnimap_episodesOfAPositiveSeason(t *testing.T) {
-	for _, tc := range []struct {
-		name, record string
-		want         []int
-	}{
-		{"one film of a season", `"tvdb_id":82099,"tvdb_season":1,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":1,"episode":1}]`, []int{1}},
-		{"a season in two runs", `"tvdb_id":5,"tvdb_season":2,"episodes":3,"tvdb_placement":[{"start":1,"end":2,"season":2,"episode":4},{"start":3,"end":3,"season":2,"episode":9}]`, []int{4, 5, 9}},
-		{"one episode on two targets", `"tvdb_id":5,"tvdb_season":2,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4},{"start":1,"end":1,"season":2,"episode":5}]`, []int{4, 5}},
-		{"season 0", `"tvdb_id":5,"tvdb_season":0,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":4}]`, nil},
-		{"a run on another season", `"tvdb_id":5,"tvdb_season":2,"episodes":2,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4},{"start":2,"end":2,"season":3,"episode":1}]`, nil},
-		{"an episode on none", `"tvdb_id":5,"tvdb_season":2,"episodes":2,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4},{"start":2,"end":2}]`, nil},
-		{"a placement short of the count", `"tvdb_id":5,"tvdb_season":2,"episodes":3,"tvdb_placement":[{"start":1,"end":2,"season":2,"episode":4}]`, nil},
-		{"no tvdb_id", `"tvdb_season":2,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":2,"episode":4}]`, nil},
-		{"a run past the expansion cap", `"tvdb_id":5,"tvdb_season":2,"episodes":2000,"tvdb_placement":[{"start":1,"end":2000,"season":2,"episode":1}]`, nil},
-		{"no placement", `"tvdb_id":5,"tvdb_season":2,"episodes":1`, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			parsed, err := parseAnimap(animapBody(`[{"anilist_id":7,`+tc.record+`}]`), discardLogger())
-			if err != nil {
-				t.Fatalf("parseAnimap error: %v", err)
-			}
-			got := parsed.aniListMappings[7]
-			if !slices.Equal(got.Episodes, tc.want) {
-				t.Errorf("Episodes = %v, want %v", got.Episodes, tc.want)
-			}
-			if tc.want != nil && (got.EpisodesTvdb <= 0 || got.EpisodesSeason < 1) {
-				t.Errorf("Episodes on TVDB %d season %d, want the record's series and season", got.EpisodesTvdb, got.EpisodesSeason)
-			}
-		})
-	}
-}
-
-func TestParseAnimap_refusesWhatIsNotAVersionOneDocument(t *testing.T) {
+// TestProject_derivesTheRecordFromWhereTheEpisodesLand pins how the season
+// kind and season, and each fact, follow from where an entry's episodes land
+// on TVDB.
+func TestProject_derivesTheRecordFromWhereTheEpisodesLand(t *testing.T) {
+	const series = 500
 	tests := []struct {
-		want error
-		name string
-		body string
+		name       string
+		runs       []mapread.Run
+		want       Mapping
+		episodes   int
+		wantKind   SeasonKind
+		wantSeason int
 	}{
-		{name: "array", body: `[{"anilist_id":1}]`, want: errNotAnimapDocument},
-		{name: "null", body: `null`, want: errNotAnimapDocument},
-		{name: "no records", body: `{"version":1}`, want: errNotAnimapDocument},
-		{name: "null records", body: `{"version":1,"records":null}`, want: errNotAnimapDocument},
-		{name: "records not an array", body: `{"version":1,"records":{}}`, want: errNotAnimapDocument},
-		{name: "repeated records", body: `{"version":1,"records":[],"records":[]}`, want: errNotAnimapDocument},
-		{name: "version not a number", body: `{"version":"1","records":[]}`, want: errNotAnimapDocument},
-		{name: "a later version", body: `{"version":2,"records":[{"anilist_id":1}]}`, want: errUnsupportedVersion},
-		{name: "no version", body: `{"records":[{"anilist_id":1}]}`, want: errUnsupportedVersion},
+		{
+			name: "stated on one positive season", episodes: 3, runs: []mapread.Run{regular(1, 3, targets(at(2, 5)))},
+			wantKind: SeasonPresent, wantSeason: 2,
+			want: Mapping{Seasons: []SeasonRange{{Season: 2, First: 1, Last: 3}}, SeasonsTvdb: series, Episodes: []int{5, 6, 7}, EpisodesTvdb: series, EpisodesSeason: 2},
+		},
+		{
+			name: "one positive season by default", episodes: 3, runs: []mapread.Run{regular(1, 3, targets(dflt(1, 1)))},
+			wantKind: SeasonPresent, wantSeason: 1,
+			want: Mapping{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 3}}, SeasonsTvdb: series},
+		},
+		{
+			name: "one positive season and an episode landing nowhere", episodes: 3, runs: []mapread.Run{regular(1, 2, targets(at(1, 1)))},
+			wantKind: SeasonPresent, wantSeason: 1,
+			want: Mapping{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 2}}, SeasonsTvdb: series},
+		},
+		{
+			name: "one positive season and season 0", episodes: 3,
+			runs:     []mapread.Run{regular(1, 2, targets(at(1, 1))), regular(3, 3, targets(at(0, 4)))},
+			wantKind: SeasonPresent, wantSeason: 1,
+			want: Mapping{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 2}}, SeasonsTvdb: series},
+		},
+		{
+			name: "two positive seasons", episodes: 4,
+			runs:     []mapread.Run{regular(1, 2, targets(at(1, 1))), regular(3, 4, targets(at(2, 1)))},
+			wantKind: SeasonAbsent,
+			want:     Mapping{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 2}, {Season: 2, First: 3, Last: 4}}, SeasonsTvdb: series},
+		},
+		{
+			name: "an episode with nothing stated", episodes: 3,
+			runs:     []mapread.Run{regular(1, 1, nil), regular(2, 3, targets(at(2, 1)))},
+			wantKind: SeasonAbsent,
+			want:     Mapping{Seasons: []SeasonRange{{Season: 2, First: 2, Last: 3}}, SeasonsTvdb: series},
+		},
+		{
+			name: "stated wholly on season 0", episodes: 2, runs: []mapread.Run{regular(1, 2, targets(at(0, 7)))},
+			wantKind: SeasonPresent,
+			want:     Mapping{Specials: []int{7, 8}, SpecialsTvdb: series, SpecialsEpisodes: 2},
+		},
+		{
+			name: "season 0 and an episode landing nowhere", episodes: 2, runs: []mapread.Run{regular(1, 1, targets(at(0, 7)))},
+			wantKind: SeasonPresent,
+			want:     Mapping{Specials: []int{7}, SpecialsTvdb: series},
+		},
+		{
+			name: "one episode on two season-0 episodes", episodes: 1, runs: []mapread.Run{regular(1, 1, targets(at(0, 3), at(0, 4)))},
+			wantKind: SeasonPresent,
+			want:     Mapping{Specials: []int{3, 4}, SpecialsTvdb: series, SpecialsEpisodes: 1},
+		},
+		{
+			name: "season 0 by default", episodes: 1, runs: []mapread.Run{regular(1, 1, targets(dflt(0, 1)))},
+			wantKind: SeasonPresent,
+		},
+		{
+			name: "a default agreeing with the stated special episode", episodes: 3,
+			runs:     []mapread.Run{regular(1, 1, targets(at(0, 2))), regular(2, 2, targets(dflt(0, 2))), regular(3, 3, targets(at(0, 2)))},
+			wantKind: SeasonPresent,
+			want:     Mapping{SpecialEpisode: 2, SpecialsTvdb: series},
+		},
+		{
+			name: "a default naming another special episode", episodes: 3,
+			runs:     []mapread.Run{regular(1, 1, targets(at(0, 51))), regular(2, 3, targets(dflt(0, 2)))},
+			wantKind: SeasonPresent,
+		},
+		{
+			name: "a default agreeing with the stated special episode beside one landing nowhere", episodes: 3,
+			runs:     []mapread.Run{regular(1, 1, targets(at(0, 2))), regular(2, 2, targets(dflt(0, 2)))},
+			wantKind: SeasonPresent,
+		},
+		{
+			name: "a default agreeing with the stated special episode beside an unstated one", episodes: 3,
+			runs:     []mapread.Run{regular(1, 1, targets(at(0, 2))), regular(2, 2, targets(dflt(0, 2))), regular(3, 3, nil)},
+			wantKind: SeasonAbsent,
+		},
+		{
+			name: "lands nowhere at all", episodes: 2,
+			wantKind: SeasonPresent,
+		},
+		{
+			name:     "no episodes",
+			wantKind: SeasonAbsent,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			parsed, err := parseAnimap([]byte(tc.body), discardLogger())
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("parseAnimap(%s) error = %v, want %v", tc.body, err, tc.want)
+			a := mapread.Anime{AniDBID: 10, Type: "TV", TVDBID: series, Last: mapread.Last{Regular: tc.episodes}, Episodes: tc.runs}
+			e := mapread.Entry{AniListID: 1, Type: "TV", Parts: []mapread.Part{{AniDBID: 10, Kind: mapread.Regular}}}
+			p, got := projected(t, encode(t, document([]mapread.Anime{a}, []mapread.Entry{e})))
+			rec := got[1].rec
+			if rec.AniDBID != 10 || rec.TvdbID != series || rec.SeasonKind != tc.wantKind || rec.SeasonTvdb != tc.wantSeason {
+				t.Errorf("record = %+v, want AniDB 10 on TVDB %d with season %s %d", rec, series, tc.wantKind, tc.wantSeason)
 			}
-			if parsed.records != nil || parsed.mappings != nil || parsed.elements != 0 {
-				t.Errorf("parseAnimap(%s) returned a partial result %+v alongside its error", tc.body, parsed)
+			if !sameMapping(got[1].m, tc.want) {
+				t.Errorf("MappingFor = %+v, want %+v", got[1].m, tc.want)
+			}
+			if !sameMapping(p.mappings[10], tc.want) || len(p.aniListMappings) != 0 {
+				t.Errorf("facts keyed %+v by AniDB and %+v by AniList, want %+v under AniDB 10 only", p.mappings, p.aniListMappings, tc.want)
 			}
 		})
 	}
 }
 
-// TestParseAnimap_transientFailuresCarryNoSentinel pins that an empty body and a
-// body truncated mid-stream are not content-shape evidence: both can succeed on
-// the next attempt, so neither may carry a sentinel that advances the streak.
-func TestParseAnimap_transientFailuresCarryNoSentinel(t *testing.T) {
-	for _, body := range []string{"", "  \n", `{"version":1,"records":[{"anilist_id":1,`, `{"version":1,"records":[]} trailing`} {
-		_, err := parseAnimap([]byte(body), discardLogger())
-		if err == nil {
-			t.Fatalf("parseAnimap(%q) error = nil, want a parse failure", body)
+// TestProject_routesAndKeys pins the ids and join keys: a whole anime's
+// films and its AniDB id, a link's facts under its AniList id, an anime no
+// entry names keyed for an override, and an entry on two TVDB series or on
+// none, which carries no series, season or facts.
+func TestProject_routesAndKeys(t *testing.T) {
+	anime := []mapread.Anime{
+		{
+			AniDBID: 1, Type: "MOVIE", TVDBID: 500, TMDBMovieIDs: []int{42}, IMDbIDs: []string{"tt0000042"}, Last: mapread.Last{Regular: 1, Special: 2},
+			Episodes: []mapread.Run{regular(1, 1, targets(at(0, 3))), {Kind: mapread.Special, Start: 1, End: 2, TVDB: targets(at(0, 8))}},
+		},
+		{AniDBID: 2, Type: "TV", TVDBID: 600, Last: mapread.Last{Regular: 2}, Episodes: []mapread.Run{regular(1, 2, targets(at(1, 1)))}},
+		{AniDBID: 3, Type: "MOVIE", TMDBMovieIDs: []int{77}, Last: mapread.Last{Regular: 1}},
+		{AniDBID: 4, Type: "TV", TVDBID: 700, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{regular(1, 1, targets(at(0, 1)))}},
+	}
+	entries := []mapread.Entry{
+		{AniListID: 10, Type: "MOVIE", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Regular}}},
+		{AniListID: 11, Type: "SPECIAL", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Special, Start: 1, End: 2}}},
+		{AniListID: 12, Type: "TV", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Special, Start: 1, End: 1}, {AniDBID: 2, Kind: mapread.Regular, Start: 1, End: 2}}},
+		{AniListID: 13, Type: "MOVIE", Parts: []mapread.Part{{AniDBID: 3, Kind: mapread.Regular}}},
+		{AniListID: 14, Type: "TV", IDs: &mapread.IDs{AniDB: []int{2, 4}}},
+		{Type: "TV", IDs: &mapread.IDs{Kitsu: []int{9}}, Parts: []mapread.Part{{AniDBID: 2, Kind: mapread.Regular}}},
+	}
+	p, got := projected(t, encode(t, document(anime, entries)))
+	t.Run("a whole film", func(t *testing.T) {
+		r := got[10].rec
+		if r.AniDBID != 1 || r.TvdbID != 500 || !slices.Equal(r.TmdbMovies, []int{42}) || !slices.Equal(r.IMDbIDs, []string{"tt0000042"}) ||
+			r.SeasonKind != SeasonPresent || r.SeasonTvdb != 0 {
+			t.Errorf("record = %+v, want AniDB 1, TVDB 500 season 0, its film ids", r)
 		}
-		for _, sentinel := range []error{errNotAnimapDocument, errUnsupportedVersion, errRecordCapExceeded, errIdentifierBudgetExceeded} {
-			if errors.Is(err, sentinel) {
-				t.Errorf("parseAnimap(%q) error = %v, want no persistent sentinel (%v)", body, err, sentinel)
+		if !slices.Equal(got[10].m.Specials, []int{3}) || got[10].m.SpecialsEpisodes != 1 {
+			t.Errorf("facts = %+v, want S00E03 answering 1 episode", got[10].m)
+		}
+	})
+	t.Run("a link to specials", func(t *testing.T) {
+		r := got[11].rec
+		if r.AniDBID != 0 || r.TvdbID != 500 || r.TmdbMovies != nil || r.IMDbIDs != nil {
+			t.Errorf("record = %+v, want no AniDB id, TVDB 500 and none of its parent's film ids", r)
+		}
+		want := Mapping{Specials: []int{8, 9}, SpecialsTvdb: 500, SpecialsEpisodes: 2}
+		if !sameMapping(got[11].m, want) || !sameMapping(p.aniListMappings[11], want) {
+			t.Errorf("facts = %+v, keyed %+v, want %+v under AniList 11", got[11].m, p.aniListMappings[11], want)
+		}
+	})
+	t.Run("an entry on two TVDB series", func(t *testing.T) {
+		r := got[12].rec
+		if r.TvdbID != 0 || r.SeasonKind != SeasonAbsent || r.HasArrIdentifier() {
+			t.Errorf("record = %+v, want no TVDB id and an absent season: the arrs key a series by one id", r)
+		}
+		if _, ok := p.aniListMappings[12]; ok {
+			t.Errorf("facts for an entry on two series = %+v, want none", p.aniListMappings[12])
+		}
+	})
+	t.Run("a film with no series", func(t *testing.T) {
+		r := got[13].rec
+		if r.TvdbID != 0 || r.SeasonKind != SeasonAbsent || !slices.Equal(r.TmdbMovies, []int{77}) || !r.HasArrIdentifier() {
+			t.Errorf("record = %+v, want the TMDB movie and no series", r)
+		}
+	})
+	t.Run("an ambiguous entry", func(t *testing.T) {
+		if r := got[14].rec; r.AniDBID != 0 || r.TvdbID != 0 || r.Type != "TV" || r.SeasonKind != SeasonAbsent {
+			t.Errorf("record = %+v, want a type and nothing else", r)
+		}
+	})
+	t.Run("keys", func(t *testing.T) {
+		if keys := slices.Sorted(maps.Keys(p.mappings)); !slices.Equal(keys, []int{1, 2, 4}) {
+			t.Errorf("AniDB-keyed facts = %v, want every anime on a TVDB series with facts, AniDB 4 included", keys)
+		}
+		if len(p.records) != 5 || p.entries != 6 {
+			t.Errorf("records = %d, entries = %d, want 5 AniList records of 6 entry rows", len(p.records), p.entries)
+		}
+	})
+}
+
+// TestProject_overrideOnAnAnimeNoEntryNamesKeepsItsSeasonRanges pins that
+// an anime's season ranges travel with their series: an override naming an
+// anime no entry is the whole of keeps them on that series, and loses them
+// on another.
+func TestProject_overrideOnAnAnimeNoEntryNamesKeepsItsSeasonRanges(t *testing.T) {
+	a := mapread.Anime{AniDBID: 20, Type: "TV", TVDBID: 800, Last: mapread.Last{Regular: 8}, Episodes: []mapread.Run{regular(1, 8, targets(dflt(1, 1)))}}
+	e := mapread.Entry{AniListID: 30, Type: "TV", Parts: []mapread.Part{{AniDBID: 20, Kind: mapread.Regular, Start: 1, End: 4}}}
+	p, _ := projected(t, encode(t, document([]mapread.Anime{a}, []mapread.Entry{e})))
+	want := []SeasonRange{{Season: 1, First: 1, Last: 8}}
+	for _, tc := range []struct {
+		want   []SeasonRange
+		name   string
+		series int
+	}{
+		{name: "on its series", series: 800, want: want},
+		{name: "on another series", series: 801},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			override := Record{AniListID: 31, Type: "TV", AniDBID: 20, TvdbID: tc.series, SeasonKind: SeasonAbsent}
+			idx := NewIndex(Source{Records: p.records, Mappings: p.mappings, AniListMappings: p.aniListMappings, Overrides: []Record{override}})
+			if got, _ := idx.MappingFor(&override); !slices.Equal(got.Seasons, tc.want) {
+				t.Errorf("MappingFor(override of AniDB 20 on TVDB %d).Seasons = %+v, want %+v", tc.series, got.Seasons, tc.want)
+			}
+		})
+	}
+}
+
+// fixture is a subset of animap's 2026-10 version 2 build (content hash
+// fe2e67a1…6fe7ef): the entries these tests name and every anime their parts
+// reach, with AniDB's episode listing and the service ids left out, which
+// the projection does not read.
+func fixture(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/animap-v2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestProject_realBuild pins the projection of real-build entries, each one
+// kind of answer.
+func TestProject_realBuild(t *testing.T) {
+	_, got := projected(t, fixture(t))
+	tests := []struct {
+		name       string
+		kind       SeasonKind
+		aniList    int
+		tvdb       int
+		season     int
+		specials   []int
+		episodes   []int
+		count      int
+		special    int
+		seasons    []SeasonRange
+		allSeasons bool
+	}{
+		{
+			name: "Cowboy Bebop on one season", aniList: 1, tvdb: 76885, kind: SeasonPresent, season: 1,
+			seasons: []SeasonRange{{Season: 1, First: 1, Last: 26}}, allSeasons: true,
+		},
+		{
+			name: "absolute numbering whose rows place only the second half", aniList: 132, tvdb: 79056, kind: SeasonAbsent,
+			seasons: []SeasonRange{{Season: 2, First: 26, Last: 49}}, allSeasons: true,
+		},
+		{
+			name: "an absolute node whose rows put every episode on one season", aniList: 99749, tvdb: 114801, kind: SeasonPresent, season: 8,
+			seasons: []SeasonRange{{Season: 8, First: 1, Last: 51}}, episodes: seq(1, 51), allSeasons: true,
+		},
+		{name: "a film whose six parts are one special", aniList: 2013, tvdb: 80054, kind: SeasonPresent, specials: []int{23}, count: 6},
+		{name: "a special filed under season 5 that lands nowhere", aniList: 21745, tvdb: 102261, kind: SeasonPresent},
+		{
+			name: "a film filed under season 3 stated on season 6", aniList: 21286, tvdb: 79460, kind: SeasonPresent, season: 6,
+			seasons: []SeasonRange{{Season: 6, First: 1, Last: 22}}, episodes: seq(1, 22), allSeasons: true,
+		},
+		{
+			name: "cours split by rows", aniList: 28, tvdb: 76014, kind: SeasonAbsent,
+			seasons: []SeasonRange{{Season: 1, First: 1, Last: 26}, {Season: 2, First: 27, Last: 52}, {Season: 3, First: 53, Last: 69}}, allSeasons: true,
+		},
+		{name: "a link to four specials", aniList: 10020, tvdb: 194961, kind: SeasonPresent, specials: []int{1, 2, 3, 4}, count: 4},
+		{name: "a film whose rows and default name one special", aniList: 1006, tvdb: 80009, kind: SeasonPresent, special: 2},
+		{name: "a film whose rows and defaults name different specials", aniList: 12117, tvdb: 72454, kind: SeasonPresent},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, ok := got[tc.aniList]
+			if !ok {
+				t.Fatalf("AniList %d has no record", tc.aniList)
+			}
+			if f.rec.TvdbID != tc.tvdb || f.rec.SeasonKind != tc.kind || f.rec.SeasonTvdb != tc.season {
+				t.Errorf("record = %+v, want TVDB %d season %s %d", f.rec, tc.tvdb, tc.kind, tc.season)
+			}
+			if !tc.allSeasons {
+				tc.seasons = f.m.Seasons
+			}
+			want := Mapping{Seasons: tc.seasons, Specials: tc.specials, Episodes: tc.episodes, SpecialsEpisodes: tc.count, SpecialEpisode: tc.special}
+			if len(tc.seasons) > 0 {
+				want.SeasonsTvdb = tc.tvdb
+			}
+			if tc.specials != nil || tc.special != 0 {
+				want.SpecialsTvdb = tc.tvdb
+			}
+			if tc.episodes != nil {
+				want.EpisodesTvdb, want.EpisodesSeason = tc.tvdb, tc.season
+			}
+			if !sameMapping(f.m, want) {
+				t.Errorf("facts = %+v, want %+v", f.m, want)
+			}
+		})
+	}
+}
+
+func seq(from, to int) []int {
+	out := make([]int, 0, to-from+1)
+	for i := from; i <= to; i++ {
+		out = append(out, i)
+	}
+	return out
+}
+
+// TestProject_onePieceEpisode590 pins the hole a single range per season
+// would claim: AniList 21's entry episodes 579 to 589 and 591 to 628 land on
+// season 16 and episode 590 on S00E39, so season 16 is two ranges and no
+// range holds 590.
+func TestProject_onePieceEpisode590(t *testing.T) {
+	_, got := projected(t, fixture(t))
+	f := got[21]
+	if f.rec.SeasonKind != SeasonAbsent || f.rec.TvdbID != 81797 {
+		t.Fatalf("record = %+v, want TVDB 81797 compared on the whole series", f.rec)
+	}
+	var sixteen []SeasonRange
+	for _, r := range f.m.Seasons {
+		if r.Season == 16 {
+			sixteen = append(sixteen, r)
+		}
+		if r.First <= 590 && 590 <= r.Last {
+			t.Errorf("range %+v holds episode 590, which lands on season 0", r)
+		}
+	}
+	if want := []SeasonRange{{Season: 16, First: 579, Last: 589}, {Season: 16, First: 591, Last: 628}}; !slices.Equal(sixteen, want) {
+		t.Errorf("season 16 ranges = %+v, want %+v", sixteen, want)
+	}
+}
+
+// TestProject_seasonRangesAreTheMaximalRuns holds every entry of the
+// fixture to the range rule, read back through mapread: each range's entry
+// episodes all land on its season and the episodes either side do not, and
+// every landing on a positive season sits in exactly one range of it.
+func TestProject_seasonRangesAreTheMaximalRuns(t *testing.T) {
+	body := fixture(t)
+	_, got := projected(t, body)
+	doc, err := mapread.Decode(bytes.NewReader(body), mapread.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := mapread.NewIndex(doc)
+	for al, f := range got {
+		if f.rec.TvdbID == 0 {
+			continue
+		}
+		e, _ := x.Entry(al)
+		on := make(map[int]map[int]bool)
+		for _, ep := range x.Episodes(e) {
+			for _, sr := range x.OnTVDB(ep).Series {
+				for _, b := range sr.Seasons {
+					if b.Season > 0 {
+						if on[b.Season] == nil {
+							on[b.Season] = make(map[int]bool)
+						}
+						on[b.Season][ep.Number] = true
+					}
+				}
+			}
+		}
+		covered := make(map[int]map[int]int)
+		for _, r := range f.m.Seasons {
+			if on[r.Season][r.First-1] || on[r.Season][r.Last+1] {
+				t.Errorf("AniList %d range %+v is not maximal", al, r)
+			}
+			for n := r.First; n <= r.Last; n++ {
+				if !on[r.Season][n] {
+					t.Errorf("AniList %d range %+v holds episode %d, which does not land on season %d", al, r, n, r.Season)
+				}
+				if covered[r.Season] == nil {
+					covered[r.Season] = make(map[int]int)
+				}
+				covered[r.Season][n]++
+			}
+		}
+		for s, eps := range on {
+			for n := range eps {
+				if covered[s][n] != 1 {
+					t.Errorf("AniList %d episode %d on season %d is in %d ranges, want 1", al, n, s, covered[s][n])
+				}
 			}
 		}
 	}
-	if _, err := parseAnimap(nil, discardLogger()); !errors.Is(err, io.EOF) {
-		t.Errorf("parseAnimap(empty) error = %v, want it to wrap io.EOF", err)
+}
+
+// TestProject_boundsTheAnimeEpisodes pins the projection's own cap: the
+// anime facts expand every regular episode of every anime on TVDB, which
+// mapread's caps on the entries do not bound, so a document past the budget
+// is refused whole and one at it is read.
+func TestProject_boundsTheAnimeEpisodes(t *testing.T) {
+	doc := func() *mapread.Document {
+		return document([]mapread.Anime{
+			{AniDBID: 1, TVDBID: 5, Last: mapread.Last{Regular: 6}},
+			{AniDBID: 2, TVDBID: 6, Last: mapread.Last{Regular: 4}},
+			{AniDBID: 3, TMDBTVID: 7, Last: mapread.Last{Regular: 100}},
+		}, nil)
+	}
+	if _, err := project(doc(), 10); err != nil {
+		t.Errorf("project(10 episodes on TVDB, budget 10) = %v, want the document read", err)
+	}
+	if p, err := project(doc(), 9); !errors.Is(err, mapread.ErrTooLarge) || p.records != nil || p.mappings != nil {
+		t.Errorf("project(10 episodes on TVDB, budget 9) = %+v, %v, want nothing and mapread.ErrTooLarge", p, err)
 	}
 }
 
-// TestParseAnimap_toleratesMembersItDoesNotRead pins that additive schema
-// members, at the top level and on a record, neither fail nor change a record.
-func TestParseAnimap_toleratesMembersItDoesNotRead(t *testing.T) {
-	body := []byte(`{"sources":{"overlay":{"entries":3}},"records":[{"anilist_id":1,"type":"TV","tvdb_id":5,"future":[1,{"x":2}]}],"version":1,"attribution":{}}`)
-	parsed, err := parseAnimap(body, discardLogger())
-	if err != nil {
-		t.Fatalf("parseAnimap error: %v", err)
-	}
-	if len(parsed.records) != 1 || parsed.records[0].TvdbID != 5 {
-		t.Errorf("parseAnimap records = %+v, want the one record with tvdb 5", parsed.records)
-	}
-}
-
-// TestParseAnimap_skipsMalformedRecords pins the per-record tolerance: a member of
-// the wrong JSON type, an oversized record and an identifier list over its cap
-// each skip their record and keep the rest, and every element still counts.
-func TestParseAnimap_skipsMalformedRecords(t *testing.T) {
-	overList := `"imdb_ids":["tt0000001"` + strings.Repeat(`,"tt0000001"`, maxRecordIdentifiers) + `]`
-	oversized := `{"anilist_id":5,"type":"` + strings.Repeat("x", maxRecordBytes) + `"}`
-	body := animapBody(`[{"anilist_id":1,"tvdb_id":"100"},{"anilist_id":2,` + overList + `},` + oversized + `,{"anilist_id":3,"tvdb_id":300}]`)
-	parsed, err := parseAnimap(body, discardLogger())
-	if err != nil {
-		t.Fatalf("parseAnimap error: %v", err)
-	}
-	if len(parsed.records) != 1 || parsed.records[0].AniListID != 3 {
-		t.Errorf("parseAnimap records = %+v, want only the well-formed record 3", parsed.records)
-	}
-	if parsed.elements != 4 {
-		t.Errorf("parseAnimap elements = %d, want 4", parsed.elements)
-	}
-}
-
-func TestParseAnimap_recordCap(t *testing.T) {
-	if _, err := parseAnimap(keyedRecordsBody(maxRecords), discardLogger()); err != nil {
-		t.Fatalf("parseAnimap(exactly %d records) error: %v, want acceptance", maxRecords, err)
-	}
-	if _, err := parseAnimap(keyedRecordsBody(maxRecords+1), discardLogger()); !errors.Is(err, errRecordCapExceeded) {
-		t.Fatalf("parseAnimap(%d records) error = %v, want errRecordCapExceeded", maxRecords+1, err)
-	}
-}
-
-func TestParseAnimap_retainedBudgetCountsListFacts(t *testing.T) {
-	const idsPerRecord = maxRecordIdentifiers
-	n := maxRetainedTotal / idsPerRecord
-	var b strings.Builder
-	b.WriteByte('[')
-	ids := strings.TrimSuffix(strings.Repeat("1,", idsPerRecord), ",")
-	for i := range n {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"tmdb_movie_ids":[%s]}`, i+1, ids)
-	}
-	b.WriteByte(']')
-	if _, err := parseAnimap(animapBody(b.String()), discardLogger()); err != nil {
-		t.Fatalf("parseAnimap(exactly the budget in ids) error: %v, want acceptance", err)
-	}
-	withRange := strings.TrimSuffix(b.String(), "]") +
-		`,{"anidb_id":1,"tvdb_id":1,"mapping_list":[{"anidb_season":1,"tvdb_season":1,"start":1}]}]`
-	if _, err := parseAnimap(animapBody(withRange), discardLogger()); !errors.Is(err, errIdentifierBudgetExceeded) {
-		t.Fatalf("parseAnimap(budget plus one season range) error = %v, want errIdentifierBudgetExceeded", err)
-	}
-	withPlaced := strings.TrimSuffix(b.String(), "]") +
-		`,{"anidb_id":1,"tvdb_id":1,"tvdb_season":0,"episodes":1,"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":3}]}]`
-	if _, err := parseAnimap(animapBody(withPlaced), discardLogger()); !errors.Is(err, errIdentifierBudgetExceeded) {
-		t.Fatalf("parseAnimap(budget plus one placed special) error = %v, want errIdentifierBudgetExceeded", err)
+func TestMapping_SpecialRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		m         Mapping
+		want      []int
+		wantCount int
+	}{
+		{name: "every episode on season 0", m: Mapping{Specials: []int{4, 5}, SpecialsEpisodes: 2}, want: []int{4, 5}, wantCount: 2},
+		{name: "an episode landing nowhere", m: Mapping{Specials: []int{4}}},
+		{name: "one special episode beside a default", m: Mapping{SpecialEpisode: 4}, want: []int{4}},
+		{name: "specials win over the special episode", m: Mapping{Specials: []int{4, 5}, SpecialsEpisodes: 2, SpecialEpisode: 9}, want: []int{4, 5}, wantCount: 2},
+		{name: "no specials", m: Mapping{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 2}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, n := tc.m.SpecialRun()
+			if !slices.Equal(got, tc.want) || n != tc.wantCount {
+				t.Errorf("SpecialRun() = %v, %d, want %v, %d", got, n, tc.want, tc.wantCount)
+			}
+			if tc.m.Specials != nil && got != nil {
+				got[0] = -1
+				if tc.m.Specials[0] == -1 {
+					t.Error("SpecialRun returned the Mapping's own slice")
+				}
+			}
+		})
 	}
 }
