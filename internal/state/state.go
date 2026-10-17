@@ -1,6 +1,6 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
 // written atomically: the last library snapshot (for diffing), the cached animap
-// map plus its HTTP validators, the AniList fallback memo, and the degradation
+// map plus its release tag, the AniList fallback memo, and the degradation
 // streak counters with the conditions they escalated. It holds NO finding state:
 // internal/notify reports findings as STATE and rebuilds its whole set from each
 // pass. A missing file loads as an empty state (a cold start), never an error.
@@ -37,23 +37,22 @@ const (
 	fileMode = 0o600
 )
 
-// currentSchemaVersion is the schema version Save stamps into State.Version on
-// every write. Bump it when a persisted member moves or is renamed
-// incompatibly, so a future loader can detect the old shape and migrate (or
-// refuse) explicitly instead of silently zero-loading it. A file whose version
-// field is absent or zero is a legacy envelope written before versioning and
-// loads unchanged.
+// currentSchemaVersion is the envelope version Save stamps into State.Version.
+// Bump it only when an older binary must refuse the whole envelope: Load
+// refuses a newer version, and Save then refuses to overwrite that file. A
+// member that may be discarded on its own retires under a new JSON key instead
+// (as State.Mapping does), so its old shape zero-loads. An absent or zero
+// version is the legacy envelope written before versioning and loads unchanged.
 const currentSchemaVersion = 1
 
 // State is the persisted cross-cycle cache.
 type State struct {
 	Memo match.Memo `json:"anilist_memo"`
-	// Never the keys "mapping", "animap", "animap_v2" or "animap_v3": older
-	// files hold another upstream's cache, or facts decoded without the
-	// placement, its episode count or the AniList-keyed facts of every record
-	// with no AniDB id, which a 304 would keep serving; all must be ignored
-	// rather than served or revalidated.
-	Mapping mapping.Cache `json:"animap_v4"`
+	// Never the keys "mapping" or "animap" to "animap_v4": older files hold
+	// another upstream's cache or a projection of animap's version 1, whose
+	// records would load without their facts and be served on a failed
+	// refresh. A change to what the projection derives takes a new key.
+	Mapping mapping.Cache `json:"animap_v5"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
 	// judged that arr's fresh item count a suspicious truncation and carried its prior
 	// items forward instead.

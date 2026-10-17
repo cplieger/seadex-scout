@@ -396,15 +396,16 @@ func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
 	}
 }
 
-// TestFeedEntryInfoProjectsTheMappingList pins the projection of the record's
-// mapping facts onto the feed metadata. The twin's season-0 run is stamped ONLY
-// for the offered class, beside the title of the Sonarr series it is filed
-// under, whichever arr the entry resolved to, and a film keeps its own name. A
-// positive-season TV record, an untitled series, an override naming another
-// series and an unmapped record stamp nothing. Season ranges ride along for
-// every mapped record.
-func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
-	ranges := []mapping.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
+// TestFeedEntryInfoProjectsTheEpisodeFacts pins the projection of the
+// record's episode facts onto the feed metadata. The twin's season-0 run is
+// stamped ONLY for the offered class, beside the title of the Sonarr series it
+// is filed under, whichever arr the entry resolved to (one special episode
+// with an unknown count included); a film keeps its own name. Season ranges
+// ride along as the map splits them: One Piece's season 16 is two ranges
+// around entry episode 590, which lands on season 0. A film's ranges never
+// ride along.
+func TestFeedEntryInfoProjectsTheEpisodeFacts(t *testing.T) {
+	ranges := []mapping.SeasonRange{{Season: 15, First: 517, Last: 578}, {Season: 16, First: 579, Last: 589}, {Season: 16, First: 591, Last: 628}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "MOVIE", TvdbID: 79525, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 2, Type: "MOVIE", TvdbID: 79525, TmdbMovies: []int{5528}, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
@@ -415,13 +416,22 @@ func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 		{AniListID: 7, Type: "OVA", TvdbID: 79525, AniDBID: 8001, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 8, Type: "MOVIE", TvdbID: 79525, AniDBID: 905, SeasonKind: mapping.SeasonPresent},
 		{AniListID: 9, Type: "MOVIE", TvdbID: 81797, AniDBID: 6008, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 10, Type: "MOVIE", TvdbID: 79525, AniDBID: 906, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 11, Type: "TV", TvdbID: 79056, AniDBID: 272, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 12, Type: "MOVIE", TvdbID: 79525, AniDBID: 359, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 13, Type: "MOVIE", TvdbID: 81797, AniDBID: 359, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 14, Type: "MOVIE", TvdbID: 81797, AniDBID: 7000, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 3},
 	}, Mappings: map[int]mapping.Mapping{
-		6008: {SpecialEpisode: 4, SpecialsTvdb: 79525},
-		6009: {SpecialEpisode: 4, SpecialsTvdb: 70000},
-		7949: {SpecialEpisode: 1, SpecialsTvdb: 79525},
-		69:   {Seasons: ranges},
+		6008: {Specials: []int{4}, SpecialsTvdb: 79525, SpecialsEpisodes: 1},
+		6009: {Specials: []int{4}, SpecialsTvdb: 70000, SpecialsEpisodes: 1},
+		7949: {Specials: []int{1}, SpecialsTvdb: 79525, SpecialsEpisodes: 1},
+		69:   {Seasons: ranges, SeasonsTvdb: 81797},
 		8001: {Specials: []int{9, 10}, SpecialsTvdb: 79525, SpecialsEpisodes: 2},
-		905:  {SpecialEpisode: 8, Specials: []int{8, 12}, SpecialsTvdb: 79525, SpecialsEpisodes: 3},
+		905:  {Specials: []int{8, 12}, SpecialsTvdb: 79525, SpecialsEpisodes: 3},
+		906:  {Specials: []int{8}, SpecialsTvdb: 79525},
+		272:  {Seasons: []mapping.SeasonRange{{Season: 2, First: 26, Last: 49}}, SeasonsTvdb: 79056},
+		359:  {SpecialEpisode: 2, SpecialsTvdb: 79525},
+		7000: {Seasons: []mapping.SeasonRange{{Season: 3, First: 1, Last: 3}}, SeasonsTvdb: 81797},
 	}})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 79525, Title: "Code Geass", Year: 2006},
@@ -441,14 +451,17 @@ func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 		wantCount  int
 		wantSeries string
 	}{
-		{name: "a film only in Sonarr, from the mapping list", alID: 1, wantRun: []int{4}, wantSeries: "Code Geass"},
-		{name: "a film also in Radarr", alID: 2, wantRun: []int{4}, wantSeries: "Code Geass"},
+		{name: "a film only in Sonarr", alID: 1, wantRun: []int{4}, wantCount: 1, wantSeries: "Code Geass"},
+		{name: "a film also in Radarr", alID: 2, wantRun: []int{4}, wantCount: 1, wantSeries: "Code Geass"},
 		{name: "a positive-season TV record", alID: 3},
 		{name: "a blank-titled series", alID: 5},
 		{name: "no mapping", alID: 6},
-		{name: "a placement only", alID: 7, wantRun: []int{9, 10}, wantCount: 2, wantSeries: "Code Geass"},
-		{name: "a placement and a row disagreeing", alID: 8, wantRun: []int{8, 12}, wantCount: 3, wantSeries: "Code Geass"},
+		{name: "an OVA on two specials", alID: 7, wantRun: []int{9, 10}, wantCount: 2, wantSeries: "Code Geass"},
+		{name: "a film whose three episodes are two specials", alID: 8, wantRun: []int{8, 12}, wantCount: 3, wantSeries: "Code Geass"},
+		{name: "a film with an episode landing nowhere", alID: 10},
 		{name: "an override naming another series", alID: 9},
+		{name: "a film whose rows and default name one special", alID: 12, wantRun: []int{2}, wantSeries: "Code Geass"},
+		{name: "an override moving that film to another series", alID: 13},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := info(tc.alID)
@@ -465,11 +478,14 @@ func TestFeedEntryInfoProjectsTheMappingList(t *testing.T) {
 	if both := info(2); !both.IsMovie || both.Title != "Lelouch of the Resurrection" {
 		t.Errorf("info(2) = IsMovie %v Title %q, want the Radarr film unchanged", both.IsMovie, both.Title)
 	}
-	want := []indexer.SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 2, First: 9, Last: 30}}
+	want := []indexer.SeasonRange{{Season: 15, First: 517, Last: 578}, {Season: 16, First: 579, Last: 589}, {Season: 16, First: 591, Last: 628}}
 	if run := info(4); !slices.Equal(run.Seasons, want) {
 		t.Errorf("info(4).Seasons = %+v, want %+v", run.Seasons, want)
 	}
-	if film.Seasons != nil {
-		t.Errorf("info(1).Seasons = %+v, want nil (the list names no ranges for a film)", film.Seasons)
+	if partial := info(11); !slices.Equal(partial.Seasons, []indexer.SeasonRange{{Season: 2, First: 26, Last: 49}}) {
+		t.Errorf("info(11).Seasons = %+v, want the stated range kept for pack labels", partial.Seasons)
+	}
+	if film := info(14); film.Seasons != nil {
+		t.Errorf("info(14).Seasons = %+v, want nil (a film pins no season, so its ranges never title a pack)", film.Seasons)
 	}
 }

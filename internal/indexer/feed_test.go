@@ -323,12 +323,12 @@ func rotatedAbsolutePack(first, last int) *seadex.Torrent {
 	return t
 }
 
-// onePieceSeasons is the tail of One Piece's real mapping-list ranges: S21
-// 892-1085, S22 1086-1155, S23 open from 1156.
+// onePieceSeasons is the tail of One Piece's real season ranges: S21
+// 892-1085, S22 1086-1155, S23 1156-1168.
 var onePieceSeasons = []SeasonRange{
 	{Season: 21, First: 892, Last: 1085},
 	{Season: 22, First: 1086, Last: 1155},
-	{Season: 23, First: 1156},
+	{Season: 23, First: 1156, Last: 1168},
 }
 
 // TestPackSeasonLabelRangeBranch pins the third source of a pack's season token
@@ -348,17 +348,17 @@ func TestPackSeasonLabelRangeBranch(t *testing.T) {
 			{Name: "Show - S08E01 - 130.mkv"}, {Name: "Show - S08E02 - 131.mkv"},
 		}}, meta: EntryInfo{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 200}}}, want: "S08", wantOK: true},
 		{name: "rule two: inside one bounded range", t: absolutePack(1090, 1100), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S22", wantOK: true},
-		{name: "rule two: straddling a bounded range and the open one", t: absolutePack(1150, 1160), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: straddling two ranges", t: absolutePack(1150, 1160), meta: EntryInfo{Seasons: onePieceSeasons}},
 		{name: "rule two: filling a bounded range end to end", t: absolutePack(1086, 1155), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S22", wantOK: true},
-		{name: "rule two: inside the open range", t: absolutePack(1160, 1170), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S23", wantOK: true},
-		{name: "rule two: starting before the open range", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: inside the last range", t: absolutePack(1160, 1168), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S23", wantOK: true},
+		{name: "rule two: running past the last range", t: absolutePack(1160, 1170), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: starting before a range", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
 		// The span is the LOWEST and highest episode the files carry, not the first
 		// and last listed: a floor taken in list order puts this pack inside S22.
 		{name: "rule two: starting before a range, files out of order", t: rotatedAbsolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
 		{name: "rule two: spanning two bounded ranges", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons[:2]}},
-		// Overlapping upstream rows are not rejected by seasonRanges, so a span two
-		// ranges both contain is reachable from the wire; the label names one season
-		// or none.
+		// An entry episode landing on two seasons sits in a range of each; the
+		// label names one season or none.
 		{name: "rule two: two ranges both claim the span", t: absolutePack(120, 130), meta: EntryInfo{Seasons: []SeasonRange{
 			{Season: 1, First: 1, Last: 200}, {Season: 2, First: 100, Last: 300},
 		}}},

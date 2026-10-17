@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -251,19 +250,16 @@ func noNetworkClient() *http.Client {
 // plain load error, not a mapping.StaleMapError).
 func unreachableMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
-	return mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
+	return mapping.NewLoader(noNetworkClient(), noSource, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
-// emptyRecordsMapLoader returns a mapping loader whose upstream answers an empty
-// record array, so a fresh 200 indexes to nothing and the map is unusable
+// emptyRecordsMapLoader returns a mapping loader whose latest release holds no
+// entries, so a fresh download indexes to nothing and the map is unusable
 // through the accept path rather than the transport.
 func emptyRecordsMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("[]"))
-	}))
-	t.Cleanup(srv.Close)
-	return mapping.NewLoader(srv.Client(), srv.URL, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
+	client, src := animapRelease(t, 0, seriesDocument(t))
+	return mapping.NewLoader(client, src, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
 // aniStatsFn adapts an AniList client's Stats to the Deps.AniListStats

@@ -421,7 +421,7 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, noSource, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
 
@@ -493,7 +493,7 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(overrides), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger)),
+		Mapping: mapping.NewLoader(noNetworkClient(), noSource, mapping.WithOverridesPath(overrides), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger)),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
 		Auditor: audit.New(audit.Config{}),
