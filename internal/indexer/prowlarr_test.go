@@ -429,8 +429,8 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 			if strings.Contains(err.Error(), tc.secret[:8]) {
 				t.Errorf("returned error leaks the transmitted credential (or a prefix): %v", err)
 			}
-			if !strings.Contains(err.Error(), "REDACTED") {
-				t.Errorf("returned error = %v, want REDACTED in place of the credential", err)
+			if !strings.Contains(err.Error(), "[redacted]") {
+				t.Errorf("returned error = %v, want [redacted] in place of the credential", err)
 			}
 			if rec.Contains(tc.secret[:8]) || rec.AttrContains("", "", tc.secret[:8]) {
 				t.Errorf("log records leak the transmitted credential (or a prefix): %v", rec.Records())
@@ -548,14 +548,14 @@ func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 	}
 }
 
-// TestUpstreamSearchRedactsAcrossTheSanitizer pins the ORDER of redactAndBound's
-// composition: redaction runs on both sides of the sanitizer, not only before it.
+// TestUpstreamSearchRedactsAcrossTheSanitizer pins that redaction matches the
+// credential in the sanitized text too, not only in the raw text.
 // runesafe normalizes every unsafe rune to U+0020, and four of this upstream's needles
 // carry a U+0020 (userinfo decoded from user%20name; a query credential whose '+'
 // decodes to a space, which base64 passkeys hit routinely), so an upstream that splits
 // the credential with an unsafe rune defeats the byte-exact needle and lets the
 // sanitizer REASSEMBLE it into the error text and the log stream (CWE-532). Every row
-// below fails when the composition is reduced to redact-then-sanitize.
+// below fails when redaction matches only the raw text.
 func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
 	tests := map[string]struct {
 		// username and password are the RAW userinfo credential (encoded into the feed
@@ -645,13 +645,55 @@ func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
 			if strings.Contains(err.Error(), tc.secret) {
 				t.Errorf("returned error leaks the credential the sanitizer reassembled: %v", err)
 			}
-			if !strings.Contains(err.Error(), "REDACTED") {
-				t.Errorf("returned error = %v, want REDACTED in place of the credential", err)
+			if !strings.Contains(err.Error(), "[redacted]") {
+				t.Errorf("returned error = %v, want [redacted] in place of the credential", err)
 			}
 			if rec.Contains(tc.secret) || rec.AttrContains("", "", tc.secret) {
 				t.Errorf("log records leak the credential the sanitizer reassembled: %v", rec.Records())
 			}
 		})
+	}
+}
+
+// TestClassifyParseErrorRedactsOverlappingOccurrences pins the overlap case: the
+// sanitized text "a a a" holds the key twice, sharing a rune, and redacting one
+// occurrence before finding the other leaves "a " readable.
+func TestClassifyParseErrorRedactsOverlappingOccurrences(t *testing.T) {
+	u := &upstream{name: upstreamNyaa, apiKey: "a a"}
+	err := u.classifyParseError(newUpstreamDocError("100", "a\ra a"))
+	docErr, ok := errors.AsType[*upstreamDocError](err)
+	if !ok {
+		t.Fatalf("classifyParseError = %T (%v), want the terminal *upstreamDocError", err, err)
+	}
+	if docErr.description != "[redacted]" {
+		t.Errorf("redacted description = %q, want %q", docErr.description, "[redacted]")
+	}
+}
+
+// TestUpstreamSearchRedactsQuotedCredential pins the strconv.Quote wire form: the
+// generic <size> decode error quotes the reflected value, so a credential carrying a
+// '"' reaches the error text escaped, where the raw needle no longer matches.
+func TestUpstreamSearchRedactsQuotedCredential(t *testing.T) {
+	const apiKey = `quoted"key-0123456789`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w,
+			`<?xml version="1.0" encoding="UTF-8"?><rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><item><title>x</title><size>GARBAGE-`+apiKey+`</size></item></channel></rss>`)
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL, apiKey: apiKey}
+	_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err == nil {
+		t.Fatal("search against a garbled <size> body returned nil error")
+	}
+	const tail = "key-0123456789"
+	if strings.Contains(err.Error(), tail) {
+		t.Errorf("returned error leaks the quoted credential: %v", err)
+	}
+	if rec.Contains(tail) || rec.AttrContains("", "", tail) {
+		t.Errorf("log records leak the quoted credential: %v", rec.Records())
 	}
 }
 
