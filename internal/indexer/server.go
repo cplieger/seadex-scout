@@ -14,7 +14,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/secretref"
-	"github.com/cplieger/webhttp/v3"
+	"github.com/cplieger/webhttp/v4"
 )
 
 const (
