@@ -724,9 +724,8 @@ func capLogText(s string, maxLen int) string {
 // upstreamTextMaxBytes bounds one untrusted upstream text value on its way to a log
 // line or an error message. It is named because TWO compositions must agree on it:
 // sanitizeUpstreamText below (upstreamDocError's emit boundary) and the upstream's
-// own redactAndBound (prowlarr.go), which bounds the same text after redacting it on
-// both sides of the sanitizer. A drift between the two would earn a second
-// truncation marker at the emit boundary.
+// classifyParseError (prowlarr.go), which bounds the same text while redacting it. A
+// drift between the two would earn a second truncation marker at the emit boundary.
 const upstreamTextMaxBytes = 200
 
 // sanitizeUpstreamText bounds and cleans an untrusted Torznab <error>

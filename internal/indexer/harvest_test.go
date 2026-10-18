@@ -1520,7 +1520,7 @@ func TestRequestScopedHarvestError(t *testing.T) {
 // TestRequestScopedClassificationSurvivesKeyRedaction pins the parse-before-
 // redact contract: classifyParseError scrubs a reflected Prowlarr API key
 // from the document's DISPLAY strings, and with a short all-digit key ("2")
-// that scrub rewrites a valid request code ("201" -> "REDACTED01") - but the
+// that scrub rewrites a valid request code ("201" -> "[redacted]01") - but the
 // show-vs-scope classification must still read the parse-time codeNum and
 // classify the rejection show-local, never re-parsing the redacted string
 // (the c2 audit regression: a one-show rejection wrongly condemned the whole
@@ -1532,10 +1532,10 @@ func TestRequestScopedClassificationSurvivesKeyRedaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("classifyParseError = %T (%v), want the terminal *upstreamDocError", err, err)
 	}
-	if docErr.code != "REDACTED01" {
-		t.Errorf("redacted code string = %q, want %q (display text scrubbed)", docErr.code, "REDACTED01")
+	if docErr.code != "[redacted]01" {
+		t.Errorf("redacted code string = %q, want %q (display text scrubbed)", docErr.code, "[redacted]01")
 	}
-	if !strings.Contains(docErr.description, "REDACTED") {
+	if !strings.Contains(docErr.description, "[redacted]") {
 		t.Errorf("redacted description = %q, want the key scrubbed", docErr.description)
 	}
 	if !requestScopedHarvestError(err) {
