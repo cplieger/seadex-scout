@@ -327,3 +327,184 @@ func TestDecideSingleUnitApproxPassThrough(t *testing.T) {
 		t.Errorf("Kind = %v, want ScopeOffered", d.Kind)
 	}
 }
+
+// TestDecideWithholdsANonAiredOrderSeries pins Decide's first guard: a
+// Sonarr series numbered in another order than TheTVDB's aired one cannot be
+// mapped to the TVDB seasons SeaDex entries are placed in, so every comparison
+// on it is withheld for the order, whatever its files hold or whether they
+// were read, with the record's scope kind and season; the same item in aired
+// order is compared as before.
+func TestDecideWithholdsANonAiredOrderSeries(t *testing.T) {
+	bookOrder := &library.Order{Type: "alternate", Name: "Book Order"}
+	monogatari := func() library.Item {
+		return library.Item{
+			Arr: library.ArrSonarr, ArrID: 2189, Title: "Monogatari", HasFile: true,
+			SeasonGroups: map[int][]string{0: {"sp"}, 1: {"wrong"}, 2: {"wrong"}},
+			Specials:     map[int]library.ListedEpisode{3: {Group: "sp", HasFile: true}},
+			Order:        bookOrder,
+		}
+	}
+	listing := &align.Listing{Best: []string{"best"}}
+	tests := []struct {
+		name       string
+		mutate     func(*library.Item)
+		entry      align.Entry
+		wantKind   align.ScopeKind
+		wantSeason int
+	}{
+		{name: "mapped season", entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
+		{name: "whole series", entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonKind: mapping.SeasonAbsent}}, wantKind: align.ScopeWholeSeries},
+		{name: "placed special", entry: align.Entry{Record: &mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonPresent}, Specials: []int{3}}, wantKind: align.ScopeOffered},
+		{name: "season with no file", mutate: func(it *library.Item) { it.SeasonGroups = nil; it.HasFile = false }, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
+		{name: "failed placeholder", mutate: func(it *library.Item) { *it = library.Item{Arr: library.ArrSonarr, Failed: true, Order: bookOrder} }, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 1},
+		// arrapi maps an empty Sonarr v5 seasonType to Order{}, an unknown order,
+		// never aired (arrapi sonarr/engine_sonarr_v5_api_v5.go, sonarrV5Series.order).
+		{name: "unknown order", mutate: func(it *library.Item) { it.Order = &library.Order{} }, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := monogatari()
+			if tt.mutate != nil {
+				tt.mutate(&item)
+			}
+			d := align.Decide(&item, &tt.entry, listing)
+			if d.Outcome != align.OutcomeWithheld || d.Withheld != align.WithheldOrder {
+				t.Errorf("Outcome, Withheld = %v, %v, want %v, %v", d.Outcome, d.Withheld, align.OutcomeWithheld, align.WithheldOrder)
+			}
+			if d.Kind != tt.wantKind || d.Season != tt.wantSeason {
+				t.Errorf("Kind, Season = %v, %d, want %v, %d (the record's)", d.Kind, d.Season, tt.wantKind, tt.wantSeason)
+			}
+			if len(d.Groups) != 0 || len(d.Episodes) != 0 {
+				t.Errorf("Groups, Episodes = %v, %v, want none: nothing was judged", d.Groups, d.Episodes)
+			}
+		})
+	}
+	t.Run("aired order compares", func(t *testing.T) {
+		item := monogatari()
+		item.Order = nil
+		d := align.Decide(&item, &align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, listing)
+		if d.Outcome != align.OutcomeDiverged || d.Withheld != align.WithheldNone {
+			t.Errorf("Outcome, Withheld = %v, %v, want %v, %v", d.Outcome, d.Withheld, align.OutcomeDiverged, align.WithheldNone)
+		}
+	})
+}
+
+// TestDecideAniListMembershipGuard pins that a season or whole-series
+// comparison on a Sonarr series whose AniList ids exclude the entry's is
+// withheld for AniList, while a member id or an empty list (Sonarr 4, or a
+// series Sonarr links to no AniList entry) compares. Offered and episodes
+// scopes are never withheld by it: Sonarr's list names only some of a series'
+// films and specials, so one missing from it proves nothing, and an entry
+// placed on part of a season is exempt too. The ids are Code Geass's
+// aniListIds in Sonarr 5's /api/v5/series answer; 20 is outside them.
+func TestDecideAniListMembershipGuard(t *testing.T) {
+	codeGeass := []int{1575, 2904, 12685, 97880}
+	series := func(ids []int) library.Item {
+		return library.Item{
+			Arr: library.ArrSonarr, ArrID: 33, Title: "Code Geass", HasFile: true,
+			SeasonGroups: map[int][]string{0: {"wrong"}, 1: {"wrong"}, 2: {"wrong"}},
+			Specials:     map[int]library.ListedEpisode{3: {Group: "wrong", HasFile: true}},
+			Listed: map[int]map[int]library.ListedEpisode{1: {
+				1: {Group: "wrong", HasFile: true}, 2: {Group: "wrong", HasFile: true},
+			}},
+			AniListIDs: ids,
+		}
+	}
+	seasonRec := &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
+	wholeRec := &mapping.Record{Type: "TV", SeasonKind: mapping.SeasonAbsent}
+	listing := &align.Listing{Best: []string{"best"}}
+	tests := []struct {
+		name         string
+		ids          []int
+		entry        align.Entry
+		wantKind     align.ScopeKind
+		wantWithheld bool
+	}{
+		{name: "season non-member", ids: codeGeass, entry: align.Entry{Record: seasonRec, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
+		{name: "season member", ids: codeGeass, entry: align.Entry{Record: seasonRec, AniListID: 2904}, wantKind: align.ScopeSeason},
+		{name: "season empty list", entry: align.Entry{Record: seasonRec, AniListID: 20}, wantKind: align.ScopeSeason},
+		{name: "whole series non-member", ids: codeGeass, entry: align.Entry{Record: wholeRec, AniListID: 20}, wantKind: align.ScopeWholeSeries, wantWithheld: true},
+		{name: "whole series member", ids: codeGeass, entry: align.Entry{Record: wholeRec, AniListID: 1575}, wantKind: align.ScopeWholeSeries},
+		{name: "whole series empty list", ids: []int{}, entry: align.Entry{Record: wholeRec, AniListID: 20}, wantKind: align.ScopeWholeSeries},
+		{name: "offered non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonPresent}, AniListID: 20}, wantKind: align.ScopeOffered},
+		{name: "special episodes non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonPresent}, Specials: []int{3}, AniListID: 20}, wantKind: align.ScopeEpisodes},
+		{name: "season episodes non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{1}, AniListID: 20}, wantKind: align.ScopeEpisodes},
+		// A placement that does not resolve to part of the season (every listed
+		// episode, an episode Sonarr does not list, a season whose listing is
+		// unknown) is a season comparison, so the guard applies to it.
+		{name: "placed on every listed episode non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{1, 2}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
+		{name: "placed on an unlisted episode non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{3}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
+		{name: "placed on an unlisted season non-member", ids: codeGeass, entry: align.Entry{Record: seasonRec, Episodes: []int{1}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := series(tt.ids)
+			d := align.Decide(&item, &tt.entry, listing)
+			if d.Kind != tt.wantKind {
+				t.Errorf("Kind = %v, want %v", d.Kind, tt.wantKind)
+			}
+			wantReason := align.WithheldNone
+			if tt.wantWithheld {
+				wantReason = align.WithheldAniList
+			}
+			if got := align.Withholding(&item, &tt.entry); got != wantReason {
+				t.Errorf("Withholding = %v, want %v", got, wantReason)
+			}
+			if tt.wantWithheld {
+				if d.Outcome != align.OutcomeWithheld || d.Withheld != align.WithheldAniList {
+					t.Errorf("Outcome, Withheld = %v, %v, want %v, %v", d.Outcome, d.Withheld, align.OutcomeWithheld, align.WithheldAniList)
+				}
+				if len(d.Groups) != 0 {
+					t.Errorf("Groups = %v, want none: nothing was judged", d.Groups)
+				}
+				return
+			}
+			if d.Outcome == align.OutcomeWithheld || d.Withheld != align.WithheldNone {
+				t.Errorf("Outcome, Withheld = %v, %v, want a compared outcome and no reason", d.Outcome, d.Withheld)
+			}
+		})
+	}
+	t.Run("order outranks AniList", func(t *testing.T) {
+		item := series(codeGeass)
+		item.Order = &library.Order{Type: "dvd"}
+		d := align.Decide(&item, &align.Entry{Record: seasonRec, AniListID: 20}, listing)
+		if d.Withheld != align.WithheldOrder {
+			t.Errorf("Withheld = %v, want %v (the order guard runs first)", d.Withheld, align.WithheldOrder)
+		}
+	})
+}
+
+// TestDecideAniListGuardOnAFailedPlaceholder pins that the guard reads no
+// file evidence: on a series whose file read failed it withholds a season or
+// whole-series entry the ids exclude, as on a walked one. An entry the map
+// places on episodes of its season is not withheld there, because the episode
+// listing the placeholder lacks could place it on part of the season, where
+// the guard does not apply; its file state is unknown, so it is unverifiable.
+func TestDecideAniListGuardOnAFailedPlaceholder(t *testing.T) {
+	failed := library.Item{Arr: library.ArrSonarr, ArrID: 33, Title: "Code Geass", Failed: true, AniListIDs: []int{1575, 2904, 12685, 97880}}
+	listing := &align.Listing{Best: []string{"best"}}
+	seasonRec := &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}
+	tests := []struct {
+		name         string
+		entry        align.Entry
+		wantWithheld align.WithholdReason
+		wantOutcome  align.Outcome
+	}{
+		{name: "season non-member", entry: align.Entry{Record: seasonRec, AniListID: 20}, wantWithheld: align.WithheldAniList, wantOutcome: align.OutcomeWithheld},
+		{name: "whole series non-member", entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonKind: mapping.SeasonAbsent}, AniListID: 20}, wantWithheld: align.WithheldAniList, wantOutcome: align.OutcomeWithheld},
+		{name: "season member", entry: align.Entry{Record: seasonRec, AniListID: 2904}, wantOutcome: align.OutcomeUnverifiable},
+		{name: "placed on season episodes non-member", entry: align.Entry{Record: seasonRec, Episodes: []int{1}, AniListID: 20}, wantOutcome: align.OutcomeUnverifiable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := failed
+			d := align.Decide(&item, &tt.entry, listing)
+			if d.Outcome != tt.wantOutcome || d.Withheld != tt.wantWithheld {
+				t.Errorf("Outcome, Withheld = %v, %v, want %v, %v", d.Outcome, d.Withheld, tt.wantOutcome, tt.wantWithheld)
+			}
+			if got := align.Withholding(&item, &tt.entry); got != tt.wantWithheld {
+				t.Errorf("Withholding = %v, want %v, Decide's reason", got, tt.wantWithheld)
+			}
+		})
+	}
+}

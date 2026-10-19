@@ -16,6 +16,8 @@ Informational cases log at `info`. Their statuses are `incomplete`, `theoretical
 
 Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per report row. A film or special both Sonarr and Radarr hold has a row for each copy, so it logs two.
 
+Each full pass and each report run logs one `info` line, `sonarr series uses a non-aired episode order; seadex-scout does not compare it`, for each Sonarr series that `arr_tags` includes and that is set to another episode order than TheTVDB's aired one. It names the series in `series` and `id`, the order in `order` and its Sonarr type in `order_type`. seadex-scout does not compare such a series, as [The report](how-it-works.md#the-report) explains. Set the series back to the aired order in Sonarr to have it compared again.
+
 When the library read was partial, `cycle degraded` has `reason=partial-walk` and `failed_items`, the number of SeaDex entries matched to an item that could not be read. A film both Sonarr and Radarr hold counts once for each.
 Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The [log contract](#log-contract) lists the stable attributes of each message.
 
@@ -87,13 +89,13 @@ Size is what the upgrade downloads, and Size change is how much your library gro
 
 The download is one set of torrents. A season pack, or a release whose files name no episode, is that torrent alone. A single episode stands for every single episode of the same release, which is the same group, tracker, resolution, codec, kind and dual audio, one torrent per episode. Each torrent counts at its full size, extras and samples included.
 
-The size it replaces is the files of yours that download covers whole. A file holding two episodes is replaced only when the download brings both. A film replaces its one file. seadex-scout reads which file holds each episode from Sonarr once a day, during the full check.
+The size it replaces is the files of yours that download covers whole. A file holding two episodes is replaced only when the download brings both. A film replaces its one file. A file Sonarr does not link to an episode, for example one part of an episode split across two files, is not counted, because a Sonarr upgrade does not replace it. seadex-scout reads which file holds each episode from Sonarr once a day, during the full check.
 
 A size stays unknown in these cases, among others:
 
 - The release mixes a pack with single episodes, two torrents name the same episode, or a file names no episode.
 - A torrent has no size or has neither an info hash nor a link, or two torrents of one download share an info hash or a link.
-- Sonarr's episode list for the series could not be read or marks a file without saying which, or a file names an episode of another season.
+- Sonarr's episode list for the series could not be read, marks a file without saying which, or names a file its file list lacks, as when a file is imported, an upgrade included, after the file list was read. Or a file names an episode of another season.
 - A covered episode has no file, or Sonarr or Radarr reports a file without its size.
 - An absolute episode number is carried by no episode of the series, by several, or by one in another season.
 - The download covers none of your files whole.
@@ -156,9 +158,11 @@ The messages in this table are the log contract. The rules in [`alerts/logql.yam
 | `tick degraded` | a quick check ran but could not compare, matched by `SeadexScoutScanStalled` | `reason` |
 | `reconcile started` | a full pass started, also matched by `SeadexScoutScanStalled` | |
 | `reconcile complete` | a full pass finished, matched by `SeadexScoutReconcileStalled` | |
+| `sonarr API unsupported` | at startup, at `error`, when the server answers but seadex-scout cannot read its API. seadex-scout still starts, and every full pass fails its library read with the same error until you fix it. The `error` text names the cause. When it names `/api/v5` or `X-Application-Version`, let that path or header through your reverse proxy. When it says a web page answered, fix the base path in the URL. When it names another application, point the URL at Sonarr or Radarr. When it says the version is not supported, run Sonarr 4 or Sonarr 5. When it says the API is not implemented, update seadex-scout | `error` |
+| `radarr API unsupported` | the same, for Radarr | `error` |
 | `indexer request` | one Torznab request from an arr or Prowlarr. `feed=true` marks a request with no search query: an RSS poll or an indexer test. `t` is the Torznab function, `returned` the items sent back and `curated` the SeaDex-curated items among them | `scope`, `feed`, `t`, `curated`, `returned` |
 | `indexer feed snapshot written` | the feed was rebuilt or advanced, and `journal_new` counts the releases newly added to the RSS feed | `journal_new`, `scope`, `nyaa_feed`, `ab_feed`, `ab_releases_skipped` |
-| `library summary` | each full pass whose library read was complete, with the daily library counts | `rows`, `have_best`, `have_alt`, `have_older_revision`, `have_unlisted`, `no_file`, `unverified`, `unattributed`, `not_on_seadex`, `anime_items`, `items_with_entry`, `items_all_best`, `items_all_best_or_alt` |
+| `library summary` | each full pass whose library read was complete, with the daily library counts | `rows`, `have_best`, `have_alt`, `have_older_revision`, `have_unlisted`, `no_file`, `unverified`, `unattributed`, `withheld`, `not_on_seadex`, `anime_items`, `items_with_entry`, `items_all_best`, `items_all_best_or_alt` |
 
 `SeadexScoutScanStalled` matches `(cycle|tick) (complete|degraded)`, and `duration` is a Go duration string. A gated `cycle degraded` line carries no `duration`, `library_items`, `findings` or `specials_unread`.
 
@@ -172,7 +176,7 @@ Every other message and attribute seadex-scout logs is diagnostic. It may be rew
 
 #### `SeadexScoutCycleError`
 
-This rule covers every `ERROR` line without a `condition` attribute. The usual cause is a failed read of the Sonarr or Radarr library, logged as `library walk failed`. Findings stop updating, and the container is marked unhealthy until a read works again. Check the arr `url` and `api_key`, that the arr is running, and that the `/config` volume is writable.
+This rule covers every `ERROR` line without a `condition` attribute. The usual cause is a failed read of the Sonarr or Radarr library, logged as `library walk failed`. Findings stop updating, and the container is marked unhealthy until a read works again. A read also fails when Sonarr answers as another version partway through it, after an upgrade (a minor one included) or with the url pointed at another Sonarr; its `error` names both versions, and the next pass reads the library again. A single transient Sonarr error during a read, such as a 503, is retried and does not fail it. Check the arr `url` and `api_key`, that the arr is running, and that the `/config` volume is writable.
 
 The other causes are also fixed on your side. The Torznab feed may have failed to start or crashed, for example because port `9118` is in use. Prowlarr may have rejected `indexer.prowlarr_api_key` or a Torznab URL. `state.json`, `overrides.json` or the health marker in `/tmp` may not be readable or writable.
 
@@ -198,7 +202,7 @@ Each condition of `SeadexScoutUpstreamUnavailable` has more detail than its mess
 - `seadex-catalogue-fetch-failing` also stops your library being checked against the whole catalogue. If SeaDex is unreachable at the same time, this is the same outage. The alert resolves after the next daily pass that downloads the catalogue, up to a day after SeaDex comes back.
 - `seadex-window-oversize` means that for about 2 hours, SeaDex has reported more changes in the last 48 hours than the quick check downloads at once. Until it clears, only the daily full pass picks up changes. It usually follows a large edit at SeaDex, and a container clock running behind has the same effect.
 - `anilist-lookups-failing` concerns title lookups at `graphql.anilist.co`. Anime matched by ID are not affected. The alert resolves after a daily pass whose lookups succeed.
-- `mapping-refresh-rejected` concerns the anime ID map, the animap file on GitHub. Matching continues on slightly older ID data, and on a first start with no saved copy, nothing is compared until an update is accepted. After you remove `state.json`, the next start rebuilds the caches, which can take about half an hour. The alert resolves once an update is accepted. A newer `animap.json` format that your version of seadex-scout cannot read, or a download GitHub moves to a server seadex-scout does not follow, is refused the same way, and updating seadex-scout clears it.
+- `mapping-refresh-rejected` concerns the anime ID map, the animap file on GitHub. Matching continues on slightly older ID data, and on a first start with no saved copy, nothing is compared until an update is accepted. After you remove `state.json`, the next start rebuilds the caches, which can take about half an hour. The alert resolves once an update is accepted. A newer `animap.json` format that your version of seadex-scout cannot read, a file that does not match its published checksum, or a download GitHub moves to a server seadex-scout does not follow, is refused the same way. Updating seadex-scout clears a format or server refusal at animap's next release.
 
 Each condition of `SeadexScoutLibraryDegraded` works like this:
 

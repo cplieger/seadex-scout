@@ -86,27 +86,27 @@ func twinRun(t *seadex.Torrent, info *EntryInfo) (first, last int, ok bool) {
 }
 
 // holdsOnlyTheEntry reports whether t's files are the entry's whole content and
-// nothing else, for a run of runLen TVDB episodes answering anidb AniDB episodes
+// nothing else, for a run of runLen TVDB episodes answering entry episodes
 // (0 when unknown). For a run, the episode census must count one episode per
-// AniDB or per TVDB episode, and only a census that recognised none falls back
+// entry or per TVDB episode, and only a census that recognised none falls back
 // to the primary payload count: unrecognised files must not pad a partial run
 // to its length. With the count unknown only a film can prove one file is the
 // whole entry: a row may name one episode of a several-episode OVA.
 func holdsOnlyTheEntry(t *seadex.Torrent, info *EntryInfo, runLen int) bool {
-	anidb := info.SpecialsEpisodes
+	entry := info.SpecialsEpisodes
 	files := len(payload.Names(t.Files))
 	episodes := payload.DistinctEpisodes(payload.Census(t.Files))
 	switch {
-	case files < 1 || files > max(anidb, runLen, 1) || episodes > max(anidb, runLen):
+	case files < 1 || files > max(entry, runLen, 1) || episodes > max(entry, runLen):
 		return false
-	case anidb == 0 && !info.IsMovie:
+	case entry == 0 && info.Kind != KindMovie:
 		return false
 	case runLen == 1:
 		return true
 	case episodes > 0:
-		return episodes == anidb || episodes == runLen
+		return episodes == entry || episodes == runLen
 	}
-	return files == anidb || files == runLen
+	return files == entry || files == runLen
 }
 
 // sonarrTwin expands a stored item carrying a film twin into the second wire

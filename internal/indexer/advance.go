@@ -8,6 +8,6 @@ import (
 
 // Advance folds a bounded WINDOW of recently-changed SeaDex entries into the
 // persisted feed. It is the SAME pass as Rebuild at a different SCOPE (see run).
-func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info EntryInfoFunc) error {
+func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info FeedInfo) error {
 	return w.run(ctx, window, info, scopeWindow)
 }

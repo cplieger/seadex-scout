@@ -1,12 +1,10 @@
 package mapping
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/animap/mapread"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -57,8 +55,9 @@ func TestRecord_HasMappedSeason(t *testing.T) {
 // TestRecord_SeasonPresence pins the three-valued season kind: the ZERO value
 // reads unknown rather than absent (the one state a Record persisted before the
 // field existed can carry, and reading it as absent would strand every
-// mapped-zero special for a 304 window), an unrecognized string reads unknown
-// too rather than failing the record, and the two named spellings survive.
+// mapped-zero special served from the persisted cache), an unrecognized
+// string reads unknown too rather than failing the record, and the two named
+// spellings survive.
 func TestRecord_SeasonPresence(t *testing.T) {
 	tests := map[SeasonKind]SeasonKind{
 		"":            seasonUnknown,
@@ -156,9 +155,9 @@ func TestParseOverrides_seasonKind(t *testing.T) {
 	}
 }
 
-// TestParseOverrides_anidbID pins the override door for the mapping-list join
-// key: an operator names WHICH AniDB entry an entry is (the facts stay in
-// the list), the key survives canonicalize, a negative value clamps to absent,
+// TestParseOverrides_anidbID pins the override door for the map-fact join
+// key: an operator names WHICH AniDB anime an entry is (the episode facts
+// stay animap's), the key survives canonicalize, a negative value clamps to absent,
 // and the key is recognized rather than counted unknown.
 func TestParseOverrides_anidbID(t *testing.T) {
 	set, err := parseOverrides([]byte(`[
@@ -260,12 +259,15 @@ func TestIndex_nilSafe(t *testing.T) {
 }
 
 // TestIndex_MappingFor pins the AniDB join: a record with
-// no AniDB id never joins (0 is absent, not a key), an id the list lacks is
+// no AniDB id never joins (0 is absent, not a key), an id the map lacks is
 // false, a known id returns the stored value, and the served map is the one
 // handed to the index rather than anything derived from Record.
 func TestIndex_MappingFor(t *testing.T) {
-	want := Mapping{SpecialEpisode: 8, Seasons: []SeasonRange{{Season: 1, First: 1, Last: 13}}}
-	idx := NewIndex(Source{Records: []Record{{AniListID: 1, Type: "MOVIE", AniDBID: 12276}, {AniListID: 2, Type: "TV", AniDBID: 999}, {AniListID: 3, Type: "TV"}}, Mappings: map[int]Mapping{12276: want, 0: {SpecialEpisode: 99}}})
+	want := Mapping{Specials: []int{8}, SpecialsTvdb: 79151, SpecialsEpisodes: 1, Seasons: []SeasonRange{{Season: 1, First: 1, Last: 13}}, SeasonsTvdb: 79151}
+	idx := NewIndex(Source{
+		Records:  []Record{{AniListID: 1, Type: "MOVIE", AniDBID: 12276, TvdbID: 79151}, {AniListID: 2, Type: "TV", AniDBID: 999}, {AniListID: 3, Type: "TV"}},
+		Mappings: map[int]Mapping{12276: want, 0: {Seasons: []SeasonRange{{Season: 9, First: 1, Last: 1}}}},
+	})
 	tests := []struct {
 		name    string
 		rec     *Record
@@ -274,8 +276,8 @@ func TestIndex_MappingFor(t *testing.T) {
 	}{
 		{name: "nil_record", rec: nil},
 		{name: "no_anidb_id_never_joins_the_zero_key", rec: &Record{AniListID: 3}},
-		{name: "id_the_list_lacks", rec: &Record{AniListID: 2, AniDBID: 999}},
-		{name: "known_id", rec: &Record{AniListID: 1, AniDBID: 12276}, want: want, wantHit: true},
+		{name: "id_the_map_lacks", rec: &Record{AniListID: 2, AniDBID: 999}},
+		{name: "known_id", rec: &Record{AniListID: 1, AniDBID: 12276, TvdbID: 79151}, want: want, wantHit: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,170 +285,131 @@ func TestIndex_MappingFor(t *testing.T) {
 			if ok != tc.wantHit {
 				t.Fatalf("MappingFor(%+v) ok = %v, want %v", tc.rec, ok, tc.wantHit)
 			}
-			if got.SpecialEpisode != tc.want.SpecialEpisode || !slices.Equal(got.Seasons, tc.want.Seasons) {
+			if !sameMapping(got, tc.want) {
 				t.Errorf("MappingFor(%+v) = %+v, want %+v", tc.rec, got, tc.want)
 			}
 		})
 	}
 	if _, ok := NewIndex(Source{Records: []Record{{AniListID: 1, AniDBID: 12276}}}).MappingFor(&Record{AniDBID: 12276}); ok {
-		t.Error("NewIndex (no list) MappingFor returned ok=true, want false")
+		t.Error("NewIndex (no facts) MappingFor returned ok=true, want false")
 	}
 }
 
 func TestIndex_MappingForKeepsThePlacementOnItsSeries(t *testing.T) {
 	idx := NewIndex(Source{Mappings: map[int]Mapping{
-		70: {SpecialEpisode: 9, Specials: []int{9}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
+		70: {Specials: []int{9}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
 		71: {Specials: []int{3}, SpecialsTvdb: 500, SpecialsEpisodes: 1},
 	}})
 	for _, tc := range []struct {
 		rec          Record
 		wantSpecials []int
-		wantSpecial  int
 		wantCount    int
 		wantHit      bool
 	}{
-		{rec: Record{AniDBID: 70, TvdbID: 500}, wantSpecials: []int{9}, wantSpecial: 9, wantCount: 1, wantHit: true},
+		{rec: Record{AniDBID: 70, TvdbID: 500}, wantSpecials: []int{9}, wantCount: 1, wantHit: true},
 		{rec: Record{AniDBID: 70, TvdbID: 600}},
 		{rec: Record{AniDBID: 71, TvdbID: 600}},
 	} {
 		got, ok := idx.MappingFor(&tc.rec)
-		if ok != tc.wantHit || got.SpecialEpisode != tc.wantSpecial || !slices.Equal(got.Specials, tc.wantSpecials) ||
-			got.SpecialsEpisodes != tc.wantCount {
-			t.Errorf("MappingFor(anidb %d, tvdb %d) = %+v, %v, want specials %v (count %d) special episode %d, %v",
-				tc.rec.AniDBID, tc.rec.TvdbID, got, ok, tc.wantSpecials, tc.wantCount, tc.wantSpecial, tc.wantHit)
+		if ok != tc.wantHit || !slices.Equal(got.Specials, tc.wantSpecials) || got.SpecialsEpisodes != tc.wantCount ||
+			(!tc.wantHit && got.SpecialsTvdb != 0) {
+			t.Errorf("MappingFor(anidb %d, tvdb %d) = %+v, %v, want specials %v (count %d), %v",
+				tc.rec.AniDBID, tc.rec.TvdbID, got, ok, tc.wantSpecials, tc.wantCount, tc.wantHit)
 		}
 	}
 }
 
-// TestMapping_SpecialRunPrefersThePlacement pins the one reader of an entry's
-// season-0 episodes: a placement wholly in season 0 and its episode count,
-// nothing for any other placement, and the mapping list's single episode with
-// an unknown count only where there is no placement.
-func TestMapping_SpecialRunPrefersThePlacement(t *testing.T) {
+// TestIndex_MappingForKeepsSeasonRangesOnTheirSeries pins that season
+// ranges reach a record only on the series they number, through either
+// join key, whether or not an upstream record is the whole anime.
+func TestIndex_MappingForKeepsSeasonRangesOnTheirSeries(t *testing.T) {
+	ranges := []SeasonRange{{Season: 2, First: 1, Last: 12}}
+	idx := NewIndex(Source{
+		Records:         []Record{{AniListID: 1, AniDBID: 80, TvdbID: 500}},
+		Mappings:        map[int]Mapping{80: {Seasons: ranges, SeasonsTvdb: 500}, 82: {Seasons: ranges, SeasonsTvdb: 500}},
+		AniListMappings: map[int]Mapping{7: {Seasons: ranges, SeasonsTvdb: 500}},
+	})
 	for _, tc := range []struct {
-		name      string
-		m         Mapping
-		want      []int
-		wantCount int
+		name string
+		want []SeasonRange
+		rec  Record
 	}{
-		{name: "placement only", m: Mapping{Specials: []int{9, 10}, SpecialsEpisodes: 2, Placed: true}, want: []int{9, 10}, wantCount: 2},
-		{name: "row only", m: Mapping{SpecialEpisode: 4}, want: []int{4}},
-		{name: "both agreeing", m: Mapping{SpecialEpisode: 4, Specials: []int{4}, SpecialsEpisodes: 1, Placed: true}, want: []int{4}, wantCount: 1},
-		{name: "both disagreeing", m: Mapping{SpecialEpisode: 8, Specials: []int{8, 12}, SpecialsEpisodes: 3, Placed: true}, want: []int{8, 12}, wantCount: 3},
-		{name: "a placement leaving episodes unplaced beside a row", m: Mapping{SpecialEpisode: 3, Specials: []int{3}, Placed: true}},
-		{name: "a placement with no season-0 run beside a row", m: Mapping{SpecialEpisode: 4, Placed: true}},
-		{name: "neither", m: Mapping{Seasons: []SeasonRange{{Season: 1, First: 1}}}},
+		{name: "its record's series", rec: Record{AniListID: 1, AniDBID: 80, TvdbID: 500}, want: ranges},
+		{name: "an override moving the record", rec: Record{AniListID: 1, AniDBID: 80, TvdbID: 600}},
+		{name: "an anime no record is the whole of, on its series", rec: Record{AniListID: 9, AniDBID: 82, TvdbID: 500}, want: ranges},
+		{name: "an anime no record is the whole of, on another series", rec: Record{AniListID: 9, AniDBID: 82, TvdbID: 600}},
+		{name: "an AniList-keyed entry on its series", rec: Record{AniListID: 7, TvdbID: 500}, want: ranges},
+		{name: "an AniList-keyed entry on another series", rec: Record{AniListID: 7, TvdbID: 600}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, count := tc.m.SpecialRun()
-			if !slices.Equal(got, tc.want) || count != tc.wantCount {
-				t.Errorf("(%+v).SpecialRun() = %v, %d, want %v, %d", tc.m, got, count, tc.want, tc.wantCount)
+			got, ok := idx.MappingFor(&tc.rec)
+			wantSeries := 0
+			if tc.want != nil {
+				wantSeries = 500
+			}
+			if !slices.Equal(got.Seasons, tc.want) || got.SeasonsTvdb != wantSeries || ok != (tc.want != nil) {
+				t.Errorf("MappingFor(%+v) = %+v ok=%v, want seasons %+v on %d", tc.rec, got, ok, tc.want, wantSeries)
 			}
 		})
 	}
 }
 
-// TestMapping_SpecialRunTakesThePlacementOverAPartialRow pins the decoded
-// disagreement shape (anidb 905): rows put episodes 2 and 3 on S00E08, the
-// stated offset puts episode 1 on S00E12, so the row names part of the entry.
-func TestMapping_SpecialRunTakesThePlacementOverAPartialRow(t *testing.T) {
-	record := `{"anilist_id":901,"anidb_id":905,"type":"MOVIE","tvdb_id":81472,"tvdb_season":0,"episodes":3,` +
-		`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[2,8],[3,8]]}],` +
-		`"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":12},{"start":2,"end":2,"season":0,"episode":8},{"start":3,"end":3,"season":0,"episode":8}]}`
-	parsed, err := parseAnimap(animapBody(`[`+record+`]`), discardLogger())
-	if err != nil {
-		t.Fatalf("parseAnimap(anidb 905) error: %v", err)
+// TestIndex_MappingForJoinsARecordWithoutAniDBOnItsAniListID pins the second
+// join: a record with no AniDB id reads the facts kept under its AniList id,
+// and a record with an AniDB id never does, whatever its AniList id.
+func TestIndex_MappingForJoinsARecordWithoutAniDBOnItsAniListID(t *testing.T) {
+	link := Mapping{Specials: []int{8}, SpecialsTvdb: 303073, SpecialsEpisodes: 1}
+	idx := NewIndex(Source{Records: []Record{{AniListID: 21777, Type: "SPECIAL"}}, AniListMappings: map[int]Mapping{21777: link}})
+	if got, ok := idx.MappingFor(&Record{AniListID: 21777, TvdbID: 303073}); !ok || !sameMapping(got, link) {
+		t.Errorf("MappingFor(no AniDB id, AniList 21777) = %+v ok=%v, want %+v", got, ok, link)
 	}
-	idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
-	rec, _ := idx.Lookup(901)
-	m, ok := idx.MappingFor(&rec)
-	if !ok || m.SpecialEpisode != 8 {
-		t.Fatalf("MappingFor(anidb 905) = %+v, %v, want the row's episode 8 decoded", m, ok)
-	}
-	if got, count := m.SpecialRun(); !slices.Equal(got, []int{8, 12}) || count != 3 {
-		t.Errorf("MappingFor(anidb 905).SpecialRun() = %v, %d, want [8 12], 3", got, count)
-	}
-}
-
-// TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero pins the decoded
-// partial shapes: a placement that leaves some regular episodes without a TVDB
-// episode names no run, and silences a row beside it, while the comparison
-// still reads the placed episodes.
-func TestMapping_SpecialRunRefusesAPlacementNotWhollyInSeasonZero(t *testing.T) {
-	for _, tc := range []struct {
-		name, record string
-		wantSpecials []int
-		alID         int
-		wantRow      int
-	}{
-		{
-			name: "the first episode placed, the rest unplaced (anidb 219)",
-			record: `{"anilist_id":5,"anidb_id":219,"type":"MOVIE","tvdb_id":76885,"tvdb_season":0,"episodes":6,` +
-				`"tvdb_placement":[{"start":1,"end":1,"season":0,"episode":3},{"start":2,"end":6}]}`,
-			alID: 5, wantSpecials: []int{3},
-		},
-		{
-			name: "the first episode unplaced, the rest placed (anidb 10046)",
-			record: `{"anilist_id":20593,"anidb_id":10046,"type":"SPECIAL","tvdb_id":102261,"tvdb_season":0,"episodes":6,` +
-				`"tvdb_placement":[{"start":1,"end":1},{"start":2,"end":6,"season":0,"episode":10}]}`,
-			alID: 20593, wantSpecials: []int{10, 11, 12, 13, 14},
-		},
-		{
-			name: "every episode unplaced beside a row naming one",
-			record: `{"anilist_id":30,"anidb_id":300,"type":"MOVIE","tvdb_id":500,"tvdb_season":0,"episodes":1,` +
-				`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}],"tvdb_placement":[{"start":1,"end":1}]}`,
-			alID: 30, wantRow: 8,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			parsed, err := parseAnimap(animapBody(`[`+tc.record+`]`), discardLogger())
-			if err != nil {
-				t.Fatalf("parseAnimap(%s) error: %v", tc.record, err)
-			}
-			idx := NewIndex(Source{Records: parsed.records, Mappings: parsed.mappings, ParentMappings: parsed.parentMappings})
-			rec, _ := idx.Lookup(tc.alID)
-			m, _ := idx.MappingFor(&rec)
-			if !slices.Equal(m.Specials, tc.wantSpecials) || m.SpecialEpisode != tc.wantRow {
-				t.Errorf("MappingFor(%s) = specials %v, row %d, want %v, %d", tc.record, m.Specials, m.SpecialEpisode, tc.wantSpecials, tc.wantRow)
-			}
-			if got, count := m.SpecialRun(); got != nil || count != 0 {
-				t.Errorf("MappingFor(%s).SpecialRun() = %v, %d, want nil, 0", tc.record, got, count)
-			}
-		})
-	}
-}
-
-// TestIndex_MappingForJoinsAParentRecordOnItsAniListID pins the second join: a
-// record with no AniDB id reads the facts kept under its AniList id, and a
-// record with an AniDB id never does, whatever its AniList id.
-func TestIndex_MappingForJoinsAParentRecordOnItsAniListID(t *testing.T) {
-	parent := Mapping{SpecialEpisode: 8}
-	idx := NewIndex(Source{Records: []Record{{AniListID: 21777, Type: "SPECIAL"}}, ParentMappings: map[int]Mapping{21777: parent}})
-	if got, ok := idx.MappingFor(&Record{AniListID: 21777}); !ok || !sameMapping(got, parent) {
-		t.Errorf("MappingFor(no AniDB id, AniList 21777) = %+v ok=%v, want %+v", got, ok, parent)
-	}
-	if got, ok := idx.MappingFor(&Record{AniListID: 21777, AniDBID: 5}); ok {
+	if got, ok := idx.MappingFor(&Record{AniListID: 21777, AniDBID: 5, TvdbID: 303073}); ok {
 		t.Errorf("MappingFor(AniDB 5, AniList 21777) = %+v ok=true, want the AniDB join only", got)
 	}
 }
 
-// TestLoader_Load_overrideAniDBIDJoinsTheSameList pins the override rule: an
-// override that names an anidb_id joins the facts animap publishes for that id,
-// an AniDB-keyed record's included, so the operator supplies the key and never
+// MappingFor keeps a record's positive-season episodes only on the series
+// and season they number: an override moving the record drops them.
+func TestIndex_MappingForDropsEpisodesOfAnotherSeriesOrSeason(t *testing.T) {
+	facts := Mapping{Episodes: []int{1}, EpisodesTvdb: 82099, EpisodesSeason: 1}
+	idx := NewIndex(Source{AniListMappings: map[int]Mapping{2593: facts}, Mappings: map[int]Mapping{4932: facts}})
+	for _, tc := range []struct {
+		rec  Record
+		name string
+		want []int
+	}{
+		{Record{AniListID: 2593, TvdbID: 82099, SeasonTvdb: 1}, "its own season, AniList join", []int{1}},
+		{Record{AniListID: 1, AniDBID: 4932, TvdbID: 82099, SeasonTvdb: 1}, "its own season, AniDB join", []int{1}},
+		{Record{AniListID: 2593, TvdbID: 82099, SeasonTvdb: 2}, "another season", nil},
+		{Record{AniListID: 2593, TvdbID: 5, SeasonTvdb: 1}, "another series", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := idx.MappingFor(&tc.rec)
+			if !slices.Equal(got.Episodes, tc.want) || ok != (tc.want != nil) {
+				t.Errorf("MappingFor(%+v) = %+v ok=%v, want episodes %v", tc.rec, got, ok, tc.want)
+			}
+			if tc.want == nil && (got.EpisodesTvdb != 0 || got.EpisodesSeason != 0) {
+				t.Errorf("MappingFor(%+v) kept the dropped episodes' series and season: %+v", tc.rec, got)
+			}
+		})
+	}
+}
+
+// TestLoader_Load_overrideAniDBIDJoinsThatAnime pins the override rule: an
+// override that names an anidb_id joins the facts of that anime, one no
+// AniList entry names included, so the operator supplies the key and never
 // the facts.
-func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
-	dir := t.TempDir()
-	overrides := filepath.Join(dir, "overrides.json")
+func TestLoader_Load_overrideAniDBIDJoinsThatAnime(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":42,"type":"movie","tmdb_movies":[7],"tvdb_id":100,"anidb_id":12276}]`), 0o600); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100},` +
-			`{"anidb_id":12276,"tvdb_id":100,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]}]`))
-	}))
-	defer ts.Close()
-	l := NewLoader(ts.Client(), ts.URL, WithOverridesPath(overrides), WithLogger(discardLogger()))
-	_, idx, err := l.Load(t.Context(), nil)
+	doc := document([]mapread.Anime{
+		{AniDBID: 42, Type: "TV", TVDBID: 100, Last: mapread.Last{Regular: 1}},
+		{AniDBID: 12276, Type: "MOVIE", TVDBID: 100, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{regular(1, 1, targets(at(0, 8)))}},
+	}, []mapread.Entry{{AniListID: 42, Type: "TV", Parts: []mapread.Part{{AniDBID: 42, Kind: mapread.Regular}}}})
+	rel := newRelease(t, testTag, encode(t, doc))
+	_, idx, err := rel.loader(WithOverridesPath(overrides)).Load(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -454,39 +417,42 @@ func TestLoader_Load_overrideAniDBIDJoinsTheSameList(t *testing.T) {
 	if !ok || rec.AniDBID != 12276 || !rec.IsMovie() {
 		t.Fatalf("Lookup(42) = %+v ok=%v, want the override record carrying anidb_id 12276", rec, ok)
 	}
-	m, ok := idx.MappingFor(&rec)
-	if !ok || m.SpecialEpisode != 8 {
-		t.Errorf("MappingFor(override) = %+v ok=%v, want the published episode 8", m, ok)
+	if m, ok := idx.MappingFor(&rec); !ok || !slices.Equal(m.Specials, []int{8}) || m.SpecialsEpisodes != 1 {
+		t.Errorf("MappingFor(override) = %+v ok=%v, want the anime's S00E08", m, ok)
 	}
 }
 
-// TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts pins that the
-// facts a specials-of-parent record carries under its AniList id go with the
+// TestLoader_Load_overrideReplacesAnAniListKeyedRecordsFacts pins that the
+// facts a record with no AniDB id carries under its AniList id go with the
 // record an override replaces: the override reaches facts only through an
 // anidb_id it names, exactly as for every other record.
-func TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts(t *testing.T) {
-	body := animapBody(`[{"anilist_id":21777,"anidb_parent":{"anidb_id":11500,"specials":[1]},"type":"SPECIAL",` +
-		`"tvdb_id":303073,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,8]]}]},` +
-		`{"anilist_id":2,"type":"tv","tvdb_id":200}]`)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
-	defer ts.Close()
-
-	cache, idx, err := NewLoader(ts.Client(), ts.URL, WithLogger(discardLogger())).Load(t.Context(), nil)
+func TestLoader_Load_overrideReplacesAnAniListKeyedRecordsFacts(t *testing.T) {
+	doc := document([]mapread.Anime{
+		{AniDBID: 2, Type: "TV", TVDBID: 200, Last: mapread.Last{Regular: 1}},
+		{
+			AniDBID: 11500, Type: "TV", TVDBID: 303073, Last: mapread.Last{Regular: 1, Special: 1},
+			Episodes: []mapread.Run{{Kind: mapread.Special, Start: 1, End: 1, TVDB: targets(at(0, 8))}},
+		},
+	}, []mapread.Entry{
+		{AniListID: 2, Type: "TV", Parts: []mapread.Part{{AniDBID: 2, Kind: mapread.Regular}}},
+		{AniListID: 21777, Type: "SPECIAL", Parts: []mapread.Part{{AniDBID: 11500, Kind: mapread.Special, Start: 1, End: 1}}},
+	})
+	rel := newRelease(t, testTag, encode(t, doc))
+	cache, idx, err := rel.loader().Load(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	rec, _ := idx.Lookup(21777)
-	if m, ok := idx.MappingFor(&rec); !ok || m.SpecialEpisode != 8 {
-		t.Fatalf("MappingFor(21777) = %+v ok=%v, want the record's own episode 8", m, ok)
+	if m, ok := idx.MappingFor(&rec); !ok || !slices.Equal(m.Specials, []int{8}) {
+		t.Fatalf("MappingFor(21777) = %+v ok=%v, want the link's own S00E08", m, ok)
 	}
 
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":21777,"type":"special","tvdb_id":303073,"season_tvdb":0,"season_kind":"present"}]`), 0o600); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	fresh := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
 	cache.FetchedAt = time.Now()
-	_, idx, err = fresh.Load(t.Context(), &cache)
+	_, idx, err = unused(WithOverridesPath(overrides), WithRefresh(time.Hour)).Load(t.Context(), &cache)
 	if err != nil {
 		t.Fatalf("Load(with override) error: %v", err)
 	}
@@ -494,8 +460,8 @@ func TestLoader_Load_overrideReplacesASpecialsOfParentRecordsFacts(t *testing.T)
 	if m, ok := idx.MappingFor(&rec); ok {
 		t.Errorf("MappingFor(overridden 21777) = %+v ok=true, want no facts: the override names no anidb_id", m)
 	}
-	if len(cache.ParentMappings) != 1 {
-		t.Errorf("the override deleted %d persisted parent facts, want the cache left intact", 1-len(cache.ParentMappings))
+	if len(cache.AniListMappings) != 1 {
+		t.Errorf("the override deleted %d persisted AniList-keyed facts, want the cache left intact", 1-len(cache.AniListMappings))
 	}
 }
 
@@ -803,8 +769,8 @@ func TestRecord_AllIDsDiffersFromRoutedIDsOnlyByTheTypeGate(t *testing.T) {
 
 // TestNewIndexCanonicalizesRecords pins the boundary that OWNS the id-usability
 // rule: the accessors do not filter on read, so a record reaching NewIndex
-// through plain encoding/json - the persisted mapping cache replayed on the 304
-// and stale-on-error paths - must be canonicalized on insertion, which is what
+// through plain encoding/json - the persisted-cache and stale-on-error paths -
+// must be canonicalized on insertion, which is what
 // makes RoutedIDs' presence check sound.
 func TestNewIndexCanonicalizesRecords(t *testing.T) {
 	idx := NewIndex(Source{Records: []Record{{
@@ -833,233 +799,163 @@ func TestNewIndexCanonicalizesRecords(t *testing.T) {
 	}
 }
 
-// overIdentifierBudgetBody builds the smallest valid document that exceeds the
-// aggregate retained budget: every record retains both capped identifier lists
-// (maxRecordIdentifiers each), so one record past
-// maxRetainedTotal/(2*maxRecordIdentifiers) trips the budget while the element
-// count (16385 records) stays well under maxRecords (65536) - the per-record
-// caps and the record cap must not be what refuses this body.
-func overIdentifierBudgetBody() []byte {
-	perRecord := 2 * maxRecordIdentifiers
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := range maxRetainedTotal/perRecord + 1 {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"MOVIE","imdb_ids":[`, i+1)
-		for j := range maxRecordIdentifiers {
-			if j > 0 {
-				b.WriteByte(',')
-			}
-			fmt.Fprintf(&b, `"tt%d"`, j+1)
-		}
-		b.WriteString(`],"tmdb_movie_ids":[`)
-		for j := range maxRecordIdentifiers {
-			if j > 0 {
-				b.WriteByte(',')
-			}
-			fmt.Fprintf(&b, `%d`, j+1)
-		}
-		b.WriteString(`]}`)
-	}
-	b.WriteByte(']')
-	return animapBody(b.String())
-}
-
-// TestAcceptRefresh_identifierBudgetFailsClosed pins the fail-closed contract of
-// the aggregate identifier budget across the whole decode-to-acceptance path,
-// which the counter-level decodeCounts.add test cannot reach: a body that
-// trips the budget is refused WHOLE (the truncated prefix is never published)
-// with errIdentifierBudgetExceeded, and acceptRefresh routes that sentinel
-// through rejectRefresh - a first boot publishes no index, a usable previous
-// cache is returned stale rather than replaced, and the persisted rejection
-// streak advances instead of staying frozen as a transient parse failure would.
-func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
-	body := overIdentifierBudgetBody()
-
-	t.Run("parse refuses the whole body", func(t *testing.T) {
-		parsed, err := parseAnimap(body, discardLogger())
-		if !errors.Is(err, errIdentifierBudgetExceeded) {
-			t.Fatalf("parseAnimap error = %v, want errIdentifierBudgetExceeded", err)
-		}
-		if len(parsed.records) != 0 {
-			t.Errorf("budget breach retained %d records, want the whole body refused", len(parsed.records))
+// TestRefresh_staleReasonClassVocabulary pins stale_reason as the
+// fixed-cardinality degradation CLASS the operator queries in Loki for the
+// classes no other test names: the acceptance floor and an unchanged refused
+// release. Each refusal class mapread names is pinned beside its arm in
+// TestLoader_refreshCache_refusalsKeepTheCacheAndAdvanceTheStreak.
+func TestRefresh_staleReasonClassVocabulary(t *testing.T) {
+	t.Run("validation floor", func(t *testing.T) {
+		_, err := refresh(t, staleCache(""), entriesBody(t, entry{AniList: 1, Type: "tv"}))
+		if stale, ok := errors.AsType[*StaleMapError](err); !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
+			t.Errorf("refresh error = %v, want stale_reason \"refresh validation failed\"", err)
 		}
 	})
-
-	t.Run("first boot publishes nothing", func(t *testing.T) {
-		l := &Loader{log: discardLogger()}
-		next, err := l.acceptRefresh(&Cache{}, httpx.ConditionalResult{Body: body})
-		if !errors.Is(err, errIdentifierBudgetExceeded) {
-			t.Fatalf("first-boot error = %v, want errIdentifierBudgetExceeded", err)
-		}
-		if _, ok := errors.AsType[*StaleMapError](err); ok {
-			t.Errorf("first-boot error = %v, want the no-cache error rather than a *StaleMapError", err)
-		}
-		if len(next.Records) != 0 {
-			t.Errorf("first boot published %d records, want none", len(next.Records))
-		}
-		if next.RejectedRefreshes != 1 {
-			t.Errorf("first-boot RejectedRefreshes = %d, want 1 (a budget breach is a persistent guard refusal)", next.RejectedRefreshes)
-		}
-	})
-
-	t.Run("usable cache is kept stale", func(t *testing.T) {
-		prev := &Cache{
-			Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-			RejectedRefreshes: 2,
-		}
-		l := &Loader{log: discardLogger()}
-		next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body})
-		if _, ok := errors.AsType[*StaleMapError](err); !ok {
-			t.Fatalf("budget-breach error = %v, want a *StaleMapError guard rejection", err)
-		}
-		if !errors.Is(err, errIdentifierBudgetExceeded) {
-			t.Errorf("budget-breach error does not match errIdentifierBudgetExceeded through the StaleMapError wrap: %v", err)
-		}
-		if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-			t.Errorf("budget-breach records = %+v, want the stale record id 1 retained", next.Records)
-		}
-		if next.RejectedRefreshes != 3 {
-			t.Errorf("budget-breach RejectedRefreshes = %d, want 3 (the prior streak advances)", next.RejectedRefreshes)
+	t.Run("refused release unchanged", func(t *testing.T) {
+		prev := staleCache("v2026.10.16")
+		prev.RefusedTag = testTag
+		_, err := newRelease(t, testTag, nil).loader().refreshCache(t.Context(), prev)
+		if stale, ok := errors.AsType[*StaleMapError](err); !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refused body unchanged") {
+			t.Errorf("refresh error = %v, want stale_reason \"refused body unchanged\"", err)
 		}
 	})
 }
 
-// TestAcceptRefresh_staleReasonClassVocabulary pins stale_reason as the
-// fixed-cardinality degradation CLASS the operator queries in Loki (the
-// discriminator StaleMapError deliberately keeps live counts out of, so the
-// attribute stays equality-queryable). Six of the classes acceptRefresh can emit
-// have no assertion anywhere, so a swapped or merged reason string would silently
-// file a never-self-heals refusal (record cap, identifier budget, validation
-// floor, moved schema, schema version) under the transient vocabulary, and the escalation runbook
-// keys on exactly that distinction.
-func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
-	var capBody strings.Builder
-	capBody.WriteByte('[')
-	for i := 0; i <= maxRecords; i++ {
-		if i > 0 {
-			capBody.WriteByte(',')
-		}
-		fmt.Fprintf(&capBody, `{"anilist_id":%d}`, i+1)
-	}
-	capBody.WriteByte(']')
+// approachingSizeCapMessage is the fixed WARN message a refresh emits before
+// the download size cap becomes a hard refusal. It is a Loki-queryable log
+// contract (the class is the message, the facts ride as structured fields),
+// so the test pins it verbatim.
+const approachingSizeCapMessage = "mapping: animap body approaching the download size cap; " +
+	"a body past it refuses every refresh and freezes the map stale"
 
-	tests := []struct {
-		name string
-		body []byte
-		want string
+// TestRefresh_approachingDownloadSizeCapWarns pins the operator's only
+// advance notice before maxMapBytes becomes a permanent refusal: a release
+// whose body reaches the threshold warns once (the shared guard is
+// inclusive); one byte below it stays silent.
+func TestRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
+	// The threshold is hardcoded rather than recomputed from the shared fraction:
+	// a fixture derived from the expression under test moves with it.
+	// 26843544 is maxMapBytes/10*8 (32 MiB), truncated down.
+	const warnThresholdBytes = 26_843_544
+	doc := entriesBody(t, seriesEntries(1)...)
+	padded := func(total int) []byte {
+		return append(doc, bytes.Repeat([]byte(" "), total-len(doc))...)
+	}
+	for name, tc := range map[string]struct {
+		total int
+		warns int
 	}{
-		{name: "record cap", body: animapBody(capBody.String()), want: "refresh exceeded record cap"},
-		{name: "identifier budget", body: overIdentifierBudgetBody(), want: "refresh exceeded identifier budget"},
-		{name: "validation floor", body: animapBody(`[{"anilist_id":1,"type":"tv"}]`), want: "refresh validation failed"},
-		{name: "not an animap document", body: []byte(`{"data":[]}`), want: "refresh not an animap document"},
-		{name: "unsupported schema version", body: []byte(`{"version":2,"records":[]}`), want: "refresh unsupported schema version"},
-		{name: "malformed body", body: animapBody(`[{"anilist_id":1,`), want: "parse failed"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
-			l := &Loader{log: discardLogger()}
-			_, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: tc.body})
-			stale, ok := errors.AsType[*StaleMapError](err)
-			if !ok {
-				t.Fatalf("acceptRefresh error = %v, want a *StaleMapError over a usable cache", err)
+		"at the threshold":  {total: warnThresholdBytes, warns: 1},
+		"one byte below it": {total: warnThresholdBytes - 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rel := newRelease(t, testTag, padded(tc.total))
+			logger, rec := capture.New()
+			next, err := NewLoader(rel.srv.Client(), rel.source(), WithLogger(logger)).refreshCache(t.Context(), staleCache(""))
+			if err != nil || next.Tag != testTag {
+				t.Fatalf("refresh = %+v, %v, want the padded release accepted", next, err)
 			}
-			if got := stale.LogAttrs(); !attrsContain(got, "stale_reason", tc.want) {
-				t.Errorf("stale_reason attrs = %v, want %q", got, tc.want)
+			if n := rec.CountLevel(slog.LevelWarn, approachingSizeCapMessage); n != tc.warns {
+				t.Fatalf("%d bytes warned %d times at WARN, want %d: %v", tc.total, n, tc.warns, rec.Messages())
+			}
+			if tc.warns > 0 && (!rec.HasAttr(approachingSizeCapMessage, "bytes", strconv.Itoa(tc.total)) ||
+				!rec.HasAttr(approachingSizeCapMessage, "cap", strconv.Itoa(maxMapBytes))) {
+				t.Errorf("approaching-cap log = %v, want bytes=%d and cap=%d", rec.Messages(), tc.total, maxMapBytes)
 			}
 		})
 	}
 }
 
-// approachingSizeCapMessage is the fixed WARN message acceptRefresh emits
-// before the download size cap becomes a hard refusal. It is a Loki-queryable
-// log contract (the class is the message, the facts ride as structured
-// fields), so the test pins it verbatim.
-const approachingSizeCapMessage = "mapping: animap body approaching the download size cap; " +
-	"a body past it refuses every refresh and freezes the map stale"
+// approachingProjectionCapMessage is the fixed WARN message a refresh emits
+// before the projection budget becomes a hard refusal.
+const approachingProjectionCapMessage = "mapping: animap anime episodes approaching the projection cap; " +
+	"a document past it refuses every refresh and freezes the map stale"
 
-// TestAcceptRefresh_approachingDownloadSizeCapWarns pins the operator's only
-// advance notice before maxMapBytes becomes a permanent refusal. A body past the
-// download cap grades PERSISTENT (isPersistentRefreshFailure over
-// *httpx.ResponseTooLargeError), so every later cycle re-downloads the multi-MB
-// body, re-refuses it, and the map stays frozen stale while the persisted
-// rejection streak escalates to ERROR - with no signal at all while refreshes were
-// still succeeding. At exactly the threshold the WARN fires once (the shared guard
-// is inclusive); one byte below it stays silent.
-func TestAcceptRefresh_approachingDownloadSizeCapWarns(t *testing.T) {
-	// The threshold is hardcoded rather than recomputed from the shared fraction:
-	// a fixture derived from the expression under test moves with it, and this
-	// test's whole subject is which byte count the warning starts at.
-	// 10066328 is maxMapBytes/10*8 (12 MiB), truncated down.
-	const warnThresholdBytes = 10_066_328
-	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
-
-	logger, rec := capture.New()
-	at := &Loader{log: logger}
-	next, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, warnThresholdBytes)})
-	if err == nil {
-		t.Fatal("acceptRefresh(at-threshold body) = nil error, want the stale-map refusal")
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("acceptRefresh kept %+v, want the stale record id 1", next.Records)
-	}
-	if n := rec.CountLevel(slog.LevelWarn, approachingSizeCapMessage); n != 1 {
-		t.Fatalf("a body at the threshold warned %d times at WARN, want exactly 1 (the guard is inclusive, and a demoted level vanishes from the deployed info-level stream): %v", n, rec.Messages())
-	}
-	if !rec.HasAttr(approachingSizeCapMessage, "bytes", strconv.Itoa(warnThresholdBytes)) {
-		t.Errorf("approaching-cap log = %v, want bytes=%d", rec.Messages(), warnThresholdBytes)
-	}
-	if !rec.HasAttr(approachingSizeCapMessage, "cap", strconv.Itoa(maxMapBytes)) {
-		t.Errorf("approaching-cap log = %v, want cap=%d", rec.Messages(), maxMapBytes)
-	}
-
-	belowLogger, belowRec := capture.New()
-	below := &Loader{log: belowLogger}
-	if _, err := below.acceptRefresh(prev, httpx.ConditionalResult{Body: make([]byte, warnThresholdBytes-1)}); err == nil {
-		t.Fatal("acceptRefresh(below-threshold body) = nil error, want the stale-map refusal")
-	}
-	if n := belowRec.CountExact(approachingSizeCapMessage); n != 0 {
-		t.Errorf("a body one byte below the threshold warned %d times, want 0: %v", n, belowRec.Messages())
+// TestRefresh_approachingProjectionCapWarns pins the advance notice before
+// maxAnimeEpisodes refuses every refresh: a document whose anime on TVDB
+// place the threshold's regular episodes warns once; one fewer stays silent.
+func TestRefresh_approachingProjectionCapWarns(t *testing.T) {
+	// 1677720 is maxAnimeEpisodes/10*8 (2^21), truncated down.
+	const warnThreshold = 1_677_720
+	for name, tc := range map[string]struct {
+		episodes int
+		warns    int
+	}{
+		"at the threshold":     {episodes: warnThreshold, warns: 1},
+		"one episode below it": {episodes: warnThreshold - 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			anime := []mapread.Anime{{AniDBID: 1, Type: "TV", TVDBID: 1, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{regular(1, 1, targets(at(1, 1)))}}}
+			for aid, left := 2, tc.episodes-1; left > 0; aid++ {
+				n := min(left, 1<<20)
+				anime = append(anime, mapread.Anime{AniDBID: aid, Type: "TV", TVDBID: aid, Last: mapread.Last{Regular: n}})
+				left -= n
+			}
+			doc := document(anime, []mapread.Entry{{AniListID: 1, Type: "TV", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Regular}}}})
+			logger, rec := capture.New()
+			rel := newRelease(t, testTag, encode(t, doc))
+			next, err := NewLoader(rel.srv.Client(), rel.source(), WithLogger(logger)).refreshCache(t.Context(), staleCache(""))
+			if err != nil || next.Tag != testTag {
+				t.Fatalf("refresh = %+v, %v, want the document accepted", next, err)
+			}
+			if n := rec.CountLevel(slog.LevelWarn, approachingProjectionCapMessage); n != tc.warns {
+				t.Fatalf("%d episodes warned %d times at WARN, want %d: %v", tc.episodes, n, tc.warns, rec.Messages())
+			}
+			if tc.warns > 0 && (!rec.HasAttr(approachingProjectionCapMessage, "episodes", strconv.Itoa(tc.episodes)) ||
+				!rec.HasAttr(approachingProjectionCapMessage, "cap", strconv.Itoa(maxAnimeEpisodes))) {
+				t.Errorf("approaching-cap log = %v, want episodes=%d and cap=%d", rec.Messages(), tc.episodes, maxAnimeEpisodes)
+			}
+		})
 	}
 }
 
-// censusBody is a four-record records array whose populations are all distinct, so
-// a count attributed to the wrong population is visible: three records carry a
-// type, one carries a positive TVDB season, one is a special, three resolve in
-// their routed arr (one movie, two series), and the last record carries neither
-// a type nor an identifier.
-const censusBody = `[{"anilist_id":10,"type":"tv","tvdb_id":200},` +
-	`{"anilist_id":11,"type":"movie","tmdb_movie_ids":[5]},` +
-	`{"anilist_id":12,"anidb_id":30,"type":"ova","tvdb_id":300,"tvdb_season":2,"mapping_list":[{"anidb_season":1,"tvdb_season":2,"start":1}]},` +
-	`{"anilist_id":13}]`
-
-// TestAcceptRefresh_logsTheCandidateCensus pins the population census the
-// accepted-refresh line carries. Each guard refuses only a below-half collapse,
-// so a routing or type loss shallower than that is accepted, and these counts
-// are the ONLY operator-visible record that it happened: a count that drifts
-// from the records it describes retires the signal while still logging a line.
-func TestAcceptRefresh_logsTheCandidateCensus(t *testing.T) {
-	prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+// TestRefresh_logsTheCandidateCensus pins the population census the
+// accepted-refresh line carries. Each guard refuses only a below-half
+// collapse, so a shallower routing or type loss is accepted, and these counts
+// are the ONLY operator-visible record that it happened. The entries'
+// populations are all distinct, so a count attributed to the wrong one shows.
+func TestRefresh_logsTheCandidateCensus(t *testing.T) {
+	doc, err := mapread.Decode(bytes.NewReader(entriesBody(t,
+		entry{AniList: 10, Type: "tv", TVDB: 200},
+		entry{AniList: 11, Type: "movie", Movies: []int{5}},
+		entry{AniList: 12, Type: "ova", TVDB: 300, Lands: targets(at(2, 1))},
+		entry{AniList: 13},
+		entry{AniList: 14, Type: "tv", TVDB: 400, Lands: targets(at(0, 3))},
+		entry{AniList: 15, Type: "tv", TVDB: 410, Lands: targets(at(0, 4))},
+	)), mapread.DefaultLimits())
+	if err != nil {
+		t.Fatalf("decoding the census fixture: %v", err)
+	}
+	// AniList 16's two episodes land on S00E7, the first by a row and the
+	// second by default: a single special and no placed specials.
+	doc.Anime = append(doc.Anime, mapread.Anime{
+		AniDBID: 16, Type: "TV", TVDBID: 500, Last: mapread.Last{Regular: 2},
+		Episodes: []mapread.Run{regular(1, 1, targets(at(0, 7))), regular(2, 2, targets(dflt(0, 7)))},
+	})
+	doc.Entries = append(doc.Entries, mapread.Entry{AniListID: 16, Type: "TV", Parts: []mapread.Part{{AniDBID: 16, Kind: mapread.Regular}}})
+	body := encode(t, document(doc.Anime, doc.Entries))
 	logger, rec := capture.New()
-	at := &Loader{log: logger}
-	if _, err := at.acceptRefresh(prev, httpx.ConditionalResult{Body: animapBody(censusBody)}); err != nil {
-		t.Fatalf("acceptRefresh(census body) = %v, want the refresh accepted", err)
+	rel := newRelease(t, testTag, body)
+	if _, err := NewLoader(rel.srv.Client(), rel.source(), WithLogger(logger)).refreshCache(t.Context(), staleCache("")); err != nil {
+		t.Fatalf("refresh(census document) = %v, want the refresh accepted", err)
 	}
 	if n := rec.CountExact("mapping: refreshed"); n != 1 {
 		t.Fatalf("accepted refresh logged %d refreshed lines, want 1: %v", n, rec.Messages())
 	}
 	for key, want := range map[string]string{
-		"records":               "4",
-		"typed_records":         "3",
-		"season_scoped_records": "1",
-		"special_records":       "1",
-		"routed_identifiers":    "3",
-		"movie_routed":          "1",
-		"series_routed":         "2",
-		"mapping_list_records":  "1",
+		"tag":                    testTag,
+		"records":                "7",
+		"elements":               "7",
+		"typed_records":          "6",
+		"season_scoped_records":  "1",
+		"special_records":        "1",
+		"routed_identifiers":     "6",
+		"movie_routed":           "1",
+		"series_routed":          "5",
+		"season_range_records":   "1",
+		"placed_special_records": "2",
+		"placed_episode_records": "1",
+		"single_special_records": "1",
 	} {
 		got, ok := rec.AttrValueExact("mapping: refreshed", key)
 		if !ok {
@@ -1069,107 +965,5 @@ func TestAcceptRefresh_logsTheCandidateCensus(t *testing.T) {
 		if got != want {
 			t.Errorf("refreshed log %s = %s, want %s", key, got, want)
 		}
-	}
-}
-
-// TestAcceptRefresh_revalidatableReportsAPersistedValidator pins the
-// revalidatable attribute on the accepted-refresh line: it tells the operator
-// whether the next cycle can revalidate cheaply or must re-download the whole
-// list, and EITHER validator alone is enough to make it true.
-func TestAcceptRefresh_revalidatableReportsAPersistedValidator(t *testing.T) {
-	for name, tc := range map[string]struct {
-		validators httpx.Validators
-		want       string
-	}{
-		"etag only":          {httpx.Validators{ETag: `"v9"`}, "true"},
-		"last-modified only": {httpx.Validators{LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"}, "true"},
-		"neither":            {httpx.Validators{}, "false"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
-			logger, rec := capture.New()
-			at := &Loader{log: logger}
-			res := httpx.ConditionalResult{Body: animapBody(censusBody), Validators: tc.validators}
-			if _, err := at.acceptRefresh(prev, res); err != nil {
-				t.Fatalf("acceptRefresh(%+v) = %v, want the refresh accepted", tc.validators, err)
-			}
-			got, ok := rec.AttrValueExact("mapping: refreshed", "revalidatable")
-			if !ok {
-				t.Fatalf("refreshed log carries no revalidatable attribute; logs = %v", rec.Messages())
-			}
-			if got != tc.want {
-				t.Errorf("acceptRefresh(%+v) logged revalidatable=%s, want %s", tc.validators, got, tc.want)
-			}
-		})
-	}
-}
-
-// shrinkingBody replaces a four-record cache with one record, which is below
-// half and so trips the shrink guard - a PERSISTENT refusal, because the same
-// upstream body is refused identically on every cycle.
-const shrinkingBody = `[{"anilist_id":9,"type":"tv","tvdb_id":900}]`
-
-// fourRecordCache is the usable stale cache the shrink guard measures against.
-func fourRecordCache() *Cache {
-	return &Cache{Records: []Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
-		{AniListID: 3, Type: "TV", TvdbID: 300},
-		{AniListID: 4, Type: "TV", TvdbID: 400},
-	}}
-}
-
-// TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators pins the
-// suppression the refusal memory buys: a body the acceptance pipeline refuses
-// persistently is remembered by its validators, so the next cycle asks about
-// that body with a conditional GET instead of re-downloading ~2.3 MB for as
-// long as the refusal lasts. Both validators are remembered, since either one
-// alone is enough for the upstream to answer 304.
-func TestAcceptRefresh_persistentRefusalRemembersTheRefusedValidators(t *testing.T) {
-	const lastModified = "Mon, 02 Jan 2006 15:04:05 GMT"
-	prev := fourRecordCache()
-	at := &Loader{log: discardLogger()}
-	res := httpx.ConditionalResult{
-		Body:       animapBody(shrinkingBody),
-		Validators: httpx.Validators{ETag: `"v9"`, LastModified: lastModified},
-	}
-	next, err := at.acceptRefresh(prev, res)
-	if err == nil {
-		t.Fatal("acceptRefresh(below-half body) = nil error, want the shrink-guard refusal")
-	}
-	if next.RejectedRefreshes != prev.RejectedRefreshes+1 {
-		t.Fatalf("acceptRefresh RejectedRefreshes = %d, want %d (a shrink refusal is persistent)", next.RejectedRefreshes, prev.RejectedRefreshes+1)
-	}
-	if next.RefusedETag != `"v9"` {
-		t.Errorf("acceptRefresh RefusedETag = %q, want %q", next.RefusedETag, `"v9"`)
-	}
-	if next.RefusedLastModified != lastModified {
-		t.Errorf("acceptRefresh RefusedLastModified = %q, want %q", next.RefusedLastModified, lastModified)
-	}
-}
-
-// TestAcceptRefresh_transientRefusalDoesNotRememberValidators pins the other
-// side: a body that failed for a reason which can self-heal next cycle (a
-// truncated download) must NOT be remembered as refused. Remembering it would
-// make the next cycle ask about a body the upstream still serves happily, so a
-// 304 would then classify as refused-unchanged and freeze the map stale on a
-// failure that was never the body's fault.
-func TestAcceptRefresh_transientRefusalDoesNotRememberValidators(t *testing.T) {
-	prev := fourRecordCache()
-	at := &Loader{log: discardLogger()}
-	res := httpx.ConditionalResult{
-		Body:       animapBody(`[{"anilist_id":1,`), // truncated mid-record
-		Validators: httpx.Validators{ETag: `"v9"`, LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"},
-	}
-	next, err := at.acceptRefresh(prev, res)
-	if err == nil {
-		t.Fatal("acceptRefresh(truncated body) = nil error, want the stale-map refusal")
-	}
-	if next.RejectedRefreshes != prev.RejectedRefreshes {
-		t.Fatalf("acceptRefresh RejectedRefreshes = %d, want %d (a truncated body is transient)", next.RejectedRefreshes, prev.RejectedRefreshes)
-	}
-	if next.RefusedETag != "" || next.RefusedLastModified != "" {
-		t.Errorf("acceptRefresh remembered refused validators (%q, %q) for a transient failure, want neither",
-			next.RefusedETag, next.RefusedLastModified)
 	}
 }

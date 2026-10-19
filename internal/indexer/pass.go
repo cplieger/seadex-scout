@@ -227,7 +227,7 @@ func ownershipOf(entries []seadex.Entry, infoFor EntryInfoFunc) map[string][]own
 				Hash:    validInfoHash(t.InfoHash),
 				TvdbID:  info.TvdbID,
 				IsBest:  t.IsBest,
-				NonFilm: !info.IsMovie,
+				NonFilm: info.Kind != KindMovie,
 			}
 			r.SonarrTitle, r.TwinFirst, r.TwinLast = twinFor(t, &info)
 			if r.SonarrTitle != "" {
@@ -250,8 +250,8 @@ func ownershipOf(entries []seadex.Entry, infoFor EntryInfoFunc) map[string][]own
 
 // run is the one pass, at one scope. Every difference between the reconcile and
 // the tick is either the scope value or one of the three catalogue-only steps.
-func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc, scope passScope) error {
-	infoFor := entryInfoFunc(info)
+func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info FeedInfo, scope passScope) error {
+	infoFor := entryInfoFunc(info.Entry)
 	prev, err := w.loadPrevious(ctx)
 	if err != nil {
 		return err
@@ -289,7 +289,7 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 			w: w, ev: ev, published: prev.published, publish: writes.published,
 			// prior: see journalPass.prior.
 			prior:   prev.owners,
-			infoFor: infoFor, js: &js, now: now,
+			infoFor: infoFor, nonAired: info.nonAiredOrder, js: &js, now: now,
 		}
 		// The file-census pack verdict per journal key, judged by the evidence this
 		// pass holds, so applyTitles can tell when a harvested title contradicts the
@@ -342,6 +342,11 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 	}
 	if err := w.persist(ctx, &snap); err != nil {
 		return err
+	}
+	if scope == scopeCatalogue {
+		// Only after persist: a refused snapshot leaves the previous journal served,
+		// and a key still in it must stay reported.
+		w.retainPackWarned(snap.NyaaFeed, snap.ABFeed)
 	}
 	w.logPass(&snap, ev, &js, len(entries), scope)
 	return nil

@@ -45,22 +45,28 @@ const (
 	// Sonarr's season-0 bucket, which can hold a different work entirely, and
 	// the map does not place it on episodes the item lists.
 	ScopeOffered
-	// ScopeEpisodes is a film or special filed under season 0 that the map
-	// places on season-0 episodes the item lists: it is judged on exactly the
-	// files on those episodes, like a mapped season.
+	// ScopeEpisodes is an entry judged on exactly the files on the episodes the
+	// map places it on, like a mapped season: a film or special filed under
+	// season 0 whose season-0 episodes the item lists, or an entry that is part
+	// of a positive season, placed on some of the episodes the item lists there.
 	ScopeEpisodes
 )
 
 // Entry is what one match says about the entry under comparison beyond its
 // item: the record, the positive seasons sibling records map
 // (mapping.Index.SiblingSeasons), the entry's own season ranges and its
-// season-0 episodes (both from mapping.Index.MappingFor). A whole-series
-// comparison reads the seasons, the episodes scope reads Specials.
+// season-0 episodes and its episodes of its positive season (all from
+// mapping.Index.MappingFor). A whole-series comparison reads the seasons, the
+// episodes scope reads Specials or Episodes.
 type Entry struct {
 	Record         *mapping.Record
 	SiblingSeasons []int
 	Seasons        []mapping.SeasonRange
 	Specials       []int
+	Episodes       []int
+	// AniListID is the SeaDex entry's own id, not Record.AniListID, which a
+	// title-fallback match leaves 0.
+	AniListID int
 }
 
 // scopeResult is the single scoping decision returned by scope: the semantic
@@ -74,11 +80,14 @@ type scopeResult struct {
 	// for placed episodes, nil otherwise.
 	Revisions map[string]release.Revision
 	Groups    []string
-	// Missing are the placed episodes with no file, on ScopeEpisodes only.
-	Missing []int
-	Kind    ScopeKind
-	HasFile bool
-	Approx  bool
+	// Episodes are the placed episodes judged and Missing those of them with no
+	// file, both of TVDB season Season, on ScopeEpisodes only.
+	Episodes []int
+	Missing  []int
+	Kind     ScopeKind
+	Season   int
+	HasFile  bool
+	Approx   bool
 }
 
 // RecordSeason resolves, from a mapping record ALONE, which season the record pins
@@ -114,8 +123,8 @@ func RecordSeason(rec *mapping.Record) (kind ScopeKind, season int) {
 // scope resolves the comparison scope of a matched entry once, for every
 // consumer: the semantic Kind plus the on-disk release groups, file presence,
 // and approximation flag that go with it. specials are the entry's placed
-// season-0 episodes.
-func scope(item *library.Item, rec *mapping.Record, specials []int) scopeResult {
+// season-0 episodes, episodes its placed episodes of its positive season.
+func scope(item *library.Item, rec *mapping.Record, specials, episodes []int) scopeResult {
 	// The ARR decides the movie scope, ahead of anything the record says: a
 	// Radarr item is a movie even when a broken upstream mapping carries a
 	// season for it.
@@ -124,12 +133,15 @@ func scope(item *library.Item, rec *mapping.Record, specials []int) scopeResult 
 	}
 	switch kind, season := RecordSeason(rec); kind {
 	case ScopeSeason:
+		if placed, ok := partOfSeason(item, season, episodes); ok {
+			return placed
+		}
 		// Group presence doubles as file presence here and in the specials branch:
 		// release.Classify falls back to the literal NOGRP for a group-less file.
 		g := item.SeasonGroups[season]
 		return scopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0, Revisions: item.SeasonRevisions[season]}
 	case ScopeOffered:
-		if placed, ok := episodesScope(item, specials); ok {
+		if placed, ok := episodesScope(item.Specials, specialSeason, specials); ok {
 			return placed
 		}
 		// The bucket is read for what it HOLDS, never to attribute a file to this
@@ -144,17 +156,31 @@ func scope(item *library.Item, rec *mapping.Record, specials []int) scopeResult 
 	}
 }
 
-// episodesScope judges the files on the placed season-0 episodes, false when
-// the item's episodes are unknown or it lists one of them not at all: a file
-// Sonarr cannot import there must not be asked for.
-func episodesScope(item *library.Item, specials []int) (scopeResult, bool) {
-	if len(specials) == 0 {
+// partOfSeason scopes an entry to its placed episodes of season when they
+// are a proper part of the episodes the item lists there. An equal set is the
+// season itself, and an unknown listing, or a placed episode the item does
+// not list, leaves the season scope: nothing then shows which files are this
+// entry's.
+func partOfSeason(item *library.Item, season int, episodes []int) (scopeResult, bool) {
+	listed := item.Listed[season]
+	if len(episodes) == 0 || len(episodes) >= len(listed) {
 		return scopeResult{}, false
 	}
-	res := scopeResult{Kind: ScopeEpisodes}
+	return episodesScope(listed, season, episodes)
+}
+
+// episodesScope judges the files on the placed episodes of season, known
+// being the item's episodes there, false when they are unknown or it lists
+// one of the placed ones not at all: a file Sonarr cannot import there must
+// not be asked for.
+func episodesScope(known map[int]library.ListedEpisode, season int, placed []int) (scopeResult, bool) {
+	if len(placed) == 0 {
+		return scopeResult{}, false
+	}
+	res := scopeResult{Kind: ScopeEpisodes, Season: season, Episodes: placed}
 	readings := make(map[string][]release.Revision)
-	for _, ep := range specials {
-		held, listed := item.Specials[ep]
+	for _, ep := range placed {
+		held, listed := known[ep]
 		switch {
 		case !listed:
 			return scopeResult{}, false
@@ -198,16 +224,16 @@ func (k ScopeKind) String() string {
 	}
 }
 
-// EpisodeLabel renders season-0 episode numbers for an operator, runs
-// collapsed: [9 10 12] is "S00E09-E10, S00E12". It is "" for none.
-func EpisodeLabel(episodes []int) string {
+// EpisodeLabel renders episode numbers of season for an operator, runs
+// collapsed: season 0's [9 10 12] is "S00E09-E10, S00E12". It is "" for none.
+func EpisodeLabel(season int, episodes []int) string {
 	var parts []string
 	for i := 0; i < len(episodes); {
 		j := i
 		for j+1 < len(episodes) && episodes[j+1] == episodes[j]+1 {
 			j++
 		}
-		part := fmt.Sprintf("S%02dE%02d", specialSeason, episodes[i])
+		part := fmt.Sprintf("S%02dE%02d", season, episodes[i])
 		if j > i {
 			part += fmt.Sprintf("-E%02d", episodes[j])
 		}
@@ -235,7 +261,7 @@ func (k ScopeKind) MarshalJSON() ([]byte, error) {
 // record-keyed predicate would strip its coverage. No file state is read, so a
 // partial walk changes no answer.
 func ClaimsCoverage(item *library.Item, rec *mapping.Record) bool {
-	return scope(item, rec, nil).Kind != ScopeOffered
+	return scope(item, rec, nil, nil).Kind != ScopeOffered
 }
 
 // ItemKind resolves the comparison scope kind of a library item that has no
@@ -244,7 +270,7 @@ func ClaimsCoverage(item *library.Item, rec *mapping.Record) bool {
 // movie, a Sonarr series has no per-season mapping and reads as the
 // whole-series comparison.
 func ItemKind(item *library.Item) ScopeKind {
-	return scope(item, &mapping.Record{}, nil).Kind
+	return scope(item, &mapping.Record{}, nil, nil).Kind
 }
 
 // summary is the per-real-season aggregate summarizeWholeSeries collects: the

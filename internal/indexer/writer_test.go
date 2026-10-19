@@ -50,7 +50,7 @@ func TestRebuildPersistsPairRelation(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := newTestWriter(path, "passkey", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "passkey", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -78,9 +78,9 @@ func TestRebuildJournalsAFilmTwinAsOneRecord(t *testing.T) {
 		}},
 	}}
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -146,7 +146,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 		},
 	}}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABTorznabURL: "http://prowlarr/2/api"}, log, nil)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("ab RSS feed empty of grabbable links") {
@@ -176,7 +176,7 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
@@ -209,7 +209,7 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -270,7 +270,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 		},
 	}}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -336,7 +336,7 @@ func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 		}},
 	}}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -360,7 +360,7 @@ func TestRebuildReportsWriteError(t *testing.T) {
 		t.Fatalf("write blocker: %v", err)
 	}
 	path := filepath.Join(blocker, "feed.json")
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(t.Context(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(t.Context(), nil, FeedInfo{})
 	if err == nil {
 		t.Fatal("Rebuild with an unwritable path returned nil, want error")
 	}
@@ -379,7 +379,7 @@ func TestRebuildFailsOnUnreadablePreviousSnapshot(t *testing.T) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir over snapshot path: %v", err)
 	}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(t.Context(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(t.Context(), nil, FeedInfo{})
 	if err == nil {
 		t.Fatal("Rebuild with an unreadable previous snapshot returned nil, want error")
 	}
@@ -406,7 +406,7 @@ func TestRebuildDropsOversizedItem(t *testing.T) {
 			ReleaseGroup: strings.Repeat("a", maxPersistedFieldBytes+1),
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -443,7 +443,7 @@ func TestRebuildDropsOversizedCachedTitle(t *testing.T) {
 	w := newLoggedTestWriter(path, log)
 	w.now = func() time.Time { return t0.Add(time.Hour) }
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -529,7 +529,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 			},
 		},
 	}}
-	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -556,7 +556,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	// ledger, so it now journals as NEW - the moment it first became
 	// grabbable curation is when the arrs should see it on RSS.
 	entries[0].Torrents[0].Tags = []string{"dual"}
-	if err := newExcludingTestWriter(path).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newExcludingTestWriter(path).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -593,7 +593,7 @@ func TestRebuildKeepsCurationWarnedTorrentsByDefault(t *testing.T) {
 	}
 	assertServed := func(t *testing.T, w *FeedWriter, path string) {
 		t.Helper()
-		if err := w.Rebuild(t.Context(), warnedEntries(), nil); err != nil {
+		if err := w.Rebuild(t.Context(), warnedEntries(), FeedInfo{}); err != nil {
 			t.Fatalf("Rebuild: %v", err)
 		}
 		snap := readSnapshotFile(t, path)
@@ -672,7 +672,7 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 			}},
 		},
 	}
-	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -721,7 +721,7 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -751,7 +751,7 @@ func TestRebuildBaselinesSnapshotMissingAFact(t *testing.T) {
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	w := newLoggedTestWriter(path, log)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -789,7 +789,7 @@ func TestRebuildDropsOversizedFeedItem(t *testing.T) {
 	w := newLoggedTestWriter(path, log)
 	w.now = func() time.Time { return t0.Add(time.Hour) }
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -832,7 +832,7 @@ func TestRebuildOversizedSnapshotRebaselines(t *testing.T) {
 	log, rec := capture.New()
 	w := newTestWriter(path, "", false)
 	w.log = log
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild over an oversized snapshot: %v (must re-baseline, not error)", err)
 	}
 	if !rec.Contains("previous feed snapshot exceeds size cap; re-baselining the feed journal") {
@@ -1003,7 +1003,7 @@ func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 		{AniListID: 2, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", InfoHash: h1, IsBest: true, Files: mkv}}},
 		{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", InfoHash: h1, IsBest: true, Tags: []string{"Broken"}, Files: mkv}}},
 	}
-	if err := newExcludingTestWriter(path).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newExcludingTestWriter(path).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1033,7 +1033,7 @@ func TestRebuildBaselinesOversizedSeenLedgerKey(t *testing.T) {
 	log, rec := capture.New()
 	w := newLoggedTestWriter(path, log)
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1074,7 +1074,7 @@ func TestRebuildCanonicalizesStoredHashBeforeWarningRetraction(t *testing.T) {
 		Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 	}}}}
 	w := newExcludingTestWriter(path)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if got := readSnapshotFile(t, path).NyaaFeed; len(got) != 0 {
@@ -1146,7 +1146,7 @@ func TestRebuildDropsOversizedABFeedItem(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1328,7 +1328,7 @@ func TestRebuildBlanksCarriedForeignInfoURL(t *testing.T) {
 	w := newTestWriter(path, "", false)
 	// No entries: the journaled torrent is no longer curated, so it is
 	// carried with its stored render rather than re-synthesized.
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	got := readSnapshotFile(t, path).NyaaFeed
@@ -1362,7 +1362,7 @@ func TestRebuildNeverLogsABPasskey(t *testing.T) {
 		Path:         path,
 		ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey,
 	}, log, nil)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	// The guard is vacuous unless the rebuild actually journaled the AB release
@@ -1463,7 +1463,7 @@ func TestRebuildBaselinesFalseSeenLedgerValue(t *testing.T) {
 	})
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1499,7 +1499,7 @@ func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
 	seedEmptyFeed(t, path)
 
 	// Tracker ON: the release journals.
-	if err := newTestWriter(path, "passkey", true).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "passkey", true).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (AB on): %v", err)
 	}
 	if got := len(readSnapshotFile(t, path).ABFeed); got != 1 {
@@ -1507,7 +1507,7 @@ func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
 	}
 
 	// Tracker OFF: one rebuild must not destroy the journal.
-	if err := newTestWriter(path, "passkey", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "passkey", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (AB off): %v", err)
 	}
 	off := readSnapshotFile(t, path)
@@ -1520,7 +1520,7 @@ func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
 	}
 
 	// Tracker BACK ON: the item is still there, so it can be served again.
-	if err := newTestWriter(path, "passkey", true).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "passkey", true).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (AB re-enabled): %v", err)
 	}
 	back := readSnapshotFile(t, path)
@@ -1554,10 +1554,10 @@ func TestRebuildOffTrackerJournalDoesNotGrow(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "passkey", true).Rebuild(t.Context(), first, nil); err != nil {
+	if err := newTestWriter(path, "passkey", true).Rebuild(t.Context(), first, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (AB on): %v", err)
 	}
-	if err := newTestWriter(path, "passkey", false).Rebuild(t.Context(), second, nil); err != nil {
+	if err := newTestWriter(path, "passkey", false).Rebuild(t.Context(), second, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (AB off, new release curated): %v", err)
 	}
 
@@ -2065,7 +2065,7 @@ func TestLoadPreviousRefusesANonRegularSnapshot(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(ctx, nil, nil)
+		done <- NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(ctx, nil, FeedInfo{})
 	}()
 	select {
 	case err := <-done:
@@ -2101,7 +2101,7 @@ func TestLoadPreviousRefusesASnapshotSymlinkEscapingItsDirectory(t *testing.T) {
 		t.Skipf("symlink unsupported here: %v", err)
 	}
 
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(t.Context(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(t.Context(), nil, FeedInfo{})
 	if err == nil {
 		t.Fatal("Rebuild over an escaping symlink returned nil, want a refusal")
 	}
@@ -2127,7 +2127,7 @@ func TestPassPublishesToTheInProcessServer(t *testing.T) {
 		NyaaTorznabURL: "http://prowlarr/1/api",
 	}, nil, nil)
 
-	if err := w.Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+	if err := w.Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	// No tick, no refresh: the server serves what the cycle handed it.
@@ -2160,7 +2160,7 @@ func TestPassWithoutAnInProcessServerOnlyWritesTheFile(t *testing.T) {
 	seedEmptyFeed(t, path)
 	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
 
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if got := ix.feedFor(upstreamNyaa, requesterAny); len(got) != 0 {
@@ -2293,7 +2293,7 @@ func TestPassOverAHealthySnapshotEmitsNoDegradationDiagnostics(t *testing.T) {
 	// Two passes: the first writes the snapshot, the second LOADS it back, which
 	// is the only way the load-side reports below are reachable at all.
 	for pass := 1; pass <= 2; pass++ {
-		if err := w.Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+		if err := w.Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 			t.Fatalf("Rebuild pass %d: %v", pass, err)
 		}
 	}

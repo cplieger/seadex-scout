@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -78,20 +78,20 @@ func emptyProbe(context.Context, time.Time) (int, error) { return 0, nil }
 // every reconcile observes a partial walk and every tick observes nothing.
 func partialWalkScout(logger *slog.Logger) (*Scout, *flakySonarr) {
 	sonarr := &flakySonarr{
-		series: []arrapi.Series{
-			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-			{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+		series: []sonarr.Series{
+			{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+			{ID: 8, Title: "Second Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
 		},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
+			8: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        &fakeStore{st: state.State{Mapping: twoRecordMappingCache()}},
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry()), countFn: emptyProbe},
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -163,7 +163,7 @@ func TestStandingShrinkConditionIsKeyedPerArr(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        f.store,
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: f.sonarr, Radarr: f.radarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{f.sonarr}, Radarr: f.radarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries(), countFn: emptyProbe},
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -214,7 +214,7 @@ func TestShrinkConditionClearsWhenTheSmallerLibraryIsAccepted(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        f.store,
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: f.sonarr, Radarr: f.radarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{f.sonarr}, Radarr: f.radarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries(), countFn: emptyProbe},
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -492,15 +492,15 @@ func TestAniListConditionClearsOnAnUndegradedReconcile(t *testing.T) {
 	logger, recorder := capture.New()
 	ani := &switchableAniList{degraded: true}
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 8, Title: "Idless Show", TvdbID: 124, Year: 2024}},
-		files:  map[int][]arrapi.EpisodeFile{8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}},
+		series: []sonarr.Series{{ID: 8, Title: "Idless Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024}},
+		files:  map[int][]sonarr.EpisodeFile{8: {{Season: 1, ReleaseGroup: "Erai-raws"}}},
 	}
 	s := New(&Deps{
 		Logger: logger,
 		Store: &fakeStore{st: state.State{
 			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 222, Type: "TV"}}},
 		}},
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: []seadex.Entry{secondSeaDexEntry()}, countFn: emptyProbe},
 		Matcher:      match.New(ani, scoutTestLogger()),

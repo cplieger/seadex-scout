@@ -59,7 +59,7 @@ func markerIndexer(t *testing.T, isBest bool) *Indexer {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	info := func(int) EntryInfo { return EntryInfo{Title: "Some Anime"} }
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

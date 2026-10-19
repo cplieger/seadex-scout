@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -189,7 +190,7 @@ func (u *upstream) upstreamSecrets() []string {
 	secrets := []string{u.apiKey}
 	parsed, err := url.Parse(u.feed)
 	if err != nil {
-		return secrets
+		return withQuotedForms(secrets)
 	}
 	if parsed.User != nil {
 		secrets = append(secrets, userinfoSecrets(parsed.User)...)
@@ -213,6 +214,17 @@ func (u *upstream) upstreamSecrets() []string {
 		secrets = append(secrets, value)
 		if decoded, err := url.QueryUnescape(value); err == nil && decoded != value {
 			secrets = append(secrets, decoded)
+		}
+	}
+	return withQuotedForms(secrets)
+}
+
+// withQuotedForms adds each secret's strconv.Quote escaping where it differs from
+// the secret: a generic decode error quotes the reflected value (strconv.NumError).
+func withQuotedForms(secrets []string) []string {
+	for _, secret := range secrets {
+		if q := strconv.Quote(secret); q[1:len(q)-1] != secret {
+			secrets = append(secrets, q[1:len(q)-1])
 		}
 	}
 	return secrets
@@ -249,44 +261,19 @@ func credentialParamName(name string) bool {
 	return credname.ContainsWord(decoded)
 }
 
-// redactSecrets removes every credential this upstream carries from untrusted
-// upstream text. It runs on the error path only, and redactAndBound runs it on BOTH
-// sides of the sanitizer, so each exact-substring replacement sees the credential in
-// the form the text carries at that position. An empty secret is a no-op
-// (httpx.RedactSecretString).
-func (u *upstream) redactSecrets(s string) string {
-	for _, secret := range u.upstreamSecrets() {
-		s = httpx.RedactSecretString(s, httpx.Secret(secret))
-	}
-	return s
-}
-
-// redactAndBound is the emit boundary for untrusted upstream text carrying this
-// upstream's credentials: redact, sanitize, redact again, cap. Every position is
-// load-bearing - the sanitizer can garble a credential the first pass would have
-// caught, and can CONSTRUCT one from text no needle matched (four of this
-// upstream's needles carry a U+0020, so an echoed correct<C0>horse becomes
-// "correct horse"), while a cap applied earlier leaves a surviving prefix. The
-// bound is upstreamTextMaxBytes with the marker counted inside it, so
-// upstreamDocError.Error()'s own sanitize pass is a no-op on this output.
-func (u *upstream) redactAndBound(s string) string {
-	s = u.redactSecrets(s)
-	s = runesafe.SanitizeSingleLine(s)
-	s = u.redactSecrets(s)
-	text, _ := runesafe.SanitizeSingleLineCapped(s, upstreamTextMaxBytes, "...")
-	return text
-}
-
-// classifyParseError maps a parseTorznab failure onto the retry taxonomy.
+// classifyParseError maps a parseTorznab failure onto the retry taxonomy. Every
+// redaction caps at upstreamTextMaxBytes with the marker counted inside it, so
+// upstreamDocError.Error()'s own sanitize pass is a no-op on its output.
 func (u *upstream) classifyParseError(err error) error {
+	secrets := u.upstreamSecrets()
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		// The document's code/description are attacker-influenced text and the request
 		// carried the Prowlarr API key: a compromised upstream could reflect the key
 		// into the error message, which httpx.Do's retry logger and the harvest WARN
 		// would then expand into the log stream (CWE-532).
 		terminal := terminalTorznabCode(docErr.codeNum)
-		docErr.code = u.redactAndBound(docErr.code)
-		docErr.description = u.redactAndBound(docErr.description)
+		docErr.code, _ = runesafe.RedactSingleLineCapped(docErr.code, upstreamTextMaxBytes, "...", secrets...)
+		docErr.description, _ = runesafe.RedactSingleLineCapped(docErr.description, upstreamTextMaxBytes, "...", secrets...)
 		if terminal {
 			return docErr
 		}
@@ -301,10 +288,8 @@ func (u *upstream) classifyParseError(err error) error {
 	// value, up to the wire cap upstreamMaxBytes), and the request carried the Prowlarr
 	// API key: redact any reflection of the key before the error reaches httpx.Do's
 	// retry logger or fetchRaw's WARN - the same emit-boundary policy the
-	// upstreamDocError path applies. The redaction runs on BOTH sides of the sanitizer
-	// (redactAndBound), because the sanitizer can both garble a credential the
-	// pre-pass would have caught and reassemble one from text no needle matches.
-	msg := u.redactAndBound(err.Error())
+	// upstreamDocError path applies.
+	msg, _ := runesafe.RedactSingleLineCapped(err.Error(), upstreamTextMaxBytes, "...", secrets...)
 	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 
@@ -403,8 +388,17 @@ func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 // how many were blanked (the counts filterDownloadURLs' onset ladder reads).
 // An admitted field is rewritten to the gate's vouched spelling, which is not a
 // blanking and must not be counted as one - the same accounting
-// sanitizeSnapshotInfoURLs applies on the persisted side.
+// sanitizeSnapshotInfoURLs applies on the persisted side. A magnet GUID is
+// cleared without being inspected or counted.
 func (u *upstream) sanitizeItemDisplayURLs(it *item) (observed, blanked int) {
+	// Prowlarr fills an empty Guid with the magnet URL
+	// (https://github.com/Prowlarr/Prowlarr/blob/26a605e41f6156b959bc8f3ae5db4bec252106c5/src/NzbDrone.Core/Indexers/IndexerBase.cs#L111-L124),
+	// and the Nyaa definition's prefer_magnet_links defaults on, leaving no
+	// download URL. It is an identifier, not a display link, and item.guid()
+	// falls back to the same torrent's InfoHash.
+	if urlform.Classify(it.GUID).Scheme == "magnet" {
+		it.GUID = ""
+	}
 	for _, field := range []*string{&it.InfoURL, &it.GUID} {
 		if *field == "" {
 			continue

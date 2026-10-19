@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="1.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <atom:link rel="self" type="application/rss+xml" />
+    <title>Prowlarr</title>
+    <item>
+      <title>[Moxie] Bokutachi wa Benkyou ga Dekinai! - Season 02 (S02) (BD Remux 1080p FLAC 2.0) (We Never Learn!: BOKUBEN Season 2)</title>
+      <description>[Moxie] Bokutachi wa Benkyou ga Dekinai! - Season 02 (S02) (BD Remux 1080p FLAC 2.0) (We Never Learn!: BOKUBEN Season 2)</description>
+      <guid>magnet:?xt=urn:btih:b705f93c1c6f843539194b3fac6ac808d1a76ee8&amp;dn=%5BMoxie%5D%20Bokutachi%20wa%20Benkyou%20ga%20Dekinai%21%20-%20Season%2002%20%28S02%29%20%28BD%20Remux%201080p%20FLAC%202.0%29%20%28We%20Never%20Learn%21%3A%20BOKUBEN%20Season%202%29&amp;tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce</guid>
+      <prowlarrindexer id="22" type="public">Nyaa</prowlarrindexer>
+      <comments>https://nyaa.si/view/2161316</comments>
+      <pubDate>Mon, 14 Sep 2026 14:31:00 +0200</pubDate>
+      <size>93415538688</size>
+      <link>@ORIGIN@/22/download?apikey=REDACTED&amp;link=REDACTED-LINK-TOKEN&amp;file=%5BMoxie%5D+Bokutachi+wa+Benkyou+ga+Dekinai!+-+Season+02+(S02)+(BD+Remux+1080p+FLAC+2.0)+(We+Never+Learn!%3A+BOKUBEN+Season+2)</link>
+      <category>5070</category>
+      <category>127720</category>
+      <category>2020</category>
+      <enclosure url="@ORIGIN@/22/download?apikey=REDACTED&amp;link=REDACTED-LINK-TOKEN&amp;file=%5BMoxie%5D+Bokutachi+wa+Benkyou+ga+Dekinai!+-+Season+02+(S02)+(BD+Remux+1080p+FLAC+2.0)+(We+Never+Learn!%3A+BOKUBEN+Season+2)" length="93415538688" type="application/x-bittorrent" />
+      <torznab:attr name="category" value="5070" />
+      <torznab:attr name="category" value="127720" />
+      <torznab:attr name="category" value="2020" />
+      <torznab:attr name="tag" value="freeleech" />
+      <torznab:attr name="genre" value="" />
+      <torznab:attr name="seeders" value="8" />
+      <torznab:attr name="grabs" value="106" />
+      <torznab:attr name="peers" value="9" />
+      <torznab:attr name="infohash" value="b705f93c1c6f843539194b3fac6ac808d1a76ee8" />
+      <torznab:attr name="downloadvolumefactor" value="0" />
+      <torznab:attr name="uploadvolumefactor" value="1" />
+    </item>
+    <item>
+      <title>[Moxie] We Never Learn: BOKUBEN S00E01-E02 (BD Remux 1080p x264 8-bit FLAC) | We Never Learn OVAs | Bokutachi wa Benkyou ga Dekinai OVAs</title>
+      <description>[Moxie] We Never Learn: BOKUBEN S00E01-E02 (BD Remux 1080p x264 8-bit FLAC) | We Never Learn OVAs | Bokutachi wa Benkyou ga Dekinai OVAs</description>
+      <guid>magnet:?xt=urn:btih:8aa9ff4d43cb54121d7bbcae1d9bc9001188dd4b&amp;dn=%5BMoxie%5D%20We%20Never%20Learn%3A%20BOKUBEN%20S00E01-E02%20%28BD%20Remux%201080p%20x264%208-bit%20FLAC%29%20%7C%20We%20Never%20Learn%20OVAs%20%7C%20Bokutachi%20wa%20Benkyou%20ga%20Dekinai%20OVAs&amp;tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce</guid>
+      <prowlarrindexer id="22" type="public">Nyaa</prowlarrindexer>
+      <comments>https://nyaa.si/view/2076059</comments>
+      <pubDate>Sat, 14 Feb 2026 06:00:00 +0100</pubDate>
+      <size>14280766259</size>
+      <link>@ORIGIN@/22/download?apikey=REDACTED&amp;link=REDACTED-LINK-TOKEN&amp;file=%5BMoxie%5D+We+Never+Learn%3A+BOKUBEN+S00E01-E02+(BD+Remux+1080p+x264+8-bit+FLAC)+%7C+We+Never+Learn+OVAs+%7C+Bokutachi+wa+Benkyou+ga+Dekinai+OVAs</link>
+      <category>5070</category>
+      <category>127720</category>
+      <category>2020</category>
+      <enclosure url="@ORIGIN@/22/download?apikey=REDACTED&amp;link=REDACTED-LINK-TOKEN&amp;file=%5BMoxie%5D+We+Never+Learn%3A+BOKUBEN+S00E01-E02+(BD+Remux+1080p+x264+8-bit+FLAC)+%7C+We+Never+Learn+OVAs+%7C+Bokutachi+wa+Benkyou+ga+Dekinai+OVAs" length="14280766259" type="application/x-bittorrent" />
+      <torznab:attr name="category" value="5070" />
+      <torznab:attr name="category" value="127720" />
+      <torznab:attr name="category" value="2020" />
+      <torznab:attr name="tag" value="freeleech" />
+      <torznab:attr name="genre" value="" />
+      <torznab:attr name="seeders" value="6" />
+      <torznab:attr name="grabs" value="151" />
+      <torznab:attr name="peers" value="7" />
+      <torznab:attr name="infohash" value="8aa9ff4d43cb54121d7bbcae1d9bc9001188dd4b" />
+      <torznab:attr name="downloadvolumefactor" value="0" />
+      <torznab:attr name="uploadvolumefactor" value="1" />
+    </item>
+    <item>
+      <title>[Moxie] We Never Learn: BOKUBEN Season 1 (BD Remux 1080p x264 8-bit FLAC) | Bokutachi wa Benkyou ga Dekinai</title>
+      <description>[Moxie] We Never Learn: BOKUBEN Season 1 (BD Remux 1080p x264 8-bit FLAC) | Bokutachi wa Benkyou ga Dekinai</description>
+      <guid>magnet:?xt=urn:btih:24994f1db58f7cdf4b1f7ea777e643da7d3fbeff&amp;dn=%5BMoxie%5D%20We%20Never%20Learn%3A%20BOKUBEN%20Season%201%20%28BD%20Remux%201080p%20x264%208-bit%20FLAC%29%20%7C%20Bokutachi%20wa%20Benkyou%20ga%20Dekinai&amp;tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce</guid>
+      <prowlarrindexer id="22" type="public">Nyaa</prowlarrindexer>
+      <comments>https://nyaa.si/view/2073478</comments>
+      <pubDate>Fri, 06 Feb 2026 19:14:00 +0100</pubDate>
+      <size>94489280512</size>
+      <link>@ORIGIN@/22/download?apikey=REDACTED&amp;link=REDACTED-LINK-TOKEN&amp;file=%5BMoxie%5D+We+Never+Learn%3A+BOKUBEN+Season+1+(BD+Remux+1080p+x264+8-bit+FLAC)+%7C+Bokutachi+wa+Benkyou+ga+Dekinai</link>
+      <category>5070</category>
+      <category>127720</category>
+      <category>2020</category>
+      <enclosure url="@ORIGIN@/22/download?apikey=REDACTED&amp;link=REDACTED-LINK-TOKEN&amp;file=%5BMoxie%5D+We+Never+Learn%3A+BOKUBEN+Season+1+(BD+Remux+1080p+x264+8-bit+FLAC)+%7C+Bokutachi+wa+Benkyou+ga+Dekinai" length="94489280512" type="application/x-bittorrent" />
+      <torznab:attr name="category" value="5070" />
+      <torznab:attr name="category" value="127720" />
+      <torznab:attr name="category" value="2020" />
+      <torznab:attr name="tag" value="freeleech" />
+      <torznab:attr name="genre" value="" />
+      <torznab:attr name="seeders" value="5" />
+      <torznab:attr name="grabs" value="213" />
+      <torznab:attr name="peers" value="8" />
+      <torznab:attr name="infohash" value="24994f1db58f7cdf4b1f7ea777e643da7d3fbeff" />
+      <torznab:attr name="downloadvolumefactor" value="0" />
+      <torznab:attr name="uploadvolumefactor" value="1" />
+    </item>
+  </channel>
+</rss>

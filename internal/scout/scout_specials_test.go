@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -24,16 +24,14 @@ import (
 type specialsSonarr struct {
 	episodesErr error
 	fakeSonarr
+	special sonarr.Episode
 }
 
-func (f *specialsSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (f *specialsSonarr) Episodes(context.Context, int) ([]sonarr.Episode, error) {
 	if f.episodesErr != nil {
 		return nil, f.episodesErr
 	}
-	return []arrapi.Episode{{
-		SeasonNumber: 0, EpisodeNumber: 9, HasFile: true,
-		EpisodeFile: &arrapi.EpisodeFile{SeasonNumber: 0, ReleaseGroup: "oz"},
-	}}, nil
+	return []sonarr.Episode{f.special}, nil
 }
 
 type placedMapping struct{}
@@ -42,7 +40,10 @@ func (placedMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache
 	return *prev, mapping.NewIndex(mapping.Source{Records: prev.Records, Mappings: prev.Mappings}), nil
 }
 
-const placedOVAID = 5
+const (
+	placedOVAID     = 5
+	placedOVAFileID = 90
+)
 
 func placedOVACache() mapping.Cache {
 	return mapping.Cache{
@@ -70,16 +71,17 @@ func placedOVAEntry() seadex.Entry {
 
 func placedOVASonarr() *specialsSonarr {
 	return &specialsSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Oz Show", TvdbID: 500, Year: 2020}},
-		files:  map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 0, ReleaseGroup: "oz"}}},
+		series:  []sonarr.Series{{ID: 7, Title: "Oz Show", IDs: sonarr.ExternalIDs{TVDB: 500}, Year: 2020}},
+		files:   map[int][]sonarr.EpisodeFile{7: {{ID: placedOVAFileID, Season: 0, ReleaseGroup: "oz"}}},
+		special: sonarr.Episode{Season: 0, Number: 9, HasFile: true, FileID: placedOVAFileID},
 	}
 }
 
-func placedOVADeps(logger *slog.Logger, sonarr *specialsSonarr, notifier *notify.Notifier, sea *fakeSeaDex, every int) *Deps {
+func placedOVADeps(logger *slog.Logger, fs *specialsSonarr, notifier *notify.Notifier, sea *fakeSeaDex, every int) *Deps {
 	return &Deps{
 		Logger:       logger,
 		Store:        &fakeStore{st: state.State{Mapping: placedOVACache()}},
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{fs}, Logger: scoutTestLogger()}),
 		Mapping:      placedMapping{},
 		SeaDex:       sea,
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -92,8 +94,8 @@ func placedOVADeps(logger *slog.Logger, sonarr *specialsSonarr, notifier *notify
 func TestCycleKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 	logger, recorder := capture.New()
 	notifier := notify.NewNotifier(logger, nil)
-	sonarr := placedOVASonarr()
-	s := New(placedOVADeps(logger, sonarr, notifier, &fakeSeaDex{entries: []seadex.Entry{placedOVAEntry()}}, 1))
+	fs := placedOVASonarr()
+	s := New(placedOVADeps(logger, fs, notifier, &fakeSeaDex{entries: []seadex.Entry{placedOVAEntry()}}, 1))
 
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle(season 0 read) healthy=false, want true")
@@ -102,7 +104,7 @@ func TestCycleKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 		t.Fatalf("Cycle(season 0 read) findings = %d, want 1 (the fixture must raise the special's finding first)", total)
 	}
 
-	sonarr.episodesErr = errors.New("episode list read failed")
+	fs.episodesErr = errors.New("episode list read failed")
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle(season 0 read failed) healthy=false, want true")
 	}
@@ -113,8 +115,9 @@ func TestCycleKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 		t.Errorf("Cycle(season 0 read failed) total=%d preserved=%d resolved=%d, want 1/1/0", total, preserved, resolved)
 	}
 
-	sonarr.episodesErr = nil
-	sonarr.files = map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "oz"}}}
+	fs.episodesErr = nil
+	fs.files = map[int][]sonarr.EpisodeFile{7: {{Season: 1, ReleaseGroup: "oz"}}}
+	fs.special = sonarr.Episode{Season: 0, Number: 9}
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("Cycle(no season-0 file) healthy=false, want true")
 	}
@@ -147,10 +150,10 @@ func TestCycleSizesAPlacedSpecialByItsDownloadOnly(t *testing.T) {
 func TestTickKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 	logger, recorder := capture.New()
 	notifier := notify.NewNotifier(logger, nil)
-	sonarr := placedOVASonarr()
-	sonarr.episodesErr = errors.New("episode list read failed")
+	fs := placedOVASonarr()
+	fs.episodesErr = errors.New("episode list read failed")
 	sea := &fakeSeaDex{entries: []seadex.Entry{placedOVAEntry()}, windowEntries: []seadex.Entry{placedOVAEntry()}}
-	s := New(placedOVADeps(logger, sonarr, notifier, sea, 96))
+	s := New(placedOVADeps(logger, fs, notifier, sea, 96))
 
 	if healthy := s.Cycle(t.Context()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
@@ -177,7 +180,7 @@ func TestTickKeepsAPlacedSpecialFindingWhileSeasonZeroIsUnread(t *testing.T) {
 func TestPreservedAddsOnlyPlacedEntriesOnAnUnreadSeries(t *testing.T) {
 	unread := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"oz"}}}
 	read := unread
-	read.Specials = map[int]library.SpecialEpisode{9: {Group: "oz", HasFile: true}}
+	read.Specials = map[int]library.ListedEpisode{9: {Group: "oz", HasFile: true}}
 	matches := []match.Match{
 		{Entry: seadex.Entry{AniListID: 1}, Item: &unread, Specials: []int{9}},
 		{Entry: seadex.Entry{AniListID: 2}, Item: &unread},
@@ -209,7 +212,7 @@ func copyFindings() []compare.Finding {
 func TestPreservedKeepsOnlyTheArrCopyWithoutEvidence(t *testing.T) {
 	unreadSonarr := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"oz"}}}
 	readSonarr := unreadSonarr
-	readSonarr.Specials = map[int]library.SpecialEpisode{9: {Group: "oz", HasFile: true}}
+	readSonarr.Specials = map[int]library.ListedEpisode{9: {Group: "oz", HasFile: true}}
 	filelessRadarr := library.Item{Arr: library.ArrRadarr}
 	failedRadarr := library.Item{Arr: library.ArrRadarr, Failed: true}
 	entry := seadex.Entry{AniListID: placedOVAID}
@@ -246,6 +249,62 @@ func TestPreservedKeepsOnlyTheArrCopyWithoutEvidence(t *testing.T) {
 			arrs := findingArrs(recorder)
 			if len(arrs) != 3 || arrs[2] != tc.want {
 				t.Errorf("finding arrs over both passes = %q, want both copies then only %q", arrs, tc.want)
+			}
+		})
+	}
+}
+
+// orderSonarr is placedOVASonarr whose series 7 can switch to a non-aired
+// order or fail its episode-file read, beside a healthy second series so a
+// failed read leaves a partial walk rather than a failed one.
+type orderSonarr struct {
+	filesErr error
+	*specialsSonarr
+}
+
+func (f *orderSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
+	if seriesID == 7 && f.filesErr != nil {
+		return nil, f.filesErr
+	}
+	return f.specialsSonarr.EpisodeFiles(ctx, seriesID)
+}
+
+// TestCycleResolvesAFindingOnceTheSeriesUsesANonAiredOrder pins the
+// resolution rule: a finding raised while the series was in aired order
+// resolves at the first reconcile that reads it in another order, because that
+// order alone withholds every comparison, so neither an unread season 0 nor a
+// failed file read (which keep an aired series' findings) preserves it.
+func TestCycleResolvesAFindingOnceTheSeriesUsesANonAiredOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		breakRead func(*orderSonarr)
+	}{
+		{name: "files read", breakRead: func(*orderSonarr) {}},
+		{name: "season 0 unread", breakRead: func(f *orderSonarr) { f.episodesErr = errors.New("episode list read failed") }},
+		{name: "episode files unread", breakRead: func(f *orderSonarr) { f.filesErr = errors.New("episode file read failed") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			notifier := notify.NewNotifier(logger, nil)
+			fs := &orderSonarr{specialsSonarr: placedOVASonarr()}
+			fs.series = append(fs.series, sonarr.Series{ID: 8, Title: "Other Show", IDs: sonarr.ExternalIDs{TVDB: 800}})
+			deps := placedOVADeps(logger, fs.specialsSonarr, notifier, &fakeSeaDex{entries: []seadex.Entry{placedOVAEntry()}}, 1)
+			deps.Library = arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{fs}, Logger: scoutTestLogger()})
+			s := New(deps)
+
+			s.Cycle(t.Context())
+			if total, _ := lastSummaryCounter(t, recorder, "total"); total != 1 {
+				t.Fatalf("Cycle(aired order) findings = %d, want 1 (the fixture must raise the finding first)", total)
+			}
+
+			fs.series[0].Order = sonarr.Order{Type: "alternate", Name: "Book Order"}
+			tc.breakRead(fs)
+			s.Cycle(t.Context())
+			total, _ := lastSummaryCounter(t, recorder, "total")
+			preserved, _ := lastSummaryCounter(t, recorder, "preserved")
+			resolved, _ := lastSummaryCounter(t, recorder, "resolved")
+			if total != 0 || preserved != 0 || resolved != 1 {
+				t.Errorf("Cycle(non-aired order) total=%d preserved=%d resolved=%d, want 0/0/1", total, preserved, resolved)
 			}
 		})
 	}

@@ -45,6 +45,7 @@ var verdictDesc = map[Verdict]string{
 	VerdictOlderRevision: "You have SeaDex's best group, but an older revision of it: SeaDex lists a newer version, PROPER or REPACK from the same group.",
 	VerdictUnverified:    "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all. Alignment could not be verified either way.",
 	verdictUnattributed:  "A film or special in Sonarr's season 0 that the anime ID map does not tie to an episode Sonarr lists, or whose season-0 episodes could not be read, so it is not compared. The groups shown are everything in season 0.",
+	verdictWithheld:      "Not compared, because seadex-scout cannot trust where this entry sits in your series. The Notes column says why.",
 	VerdictNoFile:        "No file sits where this entry maps. The mapped season, movie, special episodes or specials bucket is empty, or a whole-series comparison found no real season with files. Either the files are missing, or Sonarr files that season elsewhere, such as under TVDB's specials.",
 	VerdictBest:          "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex:   "In your library and recognized as anime (in the anime ID map), but no SeaDex entry the app can compare covers this item's files, so there is no recommendation to compare against.",
@@ -144,6 +145,8 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete; " +
+	"`order` - on a withheld row, Sonarr numbers the series in another episode order than TheTVDB's aired one; " +
+	"`anilist` - on a withheld row, the AniList entries Sonarr links the series to do not include this entry; " +
 	"`revision v1, SeaDex v2` - on a have_older_revision row, the newest revision you hold of the group and " +
 	"the newest revision SeaDex lists for it (`(repack)` or `(proper)` names the token that raised it).\n\n" +
 	"SeaDex best annotations: the `SeaDex best` column holds ONLY upstream SeaDex group text, and " +
@@ -152,7 +155,7 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"cannot be mistaken for part of a group's name. A Notes entry associates with a best group BY " +
 	"POSITION: one `;`-separated entry per group listed in the SeaDex best column, in the same order, " +
 	"with `-` for a group we have nothing to say about (a row with no annotations at all shows a single " +
-	"`-`). The note words: " +
+	"`-`). On a withheld row the Notes column instead says why the entry was not compared. The note words: " +
 	"`broken` / `incomplete` are SeaDex curation warnings, `url error` means " +
 	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), " +
 	"`unknown tracker` means the record names a tracker this build does not know, so no link could be " +
@@ -244,8 +247,12 @@ func bestCell(row *reportRow) string {
 // releases the SeaDex-best column lists, kept out of the upstream group text so
 // no group name can be read as a curation warning from us. Association is
 // POSITIONAL: one entry per group the best column lists (same selectBestGroups
-// order), `;`-separated, with emptyCell for a group carrying no note.
+// order), `;`-separated, with emptyCell for a group carrying no note. A
+// withheld row's Notes cell is instead why it was not compared.
 func notesCell(row *reportRow) string {
+	if row.Verdict == verdictWithheld {
+		return escapeCell(withheldNote(row))
+	}
 	var entries []string
 	annotatedAny := false
 	selectBestGroups(row.Releases, func(rel *rowRelease, isAnnotated bool) bool {
@@ -264,23 +271,45 @@ func notesCell(row *reportRow) string {
 	return escapeCell(strings.Join(entries, "; "))
 }
 
+// withheldNote explains a withheld row in the operator's terms.
+func withheldNote(row *reportRow) string {
+	switch row.Withheld {
+	case align.WithheldOrder:
+		return "Sonarr numbers this series in " + row.Order.Label() +
+			", which seadex-scout cannot map to TheTVDB's aired seasons, so it is not compared."
+	case align.WithheldAniList:
+		ids := make([]string, len(row.SeriesAniListIDs))
+		for i, id := range row.SeriesAniListIDs {
+			ids[i] = strconv.Itoa(id)
+		}
+		return "Sonarr links this series to AniList " + strings.Join(ids, ", ") + ", which do not include this entry's " +
+			strconv.Itoa(row.AniListID) + ", so the match is not trusted and it is not compared."
+	default:
+		return emptyCell
+	}
+}
+
 // scopeCell renders the scope for the Markdown table, appending the comparison
 // annotations in parentheses: the held and listed revisions on a
-// have_older_revision row, "approx" for a coarse multi-group bucket and the
-// qualifier when one applies - e.g. "S2 (approx, mixed)".
+// have_older_revision row, "approx" for a coarse multi-group bucket, the
+// qualifier when one applies - e.g. "S2 (approx, mixed)" - and a withheld
+// row's reason ("S2 (order)").
 func scopeCell(row *reportRow) string {
 	var notes []string
 	if row.CurrentRevision.Known() && row.BestRevision.Known() {
 		notes = append(notes, "revision "+row.CurrentRevision.String()+", SeaDex "+row.BestRevision.String())
 	}
 	if len(row.MissingEpisodes) > 0 {
-		notes = append(notes, "missing "+align.EpisodeLabel(row.MissingEpisodes))
+		notes = append(notes, "missing "+align.EpisodeLabel(row.Season, row.MissingEpisodes))
 	}
 	if row.Approx {
 		notes = append(notes, "approx")
 	}
 	if row.Qualifier != "" {
 		notes = append(notes, string(row.Qualifier))
+	}
+	if row.Withheld != align.WithheldNone {
+		notes = append(notes, row.Withheld.String())
 	}
 	if len(notes) == 0 {
 		return scopeLabel(row)
@@ -289,8 +318,8 @@ func scopeCell(row *reportRow) string {
 }
 
 // scopeLabel renders the comparison scope recorded on the row at build time:
-// "movie", "offered", the TVDB season ("S2"), the season-0 episodes
-// ("S00E09-E10"), or "series" for a whole-series comparison. A pure reader of
+// "movie", "offered", the TVDB season ("S2"), the placed episodes
+// ("S00E09-E10", "S01E01"), or "series" for a whole-series comparison. A pure reader of
 // reportRow.Scope, so the label cannot drift from the comparison actually performed;
 // the JSON renderer publishes the same value through
 // align.ScopeKind.MarshalJSON, keeping kind and numbers separable.
@@ -299,7 +328,7 @@ func scopeLabel(row *reportRow) string {
 	case row.Scope == align.ScopeSeason:
 		return "S" + strconv.Itoa(row.Season)
 	case row.Scope == align.ScopeEpisodes && len(row.Episodes) > 0:
-		return align.EpisodeLabel(row.Episodes)
+		return align.EpisodeLabel(row.Season, row.Episodes)
 	}
 	return row.Scope.String()
 }
@@ -478,6 +507,7 @@ func (r *Report) summaryAttrs() []any {
 		"no_file", r.Totals[string(VerdictNoFile)],
 		"unverified", r.Totals[string(VerdictUnverified)],
 		"unattributed", r.Totals[string(verdictUnattributed)],
+		"withheld", r.Totals[string(verdictWithheld)],
 		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
 		"anime_items", r.Items.Anime,
 		"items_with_entry", r.Items.WithEntry,
@@ -496,6 +526,7 @@ func rowAttrs(row *reportRow) []any {
 		"arr", capDisplayText(row.Arr),
 		"verdict", string(row.Verdict),
 		"qualifier", string(row.Qualifier),
+		"reason", row.Withheld.String(),
 		"scope", scopeLabel(row),
 		"approx", row.Approx,
 		"current_revision", row.CurrentRevision.String(),
@@ -923,6 +954,8 @@ func sanitizedRows(rows []reportRow) []reportRow {
 		row.MatchSource = sanitizeDisplayText(row.MatchSource)
 		row.CurrentGroups = sanitizedStrings(row.CurrentGroups)
 		row.Releases = sanitizedReleases(row.Releases)
+		row.Order.Type = sanitizeDisplayText(row.Order.Type)
+		row.Order.Name = sanitizeDisplayText(row.Order.Name)
 	}
 	return out
 }

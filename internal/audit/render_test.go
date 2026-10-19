@@ -317,6 +317,7 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		"arr":           library.ArrSonarr,
 		"verdict":       string(VerdictBest),
 		"qualifier":     string(QualifierMixed),
+		"reason":        "",
 		"scope":         "S1",
 		"approx":        true,
 		"current_group": "subsplease,erai-raws",
@@ -331,6 +332,32 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		if rAttrs[k] != v {
 			t.Errorf("row attr %q = %v, want %v", k, rAttrs[k], v)
 		}
+	}
+}
+
+// TestReportLogItemCarriesWithheldReason pins the reason qualifier a withheld
+// row carries on its report item line: "order" for a series Sonarr numbers in
+// a non-aired order (the reason the withheld verdict names, order or anilist).
+func TestReportLogItemCarriesWithheldReason(t *testing.T) {
+	log, rec := capture.New()
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(verdictWithheld): 1},
+		Rows: []reportRow{{
+			Title: "Monogatari", Arr: library.ArrSonarr, Verdict: verdictWithheld, AniListID: 5081,
+			Season: 2, Scope: align.ScopeSeason, Withheld: align.WithheldOrder,
+			Order: library.Order{Type: "alternate", Name: "Book Order"},
+		}},
+	}
+	if err := r.Log(t.Context(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if rec.Len() != 2 {
+		t.Fatalf("Log emitted %d records, want 2 (summary + one row)", rec.Len())
+	}
+	rAttrs := recordAttrs(rec.Records()[1])
+	if rAttrs["verdict"] != string(verdictWithheld) || rAttrs["reason"] != "order" {
+		t.Errorf("row verdict, reason = %v, %v, want %q, %q", rAttrs["verdict"], rAttrs["reason"], verdictWithheld, "order")
 	}
 }
 
@@ -458,6 +485,7 @@ func craftedReport() *Report {
 			MatchSource:   "id\u061c",
 			CurrentGroups: []string{"grp\u009c"},
 			Releases:      []rowRelease{{Group: "g\u0090", Tracker: "trk\u200e", URL: "https://x/\u2028a", Best: true}},
+			Order:         library.Order{Type: "alt\u009d", Name: "Book\u202e"},
 		}},
 	}
 }
@@ -482,7 +510,7 @@ func TestRenderJSONSanitizesControlAndBidiRunes(t *testing.T) {
 			t.Errorf("renderJSON output carries raw unsafe rune U+%04X", bad)
 		}
 	}
-	if r.Rows[0].Title != "Evil\u009bShow\u202e" || r.Rows[0].CurrentGroups[0] != "grp\u009c" || r.Rows[0].Releases[0].Group != "g\u0090" {
+	if r.Rows[0].Title != "Evil\u009bShow\u202e" || r.Rows[0].CurrentGroups[0] != "grp\u009c" || r.Rows[0].Releases[0].Group != "g\u0090" || r.Rows[0].Order.Name != "Book\u202e" {
 		t.Error("renderJSON mutated the canonical report; it must sanitize a copy")
 	}
 }
@@ -1450,5 +1478,36 @@ func TestReportLogRedactsArrURLCredentials(t *testing.T) {
 		if strings.Contains(got, secret) {
 			t.Errorf("arr_url = %q, carries credential material %q", got, secret)
 		}
+	}
+}
+
+// TestRenderWithheldOrderNoteNamesTheOrder pins the withheld note's naming rule: the
+// order's name when Sonarr lists one, else its type, because Sonarr can report
+// a non-official type with no matching seasonTypes entry.
+func TestRenderWithheldOrderNoteNamesTheOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		order library.Order
+		want  string
+	}{
+		{name: "named order", order: library.Order{Type: "alternate", Name: "Book Order"}, want: "Book Order"},
+		{name: "unnamed order", order: library.Order{Type: "alternate"}, want: "alternate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Report{
+				GeneratedAt: time.Unix(0, 0).UTC(),
+				Totals:      map[string]int{string(verdictWithheld): 1},
+				Rows: []reportRow{{
+					Title: "Monogatari", Arr: "sonarr", Verdict: verdictWithheld, Scope: align.ScopeSeason, Season: 2,
+					Withheld: align.WithheldOrder, Order: tc.order,
+				}},
+			}
+			md := renderMarkdown(r)
+			want := "| Monogatari | S2 (order) | - | - | Sonarr numbers this series in " + tc.want +
+				", which seadex-scout cannot map to TheTVDB's aired seasons, so it is not compared. |"
+			if !strings.Contains(md, want) {
+				t.Errorf("markdown lacks the withheld row %q:\n%s", want, md)
+			}
+		})
 	}
 }

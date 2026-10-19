@@ -130,7 +130,7 @@ func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
 			DualAudio:    dual,
 			Files:        []seadex.File{{Name: name1}, {Name: name2}},
 		}
-		meta := EntryInfo{Title: title, Year: year, Season: season, SeasonKnown: seasonKnown, IsMovie: isMovie}
+		meta := EntryInfo{Title: title, Year: year, Season: season, SeasonKnown: seasonKnown, Kind: kindOf(isMovie)}
 		got := synthesizeTitle(tor, &meta)
 		if got != strings.TrimSpace(got) {
 			t.Errorf("synthesizeTitle(title %q) = %q, not trimmed", title, got)

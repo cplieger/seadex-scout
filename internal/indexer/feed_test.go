@@ -12,6 +12,14 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
+// kindOf types a fixture entry as a film or a series.
+func kindOf(movie bool) MediaKind {
+	if movie {
+		return KindMovie
+	}
+	return KindSeries
+}
+
 // coveredEpisodes counts the distinct episodes a raw file list spans. It is the
 // two-step census rule (narrow to the counted population, then count) spelled as
 // one call, and it lives HERE because production has no use for that spelling:
@@ -323,12 +331,12 @@ func rotatedAbsolutePack(first, last int) *seadex.Torrent {
 	return t
 }
 
-// onePieceSeasons is the tail of One Piece's real mapping-list ranges: S21
-// 892-1085, S22 1086-1155, S23 open from 1156.
+// onePieceSeasons is the tail of One Piece's real season ranges: S21
+// 892-1085, S22 1086-1155, S23 1156-1168.
 var onePieceSeasons = []SeasonRange{
 	{Season: 21, First: 892, Last: 1085},
 	{Season: 22, First: 1086, Last: 1155},
-	{Season: 23, First: 1156},
+	{Season: 23, First: 1156, Last: 1168},
 }
 
 // TestPackSeasonLabelRangeBranch pins the third source of a pack's season token
@@ -348,17 +356,17 @@ func TestPackSeasonLabelRangeBranch(t *testing.T) {
 			{Name: "Show - S08E01 - 130.mkv"}, {Name: "Show - S08E02 - 131.mkv"},
 		}}, meta: EntryInfo{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 200}}}, want: "S08", wantOK: true},
 		{name: "rule two: inside one bounded range", t: absolutePack(1090, 1100), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S22", wantOK: true},
-		{name: "rule two: straddling a bounded range and the open one", t: absolutePack(1150, 1160), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: straddling two ranges", t: absolutePack(1150, 1160), meta: EntryInfo{Seasons: onePieceSeasons}},
 		{name: "rule two: filling a bounded range end to end", t: absolutePack(1086, 1155), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S22", wantOK: true},
-		{name: "rule two: inside the open range", t: absolutePack(1160, 1170), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S23", wantOK: true},
-		{name: "rule two: starting before the open range", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: inside the last range", t: absolutePack(1160, 1168), meta: EntryInfo{Seasons: onePieceSeasons}, want: "S23", wantOK: true},
+		{name: "rule two: running past the last range", t: absolutePack(1160, 1170), meta: EntryInfo{Seasons: onePieceSeasons}},
+		{name: "rule two: starting before a range", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
 		// The span is the LOWEST and highest episode the files carry, not the first
 		// and last listed: a floor taken in list order puts this pack inside S22.
 		{name: "rule two: starting before a range, files out of order", t: rotatedAbsolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons}},
 		{name: "rule two: spanning two bounded ranges", t: absolutePack(1080, 1090), meta: EntryInfo{Seasons: onePieceSeasons[:2]}},
-		// Overlapping upstream rows are not rejected by seasonRanges, so a span two
-		// ranges both contain is reachable from the wire; the label names one season
-		// or none.
+		// An entry episode landing on two seasons sits in a range of each; the
+		// label names one season or none.
 		{name: "rule two: two ranges both claim the span", t: absolutePack(120, 130), meta: EntryInfo{Seasons: []SeasonRange{
 			{Season: 1, First: 1, Last: 200}, {Season: 2, First: 100, Last: 300},
 		}}},
@@ -485,13 +493,13 @@ func TestSynthesizeTitle(t *testing.T) {
 			t: seadex.Torrent{Files: []seadex.File{
 				{Name: "A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv"},
 			}, ReleaseGroup: "Group"},
-			meta: EntryInfo{Title: "A Silent Voice", Year: 2016, IsMovie: true},
+			meta: EntryInfo{Title: "A Silent Voice", Year: 2016, Kind: KindMovie},
 			want: "A Silent Voice (2016) 1080p [Group]",
 		},
 		{
 			name: "movie without a year stays a bare title",
 			t:    seadex.Torrent{Files: []seadex.File{{Name: "Movie [Grp].mkv"}}},
-			meta: EntryInfo{Title: "Movie", IsMovie: true},
+			meta: EntryInfo{Title: "Movie", Kind: KindMovie},
 			want: "Movie",
 		},
 		{
@@ -1017,6 +1025,37 @@ func TestPackFromTitle(t *testing.T) {
 	}
 }
 
+// TestTitleNamesSeveralEpisodes pins which titles name more than one episode,
+// read as Sonarr reads them: an SxxExx range (with or without the second E) and
+// the tilde anime batch form "- 01 ~ 12" do, a single episode, a
+// season-only title and a backwards or one-episode range do not. The first two
+// cases are recorded Nyaa titles.
+func TestTitleNamesSeveralEpisodes(t *testing.T) {
+	tests := map[string]struct {
+		title string
+		want  bool
+	}{
+		"recorded SxxExx range":   {"[Moxie] We Never Learn: BOKUBEN S00E01-E02 (BD Remux 1080p x264 8-bit FLAC) | We Never Learn OVAs | Bokutachi wa Benkyou ga Dekinai OVAs", true},
+		"recorded absolute range": {"[Erai-raws] Ginga Eiyuu Densetsu - Die Neue These - Gekitotsu - 01 ~ 12 [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR][SPA-LA]", true},
+		"range":                   {"Show S01E01-E12", true},
+		"range without second E":  {"Show - S01E03-04 [1080p]", true},
+		"absolute range no space": {"[Grp] Show - 01~13 [1080p]", true},
+		"one episode":             {"Show - S01E07 [1080p]", false},
+		"one absolute episode":    {"[Grp] Show - 07 [1080p]", false},
+		"season only":             {"Show - S01 [1080p]", false},
+		"backwards range":         {"Show - S01E09-E03", false},
+		"backwards absolute":      {"[Grp] Show - 12 ~ 01 [1080p]", false},
+		"one-episode absolute":    {"[Grp] Show - 05 ~ 05 [1080p]", false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := titleNamesSeveralEpisodes(tt.title); got != tt.want {
+				t.Errorf("titleNamesSeveralEpisodes(%q) = %v, want %v", tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestPackFromTitleRefusesSeasonFollowedByEpisodeNumber pins the load-bearing
 // half of Sonarr's season-only regex separately, because it is the one
 // condition RE2 cannot express and this app therefore reimplements: the
@@ -1244,6 +1283,37 @@ func TestPackFromTitleReadsSonarrCleanedTitles(t *testing.T) {
 			pack, known := packFromTitle(tc.title)
 			if pack != tc.wantPack || known != tc.wantKnown {
 				t.Errorf("packFromTitle(%q) = (%v, %v), want (%v, %v)", tc.title, pack, known, tc.wantPack, tc.wantKnown)
+			}
+		})
+	}
+}
+
+// TestSynthesizeTitleKeepsOwnSeasonWithoutSeasonFacts pins the feed's
+// rendering half: for a series in a non-aired order the feed's EntryInfo
+// carries the arr's title and no season facts, so a Monogatari-shaped release
+// keeps its own S02 token (pack and single episode alike) and gets no twin.
+func TestSynthesizeTitleKeepsOwnSeasonWithoutSeasonFacts(t *testing.T) {
+	meta := EntryInfo{Title: "Monogatari", Year: 2009, TvdbID: 102261}
+	for _, tc := range []struct {
+		name  string
+		files []seadex.File
+		want  string
+	}{
+		{name: "pack", files: []seadex.File{
+			{Name: "Monogatari - S02E01 (1080p) [Grp].mkv"},
+			{Name: "Monogatari - S02E02 (1080p) [Grp].mkv"},
+		}, want: "Monogatari S02 1080p [Grp]"},
+		{name: "single episode", files: []seadex.File{
+			{Name: "Monogatari - S02E05 (1080p) [Grp].mkv"},
+		}, want: "Monogatari S02E05 1080p [Grp]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			torrent := &seadex.Torrent{Files: tc.files, ReleaseGroup: "Grp"}
+			if got := synthesizeTitle(torrent, &meta); got != tc.want {
+				t.Errorf("synthesizeTitle = %q, want %q", got, tc.want)
+			}
+			if twin := twinTitle(torrent, &meta); twin != "" {
+				t.Errorf("twinTitle = %q, want none", twin)
 			}
 		})
 	}

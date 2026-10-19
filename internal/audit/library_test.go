@@ -122,7 +122,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Totals:      map[string]int{string(VerdictBest): 4, string(VerdictNoFile): 1, string(VerdictUnverified): 1, string(verdictAlt): 1},
+		Totals:      map[string]int{string(VerdictBest): 4, string(VerdictNoFile): 1, string(VerdictUnverified): 1, string(verdictAlt): 1, string(verdictWithheld): 2},
 		Items:       itemCounts{Anime: 9, WithEntry: 7, AllBest: 3, AllBestOrAlt: 5},
 		Rows: []reportRow{
 			{Title: "Gone", AniListID: 1, Arr: library.ArrSonarr, Verdict: VerdictNoFile, SeaDexURL: "https://seadex.moe/1/"},
@@ -145,7 +145,7 @@ func TestLogLibraryEmitsTheContract(t *testing.T) {
 		}
 	}
 	for key, want := range map[string]int64{
-		"rows": 4, "have_best": 4, "no_file": 1, "have_alt": 1, "anime_items": 9, "items_with_entry": 7,
+		"rows": 4, "have_best": 4, "no_file": 1, "have_alt": 1, "withheld": 2, "anime_items": 9, "items_with_entry": 7,
 		"items_all_best": 3, "items_all_best_or_alt": 5,
 	} {
 		if summaryAttrs[key] != want {

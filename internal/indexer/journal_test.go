@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
@@ -201,7 +202,7 @@ func nyaaEntry(alID, viewID int, best bool, names ...string) seadex.Entry {
 func TestRebuildBaselinesFreshInstall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -216,7 +217,7 @@ func TestRebuildBaselinesFreshInstall(t *testing.T) {
 	}
 
 	// A second rebuild over the same catalogue stays empty: nothing is new.
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -236,7 +237,7 @@ func TestRebuildBaselinesPreJournalSchema(t *testing.T) {
 	}
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -262,7 +263,7 @@ func TestRebuildBaselinesMalformedSnapshot(t *testing.T) {
 	}
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 || !snap.Published["nyaa:42"] {
@@ -286,7 +287,7 @@ func TestRebuildJournalsNewlyCurated(t *testing.T) {
 
 	// Baseline over catalogue A.
 	a := nyaaEntry(7, 42, true, "Show A - S01E01 (1080p) [G].mkv")
-	if err := w.Rebuild(t.Context(), []seadex.Entry{a}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{a}, FeedInfo{}); err != nil {
 		t.Fatalf("baseline Rebuild: %v", err)
 	}
 
@@ -294,7 +295,7 @@ func TestRebuildJournalsNewlyCurated(t *testing.T) {
 	t1 := t0.Add(3 * time.Hour)
 	w.now = func() time.Time { return t1 }
 	b := nyaaEntry(8, 43, true, "Show B - S01E01 (1080p) [G].mkv")
-	if err := w.Rebuild(t.Context(), []seadex.Entry{a, b}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{a, b}, FeedInfo{}); err != nil {
 		t.Fatalf("growth Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -316,7 +317,7 @@ func TestRebuildJournalsNewlyCurated(t *testing.T) {
 	// with its original FirstSeen, and adds nothing.
 	t2 := t1.Add(3 * time.Hour)
 	w.now = func() time.Time { return t2 }
-	if err := w.Rebuild(t.Context(), []seadex.Entry{a, b}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{a, b}, FeedInfo{}); err != nil {
 		t.Fatalf("steady-state Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -339,7 +340,7 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	w.now = func() time.Time { return t0 }
 	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	// Hand-cache a harvested title for the journaled item, as a harvest would.
@@ -357,7 +358,7 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	// what distinguishes it from the synthesized "Show - S01E01 (1080p) [G]".
 	t1 := t0.Add(24 * time.Hour)
 	w.now = func() time.Time { return t1 }
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("within-window Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -369,7 +370,7 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	// and the publication log keeps the identity.
 	t2 := t0.Add(feedJournalMaxAge + time.Hour)
 	w.now = func() time.Time { return t2 }
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("prune Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -386,7 +387,7 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	// The torrent is still curated: it must never resurrect as new.
 	t3 := t2.Add(3 * time.Hour)
 	w.now = func() time.Time { return t3 }
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("post-prune Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -412,11 +413,11 @@ func TestRebuildSharedTorrentMergesBestWins(t *testing.T) {
 		{AniListID: 2, Torrents: []seadex.Torrent{best}},
 	}
 	info := func(alID int) EntryInfo {
-		return EntryInfo{IsMovie: alID == 2}
+		return EntryInfo{Kind: kindOf(alID == 2)}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -525,7 +526,7 @@ func TestRenderJournalItemSortsCategoryUnion(t *testing.T) {
 		{entry: movie, torrent: &movie.Torrents[0]},
 	}
 	rendered, ok := w.renderJournalItem("nyaa:1234567", refs, nil, func(alID int) EntryInfo {
-		return EntryInfo{IsMovie: alID == 2}
+		return EntryInfo{Kind: kindOf(alID == 2)}
 	})
 	if !ok {
 		t.Fatal("renderJournalItem: item not rendered")
@@ -548,7 +549,7 @@ func TestRenderJournalItemOffersATwinlessFilmToRadarrOnly(t *testing.T) {
 	film := &seadex.Entry{AniListID: 21519, Torrents: []seadex.Torrent{torrent}}
 	refs := []curatedRef{{entry: film, torrent: &film.Torrents[0]}}
 	rendered, ok := w.renderJournalItem("nyaa:2133634", refs, nil, func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525}
+		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525}
 	})
 	if !ok {
 		t.Fatal("renderJournalItem: item not rendered")
@@ -577,7 +578,7 @@ func TestRenderJournalItemFoldsTheTwinPerHolderType(t *testing.T) {
 		wantTitle string
 	}{
 		"movie holder with a twin": {
-			info:      EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"},
+			info:      EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"},
 			wantCats:  []int{catMovies},
 			wantTitle: "Code Geass S00E04 1080p [G]",
 		},
@@ -587,7 +588,7 @@ func TestRenderJournalItemFoldsTheTwinPerHolderType(t *testing.T) {
 			wantTitle: "Code Geass S00E04 1080p [G]",
 		},
 		"movie holder without an episode is Movies only": {
-			info:     EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525},
+			info:     EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525},
 			wantCats: []int{catMovies},
 		},
 	}
@@ -633,7 +634,7 @@ func TestRenderJournalItemKeepsTheRadarrItemOfABothArrFilm(t *testing.T) {
 		}
 		return it
 	}
-	plain := EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525}
+	plain := EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525}
 	mapped := plain
 	mapped.SpecialEpisodes, mapped.SpecialsEpisodes, mapped.SeriesTitle = []int{4}, 1, "Code Geass"
 
@@ -677,7 +678,7 @@ func TestRenderJournalItemFoldsTheTwinAcrossHolders(t *testing.T) {
 			}
 			episodes := map[int]int{14575: tc.first, 20221: tc.second}
 			infoFor := func(alID int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, TvdbID: 80000, SpecialEpisodes: []int{episodes[alID]}, SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TvdbID: 80000, SpecialEpisodes: []int{episodes[alID]}, SeriesTitle: "Minami-ke"}
 			}
 			w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
 			pass := &journalPass{w: w, ev: newEvidence(entries, tagfilter.New(nil), scopeCatalogue), publish: map[string]bool{}, infoFor: infoFor, js: &journalStats{}, now: time.Now()}
@@ -787,11 +788,11 @@ func TestRebuildFoldsAllThreeVotesOverTheHashOnlyHolder(t *testing.T) {
 	}}}
 	info := func(alID int) EntryInfo {
 		if alID == hashHolderID {
-			return EntryInfo{Title: "Union Film", IsMovie: true}
+			return EntryInfo{Title: "Union Film", Kind: KindMovie}
 		}
 		return EntryInfo{Title: "Union Show", TvdbID: 79525}
 	}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, info); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -836,7 +837,7 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	log, rec := capture.New()
 	w := newTestWriter(path, "", false)
 	w.log = log
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -883,7 +884,7 @@ func TestRebuildKeepsHashedForeignHostTorrentOutOfLedger(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -919,10 +920,10 @@ func TestRebuildJournalsReleaseAfterTrackerURLCorrected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	w := newTestWriter(path, "", false)
-	if err := w.Rebuild(t.Context(), gated, nil); err != nil {
+	if err := w.Rebuild(t.Context(), gated, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (gated URL): %v", err)
 	}
-	if err := w.Rebuild(t.Context(), corrected, nil); err != nil {
+	if err := w.Rebuild(t.Context(), corrected, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (corrected URL): %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -959,10 +960,10 @@ func TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	w := newTestWriter(path, "", false)
-	if err := w.Rebuild(t.Context(), gated, nil); err != nil {
+	if err := w.Rebuild(t.Context(), gated, FeedInfo{}); err != nil {
 		t.Fatalf("baseline Rebuild: %v", err)
 	}
-	if err := w.Rebuild(t.Context(), corrected, nil); err != nil {
+	if err := w.Rebuild(t.Context(), corrected, FeedInfo{}); err != nil {
 		t.Fatalf("corrected Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -988,7 +989,7 @@ func TestRebuildIdlessABNotCountedAsPasskeySkip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1016,7 +1017,7 @@ func TestRebuildUnpackedSeasonListsPerEpisode(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1071,7 +1072,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
 	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return now }
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1164,7 +1165,7 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1217,7 +1218,7 @@ func TestRebuildCarriedGUIDKeptOnlyForSameIdentity(t *testing.T) {
 				},
 			})
 			entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-			if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+			if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			snap := readSnapshotFile(t, path)
@@ -1257,9 +1258,9 @@ func TestRebuildCarriedTwinGUIDDerivesFromTheServedGUID(t *testing.T) {
 		}},
 	}}
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, info); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1305,7 +1306,7 @@ func TestRebuildCarriesABItemWhenPasskeyRemoved(t *testing.T) {
 		}},
 	}}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 1 {
@@ -1330,7 +1331,7 @@ func TestRebuildCarriesNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 	// No entries: the carried item's torrent is absent from the curation set,
 	// exercising the non-curated carry arm.
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, nil, nil)
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 1 {
@@ -1370,7 +1371,7 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1000", IsBest: true,
 		}},
 	}}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1411,7 +1412,7 @@ func TestRebuildDefersNewABItemUntilPasskeyArrives(t *testing.T) {
 		}},
 	}}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, log, nil)
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1427,7 +1428,7 @@ func TestRebuildDefersNewABItemUntilPasskeyArrives(t *testing.T) {
 	// The nudge's promise, which only an unwritten log can keep: setting the
 	// passkey journals the release, with a grabbable link.
 	withKey := newTestWriter(path, strings.Repeat("a", 32), true)
-	if err := withKey.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := withKey.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild with a passkey configured: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -1463,7 +1464,7 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: future, Key: "nyaa:42", AniListID: 7, FirstSeen: future},
 		},
 	})
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1497,7 +1498,7 @@ func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
 	w.now = func() time.Time { return time.Date(2026, time.July, 2, 0, 0, 0, 0, time.UTC) }
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1541,7 +1542,7 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1585,7 +1586,7 @@ func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
 			seedEmptyFeed(t, path)
 			log, rec := capture.New()
-			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: tc.cfg}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: tc.cfg}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 0 {
@@ -1619,7 +1620,7 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 		}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1656,7 +1657,7 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1798,7 +1799,7 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 		}},
 	}}
-	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1846,7 +1847,7 @@ func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 	log, rec := capture.New()
 	w := newExcludingTestWriter(path)
 	w.log = log
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1884,7 +1885,7 @@ func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}
-	if err := w.Rebuild(t.Context(), []seadex.Entry{orig}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{orig}, FeedInfo{}); err != nil {
 		t.Fatalf("baseline Rebuild: %v", err)
 	}
 
@@ -1895,7 +1896,7 @@ func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
 	moved.Torrents[0].URL = "https://nyaa.si/view/9042"
 	t1 := t0.Add(3 * time.Hour)
 	w.now = func() time.Time { return t1 }
-	if err := w.Rebuild(t.Context(), []seadex.Entry{moved}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{moved}, FeedInfo{}); err != nil {
 		t.Fatalf("moved Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1928,14 +1929,14 @@ func TestRebuildKeyVetoesNoveltyAcrossHashChange(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}
-	if err := w.Rebuild(t.Context(), []seadex.Entry{orig}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{orig}, FeedInfo{}); err != nil {
 		t.Fatalf("baseline Rebuild: %v", err)
 	}
 	swapped := orig
 	swapped.Torrents = []seadex.Torrent{orig.Torrents[0]}
 	swapped.Torrents[0].InfoHash = hashB
 	w.now = func() time.Time { return t0.Add(3 * time.Hour) }
-	if err := w.Rebuild(t.Context(), []seadex.Entry{swapped}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{swapped}, FeedInfo{}); err != nil {
 		t.Fatalf("swapped Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1973,7 +1974,7 @@ func TestRebuildJournalsSameHashIndependentlyPerTracker(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "PK", true).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "PK", true).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -2003,7 +2004,7 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 			{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
 	})
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -2015,7 +2016,7 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 	}
 	// One second past the boundary the item prunes.
 	w.now = func() time.Time { return t0.Add(time.Second) }
-	if err := w.Rebuild(t.Context(), nil, nil); err != nil {
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("past-boundary Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -2070,7 +2071,7 @@ func TestRebuildMirrorTrackerCannotSuppressNyaaJournal(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -2104,7 +2105,7 @@ func TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa(t *testing.T) {
 			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}
-	if err := w.Rebuild(t.Context(), []seadex.Entry{tail}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{tail}, FeedInfo{}); err != nil {
 		t.Fatalf("baseline Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); snap.Published[hash] {
@@ -2115,7 +2116,7 @@ func TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa(t *testing.T) {
 	nyaa.Torrents = []seadex.Torrent{tail.Torrents[0]}
 	nyaa.Torrents[0].Tracker = "Nyaa"
 	nyaa.Torrents[0].URL = "https://nyaa.si/view/42"
-	if err := w.Rebuild(t.Context(), []seadex.Entry{nyaa}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{nyaa}, FeedInfo{}); err != nil {
 		t.Fatalf("Nyaa Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -2156,7 +2157,7 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 				},
 			})
 			log, rec := capture.New()
-			if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), nil, nil); err != nil {
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil).Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -2191,7 +2192,7 @@ func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 		}}},
 	}
 
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -2204,12 +2205,11 @@ func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 }
 
 // TestApplyTitlesReportsPackDisagreementOnce pins the title-vs-file-list
-// diagnostic: a harvested title whose season-pack verdict contradicts the release's
-// own file census is warned ONCE per rebuild (the onset latch, so a systematically
-// drifting upstream cannot flood one rebuild), the warning carries the journal key
-// and both verdicts, and it never carries the raw title - untrusted tracker text the
-// decode tags runesafe.Untrusted. The disagreement pinned here is the class the
-// audit does NOT correct (the title names an episode, the census proves a pack): it
+// diagnostic: a title whose season-pack verdict contradicts the release's file
+// census warns at most once per rebuild (the rest log at Debug), carrying the
+// journal key and both verdicts but never the raw title, untrusted tracker text
+// the decode tags runesafe.Untrusted. The class pinned here is the one the audit
+// does NOT correct (the title names one episode, the census proves a pack): it
 // warns with corrected=false and the harvested title still wins verbatim.
 func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	log, rec := capture.New()
@@ -2235,11 +2235,11 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	applyTitles(items, titles, titleAudit{census: census, report: w.packDisagreementReporter()})
 
 	const msg = "indexer feed title and file list disagree about a season pack"
-	if got := rec.CountExact(msg); got != 1 {
-		t.Errorf("disagreement warnings = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
-	}
 	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
-		t.Errorf("disagreement warnings at WARN = %d, want 1", got)
+		t.Errorf("disagreement warnings at WARN = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := rec.CountLevel(slog.LevelDebug, msg); got != 1 {
+		t.Errorf("disagreement lines at Debug = %d, want 1 (nyaa:2, past the latch)", got)
 	}
 	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "false", "files_pack": "true", "corrected": "false"} {
 		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
@@ -2264,6 +2264,177 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 		if want := titles[items[i].Key]; items[i].Title != want {
 			t.Errorf("item %s title = %q, want the harvested title %q", items[i].Key, items[i].Title, want)
 		}
+	}
+}
+
+// TestApplyTitlesAgreesWithRecordedEpisodeRangeTitles pins two recorded Nyaa
+// releases whose titles name an episode range over a file list holding exactly
+// that range: nyaa 2076059 ("S00E01-E02", two SeaDex files) and nyaa 1809834
+// ("- 01 ~ 12", twelve SeaDex files, an absolute range Sonarr's tilde batch
+// regex reads). Neither is a season-pack disagreement, so both titles are
+// served verbatim and nothing is logged.
+func TestApplyTitlesAgreesWithRecordedEpisodeRangeTitles(t *testing.T) {
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
+	entry := &seadex.Entry{AniListID: 109492}
+	gekitotsu := make([]seadex.File, 0, 12)
+	for i, f := range []struct {
+		crc    string
+		length int64
+	}{
+		{"28F7D1D4", 1540521039},
+		{"727D440C", 1541657195},
+		{"246BD4E4", 1540595434},
+		{"74F580C3", 1539746515},
+		{"1400A13A", 1538982781},
+		{"E16226C4", 1541120183},
+		{"CFE8AED2", 1544224029},
+		{"92708953", 1539411627},
+		{"EBA0A2E8", 1540760034},
+		{"1053C28A", 1543852691},
+		{"27ECD4B7", 1539548458},
+		{"542993B5", 1543718366},
+	} {
+		gekitotsu = append(gekitotsu, seadex.File{
+			Name:   fmt.Sprintf("[Erai-raws] Ginga Eiyuu Densetsu - Gekitotsu - %02d [1080p][%s].mkv", i+1, f.crc),
+			Length: f.length,
+		})
+	}
+	cur := map[string][]curatedRef{
+		"nyaa:2076059": {{entry: entry, torrent: &seadex.Torrent{Files: []seadex.File{
+			{Name: "[Moxie] Bokutachi wa Benkyou ga Dekinai - S00E01 (BD Remux 1080p FLAC 2.0) [77D1ECA1].mkv", Length: 7122982285},
+			{Name: "[Moxie] Bokutachi wa Benkyou ga Dekinai - S00E02 (BD Remux 1080p FLAC 2.0) [CDC20BFC].mkv", Length: 7106109565},
+		}}}},
+		"nyaa:1809834": {{entry: &seadex.Entry{AniListID: 1}, torrent: &seadex.Torrent{Files: gekitotsu}}},
+	}
+	titles := map[string]string{
+		"nyaa:2076059": "[Moxie] We Never Learn: BOKUBEN S00E01-E02 (BD Remux 1080p x264 8-bit FLAC) | We Never Learn OVAs | Bokutachi wa Benkyou ga Dekinai OVAs",
+		"nyaa:1809834": "[Erai-raws] Ginga Eiyuu Densetsu - Die Neue These - Gekitotsu - 01 ~ 12 [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR][SPA-LA]",
+	}
+	want := maps.Clone(titles)
+	items := []journalItem{{Title: "Synth 1", Key: "nyaa:2076059"}, {Title: "Synth 2", Key: "nyaa:1809834"}}
+	applyTitles(items, titles, titleAudit{census: censusPacks(cur), report: w.packDisagreementReporter()})
+
+	for i := range items {
+		if got := items[i].Title; got != want[items[i].Key] {
+			t.Errorf("item %s title = %q, want the harvested title %q", items[i].Key, got, want[items[i].Key])
+		}
+	}
+	if rec.Contains("disagree about a season pack") {
+		t.Errorf("an episode-range title over its own range was reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestPackDisagreementWarnsOncePerKey pins the cadence across rebuilds: an
+// uncorrected disagreement WARNs the first time its key is seen in this process
+// and logs at Debug on every later rebuild, while a key not yet reported still
+// WARNs. A key that leaves the journal is forgotten, so its return WARNs again.
+func TestPackDisagreementWarnsOncePerKey(t *testing.T) {
+	const msg = "indexer feed title and file list disagree about a season pack"
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
+	census := map[string]packCensus{
+		"nyaa:1": {evidence: packEvidencePack},
+		"nyaa:2": {evidence: packEvidencePack},
+	}
+	rebuild := func(keys ...string) {
+		items := make([]journalItem, 0, len(keys))
+		titles := map[string]string{}
+		for _, k := range keys {
+			items = append(items, journalItem{Title: "Synth", Key: k})
+			titles[k] = "Show - S01E01 [1080p]"
+		}
+		applyTitles(items, titles, titleAudit{census: census, report: w.packDisagreementReporter()})
+	}
+
+	rebuild("nyaa:1")
+	rebuild("nyaa:1")
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Errorf("WARN after two rebuilds of one key = %d, want 1", got)
+	}
+	if got := rec.CountLevel(slog.LevelDebug, msg); got != 1 {
+		t.Errorf("Debug after two rebuilds of one key = %d, want 1 (the repeat)", got)
+	}
+
+	rebuild("nyaa:1", "nyaa:2")
+	if got := rec.AttrValuesExact(msg, "key"); !slices.Equal(got, []string{"nyaa:1", "nyaa:1", "nyaa:1", "nyaa:2"}) {
+		t.Errorf("reported keys = %q, want nyaa:1 three times then nyaa:2", got)
+	}
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 2 {
+		t.Errorf("WARN after a new key = %d, want 2 (the new key warns)", got)
+	}
+
+	w.retainPackWarned([]journalItem{{Key: "nyaa:2"}})
+	rebuild("nyaa:1")
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 3 {
+		t.Errorf("WARN after nyaa:1 left the journal and came back = %d, want 3", got)
+	}
+
+	// One WARN per rebuild: a second new key in the same rebuild logs at Debug
+	// and is not marked reported, so it WARNs on the next rebuild.
+	census["nyaa:3"] = packCensus{evidence: packEvidencePack}
+	census["nyaa:4"] = packCensus{evidence: packEvidencePack}
+	rebuild("nyaa:3", "nyaa:4")
+	rebuild("nyaa:4")
+	warned := []string{}
+	for _, r := range rec.Records() {
+		if r.Message != msg || r.Level != slog.LevelWarn {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "key" {
+				warned = append(warned, a.Value.String())
+			}
+			return true
+		})
+	}
+	if want := []string{"nyaa:1", "nyaa:2", "nyaa:1", "nyaa:3", "nyaa:4"}; !slices.Equal(warned, want) {
+		t.Errorf("WARNed keys = %q, want %q", warned, want)
+	}
+}
+
+// TestRebuildForgetsWarnedPackKeysOnlyOnceCommitted pins when a rebuild prunes
+// the WARNed pack-disagreement keys: a rebuild whose snapshot is refused leaves
+// the previous journal served, so a key it would have dropped stays reported;
+// a committed rebuild without the key forgets it, so its return WARNs again.
+// The failing write is a root-safe ENOTDIR (the target's parent is a file).
+func TestRebuildForgetsWarnedPackKeysOnlyOnceCommitted(t *testing.T) {
+	const msg = "indexer feed title and file list disagree about a season pack"
+	const key = "nyaa:42"
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "state")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(parent, "feed.json"), log)
+	report := func() { w.packDisagreementReporter()(key, false, true, false) }
+
+	report()
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Fatalf("WARN for a new key = %d, want 1", got)
+	}
+
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err == nil {
+		t.Fatal("Rebuild under a file parent returned nil, want the write error")
+	}
+	report()
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Errorf("WARN after a refused rebuild without the key = %d, want 1 (the served journal still holds it)", got)
+	}
+
+	if err := os.Remove(parent); err != nil {
+		t.Fatalf("remove blocker: %v", err)
+	}
+	if err := os.Mkdir(parent, 0o750); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	report()
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 2 {
+		t.Errorf("WARN after a committed rebuild without the key = %d, want 2 (the key returned)", got)
 	}
 }
 
@@ -2390,9 +2561,13 @@ func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
 		t.Errorf("served title = %q, want the absolute census marker as %q", got, want)
 	}
 
+	// A corrected title needs nothing from the operator: Info, once per rebuild.
 	const msg = "indexer feed title and file list disagree about a season pack"
-	if got := rec.CountExact(msg); got != 1 {
-		t.Errorf("disagreement warnings = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	if got := rec.CountLevel(slog.LevelInfo, msg); got != 1 {
+		t.Errorf("corrected disagreements at Info = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 0 {
+		t.Errorf("corrected disagreements at WARN = %d, want 0", got)
 	}
 	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "true", "files_pack": "false", "corrected": "true"} {
 		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
@@ -2505,7 +2680,7 @@ func TestCorrectedUpstreamRecordJournalsAsNew(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
 	}}
 	w := newTestWriter(path, "", false)
-	if err := w.Rebuild(t.Context(), defective, nil); err != nil {
+	if err := w.Rebuild(t.Context(), defective, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (defective record): %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -2519,7 +2694,7 @@ func TestCorrectedUpstreamRecordJournalsAsNew(t *testing.T) {
 	// Pass 2: the curator adds the file list. This is a legitimate later
 	// republish and must journal as new.
 	corrected := []seadex.Entry{nyaaEntry(7, 7, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), corrected, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), corrected, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild (corrected record): %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -2542,7 +2717,7 @@ func TestPublishedReleaseIsNeverReadmitted(t *testing.T) {
 	entries := []seadex.Entry{nyaaEntry(7, 7, true, "Show - S01E01 (1080p) [G].mkv")}
 
 	for pass := 1; pass <= 3; pass++ {
-		if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+		if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 			t.Fatalf("Rebuild (pass %d): %v", pass, err)
 		}
 		snap := readSnapshotFile(t, path)
@@ -2605,7 +2780,7 @@ func TestRebuildCountsNewlyJournaledItems(t *testing.T) {
 		nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv"),
 		nyaaEntry(8, 43, true, "Other - S01E01 (1080p) [G].mkv"),
 	}
-	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 2 {
@@ -2632,7 +2807,7 @@ func TestRebuildPrunesAndCountsAnAgedCarriedItem(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -2661,7 +2836,7 @@ func TestRebuildDropsACarriedItemNamingAnotherTrackerScope(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -2669,5 +2844,187 @@ func TestRebuildDropsACarriedItemNamingAnotherTrackerScope(t *testing.T) {
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "1" {
 		t.Errorf("journal_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildStoredRenderUnderNonAiredOrder pins the carry of a stored render
+// for a series Sonarr numbers in a non-aired order: a title or
+// twin rendered before the order was known may hold a TheTVDB season Sonarr
+// reads in that order, and a stored render cannot be re-rendered. So a
+// de-curated or unrenderable item whose title is not a film's leaves the
+// journal, a film keeps its own title and loses only its Sonarr twin, and an
+// aired-order series keeps its stored render, twin included. An item stored
+// with no NonFilm reads as a film's title, so only the entry's current
+// KindSeries drops it; KindUnknown, which feedInfo returns once the record is
+// gone and no memo types the entry, keeps it as a film.
+// The series is the one the entry's current EntryInfo names or the one the
+// item's stored TVDB id names, since the entry's mapping may have gone or moved.
+func TestRebuildStoredRenderUnderNonAiredOrder(t *testing.T) {
+	const (
+		guid      = "https://nyaa.si/view/42"
+		twinTitle = "Monogatari S00E04 1080p [G]"
+	)
+	// No files, no release group and no title: nothing to synthesize from.
+	unrenderable := []seadex.Entry{{
+		AniListID: 7,
+		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: guid, IsBest: true}},
+	}}
+	for _, tc := range []struct {
+		name      string
+		entries   []seadex.Entry
+		stored    journalItem
+		info      EntryInfo
+		wantKept  bool
+		wantTwin  string
+		wantCount string
+	}{
+		{
+			name:   "de-curated series item leaves",
+			stored: journalItem{Title: "Monogatari S02 1080p [G]", NonFilm: true},
+			info:   EntryInfo{Title: "Monogatari", TvdbID: 102261, NonAiredOrder: true},
+		},
+		{
+			name:    "unrenderable series item leaves",
+			entries: unrenderable,
+			stored:  journalItem{Title: "Monogatari S02 1080p [G]", NonFilm: true},
+			info:    EntryInfo{TvdbID: 102261, NonAiredOrder: true},
+		},
+		{
+			name:   "item stored without NonFilm whose entry is now a series leaves",
+			stored: journalItem{Title: "Monogatari S02 1080p [G]"},
+			info:   EntryInfo{Title: "Monogatari", Kind: KindSeries, TvdbID: 102261, NonAiredOrder: true},
+		},
+		{
+			name:      "de-curated film keeps its title and loses its twin",
+			stored:    journalItem{Title: "Kizumonogatari 2016 1080p [G]", SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			info:      EntryInfo{Title: "Kizumonogatari", Kind: KindMovie, TvdbID: 102261, NonAiredOrder: true},
+			wantKept:  true,
+			wantCount: "journal_stored_decurated",
+		},
+		{
+			name:      "unrenderable film keeps its title and loses its twin",
+			entries:   unrenderable,
+			stored:    journalItem{Title: "Kizumonogatari 2016 1080p [G]", SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			info:      EntryInfo{Kind: KindMovie, TvdbID: 102261, NonAiredOrder: true},
+			wantKept:  true,
+			wantCount: "journal_stored_unrenderable",
+		},
+		{
+			name:      "de-curated aired-order item keeps its stored render",
+			stored:    journalItem{Title: "Code Geass OVA 1080p [G]", NonFilm: true, TvdbID: 79525, SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			info:      EntryInfo{Title: "Code Geass", TvdbID: 79525},
+			wantKept:  true,
+			wantTwin:  twinTitle,
+			wantCount: "journal_stored_decurated",
+		},
+		// The entry's mapping record is gone or names another series now; the
+		// TVDB id the item stores still names the non-aired series.
+		{
+			name:   "de-curated series item whose record is gone leaves by its stored TVDB id",
+			stored: journalItem{Title: "Monogatari S02 1080p [G]", NonFilm: true, TvdbID: 102261},
+		},
+		{
+			name:    "unrenderable series item whose record is gone leaves by its stored TVDB id",
+			entries: unrenderable,
+			stored:  journalItem{Title: "Monogatari S02 1080p [G]", NonFilm: true, TvdbID: 102261},
+		},
+		{
+			name:   "de-curated series item whose record moved to an aired series leaves by its stored TVDB id",
+			stored: journalItem{Title: "Monogatari S02 1080p [G]", NonFilm: true, TvdbID: 102261},
+			info:   EntryInfo{Title: "Code Geass", TvdbID: 79525},
+		},
+		{
+			name:    "unrenderable series item whose record moved to an aired series leaves by its stored TVDB id",
+			entries: unrenderable,
+			stored:  journalItem{Title: "Monogatari S02 1080p [G]", NonFilm: true, TvdbID: 102261},
+			info:    EntryInfo{TvdbID: 79525},
+		},
+		{
+			name:      "de-curated film whose record is gone and whose memo types it keeps its title and loses its twin",
+			stored:    journalItem{Title: "Kizumonogatari 2016 1080p [G]", TvdbID: 102261, SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			info:      EntryInfo{Title: "Kizumonogatari", Kind: KindMovie},
+			wantKept:  true,
+			wantCount: "journal_stored_decurated",
+		},
+		{
+			name:      "de-curated film whose record is gone with nothing typing it keeps its title and loses its twin",
+			stored:    journalItem{Title: "Kizumonogatari 2016 1080p [G]", TvdbID: 102261, SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			wantKept:  true,
+			wantCount: "journal_stored_decurated",
+		},
+		{
+			name:      "unrenderable film whose record is gone with nothing typing it keeps its title and loses its twin",
+			entries:   unrenderable,
+			stored:    journalItem{Title: "Kizumonogatari 2016 1080p [G]", TvdbID: 102261, SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			wantKept:  true,
+			wantCount: "journal_stored_unrenderable",
+		},
+		{
+			name:      "unrenderable film whose record moved keeps its title and loses its twin",
+			entries:   unrenderable,
+			stored:    journalItem{Title: "Kizumonogatari 2016 1080p [G]", TvdbID: 102261, SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			info:      EntryInfo{Kind: KindMovie, TvdbID: 79525},
+			wantKept:  true,
+			wantCount: "journal_stored_unrenderable",
+		},
+		{
+			name:      "de-curated item stored under an aired series with no current record keeps its stored render",
+			stored:    journalItem{Title: "Code Geass S02 1080p [G]", NonFilm: true, TvdbID: 79525, SonarrTitle: twinTitle, SonarrGUID: guid + "#sonarr"},
+			wantKept:  true,
+			wantTwin:  twinTitle,
+			wantCount: "journal_stored_decurated",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			stored := tc.stored
+			stored.GUID, stored.PubDate, stored.Key, stored.AniListID, stored.FirstSeen = guid, first, "nyaa:42", 7, first
+			writeSnapshotFile(t, path, &snapshot{
+				Owners:    owns(keyed("nyaa:42", true)),
+				Published: map[string]bool{"nyaa:42": true},
+				NyaaFeed:  []journalItem{stored},
+			})
+			info := func(alID int) EntryInfo {
+				if alID != 7 {
+					return EntryInfo{}
+				}
+				return tc.info
+			}
+			log, rec := capture.New()
+			// The recorded Sonarr 5 answer lists Monogatari (102261) in its Book
+			// Order and Code Geass (79525) in aired order.
+			orders := FeedInfo{Entry: info, NonAiredOrder: func(tvdbID int) bool { return tvdbID == 102261 }}
+			if err := newLoggedTestWriter(path, log).Rebuild(t.Context(), tc.entries, orders); err != nil {
+				t.Fatalf("Rebuild: %v", err)
+			}
+			snap := readSnapshotFile(t, path)
+			if !tc.wantKept {
+				if len(snap.NyaaFeed) != 0 {
+					t.Errorf("feed = %+v, want the stored item gone", snap.NyaaFeed)
+				}
+				if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "1" {
+					t.Errorf("journal_dropped = %q (found=%v), want 1", got, ok)
+				}
+				return
+			}
+			if len(snap.NyaaFeed) != 1 {
+				t.Fatalf("feed = %+v, want the stored item kept", snap.NyaaFeed)
+			}
+			got := snap.NyaaFeed[0]
+			if got.Title != tc.stored.Title {
+				t.Errorf("Title = %q, want the stored %q", got.Title, tc.stored.Title)
+			}
+			wantGUID := ""
+			if tc.wantTwin != "" {
+				wantGUID = guid + "#sonarr"
+			}
+			if got.SonarrTitle != tc.wantTwin || got.SonarrGUID != wantGUID {
+				t.Errorf("twin = (%q, %q), want (%q, %q)", got.SonarrTitle, got.SonarrGUID, tc.wantTwin, wantGUID)
+			}
+			if v, ok := rec.AttrValue("indexer feed snapshot written", tc.wantCount); !ok || v != "1" {
+				t.Errorf("%s = %q (found=%v), want 1", tc.wantCount, v, ok)
+			}
+		})
 	}
 }

@@ -22,7 +22,7 @@ You can leave out remuxes, require dual audio, skip specials and add AnimeBytes 
 
 seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on SeaDex and compare its release groups with your files by hand.
 
-You need a Sonarr instance, a Radarr instance or both, with anime in them. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
+You need a Sonarr instance, a Radarr instance or both, with anime in them. Sonarr 4 and Sonarr 5 both work. Behind a reverse proxy, the proxy must pass the `X-Application-Version` header, and Sonarr 5 must be reachable on `/api/v5`. A Sonarr 5 series set to an episode order other than TheTVDB's aired one is not compared. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 
 seadex-scout is free software under the GPL-3.0-or-later license.
 <!-- hub-overview END -->
@@ -148,6 +148,7 @@ The healthcheck runs `seadex-scout health`, which reads a marker file each compl
 - The container restarts in a loop at the first start. The `config` folder does not belong to the container user. Run the `chown` from the quick start.
 - The log says `no config found; wrote a starter config, but it cannot start yet`. `SONARR_URL` or `SONARR_API_KEY` did not reach the container. Check `.env`, then restart.
 - The log says `sonarr ping failed at startup`. Use Sonarr's network address, not `localhost`, and check that Sonarr is running.
+- The log says `sonarr API unsupported`. Sonarr answered, but seadex-scout cannot read its API. The `error` text names the fix, and [Monitoring and alerts](docs/monitoring.md#log-contract) lists each one.
 - The indexer finds nothing on searches. Tick **Anime Standard Format Search** on the indexer in Sonarr.
 
 ## Monitoring
@@ -165,7 +166,7 @@ seadex-scout writes JSON logs to standard output and has no metrics endpoint. Ei
 
 ## Credits
 
-- The anime ID map comes from [animap](https://github.com/cplieger/animap). `animap.json` is made available under the [Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/), and its contents under the [Database Contents License (DbCL) 1.0](https://opendatacommons.org/licenses/dbcl/1-0/). It contains information from [anime-offline-database](https://github.com/cedya77/anime-offline-database), made available under the ODbL 1.0 and the DbCL 1.0, from [Anime-Lists](https://github.com/Anime-Lists/anime-lists), and episode counts from [AniDB](https://anidb.net), read through [AnimeAggregations](https://github.com/notseteve/AnimeAggregations).
+- The anime ID map comes from [animap](https://github.com/cplieger/animap). `animap.json` is made available under the [Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/), and its contents under the [Database Contents License (DbCL) 1.0](https://opendatacommons.org/licenses/dbcl/1-0/). It contains information from [anime-offline-database](https://github.com/cedya77/anime-offline-database), made available under the ODbL 1.0 and the DbCL 1.0, from [Anime-Lists](https://github.com/Anime-Lists/anime-lists), and from [AniDB](https://anidb.net) which episodes exist, with their kind, number and AniDB episode id, read through [AnimeAggregations](https://github.com/notseteve/AnimeAggregations). AniDB's data is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/).
 - The way seadex-scout compares the release groups in a Sonarr or Radarr anime library with SeaDex follows [seadexarr](https://github.com/bbtufty/seadexarr).
 - The indexer reads a release's tracker ID from its page URL and accepts only an ID made of digits. Both rules follow [seadexerr](https://github.com/Ryder-C/seadexerr), a Prowlarr indexer for SeaDex releases.
 

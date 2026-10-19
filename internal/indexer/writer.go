@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -487,6 +488,9 @@ type FeedWriter struct {
 	// UpstreamConfig.torznabURL), so the writer evaluates the same expression the
 	// server's gates do and a third tracker stays one case.
 	enablement UpstreamConfig
+	// packWarned holds the journal keys whose uncorrected pack disagreement has
+	// WARNed in this process (packDisagreementReporter).
+	packWarned keySet
 }
 
 // NewFeedWriter returns a FeedWriter for cfg. client is the HTTP client the title
@@ -516,12 +520,12 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 }
 
 // Rebuild refreshes the persisted feed from the WHOLE SeaDex catalogue
-// (categorized and titled via info, the per-show metadata closure the cycle
-// builds over its persisted state; nil is valid and falls back to file-name
+// (categorized and titled via info, the metadata the cycle builds over its
+// persisted state; the zero FeedInfo is valid and falls back to file-name
 // synthesis). It is the pass at catalogue scope, and that is its ONLY
 // difference from Advance - see run for the shared body and pass.go for the
 // three steps that are genuinely catalogue-only.
-func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc) error {
+func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info FeedInfo) error {
 	return w.run(ctx, entries, info, scopeCatalogue)
 }
 
@@ -741,19 +745,66 @@ func retainValidTitles(titles map[string]string) (kept map[string]string, droppe
 }
 
 // packDisagreementReporter returns applyTitles' contradiction sink for ONE
-// rebuild: the first harvested title whose season-pack verdict disagrees with
-// its release's file list is warned with its journal key, both verdicts, and
-// whether the title was corrected, and the rest of the rebuild stays silent.
+// rebuild. A corrected title logs at Info, the first in the rebuild only. An
+// uncorrected one WARNs once per journal key in this process, the first new key
+// in the rebuild only, and stays reported while journaled even if it stops and
+// recurs; every other report logs at Debug. Each line carries the journal key,
+// both verdicts and whether the title was corrected.
 func (w *FeedWriter) packDisagreementReporter() func(key string, titlePack, filesPack, corrected bool) {
-	warned := false
+	informed, warned := false, false
 	return func(key string, titlePack, filesPack, corrected bool) {
-		if warned {
-			return
+		log := w.log.Debug
+		switch {
+		case corrected:
+			if !informed {
+				informed, log = true, w.log.Info
+			}
+		case !warned && w.packWarned.add(key):
+			warned, log = true, w.log.Warn
 		}
-		warned = true
-		w.log.Warn("indexer feed title and file list disagree about a season pack",
+		log("indexer feed title and file list disagree about a season pack",
 			"key", key, "title_pack", titlePack, "files_pack", filesPack, "corrected", corrected)
 	}
+}
+
+// retainPackWarned prunes the keys whose pack disagreement has WARNed to those
+// in the committed journal, so the set stays bounded and a returning key WARNs
+// again.
+func (w *FeedWriter) retainPackWarned(feeds ...[]journalItem) {
+	w.packWarned.retain(feeds...)
+}
+
+// keySet is a mutex-guarded set of journal keys; its zero value is empty.
+type keySet struct {
+	keys map[string]struct{}
+	mu   sync.Mutex
+}
+
+func (s *keySet) add(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.keys[key]; ok {
+		return false
+	}
+	if s.keys == nil {
+		s.keys = map[string]struct{}{}
+	}
+	s.keys[key] = struct{}{}
+	return true
+}
+
+func (s *keySet) retain(feeds ...[]journalItem) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := make(map[string]struct{}, len(s.keys))
+	for _, feed := range feeds {
+		for i := range feed {
+			if _, ok := s.keys[feed[i].Key]; ok {
+				kept[feed[i].Key] = struct{}{}
+			}
+		}
+	}
+	s.keys = kept
 }
 
 // warnedSet is the exclusion set splitCurationWarned builds and the carry side consumes

@@ -3,7 +3,6 @@ package scout
 import (
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,11 +18,8 @@ import (
 // attempt and never reaches httpx's exhausted verdict).
 func exhaustingMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	t.Cleanup(srv.Close)
-	return mapping.NewLoader(srv.Client(), srv.URL, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
+	client, src := animapRelease(t, http.StatusServiceUnavailable, nil)
+	return mapping.NewLoader(client, src, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
 // staleMappingState is a persisted cache holding usable records fetched beyond

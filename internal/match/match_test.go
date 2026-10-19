@@ -1231,9 +1231,9 @@ func TestMatchStampsSiblingSeasons(t *testing.T) {
 }
 
 // TestMatchStampsOwnSeasons pins the same producer rule for the record's
-// mapping list: the matcher is where the record and the index meet, so it stamps
-// the entry's own TVDB season ranges onto the Match; a record the list knows
-// nothing about carries nil.
+// season ranges: the matcher is where the record and the index meet, so it
+// stamps the entry's own TVDB season ranges onto the Match; a record the map
+// places nowhere carries nil.
 func TestMatchStampsOwnSeasons(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Fairy Tail", TvdbID: 114801},
@@ -1243,7 +1243,7 @@ func TestMatchStampsOwnSeasons(t *testing.T) {
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
 		{AniListID: 154587, Type: "TV", TvdbID: 424536, AniDBID: 17617, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
-	}, Mappings: map[int]mapping.Mapping{9980: {Seasons: ranges}}})
+	}, Mappings: map[int]mapping.Mapping{9980: {Seasons: ranges, SeasonsTvdb: 114801}}})
 	entries := []seadex.Entry{{AniListID: 20626}, {AniListID: 154587}}
 	m := New(fakeAniList{}, nil)
 

@@ -9,14 +9,17 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/cplieger/animap/mapread"
 	"github.com/cplieger/atomicfile/v4"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -79,7 +82,16 @@ func TestStoreLoadMissingReturnsEmptyState(t *testing.T) {
 
 func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	store := NewStore(filepath.Join(t.TempDir(), "nested", "state.json"), testLogger())
+	path := filepath.Join(t.TempDir(), "nested", "state.json")
+	store := NewStore(path, testLogger())
+	aniDBFacts := map[int]mapping.Mapping{9: {
+		Seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 12}}, SeasonsTvdb: 123, Specials: []int{3, 4}, Episodes: []int{5, 6},
+		SpecialsTvdb: 123, SpecialsEpisodes: 2, EpisodesTvdb: 123, EpisodesSeason: 1, SpecialEpisode: 7,
+	}}
+	aniListFacts := map[int]mapping.Mapping{154587: {
+		Seasons: []mapping.SeasonRange{{Season: 2, First: 13, Last: 24}}, SeasonsTvdb: 456, Specials: []int{8}, Episodes: []int{1},
+		SpecialsTvdb: 456, SpecialsEpisodes: 1, EpisodesTvdb: 456, EpisodesSeason: 2, SpecialEpisode: 9,
+	}}
 	want := &State{
 		Library: library.Snapshot{
 			TakenAt: now,
@@ -96,8 +108,10 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 		},
 		Mapping: mapping.Cache{
 			FetchedAt:         now,
-			ETag:              "etag-1",
+			Tag:               "v2026.10.16",
 			Records:           []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
+			Mappings:          aniDBFacts,
+			AniListMappings:   aniListFacts,
 			RejectedRefreshes: 3,
 		},
 		Memo: match.Memo{Entries: map[int]match.MemoEntry{
@@ -128,12 +142,45 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	if got.Mapping.RejectedRefreshes != 3 {
 		t.Errorf("Mapping.RejectedRefreshes round trip = %d, want 3 (the rejection streak must survive restarts)", got.Mapping.RejectedRefreshes)
 	}
+	if !reflect.DeepEqual(got.Mapping.Mappings, aniDBFacts) || !reflect.DeepEqual(got.Mapping.AniListMappings, aniListFacts) {
+		t.Errorf("Mapping facts round trip = %+v and %+v, want %+v and %+v (the tag skips the download, so lost facts stay lost until the next release)",
+			got.Mapping.Mappings, got.Mapping.AniListMappings, aniDBFacts, aniListFacts)
+	}
+	assertPersistedFactKeys(t, path)
 	if got.Memo.Entries[154587].Year != 2023 {
 		t.Errorf("Memo year = %d, want 2023", got.Memo.Entries[154587].Year)
 	}
 	if want := now.Add(300 * time.Hour); !got.Memo.Entries[154587].Expiry.Equal(want) {
 		t.Errorf("Memo expiry round trip = %s, want %s (the jittered-TTL stamp must survive restarts)",
 			got.Memo.Entries[154587].Expiry, want)
+	}
+}
+
+// assertPersistedFactKeys pins the wire keys of the persisted episode facts:
+// a renamed key still round-trips through this build but reads as empty
+// from a file the previous build wrote.
+func assertPersistedFactKeys(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the saved state: %v", err)
+	}
+	var wire struct {
+		Mapping map[string]json.RawMessage `json:"animap_v5"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("decoding the saved state: %v", err)
+	}
+	wantFields := []string{"episodes", "episodes_season", "episodes_tvdb", "seasons", "seasons_tvdb", "special_episode", "specials", "specials_episodes", "specials_tvdb"}
+	for key, id := range map[string]string{"anidb_facts": "9", "anilist_facts": "154587"} {
+		var facts map[string]map[string]json.RawMessage
+		if err := json.Unmarshal(wire.Mapping[key], &facts); err != nil || facts[id] == nil {
+			t.Errorf("saved animap_v5.%s = %s, want the facts of %s (err %v)", key, wire.Mapping[key], id, err)
+			continue
+		}
+		if got := slices.Sorted(maps.Keys(facts[id])); !slices.Equal(got, wantFields) {
+			t.Errorf("saved animap_v5.%s[%s] keys = %v, want %v", key, id, got, wantFields)
+		}
 	}
 }
 
@@ -726,7 +773,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	}
 	// The snapshot's own members are pinned too, not just its items: a renamed
 	// taken_at would otherwise be invisible here (the older raw fixture in
-	// TestStoreLoadReadsPersistedValidatorsAndPartialWalk carries a zero
+	// TestStoreLoadReadsPersistedTagAndPartialWalk carries a zero
 	// timestamp) and a renamed partial would zero-load a complete-looking
 	// library out of every existing state file.
 	wantSnapshotKeys := []string{"items", "partial", "taken_at"}
@@ -770,6 +817,48 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	if keys := slices.Sorted(maps.Keys(entry)); !slices.Equal(keys, wantEntryKeys) {
 		t.Errorf("persisted anilist_memo entry keys = %v, want %v (a deliberate rename needs a currentSchemaVersion bump)", keys, wantEntryKeys)
 	}
+}
+
+// TestStoreNonAiredOrderTvdbIDsShape pins the persisted order set's wire
+// shape: written under non_aired_order_tvdb_ids beside the library snapshot,
+// round-tripped through Load, and absent from a state with no such series, so
+// that state's file keeps its bytes.
+func TestStoreNonAiredOrderTvdbIDsShape(t *testing.T) {
+	saved := func(t *testing.T, st *State) (map[string]json.RawMessage, State) {
+		t.Helper()
+		store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
+		if err := store.Save(t.Context(), st); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		persisted, err := os.ReadFile(store.path)
+		if err != nil {
+			t.Fatalf("read persisted state: %v", err)
+		}
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(persisted, &envelope); err != nil {
+			t.Fatalf("decode persisted envelope: %v", err)
+		}
+		loaded, err := store.Load(t.Context())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return envelope, loaded
+	}
+	t.Run("none listed writes no member", func(t *testing.T) {
+		envelope, _ := saved(t, &State{})
+		if raw, ok := envelope["non_aired_order_tvdb_ids"]; ok {
+			t.Errorf("non_aired_order_tvdb_ids = %s, want the member absent", raw)
+		}
+	})
+	t.Run("listed round trip", func(t *testing.T) {
+		envelope, loaded := saved(t, &State{NonAiredOrderTvdbIDs: []int{78874, 102261}})
+		if got, want := string(envelope["non_aired_order_tvdb_ids"]), `[78874,102261]`; got != want {
+			t.Errorf("non_aired_order_tvdb_ids = %s, want %s", got, want)
+		}
+		if !slices.Equal(loaded.NonAiredOrderTvdbIDs, []int{78874, 102261}) {
+			t.Errorf("loaded NonAiredOrderTvdbIDs = %v, want [78874 102261]", loaded.NonAiredOrderTvdbIDs)
+		}
+	})
 }
 
 // TestStoreLoadIgnoresRetiredScalarShrunkWalks pins the one compatibility property the
@@ -861,11 +950,17 @@ const legacyMappingState = `{
 var (
 	legacyAnimapState   = strings.Replace(legacyMappingState, `"mapping":{`, `"animap":{`, 1)
 	legacyAnimapV2State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v2":{`, 1)
+	legacyAnimapV3State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v3":{`, 1)
+	legacyAnimapV4State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v4":{`, 1)
 )
 
 func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 	for _, tc := range []struct{ key, body string }{
-		{"mapping", legacyMappingState}, {"animap", legacyAnimapState}, {"animap_v2", legacyAnimapV2State},
+		{"mapping", legacyMappingState},
+		{"animap", legacyAnimapState},
+		{"animap_v2", legacyAnimapV2State},
+		{"animap_v3", legacyAnimapV3State},
+		{"animap_v4", legacyAnimapV4State},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
@@ -880,7 +975,7 @@ func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 			if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
 				t.Errorf("quarantine stat = %v, want not exist", statErr)
 			}
-			if m := got.Mapping; m.ETag != "" || m.LastModified != "" || m.RefusedETag != "" || m.RejectedRefreshes != 0 ||
+			if m := got.Mapping; m.Tag != "" || m.RefusedTag != "" || m.RejectedRefreshes != 0 ||
 				len(m.Records) != 0 || len(m.Mappings) != 0 || !m.FetchedAt.IsZero() {
 				t.Errorf("Load(legacy state).Mapping = %+v, want the zero cache", m)
 			}
@@ -915,6 +1010,34 @@ func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 		})
 	}
 }
+
+// TestStoreLoadedV4CacheServesNoMappingOnATransientRefreshFailure pins
+// that the records of a version 1 projection never reach the loader: were
+// they loaded, a transient first refresh would serve them stale with none
+// of their facts.
+func TestStoreLoadedV4CacheServesNoMappingOnATransientRefreshFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(legacyAnimapV4State), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	got, err := NewStore(path, testLogger()).Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load(animap_v4 state) error: %v", err)
+	}
+	outage := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	})}
+	l := mapping.NewLoader(outage, mapread.Source{Repo: mapping.DefaultRepo}, mapping.WithLogger(testLogger()))
+	_, idx, err := l.Load(t.Context(), &got.Mapping)
+	var stale *mapping.StaleMapError
+	if err == nil || errors.As(err, &stale) || idx.Len() != 0 {
+		t.Errorf("Load after a transient refresh failure = %d records, err %v, want no usable mapping", idx.Len(), err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // TestStoreSaveStampsSchemaVersion pins the envelope versioning contract:
 // Save stamps currentSchemaVersion into every file it writes (round-tripping through
@@ -1143,9 +1266,9 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 	}
 }
 
-func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
+func TestStoreLoadReadsPersistedTagAndPartialWalk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	body := `{"animap_v3":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"animap-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
+	body := `{"animap_v5":{"fetched_at":"2026-07-01T00:00:00Z","tag":"v2026.07.01","refused_tag":"v2026.07.02"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write state fixture: %v", err)
 	}
@@ -1153,11 +1276,11 @@ func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if got.Mapping.ETag != `W/"animap-v7"` {
-		t.Errorf("Mapping.ETag from persisted envelope = %q, want %q (a json-tag drift silently drops the conditional-GET validator on restart)", got.Mapping.ETag, `W/"animap-v7"`)
+	if got.Mapping.Tag != "v2026.07.01" {
+		t.Errorf("Mapping.Tag from persisted envelope = %q, want v2026.07.01 (a json-tag drift silently re-downloads the release on restart)", got.Mapping.Tag)
 	}
-	if got.Mapping.LastModified != "Wed, 01 Jul 2026 12:00:00 GMT" {
-		t.Errorf("Mapping.LastModified from persisted envelope = %q, want the fixture's validator", got.Mapping.LastModified)
+	if got.Mapping.RefusedTag != "v2026.07.02" {
+		t.Errorf("Mapping.RefusedTag from persisted envelope = %q, want the fixture's refused release", got.Mapping.RefusedTag)
 	}
 	if !got.Library.Partial {
 		t.Error("Library.Partial from persisted envelope = false, want true (an incomplete walk must not read as complete after a restart)")

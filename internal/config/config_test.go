@@ -103,8 +103,8 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	if c.radarrWanted {
 		t.Error("radarrWanted = true, want false (radarr.enabled must transfer to the runtime Config)")
 	}
-	if c.SonarrURL != "http://sonarr:8989" || c.SonarrAPIKey != "key" {
-		t.Errorf("sonarr not trimmed: url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
+	if c.SonarrURL != "http://sonarr:8989" || c.SonarrAPIKey != " key " {
+		t.Errorf("sonarr url=%q key=%q, want the url trimmed and the key as written", c.SonarrURL, c.SonarrAPIKey)
 	}
 	if c.RadarrURL != "" || c.RadarrAPIKey != "" {
 		t.Errorf("disabled radarr should be empty, got url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
@@ -208,14 +208,14 @@ func TestParseInterval(t *testing.T) {
 }
 
 func TestLoadExpandsAllowlistedEnv(t *testing.T) {
-	t.Setenv("SONARR_API_KEY", "sk-123")
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${SONARR_API_KEY}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(path)
+	c, err := load(path, lookupFrom(map[string]string{"SONARR_API_KEY": "sk-123"}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -384,8 +384,8 @@ func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 
 	c := fc.toConfig()
 
-	if c.RadarrURL != "http://radarr:7878" || c.RadarrAPIKey != "rk" {
-		t.Errorf("enabled radarr not trimmed: url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
+	if c.RadarrURL != "http://radarr:7878" || c.RadarrAPIKey != " rk " {
+		t.Errorf("enabled radarr url=%q key=%q, want the url trimmed and the key as written", c.RadarrURL, c.RadarrAPIKey)
 	}
 	if c.RadarrPublicURL != "https://radarr.example.com" {
 		t.Errorf("radarr public_url = %q, want trimmed", c.RadarrPublicURL)
@@ -401,8 +401,6 @@ func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 // because the literal ${VAR} stays in the config. Both lines name the variable.
 func TestLoadReportsUnresolvedAllowlistedEnv(t *testing.T) {
 	const msg = "config references environment variables that are not set"
-	unsetenv(t, "SONARR_MISSING")
-	unsetenv(t, "SEADEX_SCOUT_MISSING")
 
 	t.Run("arr key reads as absent at info", func(t *testing.T) {
 		rec := capture.Default(t)
@@ -411,7 +409,7 @@ func TestLoadReportsUnresolvedAllowlistedEnv(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := Load(path)
+		cfg, err := load(path, lookupFrom(nil))
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -436,7 +434,7 @@ func TestLoadReportsUnresolvedAllowlistedEnv(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := Load(path)
+		cfg, err := load(path, lookupFrom(nil))
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -452,12 +450,10 @@ func TestLoadReportsUnresolvedAllowlistedEnv(t *testing.T) {
 	})
 }
 
-// unsetenv guarantees name is unset for the test and restores it afterwards.
-func unsetenv(t *testing.T, name string) {
-	t.Helper()
-	t.Setenv(name, "")
-	if err := os.Unsetenv(name); err != nil {
-		t.Fatal(err)
+func lookupFrom(env map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		v, ok := env[name]
+		return v, ok
 	}
 }
 
@@ -467,6 +463,7 @@ func unsetenv(t *testing.T, name string) {
 // reference expands, a reference embedded in a longer value stays literal (and
 // is then refused as a placeholder), and every other field keeps the literal.
 func TestLoadBlanksUnresolvedConnectionRefs(t *testing.T) {
+	t.Parallel()
 	const on = "sonarr:\n  enabled: true\n"
 	tests := []struct {
 		name    string
@@ -558,17 +555,12 @@ func TestLoadBlanksUnresolvedConnectionRefs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, name := range []string{"SONARR_MISSING", "SONARR_MISSING_URL", "SONARR_MISSING_PUBLIC", "RADARR_URL_MISSING", "RADARR_KEY_MISSING", "SEADEX_SCOUT_MISSING", "OTHER_MISSING"} {
-				unsetenv(t, name)
-			}
-			for k, v := range tt.env {
-				t.Setenv(k, v)
-			}
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			c, err := Load(path)
+			c, err := load(path, lookupFrom(tt.env))
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -583,13 +575,12 @@ func TestLoadBlanksUnresolvedConnectionRefs(t *testing.T) {
 // unresolved reference.
 func TestLoadStaysSilentWhenAllEnvResolved(t *testing.T) {
 	rec := capture.Default(t)
-	t.Setenv("SONARR_API_KEY", "sk-123")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${SONARR_API_KEY}\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err != nil {
+	if _, err := load(path, lookupFrom(map[string]string{"SONARR_API_KEY": "sk-123"})); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if rec.Contains("config references environment variables") {
@@ -709,7 +700,7 @@ func TestParseLogFormatWarnsOnUnrecognizedValue(t *testing.T) {
 // (CWE-532).
 func TestConfigDiagnosticsOmitExpandedSecrets(t *testing.T) {
 	const secret = "credential-sentinel-7f3a"
-	t.Setenv("SONARR_API_KEY", secret)
+	env := lookupFrom(map[string]string{"SONARR_API_KEY": secret})
 	const arr = "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: k\n"
 
 	tests := []struct {
@@ -745,7 +736,7 @@ func TestConfigDiagnosticsOmitExpandedSecrets(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cfg, err := Load(path)
+			cfg, err := load(path, env)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -1118,17 +1109,11 @@ var starterVars = []string{"SONARR_URL", "SONARR_API_KEY", "RADARR_URL", "RADARR
 // first-boot starter, with exactly the given starterVars set.
 func loadExample(t *testing.T, env map[string]string) Config {
 	t.Helper()
-	for _, name := range starterVars {
-		unsetenv(t, name)
-	}
-	for k, v := range env {
-		t.Setenv(k, v)
-	}
 	path, err := filepath.Abs(filepath.Join("..", "..", "config.example.yaml"))
 	if err != nil {
 		t.Fatalf("resolve example path: %v", err)
 	}
-	c, err := Load(path)
+	c, err := load(path, lookupFrom(env))
 	if err != nil {
 		t.Fatalf("Load(config.example.yaml): %v", err)
 	}
@@ -1202,9 +1187,6 @@ func TestExampleConfigStartsFromTheEnvironment(t *testing.T) {
 // operator who replaces the starter's references with values gets a config that
 // loads, validates and reads no environment variable at all.
 func TestExampleConfigHandEditedRunsWithoutVariables(t *testing.T) {
-	for _, name := range starterVars {
-		unsetenv(t, name)
-	}
 	example, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
 	if err != nil {
 		t.Fatalf("read example: %v", err)
@@ -1226,7 +1208,7 @@ func TestExampleConfigHandEditedRunsWithoutVariables(t *testing.T) {
 	}
 
 	rec := capture.Default(t)
-	c, err := Load(path)
+	c, err := load(path, lookupFrom(nil))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1246,9 +1228,6 @@ func TestExampleConfigHandEditedRunsWithoutVariables(t *testing.T) {
 // what it says, reads no variable and logs nothing. The smoke fixture under tests/
 // is the committed instance.
 func TestExistingLiteralConfigsKeepTheirBehaviour(t *testing.T) {
-	for _, name := range starterVars {
-		unsetenv(t, name)
-	}
 	t.Run("explicit toggles with literal values", func(t *testing.T) {
 		rec := capture.Default(t)
 		path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1257,7 +1236,7 @@ func TestExistingLiteralConfigsKeepTheirBehaviour(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		c, err := Load(path)
+		c, err := load(path, lookupFrom(nil))
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -1272,7 +1251,7 @@ func TestExistingLiteralConfigsKeepTheirBehaviour(t *testing.T) {
 		}
 	})
 	t.Run("the smoke fixture validates", func(t *testing.T) {
-		c, err := Load(filepath.Join("..", "..", "tests", "fixtures", "config.yaml"))
+		c, err := load(filepath.Join("..", "..", "tests", "fixtures", "config.yaml"), lookupFrom(nil))
 		if err != nil {
 			t.Fatalf("Load(tests/fixtures/config.yaml): %v", err)
 		}
@@ -1289,6 +1268,7 @@ func TestExistingLiteralConfigsKeepTheirBehaviour(t *testing.T) {
 // TestExampleConfigMatchesLoader pins the rest of the shipped starter against the
 // loader: every non-connection default it carries is the loader's own.
 func TestExampleConfigMatchesLoader(t *testing.T) {
+	t.Parallel()
 	c := loadExample(t, nil)
 	if c.PollInterval != DefaultPollInterval || c.PollExternal {
 		t.Errorf("PollInterval = %v external=%v, want built-in %v", c.PollInterval, c.PollExternal, DefaultPollInterval)
@@ -1316,14 +1296,14 @@ func TestExampleConfigMatchesLoader(t *testing.T) {
 // in an environment value stays scalar content instead of breaking the
 // document structure.
 func TestLoadEnvValueWithYAMLSyntax(t *testing.T) {
-	t.Setenv("SONARR_API_KEY", "key\"withquote\nand-newline")
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := "sonarr:\n  enabled: true\n  url: \"http://sonarr:8989\"\n  api_key: \"${SONARR_API_KEY}\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
+	cfg, err := load(path, lookupFrom(map[string]string{"SONARR_API_KEY": "key\"withquote\nand-newline"}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1460,41 +1440,109 @@ func TestLoadRejectsMultiDocumentConfig(t *testing.T) {
 	}
 }
 
-// TestToConfigTrimsIndexerFields asserts the five indexer settings - secrets
-// and URLs pasted into YAML - are trimmed like the arr fields.
-func TestToConfigTrimsIndexerFields(t *testing.T) {
+// TestLoadRefusesPaddedIndexerSecrets pins that the three indexer credentials reach
+// the runtime byte for byte and that edge whitespace on one fails Validate naming
+// that field, whether or not a Torznab URL turns the indexer on. Each has a copy
+// outside this process (the feed key in every arr, the Prowlarr key in Prowlarr, the
+// passkey at AnimeBytes), so a trim would load a key that differs from that copy.
+func TestLoadRefusesPaddedIndexerSecrets(t *testing.T) {
+	t.Parallel()
+	clean := map[string]string{
+		"feed_api_key":     strings.Repeat("a1b2c3d4", 4),
+		"prowlarr_api_key": strings.Repeat("9f8e7d6c", 4),
+		"ab_passkey":       testABPasskey,
+	}
+	render := func(indexer map[string]string, torznab bool) string {
+		urls := ""
+		if torznab {
+			urls = "  nyaa_torznab_url: http://prowlarr:9696/22/api\n" +
+				"  ab_torznab_url: http://prowlarr:9696/2/api\n"
+		}
+		return "sonarr:\n  url: http://sonarr:8989\n  api_key: " + strings.Repeat("4b5a6978", 4) + "\n" +
+			"animebytes: true\n" +
+			"indexer:\n" + urls +
+			"  feed_api_key: \"" + indexer["feed_api_key"] + "\"\n" +
+			"  prowlarr_api_key: \"" + indexer["prowlarr_api_key"] + "\"\n" +
+			"  ab_passkey: \"" + indexer["ab_passkey"] + "\"\n"
+	}
+	loadIndexer := func(t *testing.T, indexer map[string]string, torznab bool) Config {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(render(indexer, torznab)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := load(path, lookupFrom(nil))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return c
+	}
+
+	for _, torznab := range []bool{true, false} {
+		t.Run("clean keys validate with torznab urls "+strconv.FormatBool(torznab), func(t *testing.T) {
+			t.Parallel()
+			c := loadIndexer(t, clean, torznab)
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want nil for unpadded keys", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		field   string
+		padded  string
+		torznab bool
+		got     func(*Config) string
+	}{
+		{"feed_api_key", " " + clean["feed_api_key"], true, func(c *Config) string { return c.IndexerAPIKey }},
+		{"prowlarr_api_key", clean["prowlarr_api_key"] + " ", true, func(c *Config) string { return c.IndexerProwlarrAPIKey }},
+		{"ab_passkey", "\t" + clean["ab_passkey"], true, func(c *Config) string { return c.IndexerABPasskey }},
+		{"feed_api_key", clean["feed_api_key"] + "\t", false, func(c *Config) string { return c.IndexerAPIKey }},
+		{"prowlarr_api_key", " " + clean["prowlarr_api_key"], false, func(c *Config) string { return c.IndexerProwlarrAPIKey }},
+		{"ab_passkey", clean["ab_passkey"] + " ", false, func(c *Config) string { return c.IndexerABPasskey }},
+	} {
+		t.Run(tc.field+" with torznab urls "+strconv.FormatBool(tc.torznab), func(t *testing.T) {
+			t.Parallel()
+			indexer := maps.Clone(clean)
+			indexer[tc.field] = tc.padded
+			c := loadIndexer(t, indexer, tc.torznab)
+			if got := tc.got(&c); got != tc.padded {
+				t.Errorf("indexer.%s = %q, want the configured bytes %q", tc.field, got, tc.padded)
+			}
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error refusing the padded indexer.%s", tc.field)
+			}
+			if !strings.Contains(err.Error(), "indexer."+tc.field) {
+				t.Errorf("Validate() error = %v, want it to name indexer.%s", err, tc.field)
+			}
+			if strings.Contains(err.Error(), clean[tc.field]) {
+				t.Errorf("Validate() error echoes the configured indexer.%s: %v", tc.field, err)
+			}
+		})
+	}
+}
+
+func TestToConfigTrimsIndexerURLs(t *testing.T) {
 	fc := defaultFileConfig()
 	fc.Indexer = indexerFile{
-		FeedAPIKey:     " fk ",
 		NyaaTorznabURL: "\thttp://prowlarr:9696/22/api ",
 		ABTorznabURL:   " http://prowlarr:9696/2/api\n",
-		ProwlarrAPIKey: " pk ",
-		ABPasskey:      " passkey ",
 	}
 
 	c := fc.toConfig()
 
-	if c.IndexerAPIKey != "fk" {
-		t.Errorf("IndexerAPIKey = %q, want trimmed %q", c.IndexerAPIKey, "fk")
-	}
 	if c.IndexerNyaaTorznabURL != "http://prowlarr:9696/22/api" {
 		t.Errorf("IndexerNyaaTorznabURL = %q, want trimmed", c.IndexerNyaaTorznabURL)
 	}
 	if c.IndexerABTorznabURL != "http://prowlarr:9696/2/api" {
 		t.Errorf("IndexerABTorznabURL = %q, want trimmed", c.IndexerABTorznabURL)
 	}
-	if c.IndexerProwlarrAPIKey != "pk" {
-		t.Errorf("IndexerProwlarrAPIKey = %q, want trimmed %q", c.IndexerProwlarrAPIKey, "pk")
-	}
-	if c.IndexerABPasskey != "passkey" {
-		t.Errorf("IndexerABPasskey = %q, want trimmed %q", c.IndexerABPasskey, "passkey")
-	}
 }
 
 // TestLoadExpandsEnvInSequenceValues pins that ${VAR} expansion reaches string
 // scalars inside YAML sequences (the arr_tags lists), not just mapping values.
 func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
-	t.Setenv("SEADEX_SCOUT_TAG", "anime")
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: k\n" +
@@ -1502,7 +1550,7 @@ func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(path)
+	c, err := load(path, lookupFrom(map[string]string{"SEADEX_SCOUT_TAG": "anime"}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1579,14 +1627,14 @@ func TestLoadDuplicateKeyErrorKeepsLineNumbers(t *testing.T) {
 // it been expanded it would have materialized the real animebytes key and
 // loaded silently with the toggle flipped.
 func TestLoadLeavesMappingKeysLiteral(t *testing.T) {
-	t.Setenv("SEADEX_SCOUT_KEY", "animebytes")
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: k\n" +
 		"\"${SEADEX_SCOUT_KEY}\": true\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Load(path)
+	_, err := load(path, lookupFrom(map[string]string{"SEADEX_SCOUT_KEY": "animebytes"}))
 	if err == nil {
 		t.Fatal("Load() = nil error: the mapping key ${SEADEX_SCOUT_KEY} was expanded into a real key; keys must stay literal")
 	}
@@ -1692,22 +1740,19 @@ func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
 	})
 }
 
-// TestValidateWarnsOnCredentialBearingArrURL pins Validate's credential
-// posture for arr URLs: a query-bearing url (where pasted credentials land)
-// is rejected outright naming ONLY the field — arrapi's base-URL contract
-// forbids a query, and its own rejection would echo the full URL — while a
-// userinfo credential (which still loads) fires the field-name-only warning,
-// and clean URLs stay silent. Neither path may leak the credential value.
-func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
-	const warnMsg = "arr url embeds a credential-like query parameter or userinfo"
-
+// TestValidateArrURLCredentialPosture pins Validate's arr URL posture: a
+// query-bearing url (where pasted credentials land) is rejected naming ONLY the
+// field, since the arr client refuses a base URL with a query; a userinfo url
+// loads (the arr client sends it as HTTP basic auth). Neither path echoes the
+// credential.
+func TestValidateArrURLCredentialPosture(t *testing.T) {
 	t.Run("apikey query param is rejected naming only the sonarr field", func(t *testing.T) {
 		const cred = "leaked-arr-cred-sentinel"
 		rec := capture.Default(t)
 		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989?apikey=" + cred, SonarrAPIKey: "k"}
 		err := c.Validate()
 		if err == nil {
-			t.Fatal("Validate() = nil, want the no-query rejection (arrapi's base-URL contract forbids a query)")
+			t.Fatal("Validate() = nil, want the no-query rejection")
 		}
 		if !strings.Contains(err.Error(), "sonarr.url must not contain a query") {
 			t.Errorf("Validate() error = %q, want the field-name-only no-query rejection", err)
@@ -1720,29 +1765,16 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
 		}
 	})
-	t.Run("userinfo credential warns naming the radarr field", func(t *testing.T) {
+	t.Run("userinfo url loads without echoing the credential", func(t *testing.T) {
 		const cred = "arr-userinfo-pw-sentinel"
 		rec := capture.Default(t)
 		c := Config{RunMode: RunModeDaemon, RadarrURL: "http://user:" + cred + "@radarr:7878", RadarrAPIKey: "k"}
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "radarr.url") {
-			t.Errorf("Validate() log = %v, want the credential warning naming radarr.url", rec.Messages())
-		}
 		corpus := strings.Join(rec.Messages(), "\n")
 		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
 			t.Errorf("Validate() log leaks the userinfo credential value: %v", rec.Messages())
-		}
-	})
-	t.Run("clean arr urls stay silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains(warnMsg) {
-			t.Errorf("Validate() log = %v, want no credential warning for clean urls", rec.Messages())
 		}
 	})
 }
@@ -1795,13 +1827,13 @@ func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
 // survives into the runtime Config - so an arbitrary host env value can never
 // be injected into a config field through a ${VAR} reference.
 func TestLoadLeavesNonAllowlistedEnvLiteral(t *testing.T) {
-	t.Setenv("HOME", "/home/leaked-value")
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${HOME}\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(path)
+	c, err := load(path, lookupFrom(map[string]string{"HOME": "/home/leaked-value"}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

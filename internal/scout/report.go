@@ -41,12 +41,12 @@ func NewReporter(deps *ReportDeps) *Reporter {
 // error or a partial snapshot: auditing an incomplete snapshot would publish a
 // timestamped report that silently omits the skipped series.
 func (r *Reporter) reportSnapshot(ctx context.Context) (library.Snapshot, error) {
-	snap, err := r.library.Walk(ctx)
+	// The report reads no order set: Item.Order withholds its comparisons.
+	snap, _, err := r.library.Walk(ctx)
 	if err != nil {
-		// Reduce a transport *url.Error before it crosses the returned-report
-		// boundary (main logs this at ERROR): the request URL may carry configured
-		// userinfo credentials. The reduction also drops arrwalk.Walk's wrapper, so
-		// name the failed side from the typed walk-side error.
+		// LogSafeError is defence in depth (arrapi's errors carry no request URL).
+		// When it fires, the reduction drops arrwalk.Walk's wrapper, so name the
+		// failed side from the typed walk-side error.
 		if arr := arrwalk.WalkErrArr(err); arr != "" {
 			return library.Snapshot{}, fmt.Errorf("library walk (%s): %w", arr, httpx.LogSafeError(err))
 		}

@@ -427,7 +427,7 @@ func TestSizeOfAFilmOrSpecialInSeasonZero(t *testing.T) {
 	series := &library.Item{
 		Title: "Show", Arr: library.ArrSonarr, ArrID: 7, HasFile: true,
 		Groups: []string{"oz"}, SeasonGroups: map[int][]string{0: {"oz"}},
-		Specials:       map[int]library.SpecialEpisode{9: {Group: "oz", HasFile: true}, 10: {Group: "oz", HasFile: true}},
+		Specials:       map[int]library.ListedEpisode{9: {Group: "oz", HasFile: true}, 10: {Group: "oz", HasFile: true}},
 		SeasonEpisodes: map[int]map[int]library.Episode{0: {9: {File: 300}, 10: {File: 300}}},
 		FileBytes:      map[int]int64{300: heldBytes},
 	}

@@ -41,7 +41,7 @@ func twinFixtureEntries() []seadex.Entry {
 func twinFixtureInfo(alID int) EntryInfo {
 	if alID == 21519 {
 		return EntryInfo{
-			Title: "Lelouch of the Resurrection", Year: 2019, IsMovie: true, TvdbID: 79525,
+			Title: "Lelouch of the Resurrection", Year: 2019, Kind: KindMovie, TvdbID: 79525,
 			SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: twinSeries,
 		}
 	}
@@ -60,7 +60,7 @@ func twinIndexer(t *testing.T, entries []seadex.Entry, info EntryInfoFunc, upstr
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, cfg.ABPasskey, cfg.ABTorznabURL != "").Rebuild(t.Context(), entries, info); err != nil {
+	if err := newTestWriter(path, cfg.ABPasskey, cfg.ABTorznabURL != "").Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	srv := httptest.NewServer(upstream)
@@ -396,7 +396,7 @@ func TestServeGivesSonarrACoHeldReleaseOnlyUnderANonFilmTitle(t *testing.T) {
 func TestRebuildPersistsTheTwinCatalogue(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), twinFixtureEntries()[:1], twinFixtureInfo); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), twinFixtureEntries()[:1], FeedInfo{Entry: twinFixtureInfo}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -516,7 +516,7 @@ func TestServeSpecialSearchKeepsSeriesApartByTheirWordBoundary(t *testing.T) {
 		if alID == 3000 {
 			series = "Kon"
 		}
-		return EntryInfo{Title: "The Movie", IsMovie: true, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: series}
+		return EntryInfo{Title: "The Movie", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: series}
 	}
 	ix := twinIndexer(t, entries, info, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, emptyUpstreamFeed)
@@ -541,7 +541,7 @@ func TestServeALegacySnapshotGivesSonarrNoFilm(t *testing.T) {
 		info.SpecialEpisodes = nil
 		return info
 	}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), twinFixtureEntries()[:1], twinless); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), twinFixtureEntries()[:1], FeedInfo{Entry: twinless}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	legacyFeedFile(t, path, func(item map[string]any) { item["Categories"] = []int{catMovies, catAnime} })
@@ -602,7 +602,7 @@ func TestServeCatalogueTwinKeepsTheEpochAcrossSnapshots(t *testing.T) {
 	const epoch = "<pubDate>Thu, 01 Jan 1970 00:00:00 +0000</pubDate>"
 	for generation := range 2 {
 		if generation > 0 {
-			if err := newTestWriter(ix.cache.path, "", false).Rebuild(t.Context(), twinFixtureEntries(), twinFixtureInfo); err != nil {
+			if err := newTestWriter(ix.cache.path, "", false).Rebuild(t.Context(), twinFixtureEntries(), FeedInfo{Entry: twinFixtureInfo}); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			later := time.Now().Add(time.Hour)

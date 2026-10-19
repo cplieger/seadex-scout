@@ -7,6 +7,8 @@
 package compare
 
 import (
+	"cmp"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -111,8 +114,8 @@ type Finding struct {
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
 	CurrentGroups []string
-	// Episodes are the season-0 episodes an "episodes" scope judged
-	// (align.Decision.Episodes).
+	// Episodes are the episodes of Season, 0 or positive, an "episodes"
+	// scope judged (align.Decision.Episodes).
 	Episodes []int
 	// CurrentRevision and RecommendedRevision are set only for a same-group
 	// revision gap (StatusNewerRevision, or StatusIncomplete downgraded from
@@ -139,6 +142,7 @@ type Finding struct {
 
 // Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
+	log             *slog.Logger
 	tags            tagfilter.Filter
 	opts            filter.Options
 	excludeSpecials bool
@@ -147,6 +151,9 @@ type Comparer struct {
 
 // Config configures a Comparer.
 type Config struct {
+	// Logger receives the Debug record of each comparison withheld for AniList;
+	// nil means slog.Default().
+	Logger *slog.Logger
 	// TagFilter is the operator's filters.exclude_tags policy, asked about the
 	// findings surface. Its zero value - the default - excludes nothing, so a
 	// release SeaDex tags Broken produces a finding like any other.
@@ -162,6 +169,7 @@ type Config struct {
 // New builds a Comparer from cfg.
 func New(cfg Config) *Comparer {
 	return &Comparer{
+		log:             cmp.Or(cfg.Logger, slog.Default()),
 		tags:            cfg.TagFilter,
 		opts:            cfg.Filter,
 		excludeSpecials: cfg.ExcludeSpecials,
@@ -213,7 +221,11 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	if d.Kind == align.ScopeOffered {
 		return nil
 	}
-	if d.Outcome == align.OutcomeNoFile || d.Outcome == align.OutcomeAligned {
+	if d.Withheld == align.WithheldAniList {
+		c.log.Debug("comparison withheld: Sonarr's AniList ids exclude this entry",
+			"anilist_id", entry.AniListID, "series", logattr.Cap(m.Item.Title), "series_anilist_ids", m.Item.AniListIDs)
+	}
+	if d.Outcome == align.OutcomeNoFile || d.Outcome == align.OutcomeWithheld || d.Outcome == align.OutcomeAligned {
 		return nil
 	}
 	base := baseFinding(m, &d)

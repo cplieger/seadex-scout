@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,12 +194,12 @@ func TestValidateRejectionNamesEnvRefOnlyForDollar(t *testing.T) {
 }
 
 // TestValidateWarnsOnNonGeneratedAPIKeyShape pins the warn-and-never-error half:
-// a key that PASSES the shape gate but is not 32 lower-case hex is not what any
-// of the three upstreams generates, so it is probably a truncated paste - but the
-// same upstreams accept an operator-supplied key of any shape (their only check on
-// SONARR__AUTH__APIKEY is IsNullOrWhiteSpace), so it must not refuse the config.
-// Exactly one warning, naming the field, never echoing the key; none at all for
-// the generated shape.
+// a key that passes the shape gate (and, for Sonarr and Radarr, the client
+// alphabet) but is not 32 lower-case hex is not what any of the three upstreams
+// generates, so it is probably a truncated paste - but the upstreams accept it
+// (their only check on SONARR__AUTH__APIKEY is IsNullOrWhiteSpace), so it must
+// not refuse the config. Exactly one warning, naming the field, never echoing
+// the key; none at all for the generated shape.
 func TestValidateWarnsOnNonGeneratedAPIKeyShape(t *testing.T) {
 	const sentinel = "shortkeysentinel"
 	for _, f := range gatedAPIKeyFields() {
@@ -256,6 +258,124 @@ func TestValidateWarnsPerNonGeneratedArrKey(t *testing.T) {
 		if !rec.AttrContains(generatedShapeWarn, "field", field) {
 			t.Errorf("no generated-shape warning naming %s: %v", field, rec.Messages())
 		}
+	}
+}
+
+// TestValidateRefusesArrKeyOutsideClientAlphabet pins the arr key gate to the
+// alphabet the arr client accepts (arrapi sonarr.New and radarr.New refuse any key
+// byte outside letters, digits, '.', '_' and '-'): a key the config passes must
+// never be refused at client construction. A refused key gets no "it is accepted"
+// warning, and neither the error nor the log carries the key. Prowlarr's key does
+// not go through that client, so its gate stays wider.
+func TestValidateRefusesArrKeyOutsideClientAlphabet(t *testing.T) {
+	const rule = "may hold only letters, digits, '.', '_' and '-'"
+	refused := map[string]string{
+		"plus":             "sentinel+key",
+		"tilde":            "sentinel~key",
+		"percent escape":   "sentinel%2Bkey",
+		"slash":            "sentinel/key",
+		"at sign":          "sentinel@key",
+		"non-ASCII letter": "sentinélkey",
+	}
+	accepted := map[string]string{
+		"generated key":          testArrAPIKey,
+		"upper-case hex":         strings.Repeat("AB", 16),
+		"hand-set alphabet only": "abc.DEF_1-2",
+	}
+	for _, f := range gatedAPIKeyFields() {
+		if f.field == "indexer.prowlarr_api_key" {
+			t.Run("indexer.prowlarr_api_key keeps its wider gate", func(t *testing.T) {
+				cfg := f.build("sentinel+key")
+				if err := cfg.Validate(); err != nil {
+					t.Errorf("Validate() = %v, want nil: Prowlarr's key is not sent through the arr client", err)
+				}
+			})
+			continue
+		}
+		t.Run(f.field, func(t *testing.T) {
+			for name, key := range refused {
+				t.Run(name, func(t *testing.T) {
+					rec := capture.Default(t)
+					cfg := f.build(key)
+					err := cfg.Validate()
+					if err == nil {
+						t.Fatalf("Validate() = nil, want a refusal for %s = %q", f.field, key)
+					}
+					if !strings.Contains(err.Error(), f.field) || !strings.Contains(err.Error(), rule) {
+						t.Errorf("Validate() error = %q, want it to name %s and the rule %q", err, f.field, rule)
+					}
+					if strings.Contains(err.Error(), "sentin") {
+						t.Errorf("Validate() error echoes the configured key value: %q", err)
+					}
+					if n := rec.CountExact(generatedShapeWarn); n != 0 {
+						t.Errorf("generated-shape warnings = %d, want 0 for a refused key: %v", n, rec.Messages())
+					}
+					if strings.Contains(strings.Join(rec.Messages(), "\n"), "sentin") || rec.AttrContains("", "", "sentin") {
+						t.Errorf("Validate() log echoes the configured key value: %v", rec.Messages())
+					}
+				})
+			}
+			for name, key := range accepted {
+				t.Run(name, func(t *testing.T) {
+					cfg := f.build(key)
+					if err := cfg.Validate(); err != nil {
+						t.Errorf("Validate() = %v, want nil for %s = %q", err, f.field, key)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestLoadKeepsArrKeyBytes pins env-validation.md's no-repair rule on the arr
+// keys through the production path: the arr compares the key byte for byte, so
+// Load hands a padded key to Validate as written and Validate refuses it naming
+// the field. The url beside it is not a shared credential and stays trimmed.
+func TestLoadKeepsArrKeyBytes(t *testing.T) {
+	padded := map[string]string{
+		"leading space":    " " + testArrAPIKey,
+		"trailing space":   testArrAPIKey + " ",
+		"trailing newline": testArrAPIKey + "\n",
+	}
+	for _, arr := range []string{"sonarr", "radarr"} {
+		t.Run(arr, func(t *testing.T) {
+			for name, key := range padded {
+				t.Run(name, func(t *testing.T) {
+					t.Setenv("SONARR_API_KEY", key)
+					t.Setenv("RADARR_API_KEY", key)
+					content := arr + ":\n  enabled: true\n  url: \" http://" + arr + ":8989 \"\n  api_key: ${" + strings.ToUpper(arr) + "_API_KEY}\n"
+					path := filepath.Join(t.TempDir(), "config.yaml")
+					if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					cfg, err := Load(path)
+					if err != nil {
+						t.Fatalf("Load: %v", err)
+					}
+					err = cfg.Validate()
+					if err == nil {
+						t.Fatalf("Validate() = nil, want a refusal of the padded %s.api_key", arr)
+					}
+					if !strings.Contains(err.Error(), arr+".api_key") || strings.Contains(err.Error(), testArrAPIKey) {
+						t.Errorf("Validate() error = %q, want it to name %s.api_key and not echo the key", err, arr)
+					}
+				})
+			}
+			t.Run("unpadded key with a padded url", func(t *testing.T) {
+				content := arr + ":\n  enabled: true\n  url: \" http://" + arr + ":8989 \"\n  api_key: \"" + testArrAPIKey + "\"\n"
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := Load(path)
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				if err := cfg.Validate(); err != nil {
+					t.Errorf("Validate() = %v, want nil", err)
+				}
+			})
+		})
 	}
 }
 

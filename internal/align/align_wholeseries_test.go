@@ -356,7 +356,7 @@ func TestDecideSiblingSeasonsOnlyReachTheWholeSeriesAggregate(t *testing.T) {
 }
 
 // TestDecideOwnSeasonsJudgeASplitShowPerEntry pins the report rule: when the
-// mapping list names an entry's own TVDB seasons, a whole-series
+// map names an entry's own TVDB seasons, a whole-series
 // comparison judges exactly those. Fairy Tail's three entries share one eight-season
 // Sonarr series, and with the verdicts arranged to differ (S1-S4 best, S5-S7 alt,
 // S8 unlisted) each Groups is its own seasons' union, where the sibling rule alone

@@ -27,7 +27,7 @@ const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
 // (or the AniList canonical title as fallback; empty when neither is known),
-// its release year, the season the entry maps to, whether it is a movie, and the
+// its release year, the season the entry maps to, its media kind, and the
 // TVDB id its mapping record carries.
 type EntryInfo struct {
 	Title string
@@ -35,15 +35,17 @@ type EntryInfo struct {
 	// SpecialEpisodes: the second title the twin is labeled with, since Title
 	// keeps the entry's own name.
 	SeriesTitle string
-	// Seasons are the TVDB seasons this entry's absolute-numbered episodes fall
-	// into, from the mapping list; nil when the list names none. The
-	// RANGES, never a scalar: three measured entries need 6, 8 and 2 distinct
-	// seasons across their packs, so one season per entry mislabels most of them.
+	// Seasons are the TVDB seasons this entry's episodes fall into, as runs
+	// of entry episodes from the map; nil for a film, when the map names none
+	// or under NonAiredOrder. The RANGES, never a scalar: three measured
+	// entries need 6, 8 and 2 distinct seasons across their packs, so one
+	// season per entry mislabels most of them.
 	Seasons []SeasonRange
 	// SpecialEpisodes are the TVDB season-0 episodes of SeriesTitle this offered
-	// entry is, ascending, nil when the map names none; SpecialsEpisodes is the
-	// AniDB episode count they answer, 0 when unknown. They let the feed serve a
-	// release a second time as "<SeriesTitle> S00Exx", which Sonarr can parse.
+	// entry is, ascending, nil when the map names none or under NonAiredOrder;
+	// SpecialsEpisodes is the entry episode count they answer, 0 when unknown.
+	// They let the feed serve a release a second time as "<SeriesTitle>
+	// S00Exx", which Sonarr can parse.
 	SpecialEpisodes  []int
 	SpecialsEpisodes int
 	Year             int
@@ -55,13 +57,30 @@ type EntryInfo struct {
 	// resolve a series it could not parse out of the release title.
 	TvdbID      int
 	SeasonKnown bool
-	IsMovie     bool
+	Kind        MediaKind
+	// NonAiredOrder reports that Sonarr numbers the series TvdbID names in
+	// another order than TheTVDB's aired one. The producer then sets no season
+	// fact, and a stored render carried without a fresh one loses its twin, or
+	// leaves the journal when its title is not a film's (applyStoredOrder).
+	NonAiredOrder bool
 }
 
-// SeasonRange is one TVDB season an absolute-numbered run's episodes fall into:
-// episodes First..Last are season Season, with Last 0 meaning open-ended. This
-// package's own copy of the mapping-list fact (it imports neither mapping nor
-// align, and EntryInfo is its only channel).
+// MediaKind is what the producer's typing says an entry is. KindUnknown means
+// nothing typed it: it renders as a series does, but is no evidence that a
+// stored title is not a film's (applyStoredOrder).
+type MediaKind uint8
+
+// The media kinds.
+const (
+	KindUnknown MediaKind = iota
+	KindSeries
+	KindMovie
+)
+
+// SeasonRange is one TVDB season a run of the entry's episodes falls into:
+// entry episodes First..Last are season Season. This package's own copy of
+// the map's fact (it imports neither mapping nor align, and EntryInfo is its
+// only channel).
 type SeasonRange struct {
 	Season int
 	First  int
@@ -69,10 +88,9 @@ type SeasonRange struct {
 }
 
 // contains reports whether the whole episode span first..last sits inside the
-// range. An open-ended range (Last 0) contains a span only from its First on, so
-// it never claims a span that starts before it.
+// range.
 func (r SeasonRange) contains(first, last int) bool {
-	return r.First <= first && (r.Last == 0 || last <= r.Last)
+	return r.First <= first && last <= r.Last
 }
 
 // EntryInfoFunc resolves the per-show (per-AniList-id) metadata the feed
@@ -81,6 +99,22 @@ func (r SeasonRange) contains(first, last int) bool {
 // fallback, anime category). The compare cycle supplies it; see
 // entryInfoFunc for the nil-safe wrapper.
 type EntryInfoFunc func(alID int) EntryInfo
+
+// FeedInfo is the persisted metadata the compare cycle hands a feed pass. Its
+// zero value is valid: file-name synthesis, and no series known to use a
+// non-aired order.
+type FeedInfo struct {
+	// Entry resolves the per-show metadata; nil yields the zero EntryInfo.
+	Entry EntryInfoFunc
+	// NonAiredOrder reports whether Sonarr numbers the series tvdbID names in
+	// another order than TheTVDB's aired one; nil reports none.
+	NonAiredOrder func(tvdbID int) bool
+}
+
+// nonAiredOrder is NonAiredOrder, false for a nil func.
+func (f FeedInfo) nonAiredOrder(tvdbID int) bool {
+	return f.NonAiredOrder != nil && f.NonAiredOrder(tvdbID)
+}
 
 // ref resolves one show's metadata to a fresh addressable value, for the title
 // synthesizers that take it by pointer (EntryInfo outgrew the pass-by-value size).
@@ -118,8 +152,8 @@ func synthesizeTitle(t *seadex.Torrent, meta *EntryInfo) string {
 		return derivedTitle(t, meta)
 	}
 	parts := []string{title}
-	switch {
-	case meta.IsMovie:
+	switch meta.Kind {
+	case KindMovie:
 		if meta.Year > 0 {
 			parts[0] = fmt.Sprintf("%s (%d)", title, meta.Year)
 		}
@@ -223,7 +257,7 @@ func episodeLabel(e int) string { return fmt.Sprintf("E%02d", e) }
 // packSeasonLabel resolves the season token a PACK is labeled with, in the one
 // precedence both title paths share: the entry's resolved season outvotes the
 // pack's own file-season evidence (fansub numbering is cour-local), which
-// outvotes the mapping-list's season ranges - so a token a release name already
+// outvotes the map's season ranges - so a token a release name already
 // carries is never rewritten by a range. ok is false when no source pins a
 // season, so each caller supplies its own fallback (no marker on the assembled
 // path, the file's own season half on the derived one).
@@ -241,10 +275,10 @@ func packSeasonLabel(t *seadex.Torrent, meta *EntryInfo) (string, bool) {
 }
 
 // rangeSeason resolves the season a tokenless absolute-numbered pack is labeled
-// with from the entry's mapping-list ranges: the pack's absolute episode span,
-// then EXACTLY one range containing the whole span. Zero or several containing
-// ranges (a pack straddling a season boundary, or a span an open range and a
-// bounded sibling both claim) yield no season: the label is written only where
+// with from the entry's season ranges: the pack's absolute episode span, then
+// EXACTLY one range containing the whole span. Zero or several containing
+// ranges (a pack straddling a season boundary, or a span two ranges both
+// claim) yield no season: the label is written only where
 // the mapping places the WHOLE release inside one TVDB season.
 func rangeSeason(ranges []SeasonRange, files []seadex.File) (int, bool) {
 	if len(ranges) == 0 {
@@ -588,6 +622,28 @@ func packFromTitle(title string) (pack, known bool) {
 		return false, false
 	}
 	return true, true
+}
+
+// titleAbsoluteRange matches an absolute episode range "- 01 ~ 12", Sonarr's
+// tilde-separated anime batch regex
+// (https://github.com/Sonarr/Sonarr/blob/7ccafd3a13b737aca0619d4eb0d985c89c00df73/src/NzbDrone.Core/Parser/Parser.cs#L85).
+var titleAbsoluteRange = regexp.MustCompile(`[\s_]-[\s_](\d{2,4})\s?~\s?(\d{2,4})(?:\D|$)`)
+
+// titleNamesSeveralEpisodes reports whether a title's episode token names more
+// than one episode: an SxxExx range such as S00E01-E02, or an absolute range.
+// Such a title agrees with a multi-episode file census although packFromTitle
+// reads it as no season pack.
+func titleNamesSeveralEpisodes(title string) bool {
+	if span, ok := payload.Span(title); ok && span.Last > span.First {
+		return true
+	}
+	m := titleAbsoluteRange.FindStringSubmatch(title)
+	if m == nil {
+		return false
+	}
+	first, _ := strconv.Atoi(m[1])
+	last, _ := strconv.Atoi(m[2])
+	return last > first
 }
 
 // seasonNumberEnds applies the two boundary conditions Sonarr's season-only

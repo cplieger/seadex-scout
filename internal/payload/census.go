@@ -169,7 +169,7 @@ func Spans(files []seadex.File) ([]EpisodeSpan, bool) {
 		if sharedTokenQualifier(files[i].Name) != "" {
 			return nil, false
 		}
-		span, ok := fileSpan(EpisodeKeyBase(files[i].Name))
+		span, ok := Span(EpisodeKeyBase(files[i].Name))
 		if !ok {
 			return nil, false
 		}
@@ -178,8 +178,10 @@ func Spans(files []seadex.File) ([]EpisodeSpan, bool) {
 	return spans, true
 }
 
-// fileSpan reads base's last episode token, the one DistinctEpisodes keys on.
-func fileSpan(base string) (EpisodeSpan, bool) {
+// Span reads the episode span of base's last episode token, the one
+// DistinctEpisodes keys on, and false when base has none or its range runs
+// backwards or past maxSpanEpisodes.
+func Span(base string) (EpisodeSpan, bool) {
 	if l := LastSubmatchIndex(EpisodeToken, base); l != nil {
 		tok := EpisodeVersion.ReplaceAllString(strings.ToUpper(base[l[2]:l[3]]), "")
 		m := seasonEpisodeToken.FindStringSubmatch(tok)

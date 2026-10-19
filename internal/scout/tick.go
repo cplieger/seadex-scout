@@ -102,7 +102,7 @@ func (s *Scout) tick(ctx context.Context) bool {
 
 // tickInterrupted closes a tick a shutdown cancelled - CAUSE: shutdown. No
 // streak advances, because a redeploy is not an upstream fault. It ALWAYS
-// persists what the pass already learned (the revalidated mapping validators, the
+// persists what the pass already learned (the accepted mapping release, the
 // memo entries that did resolve, the persisted refresh-rejection streak - never
 // the library snapshot, since a tick performs no walk). It emits NO completion
 // line and no re-statement, because its match set is truncated. st and mapCache
@@ -256,8 +256,8 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 			// SeaDex. The symmetric sibling of the probe's arm in tick.
 			return s.tickInterrupted(ctx, "during the change window fetch", &st, &mapCache)
 		}
-		// The mapping load above may have accepted a freshly revalidated animap body;
-		// the outcome persists it, because discarding it re-downloads ~2.3 MB.
+		// The mapping load above may have accepted a new animap release; discarding
+		// it forces the next tick to download the accepted mapping again.
 		return s.tickUnreadableUpstream(ctx,
 			"change window fetch failed; skipping tick", "window-fetch-failed", err,
 			&st, &mapCache, "window_entries", count)
@@ -311,13 +311,12 @@ func (s *Scout) saveTick(ctx context.Context, st *state.State, mapCache *mapping
 }
 
 // mappingWorthPersisting reports whether a refreshed mapping cache differs from
-// the persisted one in a way a future load would miss: the validators plus a
+// the persisted one in a way a future load would miss: the release tag plus a
 // size, plus RejectedRefreshes for a refusal. The fetch timestamp is excluded:
-// almost every tick gets a 304 and a fresh timestamp, so comparing whole Cache
-// values would persist on every tick.
+// almost every tick finds the same release and a fresh timestamp, so comparing
+// whole Cache values would persist on every tick.
 func mappingWorthPersisting(prev, next *mapping.Cache) bool {
-	return prev.ETag != next.ETag ||
-		prev.LastModified != next.LastModified ||
+	return prev.Tag != next.Tag ||
 		len(prev.Records) != len(next.Records) ||
 		prev.RejectedRefreshes != next.RejectedRefreshes
 }

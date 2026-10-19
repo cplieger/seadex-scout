@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3"
+	"github.com/cplieger/arrapi/v3/radarr"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -29,26 +31,39 @@ import (
 )
 
 type fakeSonarr struct {
-	files   map[int][]arrapi.EpisodeFile
+	files   map[int][]sonarr.EpisodeFile
 	listErr error
-	series  []arrapi.Series
+	series  []sonarr.Series
 }
 
-func (f *fakeSonarr) Series(context.Context) ([]arrapi.Series, error) {
-	return f.series, f.listErr
+func (f *fakeSonarr) Series(context.Context) ([]sonarr.Series, error) {
+	out := slices.Clone(f.series)
+	for i := range out {
+		// arrapi reports every Sonarr v4 (API v3) series in TheTVDB's aired
+		// order; a test models a Sonarr v5 series by setting its Order.
+		if out[i].Order == (sonarr.Order{}) {
+			out[i].Order = sonarr.Order{Type: "official", Name: "Aired Order", Official: true}
+		}
+	}
+	return out, f.listErr
 }
 
-func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
 	return f.files[seriesID], nil
 }
 
-func (*fakeSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*fakeSonarr) Episodes(context.Context, int) ([]sonarr.Episode, error) {
 	return nil, nil
 }
 
 func (*fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
+
+// onePass gives the walker its SonarrPass as the pass of every walk.
+type onePass struct{ arrwalk.SonarrPass }
+
+func (p onePass) Pin(context.Context) (arrwalk.SonarrPass, error) { return p.SonarrPass, nil }
 
 // flakySonarr wraps fakeSonarr but fails EpisodeFiles for the listed series
 // IDs, so a walk succeeds while marking the snapshot partial.
@@ -57,7 +72,7 @@ type flakySonarr struct {
 	fakeSonarr
 }
 
-func (f *flakySonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *flakySonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
 	if f.failEpisodes[seriesID] {
 		return nil, errors.New("episode fetch failed")
 	}
@@ -128,13 +143,13 @@ type fakeFeed struct {
 	advanceWindows [][]int
 }
 
-func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ indexer.EntryInfoFunc) error {
+func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ indexer.FeedInfo) error {
 	f.calls++
 	f.entries = len(entries)
 	return f.err
 }
 
-func (f *fakeFeed) Advance(_ context.Context, window []seadex.Entry, _ indexer.EntryInfoFunc) error {
+func (f *fakeFeed) Advance(_ context.Context, window []seadex.Entry, _ indexer.FeedInfo) error {
 	f.advanceCalls++
 	f.advanceEntries = len(window)
 	ids := make([]int, 0, len(window))
@@ -251,19 +266,16 @@ func noNetworkClient() *http.Client {
 // plain load error, not a mapping.StaleMapError).
 func unreachableMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
-	return mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
+	return mapping.NewLoader(noNetworkClient(), noSource, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
-// emptyRecordsMapLoader returns a mapping loader whose upstream answers an empty
-// record array, so a fresh 200 indexes to nothing and the map is unusable
+// emptyRecordsMapLoader returns a mapping loader whose latest release holds no
+// entries, so a fresh download indexes to nothing and the map is unusable
 // through the accept path rather than the transport.
 func emptyRecordsMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("[]"))
-	}))
-	t.Cleanup(srv.Close)
-	return mapping.NewLoader(srv.Client(), srv.URL, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
+	client, src := animapRelease(t, 0, seriesDocument(t))
+	return mapping.NewLoader(client, src, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger))
 }
 
 // aniStatsFn adapts an AniList client's Stats to the Deps.AniListStats
@@ -311,7 +323,7 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 		Notifier: notify.NewNotifier(logger, nil),
 		Logger:   logger,
 		Store:    store,
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{listErr: errors.New("sonarr down")}}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(t.Context()); healthy {
@@ -342,15 +354,15 @@ func TestCycleSeaDexFailureIsHealthyAndReportsNothing(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    store,
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
 		Notifier: notify.NewNotifier(logger, nil),
@@ -383,16 +395,16 @@ func TestCycleGateReemitsAStandingSetAfterReadiness(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	sea := &fakeSeaDex{entries: seadexFrierenEntry()}
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    store,
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   sea,
 		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
@@ -478,12 +490,11 @@ func recordsContainString(recorder *capture.Recorder, sub string) bool {
 }
 
 // TestWalkFailureLogsAndReportErrorAreLogSafe pins the credential-redaction
-// boundary on the walk-failure paths: the configured arr URL may carry
-// userinfo (config.Validate only warns on that shape) and a transport failure
-// wraps a *url.Error embedding the full request URL, so neither the cycle's
-// walk-failure log sites nor Report's returned error (logged at ERROR by
-// main) may carry the embedded credentials — httpx.LogSafeError must reduce
-// the *url.Error to its cause before any log or return boundary.
+// boundary on the walk-failure paths for an error carrying a URL with
+// userinfo (a *url.Error, which the arr client does not return today):
+// neither the cycle's walk-failure log sites nor Report's returned error
+// (logged at ERROR by main) may carry the embedded credentials, so
+// httpx.LogSafeError must reduce the *url.Error to its cause first.
 func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	const userinfoSentinel = "hunter2pass"
 	const querySentinel = "sekrettoken"
@@ -499,7 +510,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		Notifier: notify.NewNotifier(logger, nil),
 		Logger:   logger,
 		Store:    &fakeStore{},
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{listErr: walkErr}}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(t.Context()); healthy {
@@ -524,7 +535,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{listErr: walkErr}}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    &fakeFeed{},
@@ -546,7 +557,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	reporter := NewReporter(&ReportDeps{
 		Logger:  scoutTestLogger(),
 		Store:   &fakeStore{},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{listErr: walkErr}}, Logger: scoutTestLogger()}),
 	})
 	_, err := reporter.Report(t.Context())
 	if err == nil {
@@ -566,10 +577,10 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 // returns movies (or listErr); tags are unused here.
 type fakeRadarr struct {
 	listErr error
-	movies  []arrapi.Movie
+	movies  []radarr.Movie
 }
 
-func (f *fakeRadarr) Movies(context.Context) ([]arrapi.Movie, error) {
+func (f *fakeRadarr) Movies(context.Context) ([]radarr.Movie, error) {
 	return f.movies, f.listErr
 }
 
@@ -600,13 +611,14 @@ func recordAttr(recorder *capture.Recorder, msg, key string) (string, bool) {
 }
 
 // TestWalkFailureLogsCarryArrIdentity pins the failed-side attribution on the
-// walk-failure log boundaries: httpx.LogSafeError reduces a transport failure
-// to the *url.Error's underlying cause, discarding library.Walk's textual
-// "walking sonarr/radarr" wrapper, so with both arrs enabled the reduced
-// error alone cannot say which dependency failed - each boundary (the
-// walk-failure ERROR, the alert-only walk-failed completion line, and the
-// feed-configured library gate's walk-failed completion line) must carry the
-// bounded `arr` attribute recovered from the typed walk-side error.
+// walk-failure log boundaries: httpx.LogSafeError reduces a *url.Error-shaped
+// error (defence in depth; arrapi returns none) to its underlying cause,
+// discarding library.Walk's textual "walking sonarr/radarr" wrapper, so with
+// both arrs enabled the reduced error alone cannot say which dependency
+// failed - each boundary (the walk-failure ERROR, the alert-only walk-failed
+// completion line, and the feed-configured library gate's walk-failed
+// completion line) must carry the bounded `arr` attribute recovered from the
+// typed walk-side error.
 func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 	transportErr := func(host string) error {
 		return &url.Error{
@@ -624,7 +636,7 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 			Notifier: notify.NewNotifier(logger, nil),
 			Logger:   logger,
 			Store:    &fakeStore{},
-			Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
+			Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{listErr: transportErr("sonarr.local")}}, Logger: scoutTestLogger()}),
 		})
 		if healthy := s.Cycle(t.Context()); healthy {
 			t.Fatal("Cycle returned healthy=true, want false when the library walk fails")

@@ -1,16 +1,20 @@
 package mapping
 
 import (
+	"bytes"
 	"errors"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/cplieger/animap/mapread"
+	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
 func freshCache() *Cache {
@@ -20,9 +24,23 @@ func freshCache() *Cache {
 	}
 }
 
+// staleCache is a usable cache of one series record, fetched two hours ago
+// from release tag.
+func staleCache(tag string) *Cache {
+	return &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Tag:       tag,
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+}
+
+// unused is a loader that must not reach the network.
+func unused(opts ...Option) *Loader {
+	return NewLoader(nil, mapread.Source{Repo: DefaultRepo}, append([]Option{WithLogger(discardLogger())}, opts...)...)
+}
+
 func TestLoader_refreshCache_reusesFreshCache(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), freshCache())
+	next, err := unused(WithRefresh(time.Hour)).refreshCache(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
@@ -31,411 +49,284 @@ func TestLoader_refreshCache_reusesFreshCache(t *testing.T) {
 	}
 }
 
-func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("ETag", "v-new")
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), &Cache{})
+// TestLoader_refreshCache_downloadsANewTag pins the refresh: it asks which
+// release is the latest, then reads that tag's sidecar and body, both pinned
+// to the tag, and persists the tag beside the records.
+func TestLoader_refreshCache_downloadsANewTag(t *testing.T) {
+	rel := newRelease(t, testTag, entriesBody(t, entry{AniList: 42, Type: "tv", TVDB: 100, Lands: targets(at(1, 1))}))
+	next, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), staleCache("v2026.10.16"))
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Errorf("refresh records = %+v, want one record id 42", next.Records)
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 || next.Records[0].SeasonTvdb != 1 {
+		t.Errorf("refresh records = %+v, want one record id 42 on season 1", next.Records)
 	}
-	if next.ETag != "v-new" {
-		t.Errorf("refresh ETag = %q, want v-new", next.ETag)
+	if next.Tag != testTag || next.RefusedTag != "" || next.RejectedRefreshes != 0 {
+		t.Errorf("refresh tag %q, refused %q, streak %d, want %q, none, 0", next.Tag, next.RefusedTag, next.RejectedRefreshes, testTag)
+	}
+	want := []string{"/" + DefaultRepo + "/releases/latest", assetPath(testTag, ".sha256"), assetPath(testTag, "")}
+	if got := rel.paths(); !slices.Equal(got, want) {
+		t.Errorf("requests = %v, want %v", got, want)
 	}
 }
 
-// TestLoader_Load_mappingListFactsTravelWithTheirRecords pins that the
-// mapping-list facts share the records' fate on every refresh path: an accepted
-// 200 replaces both with the body's, and every other outcome keeps the cached
-// pair byte-identical. Facts dropped on a stale path would lose every film's
-// special episode and pack label until the next accepted body.
-func TestLoader_Load_mappingListFactsTravelWithTheirRecords(t *testing.T) {
-	ok200 := func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("ETag", "v-new")
-		_, _ = w.Write(animapBody(`[{"anilist_id":1,"anidb_id":7,"type":"tv","tvdb_id":100,"tvdb_season":0,` +
-			`"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,3]]}]},{"anilist_id":2,"anidb_id":8,"type":"tv","tvdb_id":200,` +
-			`"tvdb_absolute":true,"mapping_list":[{"anidb_season":1,"tvdb_season":2,"start":5}]},{"anilist_id":3,"anidb_parent":{"anidb_id":7,"specials":[5]},` +
-			`"type":"ova","tvdb_id":100,"tvdb_season":0,"mapping_list":[{"anidb_season":1,"tvdb_season":0,"episodes":[[1,5]]}]}]`))
+// TestLoader_refreshCache_sendsTheUserAgent pins appinfo.UserAgent on every
+// request of a refresh, which mapread does not set itself.
+func TestLoader_refreshCache_sendsTheUserAgent(t *testing.T) {
+	rel := newRelease(t, testTag, entriesBody(t, seriesEntries(1)...))
+	var (
+		mu     sync.Mutex
+		agents []string
+	)
+	record := func(r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		agents = append(agents, r.UserAgent())
 	}
-	prevMappings := map[int]Mapping{
-		12276: {SpecialEpisode: 8},
-		69:    {Seasons: []SeasonRange{{Season: 1, First: 1, Last: 8}, {Season: 23, First: 1156}}},
+	rel.edit(func(rr *release) {
+		rr.asset = func(_ http.ResponseWriter, r *http.Request) bool {
+			record(r)
+			return false
+		}
+		rr.latest = func(w http.ResponseWriter, r *http.Request) {
+			record(r)
+			w.Header().Set("Location", rr.srv.URL+"/"+DefaultRepo+"/releases/tag/"+testTag)
+			w.WriteHeader(http.StatusFound)
+		}
+	})
+	if _, err := rel.loader().refreshCache(t.Context(), nil); err != nil {
+		t.Fatalf("refreshCache error: %v", err)
 	}
-	prevParent := map[int]Mapping{21777: {SpecialEpisode: 8}}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(agents) != 3 || slices.ContainsFunc(agents, func(a string) bool { return a != appinfo.UserAgent }) {
+		t.Errorf("User-Agents = %q, want %q on all three requests", agents, appinfo.UserAgent)
+	}
+}
+
+// TestLoader_Load_factsTravelWithTheirRecords pins that the episode facts
+// share the records' fate on every refresh path: an accepted release
+// replaces both with its own, and every other outcome keeps the cached pair.
+func TestLoader_Load_factsTravelWithTheirRecords(t *testing.T) {
+	doc, err := mapread.Decode(bytes.NewReader(entriesBody(t,
+		entry{AniList: 1, Type: "tv", TVDB: 100, Lands: targets(at(0, 3))},
+		entry{AniList: 2, Type: "tv", TVDB: 200, Lands: targets(at(2, 5))},
+	)), mapread.DefaultLimits())
+	if err != nil {
+		t.Fatalf("decoding the fixture: %v", err)
+	}
+	// AniList 3 is anime 1's episode as a ranged part, so its facts are
+	// AniList-keyed.
+	doc.Entries = append(doc.Entries, mapread.Entry{AniListID: 3, Type: "OVA", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Regular, Start: 1, End: 1}}})
+	body := encode(t, document(doc.Anime, doc.Entries))
+	prevMappings := map[int]Mapping{1: {Specials: []int{9}, SpecialsTvdb: 100, SpecialsEpisodes: 1}}
+	prevAniList := map[int]Mapping{3: {Specials: []int{9}, SpecialsTvdb: 100, SpecialsEpisodes: 1}}
 	tests := []struct {
-		handler    http.HandlerFunc
+		serve      func(r *release)
 		want       map[int]Mapping
-		wantParent map[int]Mapping
+		wantAniLst map[int]Mapping
 		name       string
 		refresh    time.Duration
 		fresh      bool
 	}{
-		{name: "accepted_200", handler: ok200, want: map[int]Mapping{
-			7: {SpecialEpisode: 3},
-			8: {Seasons: []SeasonRange{{Season: 1, First: 1, Last: 4}, {Season: 2, First: 5}}},
-		}, wantParent: map[int]Mapping{3: {SpecialEpisode: 5}}},
-		{name: "not_modified_304", handler: func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotModified)
-		}, want: prevMappings, wantParent: prevParent},
-		{name: "server_error_stale", handler: func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "boom", http.StatusInternalServerError)
-		}, want: prevMappings, wantParent: prevParent},
-		{name: "persistent_refusal", handler: func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"not":"a document"}`))
-		}, want: prevMappings, wantParent: prevParent},
-		{name: "fresh_cache_early_return", handler: func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "must not be fetched", http.StatusTeapot)
-		}, refresh: time.Hour, fresh: true, want: prevMappings, wantParent: prevParent},
+		{name: "accepted release", serve: func(*release) {}, want: map[int]Mapping{
+			1: {Specials: []int{3}, SpecialsTvdb: 100, SpecialsEpisodes: 1},
+			2: {Seasons: []SeasonRange{{Season: 2, First: 1, Last: 1}}, SeasonsTvdb: 200, Episodes: []int{5}, EpisodesTvdb: 200, EpisodesSeason: 2},
+		}, wantAniLst: map[int]Mapping{3: {Specials: []int{3}, SpecialsTvdb: 100, SpecialsEpisodes: 1}}},
+		{name: "release unchanged", serve: func(r *release) { r.publish("v2026.10.16", body) }, want: prevMappings, wantAniLst: prevAniList},
+		{name: "server error", serve: func(r *release) {
+			r.latest = func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) }
+		}, want: prevMappings, wantAniLst: prevAniList},
+		{name: "persistent refusal", serve: func(r *release) { r.publish(testTag, []byte(`{"version":1,"records":[]}`)) }, want: prevMappings, wantAniLst: prevAniList},
+		{name: "fresh cache", serve: func(r *release) {
+			r.latest = func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "must not be asked", http.StatusTeapot) }
+		}, refresh: time.Hour, fresh: true, want: prevMappings, wantAniLst: prevAniList},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewServer(tc.handler)
-			defer ts.Close()
-			fetchedAt := time.Now().Add(-2 * time.Hour)
+			rel := newRelease(t, testTag, body)
+			rel.edit(tc.serve)
+			prev := staleCache("v2026.10.16")
 			if tc.fresh {
-				fetchedAt = time.Now()
+				prev.FetchedAt = time.Now()
 			}
-			prev := &Cache{
-				FetchedAt:      fetchedAt,
-				ETag:           "v1",
-				Records:        []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-				Mappings:       maps.Clone(prevMappings),
-				ParentMappings: maps.Clone(prevParent),
-			}
-			l := NewLoader(ts.Client(), ts.URL, WithRefresh(tc.refresh), WithLogger(discardLogger()))
-			next, _, _ := l.Load(t.Context(), prev)
+			prev.Mappings, prev.AniListMappings = maps.Clone(prevMappings), maps.Clone(prevAniList)
+			next, _, _ := rel.loader(WithRefresh(tc.refresh)).Load(t.Context(), prev)
 			if !maps.EqualFunc(next.Mappings, tc.want, sameMapping) {
 				t.Errorf("Load().Mappings = %+v, want %+v", next.Mappings, tc.want)
 			}
-			if !maps.EqualFunc(next.ParentMappings, tc.wantParent, sameMapping) {
-				t.Errorf("Load().ParentMappings = %+v, want %+v", next.ParentMappings, tc.wantParent)
+			if !maps.EqualFunc(next.AniListMappings, tc.wantAniLst, sameMapping) {
+				t.Errorf("Load().AniListMappings = %+v, want %+v", next.AniListMappings, tc.wantAniLst)
 			}
 		})
 	}
 }
 
-func TestLoader_refreshCache_notModifiedBumpsTimestamp(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") == "v1" {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-		t.Errorf("expected If-None-Match v1, got %q", r.Header.Get("If-None-Match"))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		ETag:      "v1",
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+// TestLoader_refreshCache_unchangedTagSkipsTheDownload pins the tag
+// comparison: a usable cache of the latest tag is kept with a bumped
+// timestamp, ends any rejection streak and clears a remembered refusal,
+// after one bodiless request.
+func TestLoader_refreshCache_unchangedTagSkipsTheDownload(t *testing.T) {
+	rel := newRelease(t, testTag, entriesBody(t, seriesEntries(1)...))
+	prev := staleCache(testTag)
+	prev.RejectedRefreshes, prev.RefusedTag = 3, "v2026.10.01"
+	next, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
-	if len(next.Records) != 1 {
-		t.Errorf("304 lost records: got %d, want 1", len(next.Records))
+	if rel.downloads() != 0 || len(rel.paths()) != 1 {
+		t.Errorf("requests = %v, want only the latest-release check", rel.paths())
 	}
-	if !next.FetchedAt.After(prev.FetchedAt) {
-		t.Error("304 did not bump FetchedAt")
+	if len(next.Records) != 1 || !next.FetchedAt.After(prev.FetchedAt) {
+		t.Errorf("kept cache = %+v, want the cached record with a bumped FetchedAt", next)
+	}
+	if next.RejectedRefreshes != 0 || next.RefusedTag != "" || next.Tag != testTag {
+		t.Errorf("streak %d, refused %q, tag %q, want 0, none, %q", next.RejectedRefreshes, next.RefusedTag, next.Tag, testTag)
 	}
 }
 
-func TestLoader_refreshCache_parseFailKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{ not-an-array`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err == nil {
-		t.Fatal("parse failure returned nil error, want degraded error")
-	}
-	if len(next.Records) != 1 {
-		t.Errorf("parse failure lost stale records: got %d, want 1", len(next.Records))
+// TestLoader_refreshCache_unchangedTagOnAnUnusableCacheDownloads pins the
+// usability gate on the tag comparison: a cache that serves no map is never
+// affirmed by its tag, so the release is downloaded again.
+func TestLoader_refreshCache_unchangedTagOnAnUnusableCacheDownloads(t *testing.T) {
+	for name, records := range map[string][]Record{
+		"no records":            nil,
+		"a zero AniList id":     {{}},
+		"no arr identifier":     {{AniListID: 1, Type: "TV"}},
+		"non-canonical ids":     {{AniListID: 7, Type: "MOVIE", TmdbMovies: []int{0}, IMDbIDs: []string{"  "}}},
+		"negative AniList keys": {{AniListID: -1, Type: "TV", TvdbID: 100}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rel := newRelease(t, testTag, entriesBody(t, entry{AniList: 42, Type: "tv", TVDB: 100, Lands: targets(at(1, 1))}))
+			prev := &Cache{FetchedAt: time.Now(), Tag: testTag, RefusedTag: testTag, Records: records}
+			next, idx, err := rel.loader(WithRefresh(time.Hour)).Load(t.Context(), prev)
+			if err != nil {
+				t.Fatalf("Load error: %v", err)
+			}
+			if rel.downloads() != 1 {
+				t.Errorf("downloads = %d, want 1: an unusable cache must not be kept on its tag", rel.downloads())
+			}
+			if rec, ok := idx.Lookup(42); !ok || len(next.Records) != 1 || rec.TvdbID != 100 {
+				t.Errorf("Load records = %+v, Lookup(42) = %+v %v, want the downloaded record", next.Records, rec, ok)
+			}
+			if len(records) > 0 && records[0].AniListID == 7 && records[0].TmdbMovies[0] != 0 {
+				t.Errorf("Load mutated the caller's cache: %+v", records[0])
+			}
+		})
 	}
 }
 
 // TestLoader_Load_nilCacheFetches pins the documented no-persisted-cache
-// entry point: Load(ctx, nil) must take the ordinary initial-fetch route (no
-// panic on the nil previous cache) and return the fetched records in both the
-// persisted Cache and the built Index.
+// entry point: Load(ctx, nil) takes the ordinary initial-fetch route and
+// returns the fetched records in both the persisted Cache and the Index.
 func TestLoader_Load_nilCacheFetches(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, idx, err := l.Load(t.Context(), nil)
+	rel := newRelease(t, testTag, entriesBody(t, entry{AniList: 42, Type: "tv", TVDB: 100}))
+	next, idx, err := rel.loader(WithRefresh(time.Hour)).Load(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("Load(nil) error: %v", err)
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
 		t.Errorf("Load(nil) cache records = %+v, want one record id 42", next.Records)
 	}
-	if rec, ok := idx.Lookup(42); !ok || rec.TvdbID != 100 {
-		t.Errorf("Load(nil) index Lookup(42) = %+v ok=%v, want the fetched record", rec, ok)
-	}
-}
-
-// TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision pins the
-// input-boundary canonicalization: a persisted cache whose only record carries
-// non-canonical ids - a MOVIE with tmdb_movies [0] and a blank imdb id - holds NO
-// usable arr identifier, so it is not a usable cache and its validators must not
-// be sent. Without the boundary pass the raw record answers HasArrIdentifier true
-// (the zero and the blank survive an un-normalized read) while the served index
-// answers false, so the refresh sends If-None-Match and a 304 revalidates the
-// unusable cache forever. It also pins that the caller's Cache is not mutated.
-func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *testing.T) {
-	var sentValidators atomic.Bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
-			sentValidators.Store(true)
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt:    time.Now().Add(-2 * time.Hour),
-		ETag:         "v1",
-		LastModified: "Wed, 01 Jul 2026 12:00:00 GMT",
-		Records:      []Record{{AniListID: 7, Type: "MOVIE", TmdbMovies: []int{0}, IMDbIDs: []string{"  "}}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, idx, err := l.Load(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("Load error: %v", err)
-	}
-	if sentValidators.Load() {
-		t.Error("refresh sent cache validators for an unusable cache; a 304 would freeze the non-canonical records indefinitely")
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Errorf("returned cache records = %+v, want the full 200 replacement (one record id 42)", next.Records)
-	}
-	if rec, ok := idx.Lookup(42); !ok || rec.TvdbID != 100 {
-		t.Errorf("index Lookup(42) = %+v ok=%v, want the replacement record", rec, ok)
-	}
-	// The canonicalization runs on a private copy: the caller's State is the
-	// persisted cache and must be left exactly as it was handed over.
-	if len(prev.Records[0].TmdbMovies) != 1 || prev.Records[0].TmdbMovies[0] != 0 ||
-		len(prev.Records[0].IMDbIDs) != 1 || prev.Records[0].Type != "MOVIE" {
-		t.Errorf("Load mutated the caller's cache: %+v", prev.Records[0])
+	if rec, ok := idx.Lookup(42); !ok || rec.TvdbID != 100 || rec.SeasonKind != SeasonAbsent {
+		t.Errorf("Load(nil) index Lookup(42) = %+v ok=%v, want the fetched record, its season unstated", rec, ok)
 	}
 }
 
 func TestLoader_Load_overrideWinsOverUpstream(t *testing.T) {
-	dir := t.TempDir()
-	overrides := filepath.Join(dir, "overrides.json")
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
-	_, idx, err := l.Load(t.Context(), freshCache())
+	_, idx, err := unused(WithOverridesPath(overrides), WithRefresh(time.Hour)).Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	rec, ok := idx.Lookup(1)
-	if !ok {
-		t.Fatal("Lookup(1) not found after override")
-	}
-	if rec.Type != "MOVIE" || len(rec.TmdbMovies) != 1 || rec.TmdbMovies[0] != 42 {
-		t.Errorf("override not applied: got %+v, want Type MOVIE / TmdbMovies [42]", rec)
+	if !ok || rec.Type != "MOVIE" || !slices.Equal(rec.TmdbMovies, []int{42}) {
+		t.Errorf("override not applied: got %+v ok=%v, want Type MOVIE / TmdbMovies [42]", rec, ok)
 	}
 }
 
 func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 	dir := t.TempDir()
-	missing := filepath.Join(dir, "nope.json")
-	l := NewLoader(nil, "http://unused.invalid", WithOverridesPath(missing), WithRefresh(time.Hour), WithLogger(discardLogger()))
-	_, idx, err := l.Load(t.Context(), freshCache())
+	_, idx, err := unused(WithOverridesPath(filepath.Join(dir, "nope.json")), WithRefresh(time.Hour)).Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with missing overrides error: %v", err)
 	}
 	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" {
 		t.Errorf("missing overrides changed the mapping record: %+v ok=%v", rec, ok)
 	}
-
 	bad := filepath.Join(dir, "bad.json")
 	if err := os.WriteFile(bad, []byte(`{ not valid`), 0o644); err != nil {
 		t.Fatalf("write bad overrides: %v", err)
 	}
-	l2 := NewLoader(nil, "http://unused.invalid", WithOverridesPath(bad), WithRefresh(time.Hour), WithLogger(discardLogger()))
-	if _, _, err := l2.Load(t.Context(), freshCache()); err != nil {
+	if _, _, err := unused(WithOverridesPath(bad), WithRefresh(time.Hour)).Load(t.Context(), freshCache()); err != nil {
 		t.Fatalf("Load with malformed overrides returned error, want ignored: %v", err)
 	}
 }
 
-func TestLoader_refreshCache_httpErrorKeepsStale(t *testing.T) {
-	const lastModified = "Mon, 02 Jan 2006 15:04:05 GMT"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("If-None-Match"); got != "v1" {
-			t.Errorf("If-None-Match = %q, want v1", got)
-		}
-		if got := r.Header.Get("If-Modified-Since"); got != lastModified {
-			t.Errorf("If-Modified-Since = %q, want %q", got, lastModified)
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt:    time.Now().Add(-2 * time.Hour),
-		ETag:         "v1",
-		LastModified: lastModified,
-		Records:      []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err == nil {
-		t.Fatal("HTTP error refresh returned nil error, want degraded error")
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Errorf("HTTP error refresh records = %+v, want stale record id 1", next.Records)
-	}
-	if next.ETag != "v1" || next.LastModified != lastModified {
-		t.Errorf("HTTP error refresh validators = ETag %q LastModified %q, want stale validators", next.ETag, next.LastModified)
-	}
-}
-
-// TestLoader_refreshCache_notModifiedEmptyCacheErrors covers the 304/empty-cache
-// guard: a record-less cache must suppress the conditional-GET validators (so the
-// server returns a full 200) and, if a 304 arrives anyway, refreshCache must error
-// rather than reuse zero records.
-func TestLoader_refreshCache_notModifiedEmptyCacheErrors(t *testing.T) {
-	var sawValidators atomic.Bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
-			sawValidators.Store(true)
-		}
-		w.WriteHeader(http.StatusNotModified)
-	}))
-	defer ts.Close()
-
-	prev := &Cache{ETag: "v1", LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err == nil {
-		t.Fatal("304 with a record-less cache returned nil error, want a no-cache-available error")
-	}
-	if len(next.Records) != 0 {
-		t.Errorf("304 with empty cache produced %d records, want 0 (must not reuse zero records)", len(next.Records))
-	}
-	if sawValidators.Load() {
-		t.Error("conditional GET sent validators despite a record-less cache; they must be suppressed so the server returns a full 200")
-	}
-}
-
-// TestLoader_refreshCache_noCacheAvailableErrors covers the three first-boot
-// degradation branches (empty prev cache): a fetch failure, a parse failure, and
-// a zero-record refresh must each return a no-cache-available error rather than
-// falling through to a nil-error success.
+// TestLoader_refreshCache_noCacheAvailableErrors covers the first-boot
+// degradation branches: a refused document, one with no entries and a
+// missing release each return a no-cache error rather than a success.
 func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
-	tests := []struct {
-		handler http.HandlerFunc
-		name    string
-	}{
-		{name: "parse fail", handler: func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(`{ not-an-array`))
-		}},
-		{name: "zero records", handler: func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write(animapBody(`[]`))
-		}},
-		{name: "fetch fail", handler: func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "boom", http.StatusNotFound)
-		}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewServer(tc.handler)
-			defer ts.Close()
-			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-			next, err := l.refreshCache(t.Context(), &Cache{})
+	for name, serve := range map[string]func(*release){
+		"invalid document": func(r *release) { r.publish(testTag, []byte(`{"version":2}`)) },
+		"no entries":       func(r *release) { r.publish(testTag, encode(t, document(nil, nil))) },
+		"no release": func(r *release) {
+			r.latest = func(w http.ResponseWriter, req *http.Request) { http.NotFound(w, req) }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rel := newRelease(t, testTag, nil)
+			rel.edit(serve)
+			next, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), &Cache{})
 			if err == nil {
-				t.Fatalf("%s with no prior cache returned nil error, want a degraded no-cache-available error", tc.name)
+				t.Fatal("refresh with no prior cache returned nil error, want a no-cache-available error")
 			}
-			if len(next.Records) != 0 {
-				t.Errorf("%s with no prior cache produced %d records, want 0", tc.name, len(next.Records))
+			if _, ok := errors.AsType[*StaleMapError](err); ok || len(next.Records) != 0 {
+				t.Errorf("refresh with no prior cache = %d records, %v, want none and the no-cache error", len(next.Records), err)
 			}
 		})
 	}
 }
 
 func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusNotFound)
-	}))
-	defer ts.Close()
-
-	dir := t.TempDir()
-	overrides := filepath.Join(dir, "overrides.json")
+	rel := newRelease(t, testTag, []byte(`{}`))
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		ETag:      "v1",
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(discardLogger()))
-	_, idx, err := l.Load(t.Context(), prev)
+	_, idx, err := rel.loader(WithOverridesPath(overrides), WithRefresh(time.Hour)).Load(t.Context(), staleCache(""))
 	if err == nil {
-		t.Fatal("Load with a failed refresh returned nil error, want a degraded error")
+		t.Fatal("Load with a refused refresh returned nil error, want a degraded error")
 	}
 	rec, ok := idx.Lookup(1)
-	if !ok {
-		t.Fatal("degraded Load lost the stale record for id 1")
-	}
-	if rec.Type != "MOVIE" || len(rec.TmdbMovies) != 1 || rec.TmdbMovies[0] != 42 {
-		t.Errorf("degraded Load did not overlay overrides: got %+v, want Type MOVIE / TmdbMovies [42]", rec)
+	if !ok || rec.Type != "MOVIE" || !slices.Equal(rec.TmdbMovies, []int{42}) {
+		t.Errorf("degraded Load did not overlay overrides: got %+v ok=%v, want Type MOVIE / TmdbMovies [42]", rec, ok)
 	}
 }
 
-// TestLoader_Load_noOverridesPathServesUpstreamUnmodified pins effectiveOverrides'
-// empty-path early return: a loader constructed with no overrides file
-// configured serves the mapping untouched (no read attempt, no overlay).
+// TestLoader_Load_noOverridesPathServesUpstreamUnmodified pins
+// effectiveOverrides' empty-path early return.
 func TestLoader_Load_noOverridesPathServesUpstreamUnmodified(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
-	_, idx, err := l.Load(t.Context(), freshCache())
+	_, idx, err := unused(WithRefresh(time.Hour)).Load(t.Context(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with no overrides path error: %v", err)
 	}
-	if idx.Len() != 1 {
-		t.Errorf("Load with no overrides path indexed %d records, want 1", idx.Len())
-	}
-	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" || rec.TvdbID != 100 {
-		t.Errorf("Load with no overrides path record = %+v ok=%v, want unmodified TV/100", rec, ok)
+	if rec, ok := idx.Lookup(1); idx.Len() != 1 || !ok || rec.Type != "TV" || rec.TvdbID != 100 {
+		t.Errorf("Load with no overrides path record = %+v ok=%v of %d, want unmodified TV/100", rec, ok, idx.Len())
 	}
 }
 
 // TestLoader_refreshCache_futureFetchedAtForcesFetch pins the clock-skew guard
-// in the fresh-reuse condition (age >= 0): a cache stamped in the future
-// (clock skew or a corrupt state file) is never treated as fresh, so the
-// loader revalidates against upstream instead of trusting the bad timestamp
-// until it drifts back into range.
+// in the fresh-reuse condition (age >= 0): a cache stamped in the future is
+// never treated as fresh.
 func TestLoader_refreshCache_futureFetchedAtForcesFetch(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now().Add(2 * time.Hour), // future: skew or a corrupt state file
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+	rel := newRelease(t, testTag, entriesBody(t, entry{AniList: 42, Type: "tv", TVDB: 100}))
+	prev := staleCache("")
+	prev.FetchedAt = time.Now().Add(2 * time.Hour)
+	next, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache with future FetchedAt error: %v", err)
 	}
@@ -445,16 +336,12 @@ func TestLoader_refreshCache_futureFetchedAtForcesFetch(t *testing.T) {
 }
 
 // TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge pins the
-// stale-age clamp on the degradation telemetry: when a future FetchedAt
-// (clock skew or a corrupt state file) forces revalidation and that fetch
-// fails, the StaleMapError must report a non-negative age in both LogAttrs
-// and the error text instead of a misleading "fetched -2h0m0s ago".
+// stale-age clamp on the degradation telemetry when a future FetchedAt forces
+// a check that then fails.
 func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing.T) {
-	prev := &Cache{
-		FetchedAt: time.Now().Add(2 * time.Hour), // future: skew or a corrupt state file
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", WithRefresh(time.Hour), WithLogger(discardLogger()))
+	prev := staleCache("")
+	prev.FetchedAt = time.Now().Add(2 * time.Hour)
+	l := NewLoader(&http.Client{Transport: errTransport{}}, mapread.Source{Repo: DefaultRepo}, WithRefresh(time.Hour), WithLogger(discardLogger()))
 	next, err := l.refreshCache(t.Context(), prev)
 	if len(next.Records) != 1 {
 		t.Errorf("future-FetchedAt failed refresh records = %+v, want stale record kept", next.Records)
@@ -481,361 +368,62 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 	}
 }
 
-// TestLoader_refreshCache_zeroRefreshAlwaysRevalidates pins the deployed
-// configuration's contract (the app wires DefaultRefresh = 0): a zero
-// refresh window disables the fresh-reuse fast path entirely, so even a
-// just-fetched cache revalidates against upstream every cycle (an unchanged
-// upstream is a cheap 304) instead of being reused until the timestamp ages.
-// Guards against the scheduler library's opposite convention leaking in (it
-// treats 0 as "off"; here 0 must mean "always revalidate", never "never refresh").
-func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
-	var requests atomic.Int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		w.WriteHeader(http.StatusNotModified)
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now(), // just fetched: any positive window would reuse it
-		ETag:      "v1",
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(0), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
+// TestLoader_refreshCache_zeroRefreshAlwaysChecks pins the deployed
+// configuration's contract (DefaultRefresh = 0): even a just-fetched cache
+// asks which release is the latest every cycle.
+func TestLoader_refreshCache_zeroRefreshAlwaysChecks(t *testing.T) {
+	rel := newRelease(t, testTag, entriesBody(t, seriesEntries(1)...))
+	prev := staleCache(testTag)
+	prev.FetchedAt = time.Now()
+	next, err := rel.loader(WithRefresh(0)).refreshCache(t.Context(), prev)
 	if err != nil {
-		t.Fatalf("zero-refresh revalidation error: %v", err)
+		t.Fatalf("zero-refresh check error: %v", err)
 	}
-	if got := requests.Load(); got != 1 {
-		t.Errorf("zero-refresh loader made %d upstream requests, want 1 (must revalidate every cycle)", got)
-	}
-	if len(next.Records) != 1 {
-		t.Errorf("zero-refresh 304 kept %d records, want 1", len(next.Records))
+	if got := len(rel.paths()); got != 1 || len(next.Records) != 1 {
+		t.Errorf("zero-refresh loader made %d requests and kept %d records, want 1 and 1", got, len(next.Records))
 	}
 }
 
 // TestLoader_refreshCache_unusableCacheFetchFailureErrors pins the
-// cache-usability gate on the fetch-outage degradation path: a JSON-valid
-// state cache whose records index to nothing (records:[{}] — a zero AniList
-// ID NewIndex drops) must NOT enter staleOrFail as a StaleMapError, because
-// scout.mapUsable trusts the error type alone and would proceed into
-// matching against an empty effective map. It must degrade like no cache at
-// all (the no-cache error), so the scout preserves findings.
+// cache-usability gate on the outage path: a cache whose records index to
+// nothing degrades like no cache at all, never as a StaleMapError, so the
+// scout preserves findings instead of comparing against an empty map.
 func TestLoader_refreshCache_unusableCacheFetchFailureErrors(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusNotFound)
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{}}, // non-empty slice, zero effective index
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	_, err := l.refreshCache(t.Context(), prev)
+	rel := newRelease(t, testTag, nil)
+	rel.edit(func(r *release) {
+		r.latest = func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusBadGateway) }
+	})
+	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []Record{{}}}
+	_, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), prev)
 	if err == nil {
 		t.Fatal("fetch failure over an unusable cache returned nil error, want a no-cache-available error")
 	}
 	if _, ok := errors.AsType[*StaleMapError](err); ok {
-		t.Fatalf("fetch failure over an unusable cache returned %v, want the no-cache error (a StaleMapError would make scout compare against an empty map)", err)
-	}
-}
-
-// TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304 pins
-// the cache-usability gate on the conditional-GET and 304 paths: an unusable
-// non-empty cache (all-zero AniList IDs) must suppress the validators (forcing
-// a full 200 download) and, if a 304 arrives anyway, must error rather than
-// affirm a map that indexes to nothing.
-func TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304(t *testing.T) {
-	var sawValidators atomic.Bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
-			sawValidators.Store(true)
-		}
-		w.WriteHeader(http.StatusNotModified)
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt:    time.Now().Add(-2 * time.Hour),
-		ETag:         "v1",
-		LastModified: "Mon, 02 Jan 2006 15:04:05 GMT",
-		Records:      []Record{{}}, // non-empty slice, zero effective index
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	_, err := l.refreshCache(t.Context(), prev)
-	if err == nil {
-		t.Fatal("304 over an unusable cache returned nil error, want an error instead of reusing an empty effective map")
-	}
-	if sawValidators.Load() {
-		t.Error("conditional GET sent validators despite an unusable cache; they must be suppressed so the server returns a full 200")
-	}
-}
-
-// routingFloorPrevCache returns a previously accepted cache with both routing
-// populations above the 1% floor: two MOVIE records (TMDB-movie ids) and two
-// series records (TVDB ids). Shared by the routing-distribution floor tests.
-func routingFloorPrevCache() *Cache {
-	return &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records: []Record{
-			{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{42}},
-			{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{43}},
-			{AniListID: 3, Type: "TV", TvdbID: 300},
-			{AniListID: 4, Type: "TV", TvdbID: 400},
-		},
+		t.Fatalf("fetch failure over an unusable cache returned %v, want the no-cache error", err)
 	}
 }
 
 // TestLoader_refreshCache_freshUnusableCacheStillFetches pins the
-// cache-usability gate on the fresh-reuse fast path, the first of the four
-// cache-state gates cacheUsable documents: a cache inside the refresh window
-// whose records index to nothing
-// (records:[{}] - a zero AniList ID NewIndex drops) must NOT be reused as
-// fresh, because serving it would idle a whole refresh window on an empty
-// effective map; the loader must fall through to the fetch and accept the
-// upstream body.
+// cache-usability gate on the fresh-reuse fast path: a cache inside the
+// refresh window that serves no map is not reused.
 func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now(),   // inside the refresh window: freshness alone would reuse it
-		Records:   []Record{{}}, // non-empty slice, zero effective index
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
-	}
-}
-
-// TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable pins the
-// population deduplicateRecords hands to cacheUsable: a zero-AniList-ID record
-// is dropped by NewIndex, so its arr identifiers must not count toward the
-// coverage floor. A cache whose only keyed record carries no arr id, padded by
-// a zero-key record with a TVDB id, is NOT usable — the fresh-cache fast path
-// must fall through to the fetch instead of serving an effective index whose
-// only keyed record cannot resolve.
-func TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable(t *testing.T) {
-	records := []Record{
-		{AniListID: 1, Type: "TV"},
-		{AniListID: 0, Type: "TV", TvdbID: 100},
-	}
-	if cacheUsable(records) {
-		t.Fatal("cacheUsable = true, want false: the zero-ID record's TVDB id must not count for the dropped record")
-	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now(), // inside the refresh window: freshness alone would reuse it
-		Records:   records,
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
-	}
-}
-
-// TestLoader_refreshCache_boundsPersistedValidators pins the validator size
-// bound the app's state.json bloat protection rides on: an at-limit validator
-// is retained while an over-limit one is dropped, so an upstream-controlled
-// header cannot inflate the persisted state. The guard itself lives in
-// httpx.DoConditional (capture-side hygiene); this is the consumer-side
-// contract pin, with the limit mirroring httpx's documented 1 KiB cap.
-func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
-	const httpxValidatorCap = 1 << 10
-	atLimit := strings.Repeat("v", httpxValidatorCap)
-	tests := []struct {
-		name      string
-		validator string
-		want      string
-	}{
-		{name: "at limit retained", validator: atLimit, want: atLimit},
-		{name: "over limit dropped", validator: atLimit + "x", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("ETag", tc.validator)
-				_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-			}))
-			defer ts.Close()
-
-			loader := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-			next, err := loader.refreshCache(t.Context(), &Cache{})
-			if err != nil {
-				t.Fatalf("refreshCache error: %v", err)
-			}
-			if next.ETag != tc.want {
-				t.Errorf("ETag length %d persisted as length %d, want length %d", len(tc.validator), len(next.ETag), len(tc.want))
-			}
-		})
-	}
-}
-
-// TestLoader_refreshCache_sanitizesPersistedValidators pins the app's
-// self-heal contract for a poisoned validator already persisted in the
-// previous Cache (it predates the hygiene, or the state file was tampered
-// with): it must never be sent as a request header (httpx.DoConditional's
-// replay-side hygiene skips it, so the refresh degrades to an unconditional
-// GET instead of failing net/http's request-write validation forever), and a
-// successful refresh must return a Cache that no longer carries it.
-func TestLoader_refreshCache_sanitizesPersistedValidators(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("If-None-Match"); got != "" {
-			t.Errorf("If-None-Match = %q, want the poisoned persisted ETag dropped before the request", got)
-		}
-		if got := r.Header.Get("If-Modified-Since"); got != "" {
-			t.Errorf("If-Modified-Since = %q, want empty (no Last-Modified was cached)", got)
-		}
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		ETag:      "\"et\x01ag\"",
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	loader := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := loader.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refreshCache error: %v", err)
-	}
-	if next.ETag != "" {
-		t.Errorf("returned ETag = %q, want the poisoned persisted validator gone", next.ETag)
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Errorf("records = %+v, want the refreshed record id 42", next.Records)
-	}
-}
-
-// TestLoader_refreshCache_304KeepsValidSkipsPoisonedValidator pins the mixed
-// case on the 304 path: with one valid and one poisoned persisted validator,
-// the valid one still rides the conditional request (a 304 stays possible)
-// while the poisoned one is never sent (httpx.DoConditional's replay-side
-// hygiene skips it). The 304 return re-persists the poisoned value - it is
-// inert (skipped again on every replay) and stays until the next accepted
-// 200's pre-sanitized capture replaces it.
-func TestLoader_refreshCache_304KeepsValidSkipsPoisonedValidator(t *testing.T) {
-	const lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
-	const poisoned = "\"et\x01ag\""
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("If-None-Match"); got != "" {
-			t.Errorf("If-None-Match = %q, want the poisoned persisted ETag skipped at replay", got)
-		}
-		if got := r.Header.Get("If-Modified-Since"); got != lastModified {
-			t.Errorf("If-Modified-Since = %q, want the valid persisted validator %q", got, lastModified)
-		}
-		w.WriteHeader(http.StatusNotModified)
-	}))
-	defer ts.Close()
-
-	prev := &Cache{
-		FetchedAt:    time.Now().Add(-2 * time.Hour),
-		ETag:         poisoned,
-		LastModified: lastModified,
-		Records:      []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	loader := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := loader.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refreshCache error: %v", err)
-	}
-	if next.ETag != poisoned {
-		t.Errorf("returned ETag = %q, want the poisoned validator retained inert on the 304 path (replaced only by an accepted 200)", next.ETag)
-	}
-	if next.LastModified != lastModified {
-		t.Errorf("returned LastModified = %q, want the valid validator %q retained", next.LastModified, lastModified)
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Errorf("records = %+v, want the cached record reused on 304", next.Records)
-	}
-}
-
-// TestLoader_refreshCache_freshLowCoverageCacheStillFetches pins the second
-// arm of cacheUsable on the fresh-reuse fast path: a cache inside the refresh
-// window whose records index fine but carry no arr identifier (below the 1%
-// coverage floor) must NOT be reused as fresh — serving it would idle a whole
-// refresh window on a map no lookup can resolve; the loader must fall through
-// to the fetch and accept the upstream body.
-func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(animapBody(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now(),                           // inside the refresh window
-		Records:   []Record{{AniListID: 1, Type: "TV"}}, // keyed, but zero arr-identifier coverage
-	}
-	l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-	next, err := l.refreshCache(t.Context(), prev)
-	if err != nil {
-		t.Fatalf("refreshCache with a fresh-but-unmappable cache error: %v", err)
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
-		t.Fatalf("fresh-but-unmappable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
-	}
-}
-
-// TestLoader_refreshCache_asksAboutTheRefusedBodyWithEitherValidator pins which
-// validators a cycle following a persistent refusal puts on the wire: the
-// REFUSED body's, so the upstream can answer 304 and the ~2.3 MB document is not
-// re-downloaded for as long as the refusal lasts. Either validator alone is
-// enough to ask with, and the upstream chooses which it honours - a cycle that
-// asked with neither would download the whole refused list again every time,
-// and the 304 that classifies the body as unchanged could never arrive.
-func TestLoader_refreshCache_asksAboutTheRefusedBodyWithEitherValidator(t *testing.T) {
-	const lastModified = "Mon, 02 Jan 2006 15:04:05 GMT"
-	for name, tc := range map[string]struct {
-		refusedETag         string
-		refusedLastModified string
-		wantIfNoneMatch     string
-		wantIfModifiedSince string
-	}{
-		"etag only":          {refusedETag: `"v9"`, wantIfNoneMatch: `"v9"`},
-		"last-modified only": {refusedLastModified: lastModified, wantIfModifiedSince: lastModified},
+	for name, records := range map[string][]Record{
+		"a zero AniList id":                   {{}},
+		"a zero-id record carrying the TVDB":  {{AniListID: 1, Type: "TV"}, {AniListID: 0, Type: "TV", TvdbID: 100}},
+		"keyed but with no arr identifier":    {{AniListID: 1, Type: "TV"}},
+		"only negative AniList ids, mappable": {{AniListID: -1, Type: "TV", TvdbID: 100}, {AniListID: -2, Type: "TV", TvdbID: 200}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var requests atomic.Int32
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				if got := r.Header.Get("If-None-Match"); got != tc.wantIfNoneMatch {
-					t.Errorf("If-None-Match = %q, want %q", got, tc.wantIfNoneMatch)
-				}
-				if got := r.Header.Get("If-Modified-Since"); got != tc.wantIfModifiedSince {
-					t.Errorf("If-Modified-Since = %q, want %q", got, tc.wantIfModifiedSince)
-				}
-				w.WriteHeader(http.StatusNotModified)
-			}))
-			defer ts.Close()
-
-			prev := &Cache{
-				FetchedAt:           time.Now().Add(-2 * time.Hour),
-				Records:             []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-				RefusedETag:         tc.refusedETag,
-				RefusedLastModified: tc.refusedLastModified,
+			if cacheUsable(records) {
+				t.Fatalf("cacheUsable(%+v) = true, want false", records)
 			}
-			l := NewLoader(ts.Client(), ts.URL, WithRefresh(time.Hour), WithLogger(discardLogger()))
-			next, err := l.refreshCache(t.Context(), prev)
-			if err == nil {
-				t.Fatal("304 on the refused body returned nil error, want the stale map kept")
+			rel := newRelease(t, testTag, entriesBody(t, entry{AniList: 42, Type: "tv", TVDB: 100}))
+			next, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), &Cache{FetchedAt: time.Now(), Records: records})
+			if err != nil {
+				t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
 			}
-			if requests.Load() != 1 {
-				t.Fatalf("conditional requests = %d, want 1", requests.Load())
-			}
-			if next.RejectedRefreshes != 1 {
-				t.Errorf("RejectedRefreshes = %d, want 1 (an unchanged refused body is a persistent refusal)", next.RejectedRefreshes)
+			if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+				t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
 			}
 		})
 	}

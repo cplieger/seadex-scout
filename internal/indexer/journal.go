@@ -61,8 +61,10 @@ type journalPass struct {
 	// Built on first use by evaluatedOwners; one pass runs on one goroutine.
 	evaluated map[string]bool
 	infoFor   EntryInfoFunc
-	js        *journalStats
-	now       time.Time
+	// nonAired is the pass's FeedInfo.nonAiredOrder, never nil.
+	nonAired func(tvdbID int) bool
+	js       *journalStats
+	now      time.Time
 }
 
 // journalKey returns a torrent's journal identity - its tracker key
@@ -287,7 +289,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, hashRefs h
 			Size:                 payload.TotalSize(occ.torrent.Files),
 			Key:                  key,
 			AniListID:            occ.entry.AniListID,
-			NonFilm:              !info.IsMovie,
+			NonFilm:              info.Kind != KindMovie,
 		}
 		if it.Title == "" {
 			// No episode files and no release group on this occurrence: an
@@ -368,7 +370,7 @@ func foldRefs(it *journalItem, refs []curatedRef, hashRefs hashLookup, infoFor E
 }
 
 func foldHolderCategories(it *journalItem, info *EntryInfo) {
-	for _, c := range categoriesFor(info.IsMovie) {
+	for _, c := range categoriesFor(info.Kind == KindMovie) {
 		if !slices.Contains(it.Categories, c) {
 			it.Categories = append(it.Categories, c)
 		}
@@ -531,7 +533,8 @@ func rebaseFutureFeed(feed []journalItem, now time.Time) int {
 
 // carryStoredItem applies carryItem's DE-CURATED carry policy: an item whose
 // torrent has left the curation set - which only a CATALOGUE pass can establish
-// - keeps its stored render, subject to the GUID-identity gate.
+// - keeps its stored render, subject to the GUID-identity gate and to
+// applyStoredOrder.
 func (p *journalPass) carryStoredItem(it *journalItem) (journalItem, bool) {
 	// The journal's GUID-to-Key invariant, applied by the one arm that has both the
 	// standing to refuse and no fresh render to self-heal from: a stored GUID that no
@@ -546,7 +549,32 @@ func (p *journalPass) carryStoredItem(it *journalItem) (journalItem, bool) {
 		p.js.dropped++
 		return journalItem{}, false
 	}
-	return *it, true
+	return p.applyStoredOrder(it)
+}
+
+// applyStoredOrder judges a stored render under a non-aired order: that of the
+// series the current EntryInfo of the entry whose title it carries names, or
+// that of the series its stored TvdbID names, since the entry's mapping may
+// have gone or moved since the render. Every holder twins identically
+// (twinVote), so that series is the twin's too. The twin goes; so does an item
+// whose title is not a film's by its stored NonFilm or the entry's current
+// KindSeries, since the title may hold a TheTVDB season and cannot be
+// re-rendered. KindUnknown is no such evidence: a film whose typing is gone
+// keeps its title.
+func (p *journalPass) applyStoredOrder(it *journalItem) (journalItem, bool) {
+	info := p.infoFor(it.AniListID)
+	if !info.NonAiredOrder && !p.nonAired(it.TvdbID) {
+		return *it, true
+	}
+	if it.NonFilm || info.Kind == KindSeries {
+		p.w.log.Debug("indexer journal item refused: its series uses a non-aired episode order and the stored title cannot be re-rendered",
+			"key", it.Key, "cause", "non-aired-order")
+		p.js.dropped++
+		return journalItem{}, false
+	}
+	kept := *it
+	kept.SonarrTitle, kept.SonarrGUID = "", ""
+	return kept, true
 }
 
 // refreshCarriedItem applies carryItem's still-curated carry policy: a fresh
@@ -565,7 +593,7 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 				"key", it.Key, "cause", "render-unresolvable")
 		}
 		// Both failure reasons take the same stance: keep the stored render, subject
-		// to carryStoredItem's GUID-identity gate.
+		// to carryStoredItem's gates.
 		kept, keptOK := p.carryStoredItem(it)
 		if keptOK {
 			p.js.storedUnrenderable++
@@ -876,7 +904,7 @@ func (a titleAudit) seasonServed(key, title string, c *packCensus) string {
 		corrected, done := correctedTitle(title, c.marker)
 		a.warn(key, true, false, done)
 		return corrected
-	case !titlePack && c.evidence == packEvidencePack:
+	case !titlePack && c.evidence == packEvidencePack && !titleNamesSeveralEpisodes(title):
 		a.warn(key, false, true, false)
 		return title
 	default:

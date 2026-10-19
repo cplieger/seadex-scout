@@ -687,7 +687,7 @@ func harvestable(it *journalItem, titles map[string]string, infoFor EntryInfoFun
 // show's title candidates (harvestTitleCandidates; harvestShow walks them in order).
 func harvestParams(meta *EntryInfo, scope, title string) url.Values {
 	q := url.Values{"t": {"search"}, "q": {title}}
-	if scope == upstreamNyaa && !meta.IsMovie && meta.SeasonKnown && meta.Season > 0 {
+	if scope == upstreamNyaa && meta.Kind != KindMovie && meta.SeasonKnown && meta.Season > 0 {
 		q.Set("t", "tvsearch")
 		q.Set("season", strconv.Itoa(meta.Season))
 	}

@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/animap/mapread"
+	"github.com/cplieger/arrapi/v3"
+	"github.com/cplieger/arrapi/v3/radarr"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
@@ -79,16 +83,15 @@ type scoutCore struct {
 func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (scoutCore, error) {
 	log := slog.Default()
 
-	sonarr, radarr, err := newArrClients(cfg)
+	sc, rc, err := newArrClients(cfg)
 	if err != nil {
 		return scoutCore{}, err
 	}
 
 	seadexHTTP := httpx.NewClient(seadexTimeout)
 	mappingHTTP := httpx.NewClient(mappingTimeout)
-	mappingHTTP.CheckRedirect = mapping.RedirectPolicy
 	anilistHTTP := httpx.NewClient(anilistTimeout)
-	pingArrs(ctx, sonarr, radarr)
+	reportArrs(ctx, sc, rc)
 
 	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL,
 		anilist.WithRate(anilist.DefaultRate), anilist.WithLogger(log))
@@ -102,15 +105,15 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 		log:   log,
 		store: store,
 		library: arrwalk.NewWalker(&arrwalk.Config{
-			Sonarr:      sonarrClient(sonarr),
-			Radarr:      radarrClient(radarr),
+			Sonarr:      sonarrClient(sc),
+			Radarr:      radarrClient(rc),
 			Logger:      log,
 			SonarrURL:   cfg.SonarrWebBase(),
 			RadarrURL:   cfg.RadarrWebBase(),
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL,
+		mapping: mapping.NewLoader(mappingHTTP, mapread.Source{Repo: mapping.DefaultRepo},
 			mapping.WithOverridesPath(config.DefaultMappingOverrides),
 			mapping.WithRefresh(mapping.DefaultRefresh), mapping.WithLogger(log)),
 		seadex: seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL,
@@ -121,11 +124,11 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 			seadexHTTP.CloseIdleConnections()
 			mappingHTTP.CloseIdleConnections()
 			anilistHTTP.CloseIdleConnections()
-			if sonarr != nil {
-				sonarr.Close()
+			if sc != nil {
+				sc.Close()
 			}
-			if radarr != nil {
-				radarr.Close()
+			if rc != nil {
+				rc.Close()
 			}
 		},
 	}, nil
@@ -151,6 +154,7 @@ func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
 		Comparer: compare.New(compare.Config{
+			Logger:          c.log,
 			TagFilter:       cfg.TagFilter,
 			Filter:          filterOptions(cfg),
 			ExcludeSpecials: cfg.ExcludeSpecials,
@@ -220,6 +224,14 @@ func indexerLogger(log *slog.Logger) *slog.Logger {
 	return log.With("component", "indexer")
 }
 
+// Keep X-Api-Key on the configured origin: net/http forwards this custom header
+// on followed redirects, and httpx's same-host default admits another port.
+func newProwlarrClient() *http.Client {
+	c := httpx.NewClient(prowlarrTimeout)
+	c.CheckRedirect = httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true))
+	return c
+}
+
 // feedWriter returns the indexer feed writer the compare cycle drives when the
 // Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP client
 // - else a nil writer (the cycle then does no feed work) and a no-op. It persists
@@ -230,7 +242,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger, server *indexer.Indexer) (
 	if !cfg.IndexerConfigured() {
 		return nil, func() {}
 	}
-	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
+	prowlarrHTTP := newProwlarrClient()
 	log = indexerLogger(log)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
@@ -258,7 +270,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		return builtIndexer{cleanup: func() {}}
 	}
 	log := indexerLogger(slog.Default())
-	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
+	prowlarrHTTP := newProwlarrClient()
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
@@ -272,59 +284,73 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 }
 
 // newArrClients constructs the enabled arr clients from config.
-func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
-	var sonarr *arrapi.Sonarr
-	var radarr *arrapi.Radarr
+func newArrClients(cfg *config.Config) (sc *sonarr.Client, rc *radarr.Client, err error) {
 	if cfg.SonarrEnabled() {
-		s, err := arrapi.NewSonarr(cfg.SonarrURL, arrapi.APIKey(cfg.SonarrAPIKey),
-			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
+		sc, err = sonarr.New(cfg.SonarrURL, arrapi.APIKey(cfg.SonarrAPIKey),
+			sonarr.WithMaxAttempts(arrMaxAttempts), sonarr.WithBaseDelay(arrBaseDelay))
 		if err != nil {
-			// arrapi's constructor error echoes the full baseURL with %q and an arr
-			// url may carry configured userinfo, so this message stays
-			// field-name-only: main logs a dispatch error at ERROR.
 			return nil, nil, errors.New("sonarr client: sonarr.url or sonarr.api_key rejected by the arr client")
 		}
-		sonarr = s
 	}
 	if cfg.RadarrEnabled() {
-		r, err := arrapi.NewRadarr(cfg.RadarrURL, arrapi.APIKey(cfg.RadarrAPIKey),
-			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
+		rc, err = radarr.New(cfg.RadarrURL, arrapi.APIKey(cfg.RadarrAPIKey),
+			radarr.WithMaxAttempts(arrMaxAttempts), radarr.WithBaseDelay(arrBaseDelay))
 		if err != nil {
-			if sonarr != nil {
-				sonarr.Close()
+			if sc != nil {
+				sc.Close()
 			}
-			// Field-name-only for the same reason as the sonarr arm above.
 			return nil, nil, errors.New("radarr client: radarr.url or radarr.api_key rejected by the arr client")
 		}
-		radarr = r
 	}
-	return sonarr, radarr, nil
+	return sc, rc, nil
 }
 
-// pingArrs checks arr reachability at startup, logging the outcome. A failure
-// is not fatal: the first cycle's health reflects the live state, and a
-// temporarily-down arr should not stop the daemon from starting.
-func pingArrs(ctx context.Context, sonarr *arrapi.Sonarr, radarr *arrapi.Radarr) {
-	if sonarr != nil {
-		logPing("sonarr", sonarr.Ping(ctx))
+// reportArrs detects each enabled arr at startup and logs its version, API and
+// features. A failure is not fatal: the first cycle's walk reports the live
+// state, and a temporarily-down arr should not stop the daemon from starting.
+func reportArrs(ctx context.Context, sc *sonarr.Client, rc *radarr.Client) {
+	if sc != nil {
+		info, err := sc.Info(ctx)
+		if err != nil {
+			logArrStartupFailure("sonarr", err)
+		} else {
+			slog.Info("sonarr reachable", sonarrReachableAttrs(&info)...)
+		}
 	}
-	if radarr != nil {
-		logPing("radarr", radarr.Ping(ctx))
+	if rc != nil {
+		info, err := rc.Info(ctx)
+		if err != nil {
+			logArrStartupFailure("radarr", err)
+		} else {
+			slog.Info("radarr reachable", "version", info.Version, "api", string(info.API),
+				"deprecated", info.Deprecated)
+		}
 	}
 }
 
-// logPing logs one arr's startup reachability, classifying a context cancellation
-// (shutdown mid-startup) as routine rather than an arr fault. The error rides
-// LogSafeError because a *url.Error's text carries the full request URL, which may
-// hold configured reverse-proxy credentials.
-func logPing(arr string, err error) {
-	if err == nil {
-		slog.Info(arr + " reachable")
-		return
+// sonarrReachableAttrs is the "sonarr reachable" line's attributes: the
+// detected version, API generation and every feature flag.
+func sonarrReachableAttrs(info *sonarr.Info) []any {
+	f := info.Features
+	return []any{
+		"version", info.Version, "api", string(info.API), "deprecated", info.Deprecated,
+		"series_orders", f.SeriesOrders, "season_titles", f.SeasonTitles,
+		"translations", f.Translations, "anime_ids", f.AnimeIDs,
 	}
+}
+
+// logArrStartupFailure logs one arr's failed startup detection. A shutdown is
+// routine (Debug); an unsupported API is an ERROR because it does not clear
+// without an operator; anything else may be transient (Warn). arrapi's errors
+// carry no request URL; LogSafeError is defence in depth.
+func logArrStartupFailure(arr string, err error) {
 	safeErr := httpx.LogSafeError(err)
 	if errors.Is(err, context.Canceled) {
 		slog.Debug(arr+" startup ping cancelled by shutdown", "error", safeErr)
+		return
+	}
+	if _, ok := errors.AsType[*arrapi.UnsupportedAPIError](err); ok {
+		slog.Error(arr+" API unsupported", "error", safeErr)
 		return
 	}
 	slog.Warn(arr+" ping failed at startup", "error", safeErr)
@@ -345,16 +371,16 @@ func filterOptions(cfg *config.Config) filter.Options {
 
 // sonarrClient returns s as a arrwalk.SonarrClient, or a nil interface when
 // Sonarr is disabled (so the walker skips it rather than calling a nil pointer).
-func sonarrClient(s *arrapi.Sonarr) arrwalk.SonarrClient {
+func sonarrClient(s *sonarr.Client) arrwalk.SonarrClient {
 	if s == nil {
 		return nil
 	}
-	return s
+	return arrwalk.FromSonarr(s)
 }
 
 // radarrClient returns r as a arrwalk.RadarrClient, or a nil interface when
 // Radarr is disabled.
-func radarrClient(r *arrapi.Radarr) arrwalk.RadarrClient {
+func radarrClient(r *radarr.Client) arrwalk.RadarrClient {
 	if r == nil {
 		return nil
 	}

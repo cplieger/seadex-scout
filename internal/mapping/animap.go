@@ -1,50 +1,18 @@
 package mapping
 
 import (
-	"bytes"
 	"cmp"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"maps"
-	"math"
-	"net/http"
 	"slices"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsoncap/v2"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/animap/mapread"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
-// DefaultURL is the newest published animap.json, the AniList-to-arr ID map. The
-// release-download URL redirects through the release tag to a CDN, which answers
-// the conditional GET's validators; a new release is a new asset with a new ETag.
-const DefaultURL = "https://github.com/cplieger/animap/releases/latest/download/animap.json"
-
-// releaseRedirects admits DefaultURL's two hops: the release tag on github.com,
-// then GitHub's release-asset host (objects. is the host it served from before).
-var releaseRedirects = httpx.RedirectPolicyFunc(httpx.WithAllowedHosts("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"))
-
-// errRedirectRefused marks a refused redirect hop. Persistent: the URL is
-// constant, so a refused hop re-refuses on every load until the app is upgraded.
-var errRedirectRefused = errors.New("mapping: redirect refused")
-
-// RedirectPolicy is the CheckRedirect for the client that fetches DefaultURL. It
-// follows GitHub's release-download redirect and refuses every other host.
-func RedirectPolicy(req *http.Request, via []*http.Request) error {
-	if err := releaseRedirects(req, via); err != nil {
-		return fmt.Errorf("%w: %w", errRedirectRefused, err)
-	}
-	return nil
-}
-
-// supportedVersion is the animap.json schema version this decoder reads. The
-// producer raises it only for a breaking format change, so any other version is
-// refused rather than read with today's field meanings.
-const supportedVersion = 1
+// DefaultRepo is the repository whose dated releases carry animap.json, the
+// AniList-to-arr ID map.
+const DefaultRepo = "cplieger/animap"
 
 // RecordFromFormat builds the type-only Record a consumer uses to reuse the
 // arr/season routing decisions for an AniList format that has no mapping
@@ -53,539 +21,340 @@ const supportedVersion = 1
 // whole-series comparison against every real season.
 func RecordFromFormat(format string) Record { return Record{Type: mediatype.Normalize(format)} }
 
-// SeasonRange is one TVDB season an absolute-numbered run's episodes fall
-// into: episodes First..Last of the run are TVDB season Season. Last == 0 means
-// the range is open-ended (the last row carries a start and no end while the
-// show is airing).
+// SeasonRange is entry episodes First to Last, all landing on TVDB season
+// Season.
 type SeasonRange struct {
 	Season int `json:"season"`
 	First  int `json:"first"`
-	Last   int `json:"last,omitempty"`
+	Last   int `json:"last"`
 }
 
-// Mapping is what a record's mapping list and placement say beyond its ids:
-// the season-0 episode a film filed in a series' specials IS (SpecialEpisode,
-// 0 when none), the season-0 episodes its regular episodes are (Specials,
-// ascending, nil unless animap places every one in season 0 or nowhere), and
-// the TVDB seasons an absolute-numbered run falls into (Seasons). SpecialsTvdb
-// is the series both number episodes of. SpecialsEpisodes, the AniDB episode
-// count, is set only for a placement wholly in season 0; Placed marks any.
+// Mapping is where an entry's episodes land on its one TVDB series beyond
+// the season its Record names. Episode lists ascend.
 type Mapping struct {
-	Seasons          []SeasonRange `json:"seasons,omitempty"`
-	Specials         []int         `json:"specials,omitempty"`
-	SpecialEpisode   int           `json:"special_episode,omitempty"`
-	SpecialsTvdb     int           `json:"specials_tvdb,omitempty"`
-	SpecialsEpisodes int           `json:"specials_episodes,omitempty"`
-	Placed           bool          `json:"placed,omitempty"`
+	// Seasons are each positive season's maximal runs of entry episodes
+	// landing on SeasonsTvdb, default placements included; an episode the
+	// map states nothing for is in none.
+	Seasons []SeasonRange `json:"seasons,omitempty"`
+	// Specials are the season-0 episodes of SpecialsTvdb the entry is, when
+	// every entry episode is stated there or lands nowhere; SpecialsEpisodes
+	// counts the entry episodes they answer, 0 when some land nowhere.
+	Specials []int `json:"specials,omitempty"`
+	// Episodes are the episodes of positive season EpisodesSeason of
+	// EpisodesTvdb the entry is, when every entry episode is stated there,
+	// and none lands on season 0.
+	Episodes         []int `json:"episodes,omitempty"`
+	SeasonsTvdb      int   `json:"seasons_tvdb,omitempty"`
+	SpecialsTvdb     int   `json:"specials_tvdb,omitempty"`
+	SpecialsEpisodes int   `json:"specials_episodes,omitempty"`
+	EpisodesTvdb     int   `json:"episodes_tvdb,omitempty"`
+	EpisodesSeason   int   `json:"episodes_season,omitempty"`
+	// SpecialEpisode is the one season-0 episode of SpecialsTvdb that every
+	// landing names, when every entry episode lands there, at least one
+	// landing is stated, and a default among them withholds Specials.
+	SpecialEpisode int `json:"special_episode,omitempty"`
 }
 
 func (m *Mapping) empty() bool {
-	return m.SpecialEpisode == 0 && len(m.Seasons) == 0 && len(m.Specials) == 0
+	return m.SpecialEpisode == 0 && len(m.Seasons) == 0 && len(m.Specials) == 0 && len(m.Episodes) == 0
 }
 
-// SpecialRun is the one reader of which TVDB season-0 episodes this entry is:
-// a placement wholly in season 0 with its AniDB episode count; nil, the row
-// silenced too, beside any other placement, which says the entry is not wholly
-// specials; else the mapping list's single episode with a count of 0 (unknown).
-func (m *Mapping) SpecialRun() (episodes []int, anidbEpisodes int) {
+// SpecialRun is the one reader of which TVDB season-0 episodes the whole
+// entry is, with the entry episode count they answer: Specials with its
+// count, else SpecialEpisode with a count of 0 (unknown); nil when the map
+// names neither or some entry episode lands nowhere.
+func (m *Mapping) SpecialRun() (episodes []int, entryEpisodes int) {
 	switch {
 	case len(m.Specials) > 0 && m.SpecialsEpisodes > 0:
 		return slices.Clone(m.Specials), m.SpecialsEpisodes
-	case m.Placed:
-		return nil, 0
 	case m.SpecialEpisode > 0:
 		return []int{m.SpecialEpisode}, 0
 	}
 	return nil, 0
 }
 
-// maxSpecialEpisodes bounds the TVDB episodes one record's placement may
-// expand to; a placement past it reads as none. A real film or special spans
-// a handful, so this only stops an untrusted range from allocating.
-const maxSpecialEpisodes = 1 << 10
-
-// maxRecords is a hard acceptance cap on the document's records array, not a
-// preallocation hint: the body cap still admits ~1M tiny valid records.
-const maxRecords = 1 << 16
-
-// errRecordCapExceeded rejects a document over maxRecords. A sentinel, because a
-// permanently over-cap document never self-heals and must advance the rejection
-// streak instead of degrading at WARN forever.
-var errRecordCapExceeded = fmt.Errorf("mapping: animap records exceed cap %d", maxRecords)
-
-// errNotAnimapDocument rejects a body that is not an animap document: not a JSON
-// object, no records array, or a member of the wrong shape. Content-shape
-// evidence, so it never self-heals; mid-stream truncation stays transient.
-var errNotAnimapDocument = errors.New("mapping: body is not an animap document")
-
-// errUnsupportedVersion rejects a document whose schema version this decoder
-// does not read.
-var errUnsupportedVersion = errors.New("mapping: unsupported animap schema version")
-
-// maxRecordBytes bounds one encoded record before its decode; a real record is
-// under 4 KiB, and an oversized one is skipped as malformed.
-const maxRecordBytes = 64 << 10
-
-// maxRecordIdentifiers caps each record's IMDb and TMDB movie lists; a list over
-// it rejects the record.
-const maxRecordIdentifiers = 32
-
-// maxRetainedTotal bounds the identifiers and season ranges retained across the
-// whole document; the per-record caps alone still admit millions.
-const maxRetainedTotal = 1 << 20
-
-// errIdentifierBudgetExceeded rejects a document over maxRetainedTotal. A
-// sentinel, because the ceiling truncates the TAIL: serving the prefix would
-// publish a knowably incomplete map that every count floor still passes.
-var errIdentifierBudgetExceeded = fmt.Errorf("mapping: animap retained values exceed cap %d", maxRetainedTotal)
-
-// animapRecord is one element of the document's records array, decoded
-// strictly per field: a member of the wrong JSON type rejects its record.
-type animapRecord struct {
-	TVDBSeason    *int            `json:"tvdb_season"`
-	AniDBParent   *animapParent   `json:"anidb_parent"`
-	Type          string          `json:"type"`
-	IMDbIDs       []string        `json:"imdb_ids"`
-	TMDBMovieIDs  []int           `json:"tmdb_movie_ids"`
-	MappingList   []animapRow     `json:"mapping_list"`
-	TVDBPlacement []animapSegment `json:"tvdb_placement"`
-	AniListID     int             `json:"anilist_id"`
-	AniDBID       int             `json:"anidb_id"`
-	TVDBID        int             `json:"tvdb_id"`
-	Episodes      int             `json:"episodes"`
+// projection is a decoded document as the Index serves it: a Record per
+// AniList entry; the facts of each anime on a TVDB series, keyed by AniDB
+// id, which an entry that is one whole anime and an override naming that id
+// join on; the facts of every other entry, keyed by AniList id; the keys of
+// each space read fully stated on their series (tvdbView.fullyStated); how
+// many entry rows the document carries, every acceptance floor's
+// denominator; and the regular episodes its anime on TVDB place, which
+// maxAnimeEpisodes caps.
+type projection struct {
+	mappings           map[int]Mapping
+	aniListMappings    map[int]Mapping
+	fullyStated        map[int]struct{}
+	aniListFullyStated map[int]struct{}
+	records            []Record
+	entries            int
+	animeEpisodes      int
 }
 
-// animapSegment is one tvdb_placement run: AniDB regular episodes Start..End
-// land on consecutive TVDB episodes of Season from Episode on, or on none
-// when both are absent.
-type animapSegment struct {
-	Season  *int `json:"season"`
-	Episode *int `json:"episode"`
-	Start   int  `json:"start"`
-	End     int  `json:"end"`
-}
+// maxAnimeEpisodes bounds the regular episodes the anime facts expand, which
+// mapread's MaxEpisodes, a cap on the entries' parts, does not: 2^21, about
+// 16 times the 134,060 of the 2026-10 document's anime on TVDB.
+const maxAnimeEpisodes = 1 << 21
 
-// animapParent is a record's anidb_parent: the anime AniDB files it under as
-// specials. Only its id is read; its presence is what marks the record.
-type animapParent struct {
-	AniDBID int `json:"anidb_id"`
-}
-
-func (r *animapRecord) parentSpecial() bool {
-	return r.AniDBID <= 0 && r.AniListID > 0 && r.AniDBParent != nil && r.AniDBParent.AniDBID > 0
-}
-
-// animapRow is one mapping_list row. Each Episodes element is [anidb, target...]:
-// one element means no counterpart, three mean one episode spans two targets.
-type animapRow struct {
-	TVDBSeason  *int    `json:"tvdb_season"`
-	Episodes    [][]int `json:"episodes"`
-	AniDBSeason int     `json:"anidb_season"`
-	Start       int     `json:"start"`
-	End         int     `json:"end"`
-}
-
-// toRecord converts a decoded record into its canonical Record. The season is
-// present iff the document carries tvdb_season, which animap publishes only
-// beside a tvdb_id; tvdb_absolute and episodes have no Record field and route
-// nothing.
-func (r *animapRecord) toRecord() Record {
-	kind, season := SeasonAbsent, 0
-	if r.TVDBSeason != nil && *r.TVDBSeason >= 0 {
-		kind, season = SeasonPresent, *r.TVDBSeason
+// project reads doc as the Index serves it, refusing with mapread.ErrTooLarge
+// a document whose anime on TVDB place more than budget regular episodes.
+func project(doc *mapread.Document, budget int) (projection, error) {
+	p := projection{
+		mappings: make(map[int]Mapping), aniListMappings: make(map[int]Mapping),
+		fullyStated: make(map[int]struct{}), aniListFullyStated: make(map[int]struct{}),
+		entries: len(doc.Entries),
 	}
-	rec := Record{
-		IMDbIDs:    r.IMDbIDs,
-		TmdbMovies: r.TMDBMovieIDs,
-		Type:       r.Type,
-		SeasonKind: kind,
-		AniListID:  r.AniListID,
-		TvdbID:     r.TVDBID,
-		AniDBID:    r.AniDBID,
-		SeasonTvdb: season,
+	var series, aniList []int
+	for i := range doc.Anime {
+		if doc.Anime[i].TVDBID == 0 {
+			continue
+		}
+		if p.animeEpisodes += doc.Anime[i].Last.Regular; p.animeEpisodes > budget {
+			return projection{}, fmt.Errorf("%w: the anime on TVDB place more than %d regular episodes", mapread.ErrTooLarge, budget)
+		}
+		series = append(series, doc.Anime[i].AniDBID)
+	}
+	for i := range doc.Entries {
+		if al := doc.Entries[i].AniListID; al > 0 {
+			aniList = append(aniList, al)
+		}
+	}
+	x := mapread.NewIndex(doc)
+	for _, aid := range series {
+		p.addAnime(x, aid)
+	}
+	p.records = make([]Record, 0, len(aniList))
+	for _, al := range aniList {
+		p.addEntry(x, al)
+	}
+	return p, nil
+}
+
+// addAnime keys anime aid's facts by its AniDB id.
+func (p *projection) addAnime(x *mapread.Index, aid int) {
+	_, m, stated := entryFacts(x, mapread.Entry{Parts: []mapread.Part{{AniDBID: aid, Kind: mapread.Regular}}})
+	if !m.empty() {
+		p.mappings[aid] = m
+	}
+	if stated {
+		p.fullyStated[aid] = struct{}{}
+	}
+}
+
+// addEntry appends AniList entry al's Record, keying its facts by AniList id
+// when it is not one whole anime, whose facts addAnime keys.
+func (p *projection) addEntry(x *mapread.Index, al int) {
+	e, _ := x.Entry(al)
+	rec, m, stated := entryFacts(x, e)
+	if rec.AniDBID == 0 {
+		if !m.empty() {
+			p.aniListMappings[al] = m
+		}
+		if stated {
+			p.aniListFullyStated[al] = struct{}{}
+		}
+	}
+	p.records = append(p.records, rec)
+}
+
+// entryFacts projects one entry onto its Record and Mapping, and reports
+// whether the entry is fully stated on its series. The TVDB id, season and
+// facts exist only for an entry whose parts reach exactly one TVDB series:
+// the arrs key a series by one id.
+func entryFacts(x *mapread.Index, e mapread.Entry) (rec Record, m Mapping, stated bool) {
+	routes := x.Routes(e)
+	rec = Record{
+		Type: e.Type, SeasonKind: SeasonAbsent, AniListID: e.AniListID, AniDBID: wholeAnime(e),
+		TmdbMovies: routes.TMDBMovies, IMDbIDs: routes.IMDb,
+	}
+	if len(routes.TVDB) == 1 {
+		rec.TvdbID = routes.TVDB[0]
+		v := readTVDB(x, e, rec.TvdbID)
+		rec.SeasonKind, rec.SeasonTvdb = v.season()
+		m, stated = v.mapping(), v.fullyStated()
 	}
 	rec.canonicalize()
-	return rec
+	return rec, m, stated
 }
 
-func (r *animapRecord) mapping() Mapping {
-	m := Mapping{
-		SpecialEpisode: r.filmEpisode(), Specials: r.specialEpisodes(), Seasons: seasonRanges(r.MappingList),
-		Placed: len(r.TVDBPlacement) > 0,
+// wholeAnime is the AniDB anime e is all the regular episodes of, 0 when its
+// parts say anything else.
+func wholeAnime(e mapread.Entry) int {
+	if len(e.Parts) == 1 && e.Parts[0].Identity() {
+		return e.Parts[0].AniDBID
 	}
-	if m.Specials != nil || m.SpecialEpisode > 0 {
-		m.SpecialsTvdb = r.TVDBID
+	return 0
+}
+
+// tvdbView is an entry's episodes read on its one TVDB series. An entry
+// episode lands when it lands on any season there; it is unstated when it
+// lands on none and one of its AniDB episodes states nothing there or is on
+// no TVDB series, as animap's watch reads it; else it lands nowhere.
+type tvdbView struct {
+	x        *mapread.Index
+	landings map[int][]int
+	episodes []mapread.EntryEpisode
+	series   int
+	unstated int
+	nowhere  int
+	// implicit counts the nowhere episodes that are not listedNowhere.
+	implicit int
+	// defaulted is a landing that rests on a node default alone.
+	defaulted bool
+}
+
+func readTVDB(x *mapread.Index, e mapread.Entry, series int) *tvdbView {
+	v := &tvdbView{x: x, series: series, episodes: x.Episodes(e), landings: make(map[int][]int)}
+	for _, ep := range v.episodes {
+		r := x.OnTVDB(ep)
+		on := onSeries(r, series)
+		switch {
+		case on != nil && len(on.Seasons) > 0:
+			for _, b := range on.Seasons {
+				v.landings[b.Season] = append(v.landings[b.Season], ep.Number)
+				v.defaulted = v.defaulted || b.Default
+			}
+		case r.Off || on != nil && on.Unstated:
+			v.unstated++
+		default:
+			v.nowhere++
+			if !listedNowhere(x, ep) {
+				v.implicit++
+			}
+		}
 	}
-	if m.Specials != nil && !slices.ContainsFunc(r.TVDBPlacement, func(s animapSegment) bool { return s.unplaced() }) {
-		m.SpecialsEpisodes = r.Episodes
+	return v
+}
+
+// onSeries is r's reading on series, nil when none of its AniDB episodes'
+// anime is on it.
+func onSeries(r mapread.TVDBReading, series int) *mapread.SeriesReading {
+	for i := range r.Series {
+		if r.Series[i].Series == series {
+			return &r.Series[i]
+		}
+	}
+	return nil
+}
+
+// listedNowhere reports that AniDB's list holds every AniDB episode of ep,
+// so each sits in a run, and one landing nowhere there names TVDB as [].
+func listedNowhere(x *mapread.Index, ep mapread.EntryEpisode) bool {
+	for _, ref := range ep.Refs {
+		if st, _ := x.Episode(ref.Ref); st.Listing != mapread.Listed {
+			return false
+		}
+	}
+	return true
+}
+
+// fullyStated reports that the map states where every entry episode lands:
+// no default, no unstated episode, and landing nowhere only through a
+// listed run's tvdb []. A number no run covers is no evidence, because a
+// document that lost its runs reads it the same way; this is the evidence
+// validateFacts accepts for a fact the release no longer gives.
+func (v *tvdbView) fullyStated() bool {
+	return len(v.episodes) > 0 && !v.defaulted && v.unstated == 0 && v.implicit == 0
+}
+
+// positive is the positive seasons some entry episode lands on, ascending.
+func (v *tvdbView) positive() []int {
+	var out []int
+	for s := range v.landings {
+		if s > 0 {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// season is the Record's season: one positive season scopes the entry to
+// it, and an entry landing only on season 0 or nowhere is offered on season
+// 0. An unstated episode, two positive seasons or no episode at all leave it
+// to a whole-series comparison.
+func (v *tvdbView) season() (kind SeasonKind, season int) {
+	switch positive := v.positive(); {
+	case len(v.episodes) == 0 || v.unstated > 0 || len(positive) > 1:
+		return SeasonAbsent, 0
+	case len(positive) == 1:
+		return SeasonPresent, positive[0]
+	}
+	return SeasonPresent, 0
+}
+
+func (v *tvdbView) mapping() Mapping {
+	m := v.seasons()
+	if v.unstated > 0 {
+		return m
+	}
+	positive := v.positive()
+	_, onZero := v.landings[0]
+	switch {
+	case len(positive) == 0 && onZero && !v.defaulted:
+		m.Specials, _ = v.targets(0)
+		m.SpecialsTvdb = v.series
+		if v.nowhere == 0 {
+			m.SpecialsEpisodes = len(v.episodes)
+		}
+	case len(positive) == 0 && onZero && v.nowhere == 0:
+		if eps, stated := v.targets(0); len(eps) == 1 && stated {
+			m.SpecialEpisode, m.SpecialsTvdb = eps[0], v.series
+		}
+	case len(positive) == 1 && !onZero && v.nowhere == 0 && !v.defaulted:
+		m.Episodes, _ = v.targets(positive[0])
+		m.EpisodesTvdb, m.EpisodesSeason = v.series, positive[0]
 	}
 	return m
 }
 
-// specialEpisodes reads, from animap's resolved placement, which TVDB season-0
-// episodes a record filed under the specials (tvdb_season 0) of its tvdb_id IS.
-// It is nil for any other record, for a placement that does not answer every
-// regular episode (placesEvery), one with a run on a real season (the entry is
-// partly elsewhere), with no TVDB episode at all, or one malformed or
-// expanding past maxSpecialEpisodes.
-func (r *animapRecord) specialEpisodes() []int {
-	if r.TVDBID <= 0 || r.TVDBSeason == nil || *r.TVDBSeason != 0 || !placesEvery(r.TVDBPlacement, r.Episodes) {
-		return nil
+func (v *tvdbView) seasons() Mapping {
+	r := v.ranges()
+	if len(r) == 0 {
+		return Mapping{}
 	}
-	seen := make(map[int]struct{})
-	work := 0
-	for i := range r.TVDBPlacement {
-		first, n, ok := r.TVDBPlacement[i].seasonZero()
-		// Charged before expanding: overlapping runs repeat targets, so the
-		// distinct set alone would not bound the work.
-		if !ok || n > maxSpecialEpisodes-work {
-			return nil
-		}
-		work += n
-		for k := range n {
-			seen[first+k] = struct{}{}
-		}
-	}
-	return slices.Sorted(maps.Keys(seen))
+	return Mapping{Seasons: r, SeasonsTvdb: v.series}
 }
 
-// placesEvery reports whether segs answer each regular episode 1..episodes:
-// the runs leave no gap and end at episodes, and a run with no TVDB episode
-// overlaps no other run. Only an episode spanning several TVDB episodes
-// appears in more than one run.
-func placesEvery(segs []animapSegment, episodes int) bool {
-	sorted := slices.Clone(segs)
-	slices.SortFunc(sorted, func(a, b animapSegment) int { return cmp.Compare(a.Start, b.Start) })
-	reach, noneReach := 0, 0
-	for i := range sorted {
-		s := &sorted[i]
-		none := s.unplaced()
-		switch {
-		case s.Start < 1 || s.End < s.Start || s.Start-1 > reach:
-			return false
-		case s.Start <= noneReach || (none && s.Start <= reach):
-			return false
-		}
-		reach = max(reach, s.End)
-		if none {
-			noneReach = s.End
-		}
-	}
-	return reach == episodes
-}
-
-// seasonZero is the run's first TVDB season-0 episode and its length, 0 long
-// for a run with no TVDB episode; ok is false for a run naming half a target,
-// one on a real season, or one starting within maxSpecialEpisodes of the int
-// ceiling. Its AniDB range is placesEvery's to check, so Start >= 1 and
-// End >= Start here.
-func (s *animapSegment) seasonZero() (first, n int, ok bool) {
-	switch {
-	case (s.Season == nil) != (s.Episode == nil):
-		return 0, 0, false
-	case s.Season == nil:
-		return 0, 0, true
-	case *s.Season != 0 || *s.Episode < 1 || *s.Episode > math.MaxInt-maxSpecialEpisodes:
-		return 0, 0, false
-	}
-	return *s.Episode, s.End - s.Start + 1, true
-}
-
-func (s *animapSegment) unplaced() bool { return s.Season == nil && s.Episode == nil }
-
-// filmEpisode reads which TVDB season-0 episode a film filed in a series'
-// specials IS, and 0 when the record names none. The record gate is
-// load-bearing: a series can carry an identically shaped season-0 row for one
-// of its OWN specials, so only a record filed under the specials (tvdb_season 0)
-// is read, or a false episode lands on a TV series. The rows are its regular
-// episodes' single-episode rows (no start), and every one must name the same
-// positive episode.
-func (r *animapRecord) filmEpisode() int {
-	if r.TVDBSeason == nil || *r.TVDBSeason != 0 {
-		return 0
-	}
-	episode := 0
-	for i := range r.MappingList {
-		row := &r.MappingList[i]
-		if row.AniDBSeason != 1 || row.TVDBSeason == nil || *row.TVDBSeason != 0 || row.Start != 0 {
-			continue
-		}
-		for _, pair := range row.Episodes {
-			if len(pair) != 2 || pair[1] <= 0 || (episode != 0 && pair[1] != episode) {
-				return 0
-			}
-			episode = pair[1]
-		}
-	}
-	return episode
-}
-
-// seasonRanges reads which TVDB seasons an absolute-numbered run's episodes fall
-// into: every row rangeOf admits, sorted by first episode. When the lowest range
-// starts above episode 1 the uncovered leading run is prepended as the season
-// below the lowest one named (floor 1): rows that start at season 2 state that
-// the earlier episodes are TVDB season 1.
-func seasonRanges(rows []animapRow) []SeasonRange {
+// ranges splits each positive season's entry episodes into maximal runs, so
+// a range never claims an episode that lands elsewhere, ordered by first
+// episode.
+func (v *tvdbView) ranges() []SeasonRange {
 	var out []SeasonRange
-	for i := range rows {
-		if r, ok := rangeOf(&rows[i]); ok {
-			out = append(out, r)
+	for _, s := range v.positive() {
+		eps := v.landings[s]
+		for i := 0; i < len(eps); {
+			j := i
+			for j+1 < len(eps) && eps[j+1] == eps[j]+1 {
+				j++
+			}
+			out = append(out, SeasonRange{Season: s, First: eps[i], Last: eps[j]})
+			i = j + 1
 		}
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	slices.SortFunc(out, func(a, b SeasonRange) int {
-		if c := a.First - b.First; c != 0 {
-			return c
-		}
-		return a.Season - b.Season
+		return cmp.Or(cmp.Compare(a.First, b.First), cmp.Compare(a.Season, b.Season))
 	})
-	lowestSeason := out[0].Season
-	for _, r := range out[1:] {
-		lowestSeason = min(lowestSeason, r.Season)
-	}
-	if first := out[0].First; first > 1 {
-		out = slices.Insert(out, 0, SeasonRange{Season: max(1, lowestSeason-1), First: 1, Last: first - 1})
-	}
 	return out
 }
 
-// rangeOf reads one row as a TVDB season range, false for every row that is not
-// one: a single-episode row, a TMDB row, a specials row or a season-0 target.
-// TMDB rows are excluded because the two tables disagree on season boundaries.
-func rangeOf(row *animapRow) (SeasonRange, bool) {
-	if row.AniDBSeason != 1 || row.Start < 1 || row.TVDBSeason == nil || *row.TVDBSeason < 1 {
-		return SeasonRange{}, false
-	}
-	return SeasonRange{Season: *row.TVDBSeason, First: row.Start, Last: row.End}, true
-}
-
-// animapParseResult is parseAnimap's counted decode result. elements counts every
-// records-array element observed whatever its outcome, so the acceptance floors
-// cannot shrink their denominator with their numerator.
-type animapParseResult struct {
-	mappings       map[int]Mapping
-	parentMappings map[int]Mapping
-	records        []Record
-	elements       int
-}
-
-// listFacts counts the records whose mapping list yields a fact; a record
-// known only through its placement is placedSpecials' count.
-func (p *animapParseResult) listFacts() int {
-	return listFactCount(p.mappings) + listFactCount(p.parentMappings)
-}
-
-func listFactCount(facts map[int]Mapping) int {
-	n := 0
-	for _, f := range facts {
-		if f.SpecialEpisode > 0 || len(f.Seasons) > 0 {
-			n++
+// targets is every TVDB episode of season the entry's episodes land on,
+// ascending, and whether one of those landings is stated.
+func (v *tvdbView) targets(season int) (episodes []int, stated bool) {
+	seen := make(map[int]struct{})
+	for _, ep := range v.episodes {
+		for _, ref := range ep.Refs {
+			st, ok := v.x.Episode(ref.Ref)
+			if !ok || st.TVDB == nil {
+				continue
+			}
+			for _, t := range st.TVDB.Targets {
+				if t.Season == season {
+					seen[t.Episode] = struct{}{}
+					stated = stated || !t.Default
+				}
+			}
 		}
 	}
-	return n
-}
-
-// parseAnimap decodes an animap.json body. The records array is streamed element
-// by element, each decoded on its own so a malformed record is skipped (counted)
-// rather than failing the map. A document over maxRecords or maxRetainedTotal,
-// one that is not an animap document, and one of another schema version are
-// rejected with their sentinels; trailing data after the document is rejected.
-func parseAnimap(data []byte, log *slog.Logger) (animapParseResult, error) {
-	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
-	ok, err := dec.Open('{')
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			// No first token is not content-shape evidence: a zero-length 200 can
-			// succeed on the next attempt, so it stays a transient parse failure.
-			return animapParseResult{}, fmt.Errorf("mapping: animap body is empty: %w", err)
-		}
-		return animapParseResult{}, fmt.Errorf("%w: %w", errNotAnimapDocument, err)
-	}
-	if !ok {
-		return animapParseResult{}, fmt.Errorf("%w (got null)", errNotAnimapDocument)
-	}
-	doc, err := decodeDocumentMembers(dec)
-	if err != nil {
-		return animapParseResult{}, err
-	}
-	if err := dec.Close(); err != nil {
-		return animapParseResult{}, fmt.Errorf("mapping: animap document truncated or malformed at close: %w", err)
-	}
-	if err := dec.End(); err != nil {
-		return animapParseResult{}, fmt.Errorf("mapping: trailing data after animap document: %w", err)
-	}
-	if !doc.sawRecords {
-		return animapParseResult{}, fmt.Errorf("%w: no records array", errNotAnimapDocument)
-	}
-	if doc.version != supportedVersion {
-		return animapParseResult{}, fmt.Errorf("%w %d, want %d", errUnsupportedVersion, doc.version, supportedVersion)
-	}
-	logParseDiagnostics(log, &doc.counts)
-	c := &doc.counts
-	return animapParseResult{records: c.records, mappings: c.mappings, parentMappings: c.parentMappings, elements: c.elements}, nil
-}
-
-type documentMembers struct {
-	counts     decodeCounts
-	version    int
-	sawVersion bool
-	sawRecords bool
-}
-
-func decodeDocumentMembers(dec *jsoncap.Decoder) (documentMembers, error) {
-	var doc documentMembers
-	for dec.More() {
-		key, err := dec.Key()
-		if err != nil {
-			return documentMembers{}, fmt.Errorf("mapping: animap document key: %w", err)
-		}
-		if err := doc.member(dec, key); err != nil {
-			return documentMembers{}, err
-		}
-	}
-	return doc, nil
-}
-
-// member decodes one top-level member. A repeated records or version member is
-// refused: two answers to one question is not a document.
-func (doc *documentMembers) member(dec *jsoncap.Decoder, key string) error {
-	switch key {
-	case "version":
-		if doc.sawVersion {
-			return fmt.Errorf("%w: repeated version", errNotAnimapDocument)
-		}
-		doc.sawVersion = true
-		if err := dec.Decode(&doc.version); err != nil {
-			return fmt.Errorf("%w: version: %w", errNotAnimapDocument, err)
-		}
-	case "records":
-		if doc.sawRecords {
-			return fmt.Errorf("%w: repeated records", errNotAnimapDocument)
-		}
-		doc.sawRecords = true
-		counts, err := decodeRecords(dec)
-		if err != nil {
-			return err
-		}
-		doc.counts = counts
-	default:
-		if err := dec.Skip(); err != nil {
-			return fmt.Errorf("mapping: animap document member %q: %w", key, err)
-		}
-	}
-	return nil
-}
-
-func logParseDiagnostics(log *slog.Logger, counts *decodeCounts) {
-	if counts.skipped > 0 {
-		attrs := []any{"skipped", counts.skipped, "parsed", len(counts.records)}
-		if counts.firstErr != nil {
-			// Untrusted-input-derived, so it passes maxLoggedErrorBytes.
-			attrs = append(attrs, "error",
-				errors.New(runesafe.SanitizeSingleLineBounded(counts.firstErr.Error(), maxLoggedErrorBytes)))
-		}
-		log.Warn("mapping: skipped malformed records", attrs...)
-	}
-	if counts.anidbOnly > 0 {
-		log.Debug("mapping: records without anilist_id kept for their mapping list only", "records", counts.anidbOnly, "parsed", len(counts.records))
-	}
-	// Advance warnings before a cap becomes a hard refusal, which freezes the map
-	// stale until the cap is raised.
-	if counts.elements >= maxRecords/4*3 {
-		log.Warn("mapping: animap records approaching record cap", "elements", counts.elements, "cap", maxRecords)
-	}
-	if counts.retained >= maxRetainedTotal/4*3 {
-		log.Warn("mapping: animap retained values approaching budget", "identifiers", counts.retained, "cap", maxRetainedTotal)
-	}
-}
-
-func decodeRecords(dec *jsoncap.Decoder) (decodeCounts, error) {
-	ok, err := dec.Open('[')
-	if err != nil {
-		return decodeCounts{}, fmt.Errorf("%w: records: %w", errNotAnimapDocument, err)
-	}
-	if !ok {
-		return decodeCounts{}, fmt.Errorf("%w: records is null", errNotAnimapDocument)
-	}
-	counts := decodeCounts{mappings: make(map[int]Mapping), parentMappings: make(map[int]Mapping)}
-	for seen := 0; dec.More(); seen++ {
-		if seen == maxRecords {
-			return decodeCounts{}, errRecordCapExceeded
-		}
-		counts.elements++
-		var msg json.RawMessage
-		if err := dec.Decode(&msg); err != nil {
-			return decodeCounts{}, fmt.Errorf("mapping: animap records stream decode: %w", err)
-		}
-		if err := counts.add(msg); err != nil {
-			return decodeCounts{}, err
-		}
-	}
-	if err := dec.Close(); err != nil {
-		return decodeCounts{}, fmt.Errorf("mapping: animap records truncated or malformed at close: %w", err)
-	}
-	return counts, nil
-}
-
-type decodeCounts struct {
-	firstErr       error
-	mappings       map[int]Mapping
-	parentMappings map[int]Mapping
-	records        []Record
-	elements       int
-	skipped        int
-	anidbOnly      int
-	retained       int
-}
-
-// add folds one raw record in: a decode failure counts as skipped, keeping the
-// first error; a record breaching the retained budget fails the document. A
-// record's mapping-list facts are keyed by its AniDB id, or by its AniList id
-// when it is a specials-of-parent record; any other record's facts join nothing.
-func (c *decodeCounts) add(msg json.RawMessage) error {
-	r, err := decodeRecord(msg)
-	if err != nil {
-		c.skipped++
-		if c.firstErr == nil {
-			c.firstErr = err
-		}
-		return nil
-	}
-	rec := r.toRecord()
-	m := r.mapping()
-	n := len(rec.IMDbIDs) + len(rec.TmdbMovies) + len(m.Seasons) + len(m.Specials)
-	if c.retained+n > maxRetainedTotal {
-		return errIdentifierBudgetExceeded
-	}
-	c.retained += n
-	if !m.empty() {
-		switch {
-		case rec.AniDBID > 0:
-			c.mappings[rec.AniDBID] = m
-		case r.parentSpecial():
-			c.parentMappings[rec.AniListID] = m
-		}
-	}
-	if rec.AniListID <= 0 {
-		c.anidbOnly++
-		return nil
-	}
-	c.records = append(c.records, rec)
-	return nil
-}
-
-func decodeRecord(msg json.RawMessage) (animapRecord, error) {
-	if len(msg) > maxRecordBytes {
-		return animapRecord{}, fmt.Errorf("record exceeds %d bytes", maxRecordBytes)
-	}
-	var r animapRecord
-	if err := json.Unmarshal(msg, &r); err != nil {
-		return animapRecord{}, err
-	}
-	if len(r.IMDbIDs) > maxRecordIdentifiers || len(r.TMDBMovieIDs) > maxRecordIdentifiers {
-		return animapRecord{}, fmt.Errorf("record identifier list exceeds cap %d", maxRecordIdentifiers)
-	}
-	return r, nil
+	return slices.Sorted(maps.Keys(seen)), stated
 }

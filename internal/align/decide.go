@@ -1,9 +1,11 @@
 package align
 
 import (
+	"encoding/json"
 	"slices"
 
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -45,9 +47,10 @@ const (
 
 // Outcome is the linearized comparison decision shared by the daemon's
 // compare pass and the audit report, in the one branch order both flows
-// follow: file presence before the entry state (no file beats the no-best
-// nudge), the no-best fallback before any group comparison, proven alignment
-// over everything group-shaped, unverifiable evidence before the mixed and
+// follow: a withheld comparison first (decided before files are read), then
+// file presence before the entry state (no file beats the no-best nudge), the
+// no-best fallback before any group comparison, proven alignment over
+// everything group-shaped, unverifiable evidence before the mixed and
 // diverged claims (an unproven comparison must not surface as either), and
 // mixed over the single-group divergence.
 type Outcome int
@@ -56,6 +59,11 @@ const (
 	// OutcomeNoFile means there is nothing on disk to judge. The daemon stays
 	// silent (report-by-exception); the audit records no_file.
 	OutcomeNoFile Outcome = iota
+	// OutcomeWithheld means the comparison is not made because the item's
+	// placement of the entry is not trusted (Decision.Withheld says why).
+	// Neither consumer reads a Standing or a group beside it: the daemon stays
+	// silent and the audit records withheld.
+	OutcomeWithheld
 	// OutcomeNoBest means the prepared best set is empty, so there is no
 	// group comparison to act on; the entry state (classify.Fallback) decides
 	// the nudge each consumer emits.
@@ -77,6 +85,37 @@ const (
 	// attributable group state: the actionable divergence.
 	OutcomeDiverged
 )
+
+// WithholdReason names why a comparison was withheld.
+type WithholdReason int
+
+const (
+	// WithheldNone means the comparison was not withheld.
+	WithheldNone WithholdReason = iota
+	// WithheldOrder means Sonarr numbers the series in another order than
+	// TheTVDB's aired one, which SeaDex entries are placed in.
+	WithheldOrder
+	// WithheldAniList means Sonarr's AniList ids for the series exclude the
+	// entry.
+	WithheldAniList
+)
+
+// String names the reason for an operator: "order", "anilist", or "" for none.
+func (r WithholdReason) String() string {
+	switch r {
+	case WithheldOrder:
+		return "order"
+	case WithheldAniList:
+		return "anilist"
+	default:
+		return ""
+	}
+}
+
+// MarshalJSON encodes the reason as its String() name.
+func (r WithholdReason) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.String())
+}
 
 // Listing is the SeaDex side of one comparison.
 type Listing struct {
@@ -104,7 +143,7 @@ type Decision struct {
 	// SeaDex lists across them.
 	SupersededGroups []string
 	// Episodes and MissingEpisodes are set only for ScopeEpisodes: the placed
-	// season-0 episodes judged, and those of them with no file.
+	// episodes of Season judged, and those of them with no file.
 	Episodes        []int
 	MissingEpisodes []int
 	HeldRevision    release.Revision
@@ -113,22 +152,27 @@ type Decision struct {
 	Standing        Standing
 	Outcome         Outcome
 	// Season is the shared non-negative TVDB season label both consumers stamp on
-	// their output: Record.SeasonTvdb for a ScopeSeason comparison, else 0.
+	// their output: Record.SeasonTvdb for a ScopeSeason comparison, the placed
+	// episodes' season for ScopeEpisodes, else 0.
 	Season int
-	Approx bool
-	NoBest bool
+	// Withheld is set only on OutcomeWithheld.
+	Withheld WithholdReason
+	Approx   bool
+	NoBest   bool
 }
 
-// Decide resolves the one comparison decision both align consumers project
-// their vocabulary from: the daemon's compare pass maps it to Finding/Status
-// (internal/compare) and the audit report to its report rows' verdicts and
-// qualifiers (internal/audit). The entry's SiblingSeasons and Seasons both bound a
-// whole-series comparison to its own seasons, from two sources: Seasons (its
-// TVDB season ranges from the mapping list) wins when present, else the seasons
-// sibling records map are dropped. Its Specials decide the episodes scope.
+// Decide resolves the one comparison decision the daemon's compare pass and the
+// audit report both project their vocabulary from. Seasons (the entry's TVDB
+// ranges) bound a whole-series comparison when present, else SiblingSeasons
+// are dropped from it; Specials or Episodes decide the episodes scope. A
+// comparison Withholding names a reason for is withheld with the record's
+// scope kind and season, whatever the item's files hold.
 func Decide(item *library.Item, e *Entry, listing *Listing) Decision {
 	rec := e.Record
-	scoped := scope(item, rec, e.Specials)
+	if reason := Withholding(item, e); reason != WithheldNone {
+		return withheld(rec, reason, len(listing.Best) == 0)
+	}
+	scoped := scope(item, rec, e.Specials, e.Episodes)
 	d := Decision{Kind: scoped.Kind, NoBest: len(listing.Best) == 0}
 	switch scoped.Kind {
 	case ScopeSeason:
@@ -137,7 +181,7 @@ func Decide(item *library.Item, e *Entry, listing *Listing) Decision {
 		// other scope leaves it 0.
 		d.Season = rec.SeasonTvdb
 	case ScopeEpisodes:
-		d.Episodes, d.MissingEpisodes = slices.Clone(e.Specials), scoped.Missing
+		d.Season, d.Episodes, d.MissingEpisodes = scoped.Season, slices.Clone(scoped.Episodes), scoped.Missing
 	}
 	switch {
 	case !item.Comparable():
@@ -177,6 +221,45 @@ func Decide(item *library.Item, e *Entry, listing *Listing) Decision {
 		}
 	}
 	d.Outcome = outcomeOf(d.Standing, len(d.Groups), d.NoBest)
+	return d
+}
+
+// Withholding names why Decide withholds e's comparison on item, WithheldNone
+// when it makes it: a non-aired episode order (library.Item.Order) withholds
+// every comparison, and Sonarr's AniList ids excluding the entry withhold a
+// season or whole-series one. Both reasons come from series metadata a failed
+// placeholder keeps, so they hold there too, except that an entry placed on
+// episodes of its season is not withheld for AniList on a placeholder: the
+// listing it lacks could place it on part of the season, which is exempt.
+func Withholding(item *library.Item, e *Entry) WithholdReason {
+	switch {
+	case item.Order != nil:
+		return WithheldOrder
+	case !aniListExcludes(item, e.AniListID):
+		return WithheldNone
+	}
+	switch scope(item, e.Record, e.Specials, e.Episodes).Kind {
+	case ScopeWholeSeries:
+		return WithheldAniList
+	case ScopeSeason:
+		if item.Comparable() || len(e.Episodes) == 0 {
+			return WithheldAniList
+		}
+	}
+	return WithheldNone
+}
+
+// aniListExcludes reports whether Sonarr links item to AniList entries that
+// do not include id. An empty list excludes nothing.
+func aniListExcludes(item *library.Item, id int) bool {
+	return len(item.AniListIDs) > 0 && !slices.Contains(item.AniListIDs, id)
+}
+
+// withheld is the decision for a comparison not made: no groups were judged,
+// so only the record's own scope kind and season label it.
+func withheld(rec *mapping.Record, reason WithholdReason, noBest bool) Decision {
+	d := Decision{Outcome: OutcomeWithheld, Withheld: reason, NoBest: noBest}
+	d.Kind, d.Season = RecordSeason(rec)
 	return d
 }
 

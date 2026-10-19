@@ -112,7 +112,7 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
@@ -162,7 +162,7 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
@@ -209,13 +209,13 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
 		t.Errorf("harvest queries after first rebuild = %d, want 1", mock.calls())
 	}
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	if mock.calls() != 1 {
@@ -271,7 +271,7 @@ func TestHarvestTimeSliceEnforced(t *testing.T) {
 	}
 	t.Cleanup(func() { harvestWait = prevWait })
 
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 5 {
@@ -309,7 +309,7 @@ func TestHarvestRotationResumesAfterCursor(t *testing.T) {
 	seedLedgerWithCursor(t, path, "nyaa:1500")
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 2 {
@@ -342,7 +342,7 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		log, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") {
@@ -390,7 +390,7 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		log, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("indexer title harvest response malformed; show keeps its synthesized title this rebuild") {
@@ -447,7 +447,7 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		log, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if !rec.Contains("indexer title harvest request rejected; show keeps its synthesized title this rebuild") {
@@ -485,7 +485,7 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if mock.calls() != 0 {
@@ -638,7 +638,7 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 		nil, srv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -935,7 +935,7 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"},
 		log, countSrv.Client())
-	if err := w.Rebuild(t.Context(), entries, info); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	mu.Lock()
@@ -1041,7 +1041,7 @@ func TestHarvestParams(t *testing.T) {
 		{"nyaa series with a mapped season uses the season form", EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true}, upstreamNyaa, "tvsearch", "1"},
 		{"nyaa seasonless series stays a plain search", EntryInfo{Title: "One Piece"}, upstreamNyaa, "search", ""},
 		{"nyaa specials bucket stays a plain search", EntryInfo{Title: "Frieren OVA", Season: 0, SeasonKnown: true}, upstreamNyaa, "search", ""},
-		{"nyaa movie stays a plain search even with a mapped season", EntryInfo{Title: "A Silent Voice", Season: 1, SeasonKnown: true, IsMovie: true}, upstreamNyaa, "search", ""},
+		{"nyaa movie stays a plain search even with a mapped season", EntryInfo{Title: "A Silent Voice", Season: 1, SeasonKnown: true, Kind: KindMovie}, upstreamNyaa, "search", ""},
 		{"ab is always a plain series-level search", EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true}, upstreamAB, "search", ""},
 		{"q is the trimmed synthesis title", EntryInfo{Title: "  Frieren  ", Season: 2, SeasonKnown: true}, upstreamNyaa, "tvsearch", "2"},
 	}
@@ -1520,7 +1520,7 @@ func TestRequestScopedHarvestError(t *testing.T) {
 // TestRequestScopedClassificationSurvivesKeyRedaction pins the parse-before-
 // redact contract: classifyParseError scrubs a reflected Prowlarr API key
 // from the document's DISPLAY strings, and with a short all-digit key ("2")
-// that scrub rewrites a valid request code ("201" -> "REDACTED01") - but the
+// that scrub rewrites a valid request code ("201" -> "[redacted]01") - but the
 // show-vs-scope classification must still read the parse-time codeNum and
 // classify the rejection show-local, never re-parsing the redacted string
 // (the c2 audit regression: a one-show rejection wrongly condemned the whole
@@ -1532,10 +1532,10 @@ func TestRequestScopedClassificationSurvivesKeyRedaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("classifyParseError = %T (%v), want the terminal *upstreamDocError", err, err)
 	}
-	if docErr.code != "REDACTED01" {
-		t.Errorf("redacted code string = %q, want %q (display text scrubbed)", docErr.code, "REDACTED01")
+	if docErr.code != "[redacted]01" {
+		t.Errorf("redacted code string = %q, want %q (display text scrubbed)", docErr.code, "[redacted]01")
 	}
-	if !strings.Contains(docErr.description, "REDACTED") {
+	if !strings.Contains(docErr.description, "[redacted]") {
 		t.Errorf("redacted description = %q, want the key scrubbed", docErr.description)
 	}
 	if !requestScopedHarvestError(err) {

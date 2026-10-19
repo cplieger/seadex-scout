@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -51,11 +51,11 @@ func tickDeps(logger *slog.Logger, sea *fakeSeaDex, feed FeedWriter, notifier *n
 	if notifier == nil {
 		notifier = notify.NewNotifier(logger, nil)
 	}
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	return &Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       sea,
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -616,8 +616,8 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 // ReportScoped's deletion authority from exactly that set: publishing it would
 // tell the notifier that entries the tick never finished evaluating are resolved.
 // No completion line either, since an interrupted pass did not complete. It must
-// still persist: discarding the revalidated mapping validators re-downloads ~2.3 MB
-// on the next boot, and the refresh-rejection streak must survive a restart.
+// still persist: discarding an accepted mapping release re-downloads ~13 MB on
+// the next boot, and the refresh-rejection streak must survive a restart.
 func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) {
 	logger, recorder := capture.New()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -632,7 +632,7 @@ func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) 
 	deps, store := tickDeps(logger, sea, nil, nil, 96)
 	deps.Matcher = match.New(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger())
 	// An accepted mapping refresh on every load, so "did the interrupted tick
-	// persist what it learned" is observable at all: with a 304-shaped loader
+	// persist what it learned" is observable at all: with an unchanged-release loader
 	// saveTick's own skip fires and the assertion could not tell a declined save
 	// from a vacuous one.
 	deps.Mapping = &refreshingMapping{}
@@ -662,7 +662,7 @@ func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) 
 		t.Errorf("the interrupted tick emitted %d new 'findings reported' summaries, want 0: publishing a truncated match set would resolve rows for entries it never finished evaluating", n)
 	}
 	if store.saves != savesAfterSeed+1 {
-		t.Errorf("saves = %d, want %d: a shutdown declines the completion line, never the persistence - the revalidated mapping validators and the rejection streak the mapping escalation reads must survive the restart",
+		t.Errorf("saves = %d, want %d: a shutdown declines the completion line, never the persistence - the accepted mapping release and the rejection streak the mapping escalation reads must survive the restart",
 			store.saves, savesAfterSeed+1)
 	}
 	// The one thing a tick must never write, on this exit as on every other.
@@ -1094,20 +1094,20 @@ func tickDegradedReasons(recorder *capture.Recorder) []string {
 func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 	logger, recorder := capture.New()
 	sonarr := &flakySonarr{
-		series: []arrapi.Series{
-			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-			{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+		series: []sonarr.Series{
+			{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+			{ID: 8, Title: "Second Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
 		},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
+			8: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    &fakeStore{st: state.State{Mapping: twoRecordMappingCache()}},
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
@@ -1285,38 +1285,39 @@ func TestTickWithAnUnusableMapSkipsComparisonAndKeepsEveryRow(t *testing.T) {
 	}
 }
 
-// revalidatingMapping is a mapping loader that behaves like the REAL one on a
-// 304: same records, same validators, fresh FetchedAt (mapping.go's
-// not-modified arm does exactly this). The default fake returns prev untouched,
-// which is not what production looks like on the ~96% of ticks that revalidate
-// without a body change - and a test built on it cannot see a comparison that
-// wrongly includes the timestamp.
-type revalidatingMapping struct{}
+// unchangedReleaseMapping is a mapping loader that behaves like the REAL one on an
+// unchanged release: same records, same tag, fresh FetchedAt (mapping.go's
+// reuseCachedRecords does exactly this). The default fake returns prev untouched,
+// which is not what production looks like on the ticks that find the release
+// unchanged - and a test built on it cannot see a comparison that wrongly
+// includes the timestamp.
+type unchangedReleaseMapping struct{}
 
-func (revalidatingMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
+func (unchangedReleaseMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
 	c := *prev
 	c.FetchedAt = time.Now()
 	return c, mapping.NewIndex(mapping.Source{Records: prev.Records}), nil
 }
 
-// refreshingMapping is a mapping loader that reports a NEW validator on every
-// call, i.e. an accepted mapping refresh rather than a 304. It is the real trigger
-// for the write the skip below must not suppress.
+// refreshingMapping is a mapping loader that reports a NEW release tag on
+// every call, i.e. an accepted mapping refresh rather than an unchanged one.
+// It is the real trigger for the write the skip below must not suppress.
 type refreshingMapping struct{ calls int }
 
 func (r *refreshingMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
 	r.calls++
 	c := *prev
-	c.ETag = "etag-" + strconv.Itoa(r.calls)
+	c.Tag = "v2026.10." + strconv.Itoa(10+r.calls)
 	return c, mapping.NewIndex(mapping.Source{Records: prev.Records}), nil
 }
 
 // TestProductiveTickSkipsTheStateWriteWhenNothingChanged pins the write skip.
 // state.json is a single ~2.5 MB document dominated by the library snapshot, so
-// persisting a tick's few KB of memo and validators rewrites all of it: ~92
+// persisting a tick's few KB of memo and mapping state rewrites all of it: ~92
 // productive ticks a day is ~230 MB/day for a tick that renewed no AniList entry
-// and got a 304 for the mapping. The trap is that almost every tick DOES get a 304
-// and the loader returns the cached map with a fresh FetchedAt, so the comparison
+// and found the mapping's release unchanged. The trap is that almost every tick
+// DOES find it unchanged and the loader returns the cached map with a fresh
+// FetchedAt, so the comparison
 // excludes that timestamp deliberately or the skip would never fire.
 func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -1324,11 +1325,11 @@ func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 		wantSaves bool
 	}{
 		// The default fake hands back the cached records unchanged, which is what
-		// a 304 looks like to the scout, and the window entry needs no AniList
+		// an unchanged release looks like to the scout, and the window entry needs no AniList
 		// lookup - so this tick fetches, advances and reports while learning
 		// nothing persistable.
-		"a revalidated mapping and no renewal writes nothing": {revalidatingMapping{}, false},
-		"an accepted mapping refresh still writes":            {&refreshingMapping{}, true},
+		"an unchanged release and no renewal writes nothing": {unchangedReleaseMapping{}, false},
+		"an accepted mapping refresh still writes":           {&refreshingMapping{}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			// The window carries the MAPPED Frieren entry, so it matches by id
@@ -1370,17 +1371,18 @@ func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
 	}
 }
 
-// TestMappingWorthPersisting pins the tick's write skip: a changed validator, a
-// changed record count or a moved rejection streak is worth a write (otherwise
-// a tick that accepted a new body re-downloads it every cycle until the
-// reconcile), while a bumped FetchedAt alone is the 304 case and is not.
+// TestMappingWorthPersisting pins the tick's write skip: a changed release
+// tag, a changed record count or a moved rejection streak is worth a write
+// (otherwise a tick that accepted a new release re-downloads it every cycle
+// until the reconcile), while a bumped FetchedAt alone is the unchanged-release
+// case and is not.
 func TestMappingWorthPersisting(t *testing.T) {
 	base := func() mapping.Cache {
 		return mapping.Cache{
 			FetchedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
-			ETag:      "animap-v1",
+			Tag:       "v2026.10.16",
 			Records:   []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-			Mappings:  map[int]mapping.Mapping{7: {SpecialEpisode: 2}},
+			Mappings:  map[int]mapping.Mapping{7: {Specials: []int{2}, SpecialsTvdb: 100, SpecialsEpisodes: 1}},
 		}
 	}
 	tests := []struct {
@@ -1390,8 +1392,7 @@ func TestMappingWorthPersisting(t *testing.T) {
 	}{
 		{name: "unchanged", mutate: func(*mapping.Cache) {}, want: false},
 		{name: "only_fetched_at_moved", mutate: func(c *mapping.Cache) { c.FetchedAt = time.Now() }, want: false},
-		{name: "etag_changed", mutate: func(c *mapping.Cache) { c.ETag = "animap-v2" }, want: true},
-		{name: "last_modified_changed", mutate: func(c *mapping.Cache) { c.LastModified = "Mon, 02 Jan 2006 15:04:05 GMT" }, want: true},
+		{name: "tag_changed", mutate: func(c *mapping.Cache) { c.Tag = "v2026.10.17" }, want: true},
 		{name: "record_count_changed", mutate: func(c *mapping.Cache) { c.Records = append(c.Records, mapping.Record{AniListID: 2}) }, want: true},
 		{name: "rejection_streak_moved", mutate: func(c *mapping.Cache) { c.RejectedRefreshes = 1 }, want: true},
 	}

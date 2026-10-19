@@ -36,11 +36,11 @@ func TestTwinTitle(t *testing.T) {
 	filmWithSeries["[Arid] Steins;Gate - The Movie - Load Region of Deja Vu (BD 1080p).mkv"] = 8 << 30
 	hyoukaPack := numberedFiles("[MTBB] Hyouka - %02d (BD 1080p).mkv", 1, 22, 1<<30)
 	hyoukaPack["[MTBB] Hyouka - 11.5 (OVA) (BD 1080p).mkv"] = 1 << 30
-	geass := EntryInfo{IsMovie: true, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"}
+	geass := EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"}
 	fallback := geass
 	fallback.SpecialsEpisodes = 0
 	ovaFallback := fallback
-	ovaFallback.IsMovie = false
+	ovaFallback.Kind = KindSeries
 	tests := []struct {
 		name      string
 		files     []seadex.File
@@ -55,7 +55,7 @@ func TestTwinTitle(t *testing.T) {
 		},
 		{
 			name: "a film shipped with the series it follows", files: twinFiles(filmWithSeries),
-			info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{2}, SpecialsEpisodes: 1, SeriesTitle: "Steins;Gate"},
+			info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{2}, SpecialsEpisodes: 1, SeriesTitle: "Steins;Gate"},
 		},
 		{
 			name: "one episode of a four-episode ONA", files: twinFiles(map[string]int64{"[AtlasSubbed] Mini Yuri - 01 1080p.mkv": 1 << 28}),
@@ -83,12 +83,12 @@ func TestTwinTitle(t *testing.T) {
 		},
 		{
 			name: "one file answering one AniDB episode over three TVDB specials", files: twinFiles(map[string]int64{"[G] Film (BD 1080p).mkv": 6 << 30}),
-			info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{4, 5, 6}, SpecialsEpisodes: 1, SeriesTitle: "Series"},
+			info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{4, 5, 6}, SpecialsEpisodes: 1, SeriesTitle: "Series"},
 			want: "Series S00E04-E06 1080p [G]",
 		},
 		{
 			name: "one film of a three-film entry", files: twinFiles(map[string]int64{"Mononoke The Movie The Phantom in the Rain (2024) (1080p).mkv": 6 << 30}),
-			info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{4, 5, 6}, SpecialsEpisodes: 3, SeriesTitle: "Mononoke"},
+			info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{4, 5, 6}, SpecialsEpisodes: 3, SeriesTitle: "Mononoke"},
 		},
 		{
 			name: "two placed episodes padded to the run by unrecognised videos",
@@ -108,15 +108,15 @@ func TestTwinTitle(t *testing.T) {
 		},
 		{
 			name: "a gapped placement", files: twinFiles(numberedFiles("[G] Overlord Movie - %02d (BD 1080p).mkv", 1, 3, 4<<30)),
-			info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{9, 12, 13}, SpecialsEpisodes: 3, SeriesTitle: "Overlord"},
+			info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{9, 12, 13}, SpecialsEpisodes: 3, SeriesTitle: "Overlord"},
 		},
-		{name: "episode 999", files: film, info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{999}, SpecialsEpisodes: 1, SeriesTitle: "S"}, dualAudio: true, want: "S S00E999 1080p Dual Audio [G]"},
-		{name: "episode 1000", files: film, info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{1000}, SpecialsEpisodes: 1, SeriesTitle: "S"}},
-		{name: "the mapping-list fallback on one file", files: film, info: fallback, dualAudio: true, want: "Code Geass S00E04 1080p Dual Audio [G]"},
-		{name: "the mapping-list fallback for an OVA on one file", files: film, info: ovaFallback},
-		{name: "the mapping-list fallback on two files", files: twinFiles(numberedFiles("[G] Code Geass Akito - %02d (BD 1080p).mkv", 1, 2, 3<<30)), info: fallback},
-		{name: "no episode", files: film, info: EntryInfo{IsMovie: true, SeriesTitle: "Code Geass"}},
-		{name: "blank series title", files: film, info: EntryInfo{IsMovie: true, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "  "}},
+		{name: "episode 999", files: film, info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{999}, SpecialsEpisodes: 1, SeriesTitle: "S"}, dualAudio: true, want: "S S00E999 1080p Dual Audio [G]"},
+		{name: "episode 1000", files: film, info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{1000}, SpecialsEpisodes: 1, SeriesTitle: "S"}},
+		{name: "the single-special fallback on one file", files: film, info: fallback, dualAudio: true, want: "Code Geass S00E04 1080p Dual Audio [G]"},
+		{name: "the single-special fallback for an OVA on one file", files: film, info: ovaFallback},
+		{name: "the single-special fallback on two files", files: twinFiles(numberedFiles("[G] Code Geass Akito - %02d (BD 1080p).mkv", 1, 2, 3<<30)), info: fallback},
+		{name: "no episode", files: film, info: EntryInfo{Kind: KindMovie, SeriesTitle: "Code Geass"}},
+		{name: "blank series title", files: film, info: EntryInfo{Kind: KindMovie, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "  "}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -200,7 +200,7 @@ func TestTwinVote(t *testing.T) {
 // across the feed token and the report's Scope cell (align.EpisodeLabel).
 func TestTwinTokenSpellsTheRunAsTheReportDoes(t *testing.T) {
 	for _, run := range [][]int{{1}, {4}, {9, 10}, {4, 5, 6}, {21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}, {999}} {
-		if got, want := twinToken(run[0], run[len(run)-1]), align.EpisodeLabel(run); got != want {
+		if got, want := twinToken(run[0], run[len(run)-1]), align.EpisodeLabel(0, run); got != want {
 			t.Errorf("twinToken(%d, %d) = %q, want align.EpisodeLabel(%v) = %q", run[0], run[len(run)-1], got, run, want)
 		}
 	}
