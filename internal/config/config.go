@@ -266,12 +266,17 @@ type Config struct {
 // NAME is kept - it IS the diagnostic the operator needs - and the strict probe runs
 // on the pre-expansion bytes, so the name cannot carry an expanded secret.
 func Load(path string) (Config, error) {
+	return load(path, os.LookupEnv)
+}
+
+func load(path string, lookup func(name string) (string, bool)) (Config, error) {
 	raw, err := readConfigFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	fc := defaultFileConfig()
 	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
+		yamlenv.WithLookupEnv(lookup),
 		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho(true)))
 	if err != nil {
 		logUnresolvedRefs(refs, nil)
@@ -376,7 +381,9 @@ func readConfigFile(path string) (raw []byte, err error) {
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
 // normalization and the arr on/off decision (an arr that is off leaves its
-// URL/key empty, so it is simply skipped downstream).
+// URL/key empty, so it is simply skipped downstream). The three indexer
+// credentials keep their bytes, because the arrs, Prowlarr and AnimeBytes each
+// hold a copy they must match; Validate refuses edge whitespace on each one.
 func (fc *fileConfig) toConfig() Config {
 	c := Config{
 		RunMode:               strings.ToLower(strings.TrimSpace(fc.Mode)),
@@ -389,11 +396,11 @@ func (fc *fileConfig) toConfig() Config {
 		RequireDualAudio:      fc.Filters.RequireDualAudio,
 		AnimeBytes:            fc.AnimeBytes,
 		ExcludeSpecials:       fc.Filters.ExcludeSpecials,
-		IndexerAPIKey:         strings.TrimSpace(fc.Indexer.FeedAPIKey),
+		IndexerAPIKey:         fc.Indexer.FeedAPIKey,
 		IndexerNyaaTorznabURL: strings.TrimSpace(fc.Indexer.NyaaTorznabURL),
 		IndexerABTorznabURL:   strings.TrimSpace(fc.Indexer.ABTorznabURL),
-		IndexerProwlarrAPIKey: strings.TrimSpace(fc.Indexer.ProwlarrAPIKey),
-		IndexerABPasskey:      strings.TrimSpace(fc.Indexer.ABPasskey),
+		IndexerProwlarrAPIKey: fc.Indexer.ProwlarrAPIKey,
+		IndexerABPasskey:      fc.Indexer.ABPasskey,
 		sonarrWanted:          fc.Sonarr.explicitlyOn(),
 		radarrWanted:          fc.Radarr.explicitlyOn(),
 	}
@@ -566,6 +573,12 @@ func (c *Config) Validate() error {
 	}
 	c.warnUnexpandedSecretRefs()
 	c.warnRelativeReportDir()
+	if err := c.validateFeedAPIKey(); err != nil {
+		return err
+	}
+	if err := c.validateABPasskey(); err != nil {
+		return err
+	}
 	return c.validateIndexer()
 }
 
@@ -683,10 +696,8 @@ func (c *Config) warnArrURLCredentials() {
 	}
 }
 
-// validateIndexer rejects an enabled Torznab feed with no feed API key. The feed is
-// the only HTTP surface and authenticates callers by the apikey query param, so an
-// empty key would leave it unauthenticated - and able to leak the AnimeBytes passkey
-// embedded in synthesized RSS download links.
+// validateIndexer validates the two upstream Torznab URLs of an enabled feed and
+// emits its half-configuration warnings.
 func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
 		return nil
@@ -719,20 +730,8 @@ func (c *Config) torznabEndpoints() []torznabEndpoint {
 	}
 }
 
-// validateIndexerEndpoints enforces the feed's authentication requirement, gates the
-// two indexer-owned credentials on their FORMAT, and validates the two upstream
-// Torznab URLs, in the original diagnostic order. indexer.prowlarr_api_key is gated
-// UNCONDITIONALLY from Validate precisely because this function does not always run.
-// The gates are POSITIVE format checks at the config boundary - is this the shape a
-// credential takes - so a configured-but-unusable credential is a hard startup error
-// matching what the runtime refuses, rather than a catalogue of paste spellings.
+// validateIndexerEndpoints validates the two upstream Torznab URLs.
 func (c *Config) validateIndexerEndpoints() error {
-	if err := c.validateFeedAPIKey(); err != nil {
-		return err
-	}
-	if err := c.validateABPasskey(); err != nil {
-		return err
-	}
 	for _, endpoint := range c.torznabEndpoints() {
 		if err := validateHTTPURL(endpoint.name, endpoint.val); err != nil {
 			return err
@@ -747,7 +746,11 @@ func (c *Config) validateIndexerEndpoints() error {
 // run of printable characters with no whitespace, no control rune and no '$'. The
 // shape rule is wellFormedCredential, shared with the arr and Prowlarr key gates.
 // Field-name-only on every arm: the key value never rides the error or the log.
+// With no Torznab URL the key is unused and only edge whitespace is refused.
 func (c *Config) validateFeedAPIKey() error {
+	if !c.IndexerConfigured() {
+		return refuseEdgeWhitespace("indexer.feed_api_key", c.IndexerAPIKey)
+	}
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
 	}
@@ -786,18 +789,20 @@ func (c *Config) validateProwlarrAPIKey() error {
 
 // validateABPasskey is the ONE gate on indexer.ab_passkey. AnimeBytes is off at
 // EITHER half - an empty passkey, or an empty indexer.ab_torznab_url - and both off
-// states pass. A passkey configured BESIDE an AB endpoint must be the shape AnimeBytes
+// states pass unless the passkey has edge whitespace. A passkey configured BESIDE an AB endpoint must be the shape AnimeBytes
 // issues, or the config fails: every AB download link is built from it. The lengths
 // are upstream authority (Jackett's AnimeBytes indexer and Prowlarr's validator both
 // assert 32, 48 or 56) while NEITHER constrains the charset, so this app must not
 // either. It validates SHAPE, never CORRECTNESS; field-name-only.
 func (c *Config) validateABPasskey() error {
+	if c.IndexerABPasskey == "" || wellFormedABPasskey(c.IndexerABPasskey) {
+		return nil
+	}
 	// AnimeBytes is OFF at EITHER half, so a parked passkey - an unexpanded ${VAR} this
 	// deployment never sets, or a truncated paste - must not block the daemon the
 	// always-on compare loop rides in. warnABPasskeyConfiguration signals that state.
-	if c.IndexerABTorznabURL == "" || c.IndexerABPasskey == "" ||
-		wellFormedABPasskey(c.IndexerABPasskey) {
-		return nil
+	if c.IndexerABTorznabURL == "" {
+		return refuseEdgeWhitespace("indexer.ab_passkey", c.IndexerABPasskey)
 	}
 	msg := "indexer.ab_passkey is not a usable AnimeBytes passkey. It must be 32, 48 or 56 " +
 		"characters with no spaces, which are the lengths AnimeBytes issues and the ones Jackett and " +
@@ -883,6 +888,17 @@ func warnUnexpectedAPIKeyShape(field, v string) {
 		"(32 hex characters); it is accepted, but a truncated or mistyped paste looks "+
 		"exactly like this and every call to that upstream would fail to authenticate",
 		"field", field)
+}
+
+// refuseEdgeWhitespace fails a credential that starts or ends with whitespace, naming
+// only the field. The loader keeps credential bytes as given, because each must match
+// a copy held outside this process, so a padded paste is refused rather than trimmed.
+func refuseEdgeWhitespace(field, v string) error {
+	if v == strings.TrimSpace(v) {
+		return nil
+	}
+	return errors.New(field + " starts or ends with whitespace. Remove it: the value is " +
+		"used exactly as written and must match the copy the other service holds")
 }
 
 // wellFormedABPasskey reports whether v is one of the three lengths AnimeBytes
