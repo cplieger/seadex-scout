@@ -798,14 +798,13 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// TestMarkAndDedupe; the mock here returns the curated item for any query.)
 }
 
-// TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost pins the redirect policy of
-// the client the composition root supplies to the constructors (build.go passes
-// httpx.NewClient, so this test wires the production pairing): the Prowlarr API
-// key rides an X-Api-Key header, which net/http forwards across redirects, so a
-// cross-host hop must be refused before the credential can leave the configured
-// origin. Driving the real request path (rather than invoking CheckRedirect
-// directly) keeps the test on the contract instead of the mechanism, so an
-// equivalent policy moved into a RoundTripper still passes.
+// TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost pins that wireUpstreams uses
+// the caller-supplied redirect policy: the Prowlarr API key rides an X-Api-Key
+// header, which net/http forwards across redirects, so a cross-host hop must be
+// refused before the credential can leave the configured origin. Driving the
+// real request path (rather than invoking CheckRedirect directly) keeps the test
+// on the contract instead of the mechanism, so an equivalent policy moved into a
+// RoundTripper still passes.
 func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	leaked := make(chan string, 1)
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -828,7 +827,9 @@ func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	ups := wireUpstreams(httpx.NewClient(upstreamAttemptTimeout), nil, UpstreamConfig{
+	client := httpx.NewClient(upstreamAttemptTimeout)
+	client.CheckRedirect = httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true))
+	ups := wireUpstreams(client, nil, UpstreamConfig{
 		NyaaTorznabURL: redirector.URL,
 		ProwlarrAPIKey: "prowlarr-key",
 	})

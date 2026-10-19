@@ -20,6 +20,7 @@ import (
 
 	"github.com/cplieger/arrapi/v2"
 	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
@@ -608,6 +609,97 @@ func TestFeedWriter(t *testing.T) {
 				t.Errorf("feedWriter(nyaa=%q, ab=%q) nil = %v, want %v", tt.nyaaURL, tt.abURL, gotNil, tt.wantNil)
 			}
 		})
+	}
+}
+
+func prowlarrRedirect(t *testing.T, target func(sinkURL string) string) (sinkKey, finalKey string, err error) {
+	t.Helper()
+	sinkKeys := make(chan string, 1)
+	sink := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		sinkKeys <- r.Header.Get("X-Api-Key")
+	}))
+	defer sink.Close()
+	finalKeys := make(chan string, 1)
+	prowlarr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/final" {
+			finalKeys <- r.Header.Get("X-Api-Key")
+			return
+		}
+		http.Redirect(w, r, target(sink.URL), http.StatusFound)
+	}))
+	defer prowlarr.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, prowlarr.URL+"/api", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Api-Key", "prowlarr-key")
+	resp, err := newProwlarrClient().Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	select {
+	case sinkKey = <-sinkKeys:
+	default:
+	}
+	select {
+	case finalKey = <-finalKeys:
+	default:
+	}
+	return sinkKey, finalKey, err
+}
+
+// TestProwlarrClientRefusesAnotherOrigin pins that the X-Api-Key header, which
+// net/http forwards on every followed hop, never leaves the Prowlarr origin.
+func TestProwlarrClientRefusesAnotherOrigin(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(sinkURL string) string
+	}{
+		{name: "another port on the same host", target: func(sinkURL string) string { return sinkURL }},
+		{name: "another spelling of the host", target: func(sinkURL string) string {
+			return strings.Replace(sinkURL, "127.0.0.1", "localhost", 1)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sinkKey, _, err := prowlarrRedirect(t, tt.target)
+			if refused, ok := errors.AsType[*httpx.RedirectRefusedError](err); !ok || refused.Reason != httpx.RedirectOtherOrigin {
+				t.Errorf("redirect error = %v, want a RedirectOtherOrigin refusal", err)
+			}
+			if sinkKey != "" {
+				t.Errorf("redirect target received X-Api-Key %q, want no request", sinkKey)
+			}
+		})
+	}
+}
+
+// TestProwlarrClientFollowsItsOrigin pins that the policy still follows a
+// redirect within the Prowlarr origin, rather than refusing every hop.
+func TestProwlarrClientFollowsItsOrigin(t *testing.T) {
+	_, finalKey, err := prowlarrRedirect(t, func(string) string { return "/final" })
+	if err != nil {
+		t.Fatalf("same-origin redirect: %v, want it followed", err)
+	}
+	if finalKey != "prowlarr-key" {
+		t.Errorf("same-origin target X-Api-Key = %q, want %q", finalKey, "prowlarr-key")
+	}
+}
+
+// RFC 4007 section 11.2 leaves zone-ID representation implementation-defined, so
+// httpx compares it byte-for-byte and treats a case change as another origin.
+func TestProwlarrClientComparesIPv6ZonesExactly(t *testing.T) {
+	via, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://[fe80::1%25eth0]:9696/api", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://[fe80::1%25ETH0]:9696/api", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = newProwlarrClient().CheckRedirect(req, []*http.Request{via})
+	if refused, ok := errors.AsType[*httpx.RedirectRefusedError](err); !ok || refused.Reason != httpx.RedirectOtherOrigin {
+		t.Errorf("redirect to a zone differing only in case: %v, want a RedirectOtherOrigin refusal", err)
 	}
 }
 
