@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io/fs"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -592,21 +591,10 @@ func (h *cancelHandler) WithGroup(name string) slog.Handler {
 // captureAndCancelOn installs a recording default logger whose handler cancels
 // the given context once the expected message is recorded, replacing wall-clock
 // polling with event-driven synchronization. Serial (swaps slog.Default).
-//
-// slog.SetDefault also points the log package at the installed handler and
-// zeroes its flags, and skips that redirect for slog's own default handler, so
-// restoring slog alone leaves log writing into a dead recorder. slog goes back
-// first: reinstalling a non-default prev re-runs the redirect.
 func captureAndCancelOn(t *testing.T, cancel context.CancelFunc, message string) *capture.Recorder {
 	t.Helper()
 	_, rec := capture.New()
-	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(&cancelHandler{next: rec, cancel: cancel, message: message}))
-	t.Cleanup(func() {
-		slog.SetDefault(prev)
-		log.SetOutput(prevWriter)
-		log.SetFlags(prevFlags)
-	})
+	capture.SwapDefault(t, slog.New(&cancelHandler{next: rec, cancel: cancel, message: message}))
 	return rec
 }
 
