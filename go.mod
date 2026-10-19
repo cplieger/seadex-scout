@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/cplieger/animap/mapread v0.1.0
-	github.com/cplieger/arrapi/v2 v2.4.0-dev.3
+	github.com/cplieger/arrapi/v2 v2.4.0-dev.4
 	github.com/cplieger/atomicfile/v4 v4.1.0
 	github.com/cplieger/envx/yamlenv/v2 v2.1.0-dev.1
 	github.com/cplieger/health v1.8.2
