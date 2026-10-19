@@ -1113,14 +1113,6 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 	}
 }
 
-// TestFindByIDResolvesMovieIDOnANonMovieRecord covers FindByID's secondary
-// movie lookup: a record whose type label is not MOVIE but which routes
-// no series id still resolves its Radarr movie through its unambiguous movie
-// TMDB ids - the live animap shape (non-MOVIE type, no tvdb_id, a positive
-// themoviedb_id.movie) that the type label alone lost. The three negative arms
-// pin how narrow it is: a record that routes a TVDB id keeps series routing, a
-// non-MOVIE record's IMDb id still claims nothing (TVDB reuses a film's IMDb id
-// on the parent series), and an absent movie id resolves nothing.
 func TestFindByIDResolvesMovieIDOnANonMovieRecord(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Heaven's Feel I", TmdbID: 600, ImdbID: "tt888"},
@@ -1137,6 +1129,8 @@ func TestFindByIDResolvesMovieIDOnANonMovieRecord(t *testing.T) {
 		{"ova record with a movie tmdb id resolves the radarr movie", mapping.Record{Type: "OVA", TmdbMovies: []int{600}}, 1},
 		{"untyped record with a movie tmdb id resolves the radarr movie", mapping.Record{TmdbMovies: []int{600}}, 1},
 		{"a routed tvdb id keeps series routing", mapping.Record{Type: "OVA", TvdbID: 700, TmdbMovies: []int{800}}, 2},
+		{"a tvdb id sonarr lacks falls back to the movie tmdb id", mapping.Record{Type: "OVA", TvdbID: 701, TmdbMovies: []int{800}}, 3},
+		{"a tvdb id sonarr lacks never reaches radarr by imdb id", mapping.Record{Type: "OVA", TvdbID: 701, IMDbIDs: []string{"tt888"}}, 0},
 		{"a non-movie record's imdb id claims nothing", mapping.Record{Type: "OVA", IMDbIDs: []string{"tt888"}}, 0},
 		{"a zero movie tmdb id is not usable evidence", mapping.Record{Type: "OVA", TmdbMovies: []int{0}}, 0},
 		{"an absent movie tmdb id resolves nothing", mapping.Record{Type: "OVA", TmdbMovies: []int{999}}, 0},
@@ -1195,6 +1189,26 @@ func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
 	}
 	if res.Degraded {
 		t.Error("result degraded: the ID resolution must not consult AniList at all")
+	}
+}
+
+func TestMatchSeriesRecordMissingFromSonarrResolvesItsFilm(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 7, Title: "Some Film", TmdbID: 400, Year: 2020},
+	}}
+	rec := mapping.Record{AniListID: 102352, Type: "SPECIAL", TvdbID: 79000, TmdbMovies: []int{400}, SeasonKind: mapping.SeasonPresent}
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{rec}})
+
+	res := New(fakeAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 102352}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	if got := res.Matches[0]; !got.InLibrary() || got.Item.ArrID != 7 || got.Arr != library.ArrRadarr || got.Source != SourceID {
+		t.Errorf("match = item %+v arr %q source %q, want the Radarr film by ID", got.Item, got.Arr, got.Source)
+	}
+	if res.Coverage.Hits[library.ArrRadarr] != 1 || res.Coverage.Hits[library.ArrSonarr] != 0 {
+		t.Errorf("coverage hits = %v, want one Radarr hit", res.Coverage.Hits)
 	}
 }
 
