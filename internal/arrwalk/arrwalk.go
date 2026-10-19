@@ -344,7 +344,7 @@ func (w *Walker) walkSonarr(ctx context.Context, pass SonarrPass, series []sonar
 
 	kept := filterSeriesByTags(series, includeIDs, excludeIDs)
 	filteredEmpty := w.warnFilteredEmpty(library.ArrSonarr, len(series), len(kept), includeIDs != nil || excludeIDs != nil)
-	nonAired := w.warnNonAiredOrders(kept)
+	nonAired := w.logNonAiredOrders(kept)
 
 	fan := w.fetchEpisodeItems(ctx, pass, kept)
 	failed := fan.failed
@@ -370,9 +370,10 @@ func (w *Walker) walkSonarr(ctx context.Context, pass SonarrPass, series []sonar
 	return sideResult{items: items, failedEpisodeFetches: failed, filteredEmpty: filteredEmpty, nonAiredOrder: nonAired, readFailed: fan.readFailed}, nil
 }
 
-// warnNonAiredOrders logs one WARN per kept series in a non-aired episode
-// order and returns their count.
-func (w *Walker) warnNonAiredOrders(kept []sonarr.Series) int {
+// logNonAiredOrders logs one Info line per kept series in a non-aired episode
+// order and returns their count. Info, not Warn: the order is the operator's
+// own Sonarr setting, and the walk's completion line carries the count.
+func (w *Walker) logNonAiredOrders(kept []sonarr.Series) int {
 	n := 0
 	for i := range kept {
 		s := &kept[i]
@@ -381,7 +382,7 @@ func (w *Walker) warnNonAiredOrders(kept []sonarr.Series) int {
 		}
 		n++
 		order := library.Order{Type: s.Order.Type, Name: s.Order.Name}
-		w.log.Warn("sonarr series uses a non-aired episode order; seadex-scout does not compare it",
+		w.log.Info("sonarr series uses a non-aired episode order; seadex-scout does not compare it",
 			"series", logattr.Cap(s.Title), "id", s.ID, "order", logattr.Cap(order.Label()), "order_type", logattr.Cap(s.Order.Type))
 	}
 	return n

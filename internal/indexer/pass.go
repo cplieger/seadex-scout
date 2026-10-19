@@ -343,6 +343,11 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info FeedI
 	if err := w.persist(ctx, &snap); err != nil {
 		return err
 	}
+	if scope == scopeCatalogue {
+		// Only after persist: a refused snapshot leaves the previous journal served,
+		// and a key still in it must stay reported.
+		w.retainPackWarned(snap.NyaaFeed, snap.ABFeed)
+	}
 	w.logPass(&snap, ev, &js, len(entries), scope)
 	return nil
 }

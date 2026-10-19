@@ -7,7 +7,7 @@ require (
 	github.com/cplieger/arrapi/v3 v3.0.0-dev.1
 	github.com/cplieger/atomicfile/v4 v4.1.0
 	github.com/cplieger/envx/yamlenv/v2 v2.1.0-dev.1
-	github.com/cplieger/health v1.8.2
+	github.com/cplieger/health v1.9.0-dev.1
 	github.com/cplieger/httpx/v5 v5.1.0
 	github.com/cplieger/jsoncap/v2 v2.0.3
 	github.com/cplieger/keyenc v1.1.0-dev.1

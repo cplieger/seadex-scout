@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
@@ -2204,12 +2205,11 @@ func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 }
 
 // TestApplyTitlesReportsPackDisagreementOnce pins the title-vs-file-list
-// diagnostic: a harvested title whose season-pack verdict contradicts the release's
-// own file census is warned ONCE per rebuild (the onset latch, so a systematically
-// drifting upstream cannot flood one rebuild), the warning carries the journal key
-// and both verdicts, and it never carries the raw title - untrusted tracker text the
-// decode tags runesafe.Untrusted. The disagreement pinned here is the class the
-// audit does NOT correct (the title names an episode, the census proves a pack): it
+// diagnostic: a title whose season-pack verdict contradicts the release's file
+// census warns at most once per rebuild (the rest log at Debug), carrying the
+// journal key and both verdicts but never the raw title, untrusted tracker text
+// the decode tags runesafe.Untrusted. The class pinned here is the one the audit
+// does NOT correct (the title names one episode, the census proves a pack): it
 // warns with corrected=false and the harvested title still wins verbatim.
 func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	log, rec := capture.New()
@@ -2235,11 +2235,11 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	applyTitles(items, titles, titleAudit{census: census, report: w.packDisagreementReporter()})
 
 	const msg = "indexer feed title and file list disagree about a season pack"
-	if got := rec.CountExact(msg); got != 1 {
-		t.Errorf("disagreement warnings = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
-	}
 	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
-		t.Errorf("disagreement warnings at WARN = %d, want 1", got)
+		t.Errorf("disagreement warnings at WARN = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := rec.CountLevel(slog.LevelDebug, msg); got != 1 {
+		t.Errorf("disagreement lines at Debug = %d, want 1 (nyaa:2, past the latch)", got)
 	}
 	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "false", "files_pack": "true", "corrected": "false"} {
 		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
@@ -2264,6 +2264,177 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 		if want := titles[items[i].Key]; items[i].Title != want {
 			t.Errorf("item %s title = %q, want the harvested title %q", items[i].Key, items[i].Title, want)
 		}
+	}
+}
+
+// TestApplyTitlesAgreesWithRecordedEpisodeRangeTitles pins two recorded Nyaa
+// releases whose titles name an episode range over a file list holding exactly
+// that range: nyaa 2076059 ("S00E01-E02", two SeaDex files) and nyaa 1809834
+// ("- 01 ~ 12", twelve SeaDex files, an absolute range Sonarr's tilde batch
+// regex reads). Neither is a season-pack disagreement, so both titles are
+// served verbatim and nothing is logged.
+func TestApplyTitlesAgreesWithRecordedEpisodeRangeTitles(t *testing.T) {
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
+	entry := &seadex.Entry{AniListID: 109492}
+	gekitotsu := make([]seadex.File, 0, 12)
+	for i, f := range []struct {
+		crc    string
+		length int64
+	}{
+		{"28F7D1D4", 1540521039},
+		{"727D440C", 1541657195},
+		{"246BD4E4", 1540595434},
+		{"74F580C3", 1539746515},
+		{"1400A13A", 1538982781},
+		{"E16226C4", 1541120183},
+		{"CFE8AED2", 1544224029},
+		{"92708953", 1539411627},
+		{"EBA0A2E8", 1540760034},
+		{"1053C28A", 1543852691},
+		{"27ECD4B7", 1539548458},
+		{"542993B5", 1543718366},
+	} {
+		gekitotsu = append(gekitotsu, seadex.File{
+			Name:   fmt.Sprintf("[Erai-raws] Ginga Eiyuu Densetsu - Gekitotsu - %02d [1080p][%s].mkv", i+1, f.crc),
+			Length: f.length,
+		})
+	}
+	cur := map[string][]curatedRef{
+		"nyaa:2076059": {{entry: entry, torrent: &seadex.Torrent{Files: []seadex.File{
+			{Name: "[Moxie] Bokutachi wa Benkyou ga Dekinai - S00E01 (BD Remux 1080p FLAC 2.0) [77D1ECA1].mkv", Length: 7122982285},
+			{Name: "[Moxie] Bokutachi wa Benkyou ga Dekinai - S00E02 (BD Remux 1080p FLAC 2.0) [CDC20BFC].mkv", Length: 7106109565},
+		}}}},
+		"nyaa:1809834": {{entry: &seadex.Entry{AniListID: 1}, torrent: &seadex.Torrent{Files: gekitotsu}}},
+	}
+	titles := map[string]string{
+		"nyaa:2076059": "[Moxie] We Never Learn: BOKUBEN S00E01-E02 (BD Remux 1080p x264 8-bit FLAC) | We Never Learn OVAs | Bokutachi wa Benkyou ga Dekinai OVAs",
+		"nyaa:1809834": "[Erai-raws] Ginga Eiyuu Densetsu - Die Neue These - Gekitotsu - 01 ~ 12 [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR][SPA-LA]",
+	}
+	want := maps.Clone(titles)
+	items := []journalItem{{Title: "Synth 1", Key: "nyaa:2076059"}, {Title: "Synth 2", Key: "nyaa:1809834"}}
+	applyTitles(items, titles, titleAudit{census: censusPacks(cur), report: w.packDisagreementReporter()})
+
+	for i := range items {
+		if got := items[i].Title; got != want[items[i].Key] {
+			t.Errorf("item %s title = %q, want the harvested title %q", items[i].Key, got, want[items[i].Key])
+		}
+	}
+	if rec.Contains("disagree about a season pack") {
+		t.Errorf("an episode-range title over its own range was reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestPackDisagreementWarnsOncePerKey pins the cadence across rebuilds: an
+// uncorrected disagreement WARNs the first time its key is seen in this process
+// and logs at Debug on every later rebuild, while a key not yet reported still
+// WARNs. A key that leaves the journal is forgotten, so its return WARNs again.
+func TestPackDisagreementWarnsOncePerKey(t *testing.T) {
+	const msg = "indexer feed title and file list disagree about a season pack"
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
+	census := map[string]packCensus{
+		"nyaa:1": {evidence: packEvidencePack},
+		"nyaa:2": {evidence: packEvidencePack},
+	}
+	rebuild := func(keys ...string) {
+		items := make([]journalItem, 0, len(keys))
+		titles := map[string]string{}
+		for _, k := range keys {
+			items = append(items, journalItem{Title: "Synth", Key: k})
+			titles[k] = "Show - S01E01 [1080p]"
+		}
+		applyTitles(items, titles, titleAudit{census: census, report: w.packDisagreementReporter()})
+	}
+
+	rebuild("nyaa:1")
+	rebuild("nyaa:1")
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Errorf("WARN after two rebuilds of one key = %d, want 1", got)
+	}
+	if got := rec.CountLevel(slog.LevelDebug, msg); got != 1 {
+		t.Errorf("Debug after two rebuilds of one key = %d, want 1 (the repeat)", got)
+	}
+
+	rebuild("nyaa:1", "nyaa:2")
+	if got := rec.AttrValuesExact(msg, "key"); !slices.Equal(got, []string{"nyaa:1", "nyaa:1", "nyaa:1", "nyaa:2"}) {
+		t.Errorf("reported keys = %q, want nyaa:1 three times then nyaa:2", got)
+	}
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 2 {
+		t.Errorf("WARN after a new key = %d, want 2 (the new key warns)", got)
+	}
+
+	w.retainPackWarned([]journalItem{{Key: "nyaa:2"}})
+	rebuild("nyaa:1")
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 3 {
+		t.Errorf("WARN after nyaa:1 left the journal and came back = %d, want 3", got)
+	}
+
+	// One WARN per rebuild: a second new key in the same rebuild logs at Debug
+	// and is not marked reported, so it WARNs on the next rebuild.
+	census["nyaa:3"] = packCensus{evidence: packEvidencePack}
+	census["nyaa:4"] = packCensus{evidence: packEvidencePack}
+	rebuild("nyaa:3", "nyaa:4")
+	rebuild("nyaa:4")
+	warned := []string{}
+	for _, r := range rec.Records() {
+		if r.Message != msg || r.Level != slog.LevelWarn {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "key" {
+				warned = append(warned, a.Value.String())
+			}
+			return true
+		})
+	}
+	if want := []string{"nyaa:1", "nyaa:2", "nyaa:1", "nyaa:3", "nyaa:4"}; !slices.Equal(warned, want) {
+		t.Errorf("WARNed keys = %q, want %q", warned, want)
+	}
+}
+
+// TestRebuildForgetsWarnedPackKeysOnlyOnceCommitted pins when a rebuild prunes
+// the WARNed pack-disagreement keys: a rebuild whose snapshot is refused leaves
+// the previous journal served, so a key it would have dropped stays reported;
+// a committed rebuild without the key forgets it, so its return WARNs again.
+// The failing write is a root-safe ENOTDIR (the target's parent is a file).
+func TestRebuildForgetsWarnedPackKeysOnlyOnceCommitted(t *testing.T) {
+	const msg = "indexer feed title and file list disagree about a season pack"
+	const key = "nyaa:42"
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "state")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(parent, "feed.json"), log)
+	report := func() { w.packDisagreementReporter()(key, false, true, false) }
+
+	report()
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Fatalf("WARN for a new key = %d, want 1", got)
+	}
+
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err == nil {
+		t.Fatal("Rebuild under a file parent returned nil, want the write error")
+	}
+	report()
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Errorf("WARN after a refused rebuild without the key = %d, want 1 (the served journal still holds it)", got)
+	}
+
+	if err := os.Remove(parent); err != nil {
+		t.Fatalf("remove blocker: %v", err)
+	}
+	if err := os.Mkdir(parent, 0o750); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := w.Rebuild(t.Context(), nil, FeedInfo{}); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	report()
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 2 {
+		t.Errorf("WARN after a committed rebuild without the key = %d, want 2 (the key returned)", got)
 	}
 }
 
@@ -2390,9 +2561,13 @@ func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
 		t.Errorf("served title = %q, want the absolute census marker as %q", got, want)
 	}
 
+	// A corrected title needs nothing from the operator: Info, once per rebuild.
 	const msg = "indexer feed title and file list disagree about a season pack"
-	if got := rec.CountExact(msg); got != 1 {
-		t.Errorf("disagreement warnings = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	if got := rec.CountLevel(slog.LevelInfo, msg); got != 1 {
+		t.Errorf("corrected disagreements at Info = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 0 {
+		t.Errorf("corrected disagreements at WARN = %d, want 0", got)
 	}
 	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "true", "files_pack": "false", "corrected": "true"} {
 		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
