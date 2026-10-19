@@ -1800,15 +1800,15 @@ func TestWalkWarnsWhenSonarrDeclaresFilesButSendsNone(t *testing.T) {
 	}
 }
 
-// TestWalkWarnsOncePerNonAiredOrderSeries pins the walker half of the order rule: each
+// TestWalkLogsOncePerNonAiredOrderSeries pins the walker half of the order rule: each
 // kept series Sonarr numbers in another order than TheTVDB's aired one carries
-// that Order on its item (a failed placeholder included) and logs one WARN per
+// that Order on its item (a failed placeholder included) and logs one Info line per
 // walk naming it, its order name (or type when unnamed) and type; the walk's
 // completion line counts them; an aired-order series and a tag-excluded one
 // carry nothing and log nothing. arrapi's sonarr.Order{} (an empty seasonType,
 // "an unknown order, never aired" per its v5 engine) is withheld like a named
 // order, so rawOrders keeps the fake from turning it into the aired order.
-func TestWalkWarnsOncePerNonAiredOrderSeries(t *testing.T) {
+func TestWalkLogsOncePerNonAiredOrderSeries(t *testing.T) {
 	const msg = "sonarr series uses a non-aired episode order; seadex-scout does not compare it"
 	fs := &fakeSonarr{
 		series: []sonarr.Series{
@@ -1851,20 +1851,23 @@ func TestWalkWarnsOncePerNonAiredOrderSeries(t *testing.T) {
 			t.Errorf("item %d Order = %+v, want %+v", id, got, want)
 		}
 	}
-	if n := rec.CountLevel(slog.LevelWarn, msg); n != 4 {
-		t.Errorf("WARN-level records = %d, want 4", n)
+	if n := rec.CountLevel(slog.LevelInfo, msg); n != 4 {
+		t.Errorf("INFO-level records = %d, want 4", n)
+	}
+	if n := rec.CountLevel(slog.LevelWarn, msg); n != 0 {
+		t.Errorf("WARN-level records = %d, want 0 (the order is the operator's own Sonarr setting)", n)
 	}
 	if got, want := rec.AttrValuesExact(msg, "series"), []string{"Monogatari", "Haruhi", "Firefly", "Unknown"}; !slices.Equal(got, want) {
-		t.Errorf("WARN series = %q, want %q", got, want)
+		t.Errorf("series = %q, want %q", got, want)
 	}
 	if got, want := rec.AttrValuesExact(msg, "id"), []string{"2189", "2191", "2188", "2203"}; !slices.Equal(got, want) {
-		t.Errorf("WARN id = %q, want %q", got, want)
+		t.Errorf("id = %q, want %q", got, want)
 	}
 	if got, want := rec.AttrValuesExact(msg, "order"), []string{"Book Order", "alternate", "DVD Order", "an unknown order"}; !slices.Equal(got, want) {
-		t.Errorf("WARN order = %q, want %q", got, want)
+		t.Errorf("order = %q, want %q", got, want)
 	}
 	if got, want := rec.AttrValuesExact(msg, "order_type"), []string{"alternate", "alternate", "dvd", ""}; !slices.Equal(got, want) {
-		t.Errorf("WARN order_type = %q, want %q", got, want)
+		t.Errorf("order_type = %q, want %q", got, want)
 	}
 	if got, _ := rec.AttrValueExact("library walk complete", "non_aired_order"); got != "4" {
 		t.Errorf("library walk complete non_aired_order = %q, want \"4\"", got)
@@ -1874,7 +1877,7 @@ func TestWalkWarnsOncePerNonAiredOrderSeries(t *testing.T) {
 		t.Fatalf("second Walk: %v", err)
 	}
 	if n := rec.CountExact(msg); n != 8 {
-		t.Errorf("WARN count over two walks = %d, want 8 (one per series per walk)", n)
+		t.Errorf("records over two walks = %d, want 8 (one per series per walk)", n)
 	}
 }
 

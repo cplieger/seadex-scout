@@ -388,8 +388,17 @@ func (u *upstream) filterDownloadURLs(items []item, feedURL *url.URL) []item {
 // how many were blanked (the counts filterDownloadURLs' onset ladder reads).
 // An admitted field is rewritten to the gate's vouched spelling, which is not a
 // blanking and must not be counted as one - the same accounting
-// sanitizeSnapshotInfoURLs applies on the persisted side.
+// sanitizeSnapshotInfoURLs applies on the persisted side. A magnet GUID is
+// cleared without being inspected or counted.
 func (u *upstream) sanitizeItemDisplayURLs(it *item) (observed, blanked int) {
+	// Prowlarr fills an empty Guid with the magnet URL
+	// (https://github.com/Prowlarr/Prowlarr/blob/26a605e41f6156b959bc8f3ae5db4bec252106c5/src/NzbDrone.Core/Indexers/IndexerBase.cs#L111-L124),
+	// and the Nyaa definition's prefer_magnet_links defaults on, leaving no
+	// download URL. It is an identifier, not a display link, and item.guid()
+	// falls back to the same torrent's InfoHash.
+	if urlform.Classify(it.GUID).Scheme == "magnet" {
+		it.GUID = ""
+	}
 	for _, field := range []*string{&it.InfoURL, &it.GUID} {
 		if *field == "" {
 			continue

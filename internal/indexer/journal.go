@@ -904,7 +904,7 @@ func (a titleAudit) seasonServed(key, title string, c *packCensus) string {
 		corrected, done := correctedTitle(title, c.marker)
 		a.warn(key, true, false, done)
 		return corrected
-	case !titlePack && c.evidence == packEvidencePack:
+	case !titlePack && c.evidence == packEvidencePack && !titleNamesSeveralEpisodes(title):
 		a.warn(key, false, true, false)
 		return title
 	default:

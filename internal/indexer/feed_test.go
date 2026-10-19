@@ -1025,6 +1025,37 @@ func TestPackFromTitle(t *testing.T) {
 	}
 }
 
+// TestTitleNamesSeveralEpisodes pins which titles name more than one episode,
+// read as Sonarr reads them: an SxxExx range (with or without the second E) and
+// the tilde anime batch form "- 01 ~ 12" do, a single episode, a
+// season-only title and a backwards or one-episode range do not. The first two
+// cases are recorded Nyaa titles.
+func TestTitleNamesSeveralEpisodes(t *testing.T) {
+	tests := map[string]struct {
+		title string
+		want  bool
+	}{
+		"recorded SxxExx range":   {"[Moxie] We Never Learn: BOKUBEN S00E01-E02 (BD Remux 1080p x264 8-bit FLAC) | We Never Learn OVAs | Bokutachi wa Benkyou ga Dekinai OVAs", true},
+		"recorded absolute range": {"[Erai-raws] Ginga Eiyuu Densetsu - Die Neue These - Gekitotsu - 01 ~ 12 [1080p][BATCH][Multiple Subtitle] [ENG][POR-BR][SPA-LA]", true},
+		"range":                   {"Show S01E01-E12", true},
+		"range without second E":  {"Show - S01E03-04 [1080p]", true},
+		"absolute range no space": {"[Grp] Show - 01~13 [1080p]", true},
+		"one episode":             {"Show - S01E07 [1080p]", false},
+		"one absolute episode":    {"[Grp] Show - 07 [1080p]", false},
+		"season only":             {"Show - S01 [1080p]", false},
+		"backwards range":         {"Show - S01E09-E03", false},
+		"backwards absolute":      {"[Grp] Show - 12 ~ 01 [1080p]", false},
+		"one-episode absolute":    {"[Grp] Show - 05 ~ 05 [1080p]", false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := titleNamesSeveralEpisodes(tt.title); got != tt.want {
+				t.Errorf("titleNamesSeveralEpisodes(%q) = %v, want %v", tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestPackFromTitleRefusesSeasonFollowedByEpisodeNumber pins the load-bearing
 // half of Sonarr's season-only regex separately, because it is the one
 // condition RE2 cannot express and this app therefore reimplements: the

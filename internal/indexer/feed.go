@@ -624,6 +624,28 @@ func packFromTitle(title string) (pack, known bool) {
 	return true, true
 }
 
+// titleAbsoluteRange matches an absolute episode range "- 01 ~ 12", Sonarr's
+// tilde-separated anime batch regex
+// (https://github.com/Sonarr/Sonarr/blob/7ccafd3a13b737aca0619d4eb0d985c89c00df73/src/NzbDrone.Core/Parser/Parser.cs#L85).
+var titleAbsoluteRange = regexp.MustCompile(`[\s_]-[\s_](\d{2,4})\s?~\s?(\d{2,4})(?:\D|$)`)
+
+// titleNamesSeveralEpisodes reports whether a title's episode token names more
+// than one episode: an SxxExx range such as S00E01-E02, or an absolute range.
+// Such a title agrees with a multi-episode file census although packFromTitle
+// reads it as no season pack.
+func titleNamesSeveralEpisodes(title string) bool {
+	if span, ok := payload.Span(title); ok && span.Last > span.First {
+		return true
+	}
+	m := titleAbsoluteRange.FindStringSubmatch(title)
+	if m == nil {
+		return false
+	}
+	first, _ := strconv.Atoi(m[1])
+	last, _ := strconv.Atoi(m[2])
+	return last > first
+}
+
 // seasonNumberEnds applies the two boundary conditions Sonarr's season-only
 // regex expresses in its tail, against the text following the season number:
 // the number must end at a non-alphanumeric boundary or the end of the string

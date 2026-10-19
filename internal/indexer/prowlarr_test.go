@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -1175,6 +1176,95 @@ func TestFilterDownloadURLsWarnsOnBlankedDisplayURLs(t *testing.T) {
 	}}, mustFeedURL(t, cu))
 	if n := cleanRec.CountExact(msg); n != 0 {
 		t.Errorf("clean response blanked-display WARN count = %d, want 0", n)
+	}
+}
+
+// serveRecordedNyaaPage serves testdata/prowlarr-nyaa-search.xml, a recorded
+// Prowlarr Nyaa search answer whose Prowlarr origin is masked as @ORIGIN@, with
+// the mask replaced by the server's own URL so the download links stay on the
+// endpoint origin. edit rewrites the recorded body before it is served.
+func serveRecordedNyaaPage(t *testing.T, edit func(string) string) *upstream {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/prowlarr-nyaa-search.xml")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	body = edit(strings.ReplaceAll(string(raw), "@ORIGIN@", srv.URL))
+	return &upstream{http: srv.Client(), name: upstreamNyaa, feed: srv.URL + "/22/api"}
+}
+
+// TestUpstreamSearchKeepsRecordedNyaaPageLinks pins the recorded Prowlarr Nyaa
+// shape: <comments> is the nyaa.si page and <guid> is a magnet URI. The page
+// link is kept, the magnet is not served as a guid (the infohash attr is), and
+// nothing reports a blanked display URL.
+func TestUpstreamSearchKeepsRecordedNyaaPageLinks(t *testing.T) {
+	log, rec := capture.New()
+	u := serveRecordedNyaaPage(t, func(s string) string { return s })
+	u.log = log
+
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"BOKUBEN Moxie"}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	want := []struct{ infoURL, infoHash string }{
+		{"https://nyaa.si/view/2161316", "b705f93c1c6f843539194b3fac6ac808d1a76ee8"},
+		{"https://nyaa.si/view/2076059", "8aa9ff4d43cb54121d7bbcae1d9bc9001188dd4b"},
+		{"https://nyaa.si/view/2073478", "24994f1db58f7cdf4b1f7ea777e643da7d3fbeff"},
+	}
+	if len(items) != len(want) {
+		t.Fatalf("items = %d, want %d", len(items), len(want))
+	}
+	for i, w := range want {
+		if items[i].InfoURL != w.infoURL {
+			t.Errorf("item %d InfoURL = %q, want %q", i, items[i].InfoURL, w.infoURL)
+		}
+		if items[i].GUID != "" {
+			t.Errorf("item %d GUID = %q, want the magnet cleared", i, items[i].GUID)
+		}
+		if got := items[i].guid(); got != w.infoHash {
+			t.Errorf("item %d guid() = %q, want the infohash %q", i, got, w.infoHash)
+		}
+	}
+	if n := rec.Count("upstream display URLs"); n != 0 {
+		t.Errorf("display-URL diagnostics = %d, want 0; log output:\n%s", n, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestUpstreamSearchWarnsOnOffTrackerNyaaComments is the control for the
+// recorded page: an off-tracker <comments> link is still blanked and reported
+// once, counted as one field, while the magnet guids beside it count nothing.
+func TestUpstreamSearchWarnsOnOffTrackerNyaaComments(t *testing.T) {
+	const msg = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+	log, rec := capture.New()
+	u := serveRecordedNyaaPage(t, func(s string) string {
+		return strings.Replace(s, "https://nyaa.si/view/2076059", "https://evil.example/phish", 1)
+	})
+	u.log = log
+
+	items, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"BOKUBEN Moxie"}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items = %d, want 3 (a bad display URL never drops the item)", len(items))
+	}
+	if items[1].InfoURL != "" {
+		t.Errorf("off-tracker InfoURL = %q, want blanked", items[1].InfoURL)
+	}
+	if n := rec.CountLevel(slog.LevelWarn, msg); n != 1 {
+		t.Fatalf("blanked-display WARN count = %d, want 1; log output:\n%s", n, strings.Join(rec.Messages(), "\n"))
+	}
+	if v, ok := rec.AttrValueExact(msg, "blanked"); !ok || v != "1" {
+		t.Errorf("WARN blanked = %q (found=%v), want 1", v, ok)
+	}
+	if v, ok := rec.AttrValueExact(msg, "kept_items"); !ok || v != "3" {
+		t.Errorf("WARN kept_items = %q (found=%v), want 3", v, ok)
 	}
 }
 
