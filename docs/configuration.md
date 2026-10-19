@@ -34,11 +34,11 @@ Defaults are the values the starter file ships.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `sonarr.url` | `${SONARR_URL}` | Where seadex-scout reaches Sonarr. Sonarr is on when this is set. At least one of Sonarr and Radarr must be on. |
+| `sonarr.url` | `${SONARR_URL}` | Where seadex-scout reaches Sonarr. Sonarr is on when this is set. At least one of Sonarr and Radarr must be on. A `user:password@` in the url is sent as HTTP basic auth; the API key belongs in `api_key`. |
 | `sonarr.api_key` | `${SONARR_API_KEY}` | Required when Sonarr is on. |
 | `sonarr.enabled` | _(unset)_ | `false` turns Sonarr off whatever `url` says. `true` requires `url` and `api_key`. Absent follows `url`. |
 | `sonarr.public_url` | _(unset)_ | The Sonarr address your browser uses, for links in the report. Empty reuses `sonarr.url`. |
-| `radarr.*` | `${RADARR_URL}`, `${RADARR_API_KEY}` | The same four keys as `sonarr`. |
+| `radarr.*` | `${RADARR_URL}`, `${RADARR_API_KEY}` | The same four keys as `sonarr`. seadex-scout reads one Sonarr and one Radarr. For more instances, run one seadex-scout per instance, each with its own config folder (and so its own state and reports) and, with the indexer on, its own published Torznab port. |
 | `mode` | `daemon` | `daemon` runs on a schedule. `report` writes one report and exits. |
 | `poll_interval` | `15m` | How often to check SeaDex for changes. Minimum `15m`. `off` hands scheduling to an outside tool. |
 | `animebytes` | `false` | Set `true` when you have an AnimeBytes account, to include its releases and links. |
@@ -60,7 +60,7 @@ Defaults are the values the starter file ships.
 
 ### API key checks
 
-Sonarr, Radarr and Prowlarr generate a 32-character hex API key. A key of any other shape is accepted with a startup warning naming the field, because each of them honours whatever key you set. A key that contains a `$` is refused, because it is a `${VAR}` reference that was never filled in. An empty `indexer.prowlarr_api_key` is valid when Prowlarr's authentication is off for local addresses.
+Sonarr, Radarr and Prowlarr generate a 32-character hex API key, which always passes. A Sonarr or Radarr key you set yourself must use only letters, digits, `.`, `_` and `-`; any other character stops the start with an error naming the field. A key of another length or shape that passes is accepted with a startup warning naming the field, because each arr honours whatever key you set. A key that contains a `$` is refused, because it is a `${VAR}` reference that was never filled in. An empty `indexer.prowlarr_api_key` is valid when Prowlarr's authentication is off for local addresses.
 
 ### Tag filters
 

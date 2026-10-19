@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -35,15 +35,15 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	}}
 
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.New(notFoundAniList{}, logger),
@@ -84,9 +84,9 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	// A second entry with no mapping record keeps seadex_entries (2) distinct
@@ -96,7 +96,7 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: entries},
 		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
@@ -127,19 +127,19 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 func TestReportPartialSnapshotErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &flakySonarr{
-		series: []arrapi.Series{
-			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-			{ID: 8, Title: "Skipped Series", TvdbID: 124, Year: 2024},
+		series: []sonarr.Series{
+			{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+			{ID: 8, Title: "Skipped Series", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
 		},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
 	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   &fakeStore{},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 	})
 
 	_, err := s.Report(t.Context())
@@ -159,13 +159,13 @@ func TestReportPartialSnapshotErrors(t *testing.T) {
 // degradation gate.
 func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 	logger := scoutTestLogger()
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{},
 	})
@@ -184,7 +184,7 @@ func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 // has nothing to compare, so a failed fetch is a hard error naming the fetch.
 func TestReportSeaDexFailureErrors(t *testing.T) {
 	logger := scoutTestLogger()
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		// A cached mapping keeps the map usable so the report reaches the
@@ -192,7 +192,7 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
@@ -231,7 +231,7 @@ func (c *cancelingSeaDex) CountWindow(context.Context, time.Time) (int, error) {
 // WARN-not-ERROR shutdown classification.
 func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
 	logger := scoutTestLogger()
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -241,7 +241,7 @@ func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex: &cancelingSeaDex{
 			cancel: cancel,
@@ -275,13 +275,13 @@ func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
 // would contradict the whole-library audit contract.
 func TestReportMappingUnusableErrors(t *testing.T) {
 	logger := scoutTestLogger()
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		// Empty state + unreachable mapping: the load fails with nothing stale
 		// to fall back on, so the map is unusable (not a StaleMapError).
 		Store:   &fakeStore{},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping: unreachableMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 	})
@@ -309,15 +309,15 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
 	}}
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
@@ -349,11 +349,11 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 func TestReportDegradedMatching(t *testing.T) {
 	t.Run("anilist transiently degraded renders incomplete section", func(t *testing.T) {
 		logger, recorder := capture.New()
-		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+		sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 		s := NewReporter(&ReportDeps{
 			Logger:  logger,
 			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.New(degradedMatcherAniList{}, logger),
@@ -383,11 +383,11 @@ func TestReportDegradedMatching(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		logger := scoutTestLogger()
-		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+		sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 		s := NewReporter(&ReportDeps{
 			Logger:  logger,
 			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.New(&ctxCancellingAniList{cancel: cancel}, logger),
@@ -416,11 +416,11 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
 	}}
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, noSource, mapping.WithOverridesPath(filepath.Join(t.TempDir(), "ov.json")), mapping.WithRefresh(time.Hour), mapping.WithLogger(scoutTestLogger())),
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
@@ -484,15 +484,15 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 		t.Fatalf("mkdir overrides dir: %v", err)
 	}
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: mapping.NewLoader(noNetworkClient(), noSource, mapping.WithOverridesPath(overrides), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger)),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
@@ -545,15 +545,15 @@ func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
 				Library: library.Snapshot{Items: tc.prior},
 			}}
 			sonarr := &fakeSonarr{
-				series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-				files: map[int][]arrapi.EpisodeFile{
-					7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+				files: map[int][]sonarr.EpisodeFile{
+					7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 				},
 			}
 			s := NewReporter(&ReportDeps{
 				Logger:  logger,
 				Store:   store,
-				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 				Mapping: fakeMapping{},
 				SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 				Matcher: match.New(notFoundAniList{}, scoutTestLogger()),

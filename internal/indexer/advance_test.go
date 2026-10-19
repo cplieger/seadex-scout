@@ -89,7 +89,7 @@ func TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest(t *testing.T) {
 
 	// A window carrying an entirely new entry and identity.
 	window := []seadex.Entry{nyaaEntry(88, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
-	if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestAdvanceRefusesSearchAdmissionUnderATagPolicy(t *testing.T) {
 	// It is refused anyway, because the window cannot prove the identity is not
 	// warned through an entry it never saw.
 	window := []seadex.Entry{nyaaEntry(88, 77, true, "Clean Show - S01E01 (1080p) [G].mkv")}
-	if err := w.Advance(t.Context(), window, nil); err != nil {
+	if err := w.Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestAdvancePreservesTitlesAndHarvestCursorVerbatim(t *testing.T) {
 	before := rawSnapshotMembers(t, path)
 
 	window := []seadex.Entry{nyaaEntry(8, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
-	if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -238,7 +238,7 @@ func TestAdvanceJournalsNewExpiresOldAndNeverReadmits(t *testing.T) {
 		nyaaEntry(7, 42, true, "Harvested Show - S01E01 (1080p) [G].mkv"),
 		nyaaEntry(8, 77, true, "New Show - S01E01 (1080p) [G].mkv"),
 	}
-	if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 			}},
 		},
 	}
-	if err := w.Advance(t.Context(), window, nil); err != nil {
+	if err := w.Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -412,7 +412,7 @@ func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 				NyaaTorznabURL: "http://prowlarr/1/api",
 			}, log, nil)
 
-			if err := w.Advance(t.Context(), window, nil); err != nil {
+			if err := w.Advance(t.Context(), window, FeedInfo{}); err != nil {
 				t.Fatalf("Advance = %v, want nil (deferring to the next full rebuild is not an error)", err)
 			}
 
@@ -453,7 +453,7 @@ func TestAdvanceHonoursExcludeTags(t *testing.T) {
 	excluded.Torrents[0].Tags = []string{"broken"}
 	admitted := nyaaEntry(9, 78, true, "Clean Show - S01E01 (1080p) [G].mkv")
 
-	if err := w.Advance(t.Context(), []seadex.Entry{excluded, admitted}, nil); err != nil {
+	if err := w.Advance(t.Context(), []seadex.Entry{excluded, admitted}, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -496,7 +496,7 @@ func TestAdvanceExcludesAWarnedIdentityWithinTheWindow(t *testing.T) {
 	twin := nyaaEntry(9, 79, true, "Broken Show - S01E01 (1080p) [G].mkv")
 	twin.Torrents[0].InfoHash = sharedHash
 
-	if err := w.Advance(t.Context(), []seadex.Entry{warned, twin}, nil); err != nil {
+	if err := w.Advance(t.Context(), []seadex.Entry{warned, twin}, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -534,7 +534,7 @@ func TestAdvanceDoesNotRerenderCarriedItems(t *testing.T) {
 	// The window re-presents nyaa:42 with file names that would render a
 	// COMPLETELY different synthesized title.
 	window := []seadex.Entry{nyaaEntry(7, 42, true, "Totally Different Name - S05E09 (2160p) [Other].mkv")}
-	if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -558,7 +558,7 @@ func TestAdvanceEmptyWindowIsANoOpWrite(t *testing.T) {
 	writeSnapshotFile(t, path, advanceFixture(now.Add(-time.Hour)))
 	before := rawSnapshotMembers(t, path)
 
-	if err := advanceTestWriter(path, now).Advance(t.Context(), nil, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), nil, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -589,7 +589,7 @@ func TestAdvanceDropsForeignScopedCarriedItems(t *testing.T) {
 	writeSnapshotFile(t, path, fixture)
 
 	window := []seadex.Entry{nyaaEntry(8, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
-	if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -615,7 +615,7 @@ func TestAdvanceRebasesFutureFirstSeen(t *testing.T) {
 	writeSnapshotFile(t, path, fixture)
 
 	window := []seadex.Entry{nyaaEntry(8, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
-	if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+	if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -656,7 +656,7 @@ func TestBothPassKindsRenderTheMirrorIdentityIdentically(t *testing.T) {
 		case keyHolderID:
 			return EntryInfo{Title: "Mirror Show", TvdbID: 79525}
 		case hashHolderID:
-			return EntryInfo{Title: "Mirror Film", IsMovie: true, TvdbID: 123456}
+			return EntryInfo{Title: "Mirror Film", Kind: KindMovie, TvdbID: 123456}
 		}
 		return EntryInfo{}
 	}
@@ -681,12 +681,12 @@ func TestBothPassKindsRenderTheMirrorIdentityIdentically(t *testing.T) {
 
 	reconcilePath := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, reconcilePath, prior())
-	if err := advanceTestWriter(reconcilePath, now).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, info); err != nil {
+	if err := advanceTestWriter(reconcilePath, now).Rebuild(t.Context(), []seadex.Entry{keyHolder, hashOnly}, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	tickPath := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, tickPath, prior())
-	if err := advanceTestWriter(tickPath, now).Advance(t.Context(), []seadex.Entry{keyHolder}, info); err != nil {
+	if err := advanceTestWriter(tickPath, now).Advance(t.Context(), []seadex.Entry{keyHolder}, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
@@ -745,9 +745,9 @@ func TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote(t *testing.T) {
 			window := nyaaEntry(windowHolderID, 777, true, "Minami-ke Special (1080p) [G].mkv")
 			window.Torrents[0].ReleaseGroup = "G"
 			info := func(int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", IsMovie: true, TvdbID: 80000, SpecialEpisodes: []int{2}, SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TvdbID: 80000, SpecialEpisodes: []int{2}, SeriesTitle: "Minami-ke"}
 			}
-			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{window}, info); err != nil {
+			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{window}, FeedInfo{Entry: info}); err != nil {
 				t.Fatalf("Advance: %v", err)
 			}
 
@@ -802,7 +802,7 @@ func TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
 
 			// A window carrying an unrelated new release, so the pass persists.
 			window := []seadex.Entry{nyaaEntry(88, 77, true, "New Nyaa - S01E01 (1080p) [G].mkv")}
-			if err := advanceTestWriter(path, now).Advance(t.Context(), window, nil); err != nil {
+			if err := advanceTestWriter(path, now).Advance(t.Context(), window, FeedInfo{}); err != nil {
 				t.Fatalf("Advance: %v", err)
 			}
 
@@ -840,7 +840,7 @@ func TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes(t *testing.T) {
 	const sharedHash = "aaaabbbbccccddddeeeeffff0000111122223333"
 	// movieOwner types entry 8 as a film and every other entry as a series, so a
 	// carried category vote is visible as a second category on the item.
-	movieOwner := func(alID int) EntryInfo { return EntryInfo{IsMovie: alID == 8} }
+	movieOwner := func(alID int) EntryInfo { return EntryInfo{Kind: kindOf(alID == 8)} }
 
 	tests := map[string]struct {
 		desc string
@@ -894,7 +894,7 @@ func TestAdvanceCompletesAPartialRenderFromStoredOwnerVotes(t *testing.T) {
 			// every best marker below can only have come from a carried vote.
 			entry := nyaaEntry(9, 77, false, "New Show - S01E01 (1080p) [G].mkv")
 			entry.Torrents[0].InfoHash = tc.windowHash
-			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{entry}, movieOwner); err != nil {
+			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{entry}, FeedInfo{Entry: movieOwner}); err != nil {
 				t.Fatalf("Advance: %v", err)
 			}
 

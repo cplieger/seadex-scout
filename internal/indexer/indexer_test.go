@@ -718,7 +718,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// baseline and serve an empty journal).
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -932,7 +932,7 @@ func TestConsumerWarningsStayIndependent(t *testing.T) {
 func TestUnresolvedFirstLoadFaultsInsteadOfServingEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
@@ -1007,7 +1007,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	writer := newTestWriter(path, "", false)
-	if err := writer.Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+	if err := writer.Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1020,7 +1020,7 @@ func TestStartServesPublishedSnapshotWithoutRequestLoad(t *testing.T) {
 
 	// A second process rewrote the snapshot: no request triggers the load, so the
 	// tick is what must pick it up.
-	if err := writer.Rebuild(t.Context(), nyaaTestEntries(3), nil); err != nil {
+	if err := writer.Rebuild(t.Context(), nyaaTestEntries(3), FeedInfo{}); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -1066,7 +1066,7 @@ func TestFeedWriterReload(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [GRP].mkv"}},
 		}},
 	}}
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	// The in-process cache has not reloaded yet, so the journal is still empty
@@ -1577,7 +1577,7 @@ func seedRebuild(path string, entries []seadex.Entry) error {
 	if err := os.WriteFile(path, []byte(emptyFeedJSON), 0o600); err != nil {
 		return err
 	}
-	return newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil)
+	return newTestWriter(path, "", false).Rebuild(context.Background(), entries, FeedInfo{})
 }
 
 // setMtime sets path's mtime to when, the trigger reload's freshness check reads.

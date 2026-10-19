@@ -27,7 +27,7 @@ const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
 // (or the AniList canonical title as fallback; empty when neither is known),
-// its release year, the season the entry maps to, whether it is a movie, and the
+// its release year, the season the entry maps to, its media kind, and the
 // TVDB id its mapping record carries.
 type EntryInfo struct {
 	Title string
@@ -36,15 +36,16 @@ type EntryInfo struct {
 	// keeps the entry's own name.
 	SeriesTitle string
 	// Seasons are the TVDB seasons this entry's episodes fall into, as runs
-	// of entry episodes from the map; nil for a film or when the map names
-	// none. The RANGES, never a scalar: three measured entries need 6, 8 and
-	// 2 distinct seasons across their packs, so one season per entry
-	// mislabels most of them.
+	// of entry episodes from the map; nil for a film, when the map names none
+	// or under NonAiredOrder. The RANGES, never a scalar: three measured
+	// entries need 6, 8 and 2 distinct seasons across their packs, so one
+	// season per entry mislabels most of them.
 	Seasons []SeasonRange
 	// SpecialEpisodes are the TVDB season-0 episodes of SeriesTitle this offered
-	// entry is, ascending, nil when the map names none; SpecialsEpisodes is the
-	// entry episode count they answer, 0 when unknown. They let the feed serve a
-	// release a second time as "<SeriesTitle> S00Exx", which Sonarr can parse.
+	// entry is, ascending, nil when the map names none or under NonAiredOrder;
+	// SpecialsEpisodes is the entry episode count they answer, 0 when unknown.
+	// They let the feed serve a release a second time as "<SeriesTitle>
+	// S00Exx", which Sonarr can parse.
 	SpecialEpisodes  []int
 	SpecialsEpisodes int
 	Year             int
@@ -56,8 +57,25 @@ type EntryInfo struct {
 	// resolve a series it could not parse out of the release title.
 	TvdbID      int
 	SeasonKnown bool
-	IsMovie     bool
+	Kind        MediaKind
+	// NonAiredOrder reports that Sonarr numbers the series TvdbID names in
+	// another order than TheTVDB's aired one. The producer then sets no season
+	// fact, and a stored render carried without a fresh one loses its twin, or
+	// leaves the journal when its title is not a film's (applyStoredOrder).
+	NonAiredOrder bool
 }
+
+// MediaKind is what the producer's typing says an entry is. KindUnknown means
+// nothing typed it: it renders as a series does, but is no evidence that a
+// stored title is not a film's (applyStoredOrder).
+type MediaKind uint8
+
+// The media kinds.
+const (
+	KindUnknown MediaKind = iota
+	KindSeries
+	KindMovie
+)
 
 // SeasonRange is one TVDB season a run of the entry's episodes falls into:
 // entry episodes First..Last are season Season. This package's own copy of
@@ -81,6 +99,22 @@ func (r SeasonRange) contains(first, last int) bool {
 // fallback, anime category). The compare cycle supplies it; see
 // entryInfoFunc for the nil-safe wrapper.
 type EntryInfoFunc func(alID int) EntryInfo
+
+// FeedInfo is the persisted metadata the compare cycle hands a feed pass. Its
+// zero value is valid: file-name synthesis, and no series known to use a
+// non-aired order.
+type FeedInfo struct {
+	// Entry resolves the per-show metadata; nil yields the zero EntryInfo.
+	Entry EntryInfoFunc
+	// NonAiredOrder reports whether Sonarr numbers the series tvdbID names in
+	// another order than TheTVDB's aired one; nil reports none.
+	NonAiredOrder func(tvdbID int) bool
+}
+
+// nonAiredOrder is NonAiredOrder, false for a nil func.
+func (f FeedInfo) nonAiredOrder(tvdbID int) bool {
+	return f.NonAiredOrder != nil && f.NonAiredOrder(tvdbID)
+}
 
 // ref resolves one show's metadata to a fresh addressable value, for the title
 // synthesizers that take it by pointer (EntryInfo outgrew the pass-by-value size).
@@ -118,8 +152,8 @@ func synthesizeTitle(t *seadex.Torrent, meta *EntryInfo) string {
 		return derivedTitle(t, meta)
 	}
 	parts := []string{title}
-	switch {
-	case meta.IsMovie:
+	switch meta.Kind {
+	case KindMovie:
 		if meta.Year > 0 {
 			parts[0] = fmt.Sprintf("%s (%d)", title, meta.Year)
 		}

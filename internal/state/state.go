@@ -1,7 +1,8 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
-// written atomically: the last library snapshot (for diffing), the cached animap
-// map plus its release tag, the AniList fallback memo, and the degradation
-// streak counters with the conditions they escalated. It holds NO finding state:
+// written atomically: the last library snapshot (for diffing), the series Sonarr
+// numbers in a non-aired order, the cached animap map plus its release tag, the
+// AniList fallback memo, and the degradation streak counters with the
+// conditions they escalated. It holds NO finding state:
 // internal/notify reports findings as STATE and rebuilds its whole set from each
 // pass. A missing file loads as an empty state (a cold start), never an error.
 package state
@@ -61,7 +62,12 @@ type State struct {
 	// process keeps stating them until an observer sees them end. Owner:
 	// internal/scout's standing set.
 	Standing []StandingCondition `json:"standing,omitempty"`
-	Library  library.Snapshot    `json:"library"`
+	// NonAiredOrderTvdbIDs are the TVDB ids, ascending, of every series Sonarr
+	// was last seen numbering in another episode order than TheTVDB's aired
+	// one, whether or not arr_tags keeps it; internal/scout's nextOrderSet
+	// decides when an id joins or leaves.
+	NonAiredOrderTvdbIDs []int            `json:"non_aired_order_tvdb_ids,omitempty"`
+	Library              library.Snapshot `json:"library"`
 	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed, whichever
 	// pre-compare gate closed the cycle: the scout records the fetch outcome ahead of
 	// gate selection, so a coinciding failure cannot hide the outage.

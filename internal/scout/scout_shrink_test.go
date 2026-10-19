@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/radarr"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -66,28 +67,28 @@ type twoArrShrinkFixture struct {
 func newTwoArrShrinkFixture() *twoArrShrinkFixture {
 	return &twoArrShrinkFixture{
 		sonarr: &fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-				{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
-				{ID: 9, Title: "Third Show", TvdbID: 125, Year: 2024},
-				{ID: 10, Title: "Fourth Show", TvdbID: 126, Year: 2024},
+			series: []sonarr.Series{
+				{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+				{ID: 8, Title: "Second Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
+				{ID: 9, Title: "Third Show", IDs: sonarr.ExternalIDs{TVDB: 125}, Year: 2024},
+				{ID: 10, Title: "Fourth Show", IDs: sonarr.ExternalIDs{TVDB: 126}, Year: 2024},
 			},
-			files: map[int][]arrapi.EpisodeFile{
-				7:  {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-				8:  {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-				9:  {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-				10: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+			files: map[int][]sonarr.EpisodeFile{
+				7:  {{Season: 1, ReleaseGroup: "Erai-raws"}},
+				8:  {{Season: 1, ReleaseGroup: "Erai-raws"}},
+				9:  {{Season: 1, ReleaseGroup: "Erai-raws"}},
+				10: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 			},
 		},
-		radarr: &fakeRadarr{movies: []arrapi.Movie{
+		radarr: &fakeRadarr{movies: []radarr.Movie{
 			{
-				ID: 11, Title: "A Silent Voice", TmdbID: 900, Year: 2016, HasFile: true,
-				MovieFile: &arrapi.MovieFile{
+				ID: 11, Title: "A Silent Voice", IDs: radarr.ExternalIDs{TMDB: 900}, Year: 2016, HasFile: true,
+				File: &radarr.MovieFile{
 					RelativePath: "A Silent Voice 2016 1080p BluRay-LostYears.mkv",
 					ReleaseGroup: "LostYears",
 				},
 			},
-			{ID: 12, Title: "Your Name", TmdbID: 901, Year: 2016},
+			{ID: 12, Title: "Your Name", IDs: radarr.ExternalIDs{TMDB: 901}, Year: 2016},
 		}},
 		store: &fakeStore{st: state.State{Mapping: shrinkMappingCache()}},
 	}
@@ -102,7 +103,7 @@ func (f *twoArrShrinkFixture) scout(logger *slog.Logger) *Scout {
 	return New(&Deps{
 		Logger:       logger,
 		Store:        f.store,
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: f.sonarr, Radarr: f.radarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{f.sonarr}, Radarr: f.radarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries()},
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -134,8 +135,8 @@ func (f *twoArrShrinkFixture) seed(t *testing.T, wantRadarr int) {
 func (f *twoArrShrinkFixture) emptyRadarr() {
 	f.radarr.movies = nil
 	f.sonarr.series = append(f.sonarr.series,
-		arrapi.Series{ID: 13, Title: "Fifth Show", TvdbID: 127, Year: 2025})
-	f.sonarr.files[13] = []arrapi.EpisodeFile{{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}
+		sonarr.Series{ID: 13, Title: "Fifth Show", IDs: sonarr.ExternalIDs{TVDB: 127}, Year: 2025})
+	f.sonarr.files[13] = []sonarr.EpisodeFile{{Season: 1, ReleaseGroup: "Erai-raws"}}
 }
 
 // findingArrs returns the arr of every finding row a cycle emitted. Findings
@@ -399,17 +400,17 @@ func TestCycleAlwaysEmptySideIsNeverSuspect(t *testing.T) {
 // the behaviour the aggregate guard had, now expressed per arr.
 func TestCycleSingleArrDeploymentShrinksAsBefore(t *testing.T) {
 	sonarr := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-			{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
-			{ID: 9, Title: "Third Show", TvdbID: 125, Year: 2024},
-			{ID: 10, Title: "Fourth Show", TvdbID: 126, Year: 2024},
+		series: []sonarr.Series{
+			{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+			{ID: 8, Title: "Second Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
+			{ID: 9, Title: "Third Show", IDs: sonarr.ExternalIDs{TVDB: 125}, Year: 2024},
+			{ID: 10, Title: "Fourth Show", IDs: sonarr.ExternalIDs{TVDB: 126}, Year: 2024},
 		},
-		files: map[int][]arrapi.EpisodeFile{
-			7:  {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			8:  {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			9:  {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			10: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		files: map[int][]sonarr.EpisodeFile{
+			7:  {{Season: 1, ReleaseGroup: "Erai-raws"}},
+			8:  {{Season: 1, ReleaseGroup: "Erai-raws"}},
+			9:  {{Season: 1, ReleaseGroup: "Erai-raws"}},
+			10: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	store := &fakeStore{st: state.State{Mapping: shrinkMappingCache()}}
@@ -417,7 +418,7 @@ func TestCycleSingleArrDeploymentShrinksAsBefore(t *testing.T) {
 		return New(&Deps{
 			Logger:       logger,
 			Store:        store,
-			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries()},
 			Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -461,7 +462,7 @@ func TestMergeShrunkSidesDisabledArrIsNeverSuspect(t *testing.T) {
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    &fakeStore{},
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{}, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{}}, Logger: scoutTestLogger()}),
 		Notifier: notify.NewNotifier(logger, nil),
 	})
 	st := state.State{Library: library.Snapshot{Items: []library.Item{

@@ -6,7 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -14,23 +15,22 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-func specialEp(number int, f *arrapi.EpisodeFile) arrapi.Episode {
-	return arrapi.Episode{SeasonNumber: 0, EpisodeNumber: number, HasFile: f != nil, EpisodeFile: f}
+func specialEp(number, fileID int) sonarr.Episode {
+	return sonarr.Episode{Season: 0, Number: number, HasFile: fileID > 0, FileID: fileID}
 }
 
 func TestWalkSonarrReadsSeasonZeroEpisodeFiles(t *testing.T) {
-	v2 := &arrapi.QualityModel{Revision: &arrapi.Revision{Version: 2}}
-	span := &arrapi.EpisodeFile{ID: 50, SeasonNumber: 0, ReleaseGroup: "MTBB", Quality: v2}
+	v2 := &arrapi.Revision{Version: 2}
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Show"}},
-		files: map[int][]arrapi.EpisodeFile{
-			1: {epFile(1, "SubsPlease"), {ID: 50, SeasonNumber: 0, ReleaseGroup: "MTBB", Quality: v2}},
+		series: []sonarr.Series{{ID: 1, Title: "Show"}},
+		files: map[int][]sonarr.EpisodeFile{
+			1: {listedFile(10, 1, "SubsPlease"), {ID: 50, Season: 0, ReleaseGroup: "MTBB", Revision: v2}},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {withFile(1, 1, 1, 10), specialEp(5, span), specialEp(6, span), specialEp(7, nil)},
+		episodes: map[int][]sonarr.Episode{
+			1: {withFile(1, 1, 1, 10), specialEp(5, 50), specialEp(6, 50), specialEp(7, 0)},
 		},
 	}
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -58,17 +58,17 @@ func TestWalkSonarrReadsSeasonZeroEpisodeFiles(t *testing.T) {
 
 func TestWalkSonarrKeepsSpecialsOnlyWhereItHoldsASeasonZeroFile(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Seasons only"}, {ID: 2, Title: "Has a special"}},
-		files: map[int][]arrapi.EpisodeFile{
-			1: {epFile(1, "A"), epFile(2, "A")},
-			2: {epFile(1, "B"), epFile(0, "C")},
+		series: []sonarr.Series{{ID: 1, Title: "Seasons only"}, {ID: 2, Title: "Has a special"}},
+		files: map[int][]sonarr.EpisodeFile{
+			1: {listedFile(1, 1, "A"), listedFile(2, 2, "A")},
+			2: {listedFile(3, 1, "B"), listedFile(4, 0, "C")},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {specialEp(1, &arrapi.EpisodeFile{SeasonNumber: 0, ReleaseGroup: "X"})},
-			2: {specialEp(1, &arrapi.EpisodeFile{SeasonNumber: 0, ReleaseGroup: "C"})},
+		episodes: map[int][]sonarr.Episode{
+			1: {specialEp(1, 1)},
+			2: {specialEp(1, 4)},
 		},
 	}
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -88,12 +88,12 @@ func TestWalkSonarrKeepsSpecialsOnlyWhereItHoldsASeasonZeroFile(t *testing.T) {
 
 func TestWalkSonarrEpisodeListFailureLeavesSpecialsUnknown(t *testing.T) {
 	fs := &fakeSonarr{
-		series:      []arrapi.Series{{ID: 1, Title: "Show"}},
-		files:       map[int][]arrapi.EpisodeFile{1: {epFile(1, "A"), epFile(0, "B")}},
+		series:      []sonarr.Series{{ID: 1, Title: "Show"}},
+		files:       map[int][]sonarr.EpisodeFile{1: {epFile(1, "A"), epFile(0, "B")}},
 		episodesErr: map[int]error{1: errors.New("boom")},
 	}
 	logger, rec := capture.New()
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: logger}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -108,48 +108,48 @@ func TestWalkSonarrEpisodeListFailureLeavesSpecialsUnknown(t *testing.T) {
 }
 
 func TestSpecialEpisodesSkipsWhatIsNotASeasonZeroEpisode(t *testing.T) {
-	got, ok := specialEpisodes([]arrapi.Episode{
-		{SeasonNumber: 1, EpisodeNumber: 3, HasFile: true},
-		{SeasonNumber: 0, EpisodeNumber: 0},
-		{SeasonNumber: 0, EpisodeNumber: 4},
-	})
+	got, ok := specialEpisodes([]sonarr.Episode{
+		{Season: 1, Number: 3, HasFile: true},
+		{Season: 0, Number: 0},
+		{Season: 0, Number: 4},
+	}, nil)
 	if want := map[int]library.ListedEpisode{4: {}}; !ok || !maps.Equal(got, want) {
 		t.Errorf("specialEpisodes(mixed) = %+v, %v, want %+v, true", got, ok, want)
 	}
-	if got, ok := specialEpisodes(nil); got != nil || !ok {
+	if got, ok := specialEpisodes(nil, nil); got != nil || !ok {
 		t.Errorf("specialEpisodes(nil) = %+v, %v, want nil, true", got, ok)
 	}
 }
 
-func TestWalkSonarrSeasonZeroFileWithoutPayloadLeavesSpecialsUnknown(t *testing.T) {
-	stripped := arrapi.Episode{SeasonNumber: 0, EpisodeNumber: 9, HasFile: true}
+func TestWalkSonarrSeasonZeroFileWithoutFileIDLeavesSpecialsUnknown(t *testing.T) {
+	stripped := sonarr.Episode{Season: 0, Number: 9, HasFile: true}
 	fs := &fakeSonarr{
-		series:   []arrapi.Series{{ID: 1, Title: "Show"}},
-		files:    map[int][]arrapi.EpisodeFile{1: {epFile(1, "A"), epFile(0, "B")}},
-		episodes: map[int][]arrapi.Episode{1: {specialEp(4, &arrapi.EpisodeFile{SeasonNumber: 0, ReleaseGroup: "B"}), stripped}},
+		series:   []sonarr.Series{{ID: 1, Title: "Show"}},
+		files:    map[int][]sonarr.EpisodeFile{1: {listedFile(1, 1, "A"), listedFile(2, 0, "B")}},
+		episodes: map[int][]sonarr.Episode{1: {specialEp(4, 2), stripped}},
 	}
 	logger, rec := capture.New()
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: logger}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	if it := snap.Items[0]; it.Specials != nil || it.Failed || snap.Partial {
-		t.Errorf("Walk with hasFile and no episodeFile on S00E09 = specials %+v failed %v partial %v; want unknown specials on a comparable item",
+		t.Errorf("Walk with hasFile and no file id on S00E09 = specials %+v failed %v partial %v; want unknown specials on a comparable item",
 			it.Specials, it.Failed, snap.Partial)
 	}
 	if !rec.HasAttr("sonarr specials episode list marks a file it does not send; the series' films and specials stay uncompared", "id", "1") {
-		t.Errorf("messages = %q, want the payload-missing WARN naming series 1", rec.Messages())
+		t.Errorf("messages = %q, want the file-unknown WARN naming series 1", rec.Messages())
 	}
 }
 
 func TestWalkSonarrSeasonZeroFileWithNoListedEpisodeWarns(t *testing.T) {
 	fs := &fakeSonarr{
-		series:   []arrapi.Series{{ID: 1, Title: "Show"}},
-		files:    map[int][]arrapi.EpisodeFile{1: {epFile(1, "A"), epFile(0, "B")}},
-		episodes: map[int][]arrapi.Episode{1: {{SeasonNumber: 0, EpisodeNumber: 0}}},
+		series:   []sonarr.Series{{ID: 1, Title: "Show"}},
+		files:    map[int][]sonarr.EpisodeFile{1: {epFile(1, "A"), epFile(0, "B")}},
+		episodes: map[int][]sonarr.Episode{1: {{Season: 0, Number: 0}}},
 	}
 	logger, rec := capture.New()
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: logger}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -162,22 +162,21 @@ func TestWalkSonarrSeasonZeroFileWithNoListedEpisodeWarns(t *testing.T) {
 }
 
 // Listed holds every positive-season episode Sonarr lists, with or without a
-// file, and leaves out a season whose file state the list does not send.
+// file, and leaves out a season holding an episode whose file state is unknown.
 func TestWalkSonarrListsEveryPositiveSeasonEpisode(t *testing.T) {
-	v2 := &arrapi.QualityModel{Revision: &arrapi.Revision{Version: 2}}
-	held := &arrapi.EpisodeFile{ID: 10, SeasonNumber: 1, ReleaseGroup: "MTBB", Quality: v2}
+	v2 := &arrapi.Revision{Version: 2}
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Films"}},
-		files:  map[int][]arrapi.EpisodeFile{1: {*held}},
-		episodes: map[int][]arrapi.Episode{1: {
-			{SeasonNumber: 1, EpisodeNumber: 1, HasFile: true, EpisodeFile: held},
-			{SeasonNumber: 1, EpisodeNumber: 2},
-			{SeasonNumber: 2, EpisodeNumber: 1, HasFile: true},
-			{SeasonNumber: 2, EpisodeNumber: 2},
-			specialEp(1, nil),
+		series: []sonarr.Series{{ID: 1, Title: "Films"}},
+		files:  map[int][]sonarr.EpisodeFile{1: {{ID: 10, Season: 1, ReleaseGroup: "MTBB", Revision: v2}}},
+		episodes: map[int][]sonarr.Episode{1: {
+			{Season: 1, Number: 1, HasFile: true, FileID: 10},
+			{Season: 1, Number: 2},
+			{Season: 2, Number: 1, HasFile: true},
+			{Season: 2, Number: 2},
+			specialEp(1, 0),
 		}},
 	}
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -189,7 +188,7 @@ func TestWalkSonarrListsEveryPositiveSeasonEpisode(t *testing.T) {
 		t.Errorf("Walk Listed = %+v, want %+v: season 1 in full, season 2 unknown, no season 0", got, want)
 	}
 	fs.episodesErr = map[int]error{1: errors.New("boom")}
-	if snap, err = NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context()); err != nil || snap.Items[0].Listed != nil {
+	if snap, _, err = NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context()); err != nil || snap.Items[0].Listed != nil {
 		t.Errorf("Walk with the episode list unreadable: Listed = %+v, %v; want nil", snap.Items[0].Listed, err)
 	}
 }
@@ -197,16 +196,16 @@ func TestWalkSonarrListsEveryPositiveSeasonEpisode(t *testing.T) {
 // A series with no file still has Sonarr's episode list, so an entry placed
 // on part of a season is judged on its own episodes, there missing.
 func TestWalkSonarrFilelessSeriesListsItsEpisodes(t *testing.T) {
-	season := make([]arrapi.Episode, 7)
+	season := make([]sonarr.Episode, 7)
 	for i := range season {
-		season[i] = arrapi.Episode{SeasonNumber: 1, EpisodeNumber: i + 1}
+		season[i] = sonarr.Episode{Season: 1, Number: i + 1}
 	}
 	fs := &fakeSonarr{
-		series:   []arrapi.Series{{ID: 1, Title: "Films", TvdbID: 42}},
-		files:    map[int][]arrapi.EpisodeFile{1: {}},
-		episodes: map[int][]arrapi.Episode{1: season},
+		series:   []sonarr.Series{{ID: 1, Title: "Films", IDs: sonarr.ExternalIDs{TVDB: 42}}},
+		files:    map[int][]sonarr.EpisodeFile{1: {}},
+		episodes: map[int][]sonarr.Episode{1: season},
 	}
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}

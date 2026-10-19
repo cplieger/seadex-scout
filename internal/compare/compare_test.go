@@ -1,6 +1,7 @@
 package compare
 
 import (
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestCandidateStableKeyBoundsOversizedComponents pins the size bound on the
@@ -1236,4 +1238,82 @@ func TestCompareFindingSeasonField(t *testing.T) {
 			t.Errorf("Season = %d, want 0 (a negative season.tvdb must clamp, not leak into the slog field)", got[0].Season)
 		}
 	})
+}
+
+// TestCompareNonAiredOrderSeriesEmitsNothing pins the order rule on the findings
+// path: a series Sonarr numbers in another order is never compared, so a
+// diverged season, an unverifiable one and an empty best set all yield no
+// finding, while the same item in aired order keeps its better_release.
+func TestCompareNonAiredOrderSeriesEmitsNothing(t *testing.T) {
+	best := seadex.Torrent{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}
+	for _, tc := range []struct {
+		name     string
+		groups   []string
+		torrents []seadex.Torrent
+	}{
+		{name: "diverged", groups: []string{"erai-raws"}, torrents: []seadex.Torrent{best}},
+		{name: "unverifiable", groups: []string{release.NormalizeGroup(release.NoGroup)}, torrents: []seadex.Torrent{best}},
+		{name: "no best listed", groups: []string{"erai-raws"}, torrents: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := &library.Item{
+				Arr: library.ArrSonarr, Title: "Monogatari", Groups: tc.groups, HasFile: true,
+				SeasonGroups: map[int][]string{2: tc.groups},
+				Order:        &library.Order{Type: "alternate", Name: "Book Order"},
+			}
+			entry := seadex.Entry{AniListID: 5081, Torrents: tc.torrents}
+			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 2}}
+			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+				t.Errorf("Compare(non-aired order) = %+v, want no finding", got)
+			}
+		})
+	}
+	t.Run("aired order converse", func(t *testing.T) {
+		item := &library.Item{Arr: library.ArrSonarr, Title: "Monogatari", Groups: []string{"erai-raws"}, HasFile: true, SeasonGroups: map[int][]string{2: {"erai-raws"}}}
+		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 5081, Torrents: []seadex.Torrent{best}}, Record: mapping.Record{SeasonTvdb: 2}}
+		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		if len(got) != 1 || got[0].Status != StatusBetter {
+			t.Errorf("Compare(aired order) = %+v, want one better_release", got)
+		}
+	})
+}
+
+// TestCompareAniListExcludedEntryEmitsNothing pins the AniList guard on the
+// findings path: a diverged season on a series whose Sonarr AniList ids exclude the
+// entry's yields no finding and one Debug record naming the entry's id, the
+// series and its ids, while a member entry keeps its better_release and logs
+// nothing.
+func TestCompareAniListExcludedEntryEmitsNothing(t *testing.T) {
+	const msg = "comparison withheld: Sonarr's AniList ids exclude this entry"
+	best := seadex.Torrent{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}
+	item := &library.Item{
+		Arr: library.ArrSonarr, Title: "Code Geass", Groups: []string{"erai-raws"}, HasFile: true,
+		SeasonGroups: map[int][]string{2: {"erai-raws"}}, AniListIDs: []int{1575, 2904},
+	}
+	compareFor := func(aniListID int) ([]Finding, *capture.Recorder) {
+		log, rec := capture.New()
+		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: aniListID, Torrents: []seadex.Torrent{best}}, Record: mapping.Record{SeasonTvdb: 2}}
+		return New(Config{Logger: log}).Compare([]match.Match{m}), rec
+	}
+
+	got, rec := compareFor(20)
+	if len(got) != 0 {
+		t.Errorf("Compare(non-member) = %+v, want no finding", got)
+	}
+	if n := rec.CountLevel(slog.LevelDebug, msg); n != 1 {
+		t.Fatalf("Debug records %q = %d, want 1", msg, n)
+	}
+	for key, want := range map[string]string{"anilist_id": "20", "series": "Code Geass", "series_anilist_ids": "[1575 2904]"} {
+		if v, _ := rec.AttrValueExact(msg, key); v != want {
+			t.Errorf("%s = %q, want %q", key, v, want)
+		}
+	}
+
+	got, rec = compareFor(2904)
+	if len(got) != 1 || got[0].Status != StatusBetter {
+		t.Errorf("Compare(member) = %+v, want one better_release", got)
+	}
+	if n := rec.CountExact(msg); n != 0 {
+		t.Errorf("member logged %d withheld records, want 0", n)
+	}
 }

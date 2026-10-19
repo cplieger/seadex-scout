@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -73,20 +73,20 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 				PartialWalks: tc.priorStreak,
 			}}
 			sonarr := &flakySonarr{
-				series: []arrapi.Series{
-					{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-					{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+				series: []sonarr.Series{
+					{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+					{ID: 8, Title: "Second Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
 				},
-				files: map[int][]arrapi.EpisodeFile{
-					7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-					8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				files: map[int][]sonarr.EpisodeFile{
+					7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
+					8: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 				},
 				failEpisodes: map[int]bool{8: true},
 			}
 			s := New(&Deps{
 				Logger:       logger,
 				Store:        store,
-				Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 				Mapping:      fakeMapping{},
 				SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry())},
 				Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -149,12 +149,12 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 	store := &fakeStore{st: state.State{
 		Mapping: frierenMappingCache(),
 	}}
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	s := New(&Deps{
 		Notifier: notify.NewNotifier(logger, nil),
 		Logger:   logger,
 		Store:    store,
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{err: errors.New(hostile)},
 	})
@@ -203,7 +203,7 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 				Mapping: twoRecordMappingCache(),
 			}},
 			Library: arrwalk.NewWalker(&arrwalk.Config{
-				Sonarr: sonarr, IncludeTags: include, Logger: scoutTestLogger(),
+				Sonarr: onePass{sonarr}, IncludeTags: include, Logger: scoutTestLogger(),
 			}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
@@ -217,8 +217,8 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	// include label resolves to nothing and the side contributes zero items.
 	sonarr := func() *fakeSonarr {
 		return &fakeSonarr{
-			series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-			files:  map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}},
+			series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+			files:  map[int][]sonarr.EpisodeFile{7: {{Season: 1, ReleaseGroup: "Erai-raws"}}},
 		}
 	}
 

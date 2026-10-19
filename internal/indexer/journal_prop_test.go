@@ -38,7 +38,7 @@ func TestRenderJournalItemOrderInvariantFoldProperty(t *testing.T) {
 			}}}
 			refs[i] = curatedRef{entry: e, torrent: &e.Torrents[0]}
 		}
-		infoFor := func(alID int) EntryInfo { return EntryInfo{IsMovie: movie[alID]} }
+		infoFor := func(alID int) EntryInfo { return EntryInfo{Kind: kindOf(movie[alID])} }
 
 		rendered, ok := w.renderJournalItem("nyaa:77", refs, nil, infoFor)
 		if !ok || rendered.noPasskey {
@@ -136,7 +136,7 @@ func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
 				}
 			}
 
-			if err := w.Rebuild(t.Context(), catalogue, nil); err != nil {
+			if err := w.Rebuild(t.Context(), catalogue, FeedInfo{}); err != nil {
 				rt.Fatalf("Rebuild round %d: %v", r, err)
 			}
 			data, err := os.ReadFile(path)

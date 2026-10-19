@@ -52,27 +52,57 @@ type Item struct {
 	// unknown: the episode list was not read, or it holds a file it sent no
 	// payload for.
 	Listed map[int]map[int]ListedEpisode `json:"listed,omitempty"`
-	Arr    string                        `json:"arr"`
-	ImdbID string                        `json:"imdb_id,omitempty"`
-	Title  string                        `json:"title"`
+	// Order is the series' episode order when Sonarr numbers it in another
+	// order than TheTVDB's aired one, and nil otherwise.
+	Order  *Order `json:"order,omitempty"`
+	Arr    string `json:"arr"`
+	ImdbID string `json:"imdb_id,omitempty"`
+	Title  string `json:"title"`
 	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
 	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
 	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an
 	// audit report row. The sink-side SafeLogURL calls are belt-and-braces for an Item
 	// built outside the walker (tests, future construction paths).
-	ArrURL    string          `json:"arr_url,omitempty"`
-	AltTitles []string        `json:"alt_titles,omitempty"`
-	Groups    []string        `json:"groups,omitempty"`
-	Current   release.Release `json:"current"`
-	ArrID     int             `json:"arr_id"`
-	TvdbID    int             `json:"tvdb_id,omitempty"`
-	TmdbID    int             `json:"tmdb_id,omitempty"`
-	Year      int             `json:"year,omitempty"`
-	HasFile   bool            `json:"has_file"`
+	ArrURL    string   `json:"arr_url,omitempty"`
+	AltTitles []string `json:"alt_titles,omitempty"`
+	// AniListIDs are the AniList entries Sonarr links the series to: empty
+	// when it links none, nil on Sonarr 4, which cannot say.
+	AniListIDs []int           `json:"anilist_ids,omitempty"`
+	Groups     []string        `json:"groups,omitempty"`
+	Current    release.Release `json:"current"`
+	ArrID      int             `json:"arr_id"`
+	TvdbID     int             `json:"tvdb_id,omitempty"`
+	TmdbID     int             `json:"tmdb_id,omitempty"`
+	Year       int             `json:"year,omitempty"`
+	HasFile    bool            `json:"has_file"`
 	// Failed marks an item whose file data this walk could not establish: a
 	// series whose episode fetch failed, or a movie Radarr reports a file for
 	// while sending no file payload.
 	Failed bool `json:"failed,omitempty"`
+	// SpecialsFileUnknown marks a series whose episode list names a season-0
+	// file the walk could not tie to its file list, which SeasonGroups cannot
+	// show when that file is the series' first special.
+	SpecialsFileUnknown bool `json:"specials_file_unknown,omitempty"`
+}
+
+// Order is a Sonarr episode order: the server's type code and the order's
+// name, "" when Sonarr lists no order of that type.
+type Order struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
+}
+
+// Label names the order for an operator: its name, else its type code, else
+// "an unknown order" (Sonarr sent no type).
+func (o Order) Label() string {
+	switch {
+	case o.Name != "":
+		return o.Name
+	case o.Type != "":
+		return o.Type
+	default:
+		return "an unknown order"
+	}
 }
 
 // ListedEpisode is one episode Sonarr lists for a series: whether a file sits
@@ -105,12 +135,13 @@ func (it *Item) Key() string {
 // recommendation.
 func (it *Item) Comparable() bool { return !it.Failed }
 
-// SpecialsUnknown reports whether the series holds a season-0 file whose
-// episode is not known: the episode list read failed or tied no season-0
-// episode to it, or the snapshot predates the field. A series with no
-// season-0 file is known to hold none.
+// SpecialsUnknown reports whether the series' season-0 files are not known:
+// it holds a season-0 file whose episode is not known (the episode list read
+// failed or tied no season-0 episode to it, or the snapshot predates the
+// field), or SpecialsFileUnknown is set. Otherwise its season-0 files are
+// known: Specials maps them, or it holds none.
 func (it *Item) SpecialsUnknown() bool {
-	return it.Specials == nil && len(it.SeasonGroups[0]) > 0
+	return it.SpecialsFileUnknown || it.Specials == nil && len(it.SeasonGroups[0]) > 0
 }
 
 // Snapshot is one library walk.
@@ -141,7 +172,8 @@ type Diff struct {
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its file presence, group set, per-season group
 // attribution, revision readings, season-0 episode files, listed episodes,
-// file sizes, episode-to-file map, or current fingerprint differs.
+// file sizes, episode-to-file map, episode order, AniList ids, or current
+// fingerprint differs.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey, prevFailed := indexByKey(prev)
 	curByKey, curFailed := indexByKey(cur)
@@ -219,8 +251,13 @@ func sameItem(a, b *Item) bool {
 		maps.EqualFunc(a.SeasonGroups, b.SeasonGroups, slices.Equal) &&
 		maps.EqualFunc(a.SeasonRevisions, b.SeasonRevisions, maps.Equal) &&
 		maps.Equal(a.Revisions, b.Revisions) &&
-		maps.Equal(a.Specials, b.Specials) &&
+		maps.Equal(a.Specials, b.Specials) && a.SpecialsFileUnknown == b.SpecialsFileUnknown &&
 		maps.EqualFunc(a.Listed, b.Listed, maps.Equal) &&
 		maps.Equal(a.FileBytes, b.FileBytes) &&
-		maps.EqualFunc(a.SeasonEpisodes, b.SeasonEpisodes, maps.Equal)
+		maps.EqualFunc(a.SeasonEpisodes, b.SeasonEpisodes, maps.Equal) &&
+		sameOrder(a.Order, b.Order) && slices.Equal(a.AniListIDs, b.AniListIDs)
+}
+
+func sameOrder(a, b *Order) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }

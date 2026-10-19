@@ -13,7 +13,9 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3"
+	"github.com/cplieger/arrapi/v3/radarr"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/slogx/capture"
 )
@@ -32,35 +34,62 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// fakeSonarr is a scripted SonarrClient: Series returns series (or listErr),
-// EpisodeFiles returns files[id] (or epErr[id]), Episodes returns
-// episodes[id] (or episodesErr[id]) and counts the call in episodesCalls, Tags
-// returns the canned tag list (or tagErr).
+// fakeSonarr is a scripted SonarrPass: Series returns series (or listErr),
+// in TheTVDB's aired order where a series sets no Order unless rawOrders asks
+// for the orders as given; EpisodeFiles returns files[id] (or epErr[id]),
+// Episodes returns episodes[id] (or episodesErr[id]) and counts the call in
+// episodesCalls, and Tags returns the canned tag list (or tagErr).
 type fakeSonarr struct {
-	files         map[int][]arrapi.EpisodeFile
-	episodes      map[int][]arrapi.Episode
+	files         map[int][]sonarr.EpisodeFile
+	episodes      map[int][]sonarr.Episode
 	epErr         map[int]error
 	episodesErr   map[int]error
 	listErr       error
 	tagErr        error
 	episodesCalls map[int]int
-	series        []arrapi.Series
+	series        []sonarr.Series
 	tags          []arrapi.Tag
+	seriesCalls   int
 	mu            sync.Mutex
+	rawOrders     bool
 }
 
-func (f *fakeSonarr) Series(context.Context) ([]arrapi.Series, error) {
-	return f.series, f.listErr
+// onePass gives the walker its SonarrPass as the pass of every walk.
+type onePass struct{ SonarrPass }
+
+func (p onePass) Pin(context.Context) (SonarrPass, error) { return p.SonarrPass, nil }
+
+func (f *fakeSonarr) Series(context.Context) ([]sonarr.Series, error) {
+	f.mu.Lock()
+	f.seriesCalls++
+	f.mu.Unlock()
+	if f.rawOrders {
+		return slices.Clone(f.series), f.listErr
+	}
+	return airedByDefault(f.series), f.listErr
 }
 
-func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+// airedByDefault gives every series a fake lists with no Order TheTVDB's aired
+// order, which arrapi reports for every Sonarr v4 (API v3) series; a
+// test models a Sonarr v5 (API v5) series by setting its Order.
+func airedByDefault(series []sonarr.Series) []sonarr.Series {
+	out := slices.Clone(series)
+	for i := range out {
+		if out[i].Order == (sonarr.Order{}) {
+			out[i].Order = sonarr.Order{Type: "official", Name: "Aired Order", Official: true}
+		}
+	}
+	return out
+}
+
+func (f *fakeSonarr) EpisodeFiles(_ context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
 	if err := f.epErr[seriesID]; err != nil {
 		return nil, err
 	}
 	return f.files[seriesID], nil
 }
 
-func (f *fakeSonarr) Episodes(_ context.Context, seriesID int) ([]arrapi.Episode, error) {
+func (f *fakeSonarr) Episodes(_ context.Context, seriesID int) ([]sonarr.Episode, error) {
 	f.mu.Lock()
 	if f.episodesCalls == nil {
 		f.episodesCalls = map[int]int{}
@@ -77,8 +106,8 @@ func (f *fakeSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 	return f.tags, f.tagErr
 }
 
-func epFile(season int, group string) arrapi.EpisodeFile {
-	return arrapi.EpisodeFile{SeasonNumber: season, ReleaseGroup: group}
+func epFile(season int, group string) sonarr.EpisodeFile {
+	return sonarr.EpisodeFile{Season: season, ReleaseGroup: group}
 }
 
 // TestWalkSonarrPartialEpisodeFailure pins the "ingest succeeded == healthy"
@@ -91,20 +120,20 @@ func epFile(season int, group string) arrapi.EpisodeFile {
 // exercises the bounded-concurrency episode fetch.
 func TestWalkSonarrPartialEpisodeFailure(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Alpha"},
 			{ID: 2, Title: "Bravo"},
 			{ID: 3, Title: "Charlie"},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 			3: {epFile(1, "LostYears")},
 		},
 		epErr: map[int]error{2: errors.New("episode fetch boom")},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
 	}
@@ -148,12 +177,12 @@ func TestWalkSonarrPartialEpisodeFailure(t *testing.T) {
 func TestWalkSonarrFailureBudgetFailsWalk(t *testing.T) {
 	fs := &fakeSonarr{epErr: map[int]error{}}
 	for id := 1; id <= episodeFailureBudget+3; id++ {
-		fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+		fs.series = append(fs.series, sonarr.Series{ID: id, Title: "Series"})
 		fs.epErr[id] = errors.New("sonarr down")
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err == nil {
 		t.Fatal("Walk returned nil error, want the walk failure budget error")
 	}
@@ -184,12 +213,12 @@ func TestWalkSonarrTotalEpisodeFailureFailsWalk(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := &fakeSonarr{epErr: map[int]error{}}
 			for id := 1; id <= tc.series; id++ {
-				fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+				fs.series = append(fs.series, sonarr.Series{ID: id, Title: "Series"})
 				fs.epErr[id] = errors.New("episode endpoint down")
 			}
-			w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+			w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
-			snap, err := w.Walk(t.Context())
+			snap, _, err := w.Walk(t.Context())
 			if err == nil {
 				t.Fatal("Walk returned nil error, want the total episode-failure error")
 			}
@@ -208,18 +237,18 @@ func TestWalkSonarrTotalEpisodeFailureFailsWalk(t *testing.T) {
 // series that lack an included tag before they enter the snapshot.
 func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Kept", Tags: []int{7}},
 			{ID: 2, Title: "Dropped", Tags: []int{3}},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 		},
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -233,28 +262,28 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 // configured on the same walk keep only the included, non-excluded items.
 func TestWalkAppliesIncludeAndExcludeTagFiltersTogether(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Kept", Tags: []int{7}},
 			{ID: 2, Title: "Excluded", Tags: []int{7, 9}},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 		},
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
 	}
 	fr := &fakeRadarr{
-		movies: []arrapi.Movie{{ID: 10, Title: "Kept Movie", Tags: []int{7}}},
+		movies: []radarr.Movie{{ID: 10, Title: "Kept Movie", Tags: []int{7}}},
 		tags:   []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
 	}
 	w := NewWalker(&Config{
-		Sonarr:      fs,
+		Sonarr:      onePass{fs},
 		Radarr:      fr,
 		IncludeTags: []string{"anime"},
 		ExcludeTags: []string{"skip"},
 		Logger:      discardLogger(),
 	})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -273,17 +302,17 @@ func TestWalkAppliesIncludeAndExcludeTagFiltersTogether(t *testing.T) {
 func TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint(t *testing.T) {
 	tagErr := errors.New("tag endpoint unavailable")
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha"}},
+		files:  map[int][]sonarr.EpisodeFile{1: {epFile(1, "PMR")}},
 		tagErr: tagErr,
 	}
 	fr := &fakeRadarr{
-		movies: []arrapi.Movie{{ID: 2, Title: "Movie"}},
+		movies: []radarr.Movie{{ID: 2, Title: "Movie"}},
 		tagErr: tagErr,
 	}
-	w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Radarr: fr, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk with no tag filters: %v", err)
 	}
@@ -298,24 +327,28 @@ func TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint(t *testing.T) {
 	}
 }
 
+// TestIsDualAudio pins dual audio as two distinct languages among arrapi's
+// normalized track languages, which never hold "und" or "".
 func TestIsDualAudio(t *testing.T) {
 	tests := []struct {
-		in   string
+		name string
+		in   []string
 		want bool
 	}{
-		{"Japanese / English", true},
-		{"jpn/eng", true},
-		{"Japanese, English", true},
-		{"Japanese/English/Commentary", true},
-		{"Japanese", false},
-		{"", false},
-		{"jpn / jpn", false}, // same language repeated is not dual audio
-		{"  eng  /  eng ", false},
+		{"two languages", []string{"jpn", "eng"}, true},
+		{"one language on two tracks", []string{"jpn", "jpn"}, false},
+		{"one track", []string{"jpn"}, false},
+		{"no tagged track", []string{}, false},
+		{"nil", nil, false},
+		{"a one-stream eng file", []string{"eng"}, false},
+		{"a second language after a repeat", []string{"jpn", "jpn", "eng"}, true},
 	}
 	for _, tc := range tests {
-		if got := isDualAudio(tc.in); got != tc.want {
-			t.Errorf("isDualAudio(%q) = %v, want %v", tc.in, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDualAudio(tc.in); got != tc.want {
+				t.Errorf("isDualAudio(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -356,17 +389,17 @@ func TestKeepByTags(t *testing.T) {
 type boundedSonarr struct {
 	started   chan int
 	release   chan struct{}
-	series    []arrapi.Series
+	series    []sonarr.Series
 	mu        sync.Mutex
 	active    int
 	maxActive int
 }
 
-func (f *boundedSonarr) Series(context.Context) ([]arrapi.Series, error) {
-	return f.series, nil
+func (f *boundedSonarr) Series(context.Context) ([]sonarr.Series, error) {
+	return airedByDefault(f.series), nil
 }
 
-func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
 	f.mu.Lock()
 	f.active++
 	if f.active > f.maxActive {
@@ -386,13 +419,13 @@ func (f *boundedSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrap
 	}
 	select {
 	case <-f.release:
-		return []arrapi.EpisodeFile{epFile(1, "PMR")}, nil
+		return []sonarr.EpisodeFile{epFile(1, "PMR")}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-func (*boundedSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*boundedSonarr) Episodes(context.Context, int) ([]sonarr.Episode, error) {
 	return nil, nil
 }
 
@@ -414,13 +447,13 @@ func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
 			release: make(chan struct{}, seriesCount),
 		}
 		for id := 1; id <= seriesCount; id++ {
-			fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+			fs.series = append(fs.series, sonarr.Series{ID: id, Title: "Series"})
 		}
-		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+		w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
 		done := make(chan error, 1)
 		go func() {
-			snap, err := w.Walk(t.Context())
+			snap, _, err := w.Walk(t.Context())
 			if err == nil && len(snap.Items) != seriesCount {
 				err = errors.New("walk returned the wrong item count")
 			}
@@ -458,20 +491,20 @@ func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
 // simulating a shutdown/timeout during the episode fetch.
 type cancelingSonarr struct {
 	cancel context.CancelFunc
-	series []arrapi.Series
+	series []sonarr.Series
 }
 
-func (f *cancelingSonarr) Series(context.Context) ([]arrapi.Series, error) {
-	return f.series, nil
+func (f *cancelingSonarr) Series(context.Context) ([]sonarr.Series, error) {
+	return airedByDefault(f.series), nil
 }
 
-func (f *cancelingSonarr) EpisodeFiles(ctx context.Context, _ int) ([]arrapi.EpisodeFile, error) {
+func (f *cancelingSonarr) EpisodeFiles(ctx context.Context, _ int) ([]sonarr.EpisodeFile, error) {
 	f.cancel()
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-func (*cancelingSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*cancelingSonarr) Episodes(context.Context, int) ([]sonarr.Episode, error) {
 	return nil, nil
 }
 
@@ -482,13 +515,13 @@ func (*cancelingSonarr) Tags(context.Context) ([]arrapi.Tag, error) {
 func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	fs := &cancelingSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha"}},
 		cancel: cancel,
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
 
-	_, err := w.Walk(ctx)
+	_, _, err := w.Walk(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled", err)
 	}
@@ -501,11 +534,11 @@ func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
 type fakeRadarr struct {
 	listErr error
 	tagErr  error
-	movies  []arrapi.Movie
+	movies  []radarr.Movie
 	tags    []arrapi.Tag
 }
 
-func (f *fakeRadarr) Movies(context.Context) ([]arrapi.Movie, error) {
+func (f *fakeRadarr) Movies(context.Context) ([]radarr.Movie, error) {
 	return f.movies, f.listErr
 }
 
@@ -515,29 +548,28 @@ func (f *fakeRadarr) Tags(context.Context) ([]arrapi.Tag, error) {
 
 func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
 	fr := &fakeRadarr{
-		movies: []arrapi.Movie{
+		movies: []radarr.Movie{
 			{
 				ID:              10,
 				Title:           "Kept Movie",
-				ImdbID:          "tt0000010",
-				TmdbID:          1234,
+				IDs:             radarr.ExternalIDs{IMDb: "tt0000010", TMDB: 1234},
 				Year:            2024,
 				Tags:            []int{1},
-				AlternateTitles: []arrapi.AlternateTitle{{Title: "Alt Movie"}, {Title: "   "}},
+				AlternateTitles: []string{"Alt Movie", "   "},
 				HasFile:         true,
-				MovieFile: &arrapi.MovieFile{
+				File: &radarr.MovieFile{
 					ReleaseGroup: "PMR",
 					SceneName:    "[PMR] Kept Movie (2024) [1080p][x265][Dual Audio]",
-					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: "Japanese / English"},
+					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: []string{"jpn", "eng"}},
 				},
 			},
-			{ID: 20, Title: "Dropped Movie", Tags: []int{9}, HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "Other"}},
+			{ID: 20, Title: "Dropped Movie", Tags: []int{9}, HasFile: true, File: &radarr.MovieFile{ReleaseGroup: "Other"}},
 		},
 		tags: []arrapi.Tag{{ID: 9, Label: "skip"}},
 	}
 	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, RadarrURL: "https://radarr.example", Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -570,11 +602,11 @@ func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
 // than fail-opening the filter.
 func TestWalkSonarrTagResolutionCancellationIsFatal(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha"}},
 		tagErr: context.Canceled,
 	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	if _, err := w.Walk(t.Context()); !errors.Is(err, context.Canceled) {
+	w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: discardLogger()})
+	if _, _, err := w.Walk(t.Context()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled propagated from tag resolution", err)
 	}
 }
@@ -584,11 +616,11 @@ func TestWalkSonarrTagResolutionCancellationIsFatal(t *testing.T) {
 // cancellation during tag resolution must now propagate.
 func TestWalkRadarrTagResolutionCancellationIsFatal(t *testing.T) {
 	fr := &fakeRadarr{
-		movies: []arrapi.Movie{{ID: 1, Title: "Movie"}},
+		movies: []radarr.Movie{{ID: 1, Title: "Movie"}},
 		tagErr: context.Canceled,
 	}
 	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, Logger: discardLogger()})
-	if _, err := w.Walk(t.Context()); !errors.Is(err, context.Canceled) {
+	if _, _, err := w.Walk(t.Context()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled propagated from tag resolution", err)
 	}
 }
@@ -600,18 +632,18 @@ func TestWalkRadarrTagResolutionCancellationIsFatal(t *testing.T) {
 func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
 	boom := errors.New("arr tag lookup boom")
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Alpha", Tags: []int{1}},
 			{ID: 2, Title: "Bravo", Tags: []int{2}},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 			2: {epFile(1, "LostYears")},
 		},
 		tagErr: boom,
 	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	_, err := w.Walk(t.Context())
+	w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: discardLogger()})
+	_, _, err := w.Walk(t.Context())
 	if !errors.Is(err, boom) {
 		t.Fatalf("Walk error = %v, want the tag-resolution failure propagated (fail closed)", err)
 	}
@@ -629,12 +661,12 @@ func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
 // the walk closed like any other tag error.
 func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{1}}},
-		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha", Tags: []int{1}}},
+		files:  map[int][]sonarr.EpisodeFile{1: {epFile(1, "PMR")}},
 		tagErr: context.DeadlineExceeded,
 	}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-	if _, err := w.Walk(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+	w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: discardLogger()})
+	if _, _, err := w.Walk(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Walk error = %v, want the live-context timeout propagated (fail closed)", err)
 	}
 }
@@ -647,14 +679,14 @@ func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
 // group's episode MediaInfo (representative picks pmr, the most common group).
 func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Multi", TvdbID: 555, Year: 2023}},
-		files: map[int][]arrapi.EpisodeFile{
+		series: []sonarr.Series{{ID: 1, Title: "Multi", IDs: sonarr.ExternalIDs{TVDB: 555}, Year: 2023}},
+		files: map[int][]sonarr.EpisodeFile{
 			1: {
 				{
-					SeasonNumber: 1,
+					Season:       1,
 					ReleaseGroup: "PMR",
 					SceneName:    "[PMR] Multi S01E01 [1080p][x265]",
-					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: "Japanese / English"},
+					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: []string{"jpn", "eng"}},
 				},
 				epFile(1, "PMR"),
 				epFile(1, "LostYears"),
@@ -662,9 +694,9 @@ func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T)
 			},
 		},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -694,14 +726,14 @@ func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T)
 
 func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Monitored NoFiles", TvdbID: 42}},
+		series: []sonarr.Series{{ID: 1, Title: "Monitored NoFiles", IDs: sonarr.ExternalIDs{TVDB: 42}}},
 		// EpisodeFiles lists only episodes with files, so a fileless series
 		// yields an empty list (the fetch itself succeeds).
-		files: map[int][]arrapi.EpisodeFile{1: {}},
+		files: map[int][]sonarr.EpisodeFile{1: {}},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -732,23 +764,23 @@ func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 func TestWalkNeverLogsAConfiguredTagValue(t *testing.T) {
 	const sentinel = "sekrit-expanded-tag-9f8e7d"
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Kept", Tags: []int{7}},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 		},
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{
-		Sonarr:      fs,
+		Sonarr:      onePass{fs},
 		IncludeTags: []string{"anime", sentinel},
 		ExcludeTags: []string{sentinel + "-excl"},
 		Logger:      logger,
 	})
 
-	if _, err := w.Walk(t.Context()); err != nil {
+	if _, _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	if len(rec.Records()) == 0 {
@@ -768,26 +800,26 @@ func TestWalkNeverLogsAConfiguredTagValue(t *testing.T) {
 }
 
 func TestWalkRadarrContextCancellationAfterListIsFatal(t *testing.T) {
-	fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 1, Title: "Movie", HasFile: false}}}
+	fr := &fakeRadarr{movies: []radarr.Movie{{ID: 1, Title: "Movie", HasFile: false}}}
 	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := w.Walk(ctx); !errors.Is(err, context.Canceled) {
+	if _, _, err := w.Walk(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled surfaced by the post-walk guard", err)
 	}
 }
 
 func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
 	fr := &fakeRadarr{
-		movies: []arrapi.Movie{
-			{ID: 10, Title: "No File Movie", TmdbID: 99, HasFile: false},
-			{ID: 20, Title: "Flagged But Nil File", HasFile: true, MovieFile: nil},
+		movies: []radarr.Movie{
+			{ID: 10, Title: "No File Movie", IDs: radarr.ExternalIDs{TMDB: 99}, HasFile: false},
+			{ID: 20, Title: "Flagged But Nil File", HasFile: true, File: nil},
 		},
 	}
 	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -816,19 +848,19 @@ func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
 // (a partial snapshot).
 func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Alpha"},
 			{ID: 2, Title: "Bravo"},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 		},
 		epErr: map[int]error{2: context.DeadlineExceeded},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (a live-context per-request timeout is not fatal): %v", err)
 	}
@@ -850,15 +882,15 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 // warning per in-flight series.
 func TestWalkSonarrSilentOnContextCancel(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha"}},
 		epErr:  map[int]error{1: context.Canceled},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := w.Walk(ctx); err == nil {
+	if _, _, err := w.Walk(ctx); err == nil {
 		t.Fatal("Walk returned nil error, want the walk-context cancellation propagated")
 	}
 	if rec.Contains("sonarr episode fetch failed; series kept as failed placeholder") {
@@ -871,7 +903,7 @@ func TestWalkSonarrSilentOnContextCancel(t *testing.T) {
 // walks without panicking and stamps the snapshot time.
 func TestWalkNoArrsWithNilLoggerReturnsEmptySnapshot(t *testing.T) {
 	w := NewWalker(&Config{})
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk with no arrs: %v", err)
 	}
@@ -891,7 +923,7 @@ func TestWalkPreCancelledContextIsFatalWithNoArrs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	w := NewWalker(&Config{})
-	snap, err := w.Walk(ctx)
+	snap, _, err := w.Walk(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled", err)
 	}
@@ -905,12 +937,12 @@ func TestWalkPreCancelledContextIsFatalWithNoArrs(t *testing.T) {
 // series fail their episode fetch.
 func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Alpha"},
 			{ID: 2, Title: "Bravo"},
 			{ID: 3, Title: "Charlie"},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 		},
 		epErr: map[int]error{
@@ -919,8 +951,8 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 		},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-	snap, err := w.Walk(t.Context())
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
 	}
@@ -943,16 +975,16 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 // fingerprint comes from the FIRST such file, not the last.
 func TestWalkSonarrRepresentativeTieBreaksToFirstFile(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Tie"}},
-		files: map[int][]arrapi.EpisodeFile{
+		series: []sonarr.Series{{ID: 1, Title: "Tie"}},
+		files: map[int][]sonarr.EpisodeFile{
 			1: {
-				{SeasonNumber: 1, ReleaseGroup: "AAA", SceneName: "[AAA] Tie S01E01 [1080p][x265]"},
-				{SeasonNumber: 1, ReleaseGroup: "BBB", SceneName: "[BBB] Tie S01E02 [720p][x264]"},
+				{Season: 1, ReleaseGroup: "AAA", SceneName: "[AAA] Tie S01E01 [1080p][x265]"},
+				{Season: 1, ReleaseGroup: "BBB", SceneName: "[BBB] Tie S01E02 [720p][x264]"},
 			},
 		},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(t.Context())
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -971,17 +1003,17 @@ func TestWalkSonarrRepresentativeTieBreaksToFirstFile(t *testing.T) {
 // of vanishing from the comparison.
 func TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "GroupLess"}},
-		files: map[int][]arrapi.EpisodeFile{
+		series: []sonarr.Series{{ID: 1, Title: "GroupLess"}},
+		files: map[int][]sonarr.EpisodeFile{
 			1: {{
-				SeasonNumber: 1,
+				Season:       1,
 				ReleaseGroup: "",
 				RelativePath: "Season 01/GroupLess S01E01 1080p.mkv",
 			}},
 		},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(t.Context())
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1009,23 +1041,21 @@ func TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup(t *testing.T) {
 // link built from SonarrURL and the series title slug.
 func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{
+		series: []sonarr.Series{{
 			ID:              7,
 			Title:           "Ident",
 			TitleSlug:       "ident-slug",
-			TvdbID:          555,
-			TmdbID:          777,
-			ImdbID:          "tt0000555",
+			IDs:             sonarr.ExternalIDs{TVDB: 555, TMDB: 777, IMDb: "tt0000555"},
 			Year:            2023,
-			AlternateTitles: []arrapi.AlternateTitle{{Title: "Alt Ident"}, {Title: "   "}},
+			AlternateTitles: []string{"Alt Ident", "   ", " Alt Ident ", "Alt Two", "Alt Ident"},
 		}},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			7: {epFile(1, "PMR")},
 		},
 	}
-	w := NewWalker(&Config{Sonarr: fs, SonarrURL: "https://sonarr.example", Logger: discardLogger()})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, SonarrURL: "https://sonarr.example", Logger: discardLogger()})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1039,8 +1069,8 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 	if it.TvdbID != 555 || it.TmdbID != 777 || it.ImdbID != "tt0000555" || it.Year != 2023 {
 		t.Errorf("ids = tvdb %d tmdb %d imdb %q year %d, want 555/777/tt0000555/2023", it.TvdbID, it.TmdbID, it.ImdbID, it.Year)
 	}
-	if !slices.Equal(it.AltTitles, []string{"Alt Ident"}) {
-		t.Errorf("AltTitles = %v, want only the non-empty alternate title", it.AltTitles)
+	if !slices.Equal(it.AltTitles, []string{"Alt Ident", "Alt Two"}) {
+		t.Errorf("AltTitles = %q, want the distinct non-empty alternate titles, trimmed, in first-seen order", it.AltTitles)
 	}
 	if it.ArrURL != "https://sonarr.example/series/ident-slug" {
 		t.Errorf("ArrURL = %q, want the Sonarr /series/{titleSlug} deep link", it.ArrURL)
@@ -1056,14 +1086,14 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 // to fire on every healthy cycle.
 func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		files: map[int][]arrapi.EpisodeFile{
+		series: []sonarr.Series{{ID: 1, Title: "Alpha"}},
+		files: map[int][]sonarr.EpisodeFile{
 			1: {epFile(1, "PMR")},
 		},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
-	snap, err := w.Walk(t.Context())
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1081,14 +1111,14 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 type budgetSonarr struct {
 	started chan int
 	release chan struct{}
-	series  []arrapi.Series
+	series  []sonarr.Series
 }
 
-func (f *budgetSonarr) Series(context.Context) ([]arrapi.Series, error) {
-	return f.series, nil
+func (f *budgetSonarr) Series(context.Context) ([]sonarr.Series, error) {
+	return airedByDefault(f.series), nil
 }
 
-func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
 	select {
 	case f.started <- seriesID:
 	case <-ctx.Done():
@@ -1102,7 +1132,7 @@ func (f *budgetSonarr) EpisodeFiles(ctx context.Context, seriesID int) ([]arrapi
 	}
 }
 
-func (*budgetSonarr) Episodes(context.Context, int) ([]arrapi.Episode, error) {
+func (*budgetSonarr) Episodes(context.Context, int) ([]sonarr.Episode, error) {
 	return nil, nil
 }
 
@@ -1125,13 +1155,13 @@ func TestWalkSonarrBudgetTripSkipsQueuedFetches(t *testing.T) {
 			release: make(chan struct{}),
 		}
 		for id := 1; id <= seriesCount; id++ {
-			fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+			fs.series = append(fs.series, sonarr.Series{ID: id, Title: "Series"})
 		}
-		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+		w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := w.Walk(t.Context())
+			_, _, err := w.Walk(t.Context())
 			done <- err
 		}()
 
@@ -1158,18 +1188,18 @@ func TestWalkSonarrBudgetTripSkipsQueuedFetches(t *testing.T) {
 }
 
 func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
-	fs := &fakeSonarr{files: map[int][]arrapi.EpisodeFile{}, epErr: map[int]error{}}
+	fs := &fakeSonarr{files: map[int][]sonarr.EpisodeFile{}, epErr: map[int]error{}}
 	total := episodeFailureBudget + 1
 	for id := 1; id <= total; id++ {
-		fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+		fs.series = append(fs.series, sonarr.Series{ID: id, Title: "Series"})
 		if id <= episodeFailureBudget {
 			fs.epErr[id] = errors.New("sonarr down")
 		} else {
-			fs.files[id] = []arrapi.EpisodeFile{epFile(1, "PMR")}
+			fs.files[id] = []sonarr.EpisodeFile{epFile(1, "PMR")}
 		}
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	snap, err := w.Walk(t.Context())
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
+	snap, _, err := w.Walk(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "failure budget") {
 		t.Errorf("Walk error = %v, want the walk failure budget error", err)
 	}
@@ -1187,8 +1217,8 @@ func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
 func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
 	t.Run("empty series list", func(t *testing.T) {
 		fs := &fakeSonarr{}
-		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-		snap, err := w.Walk(t.Context())
+		w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()})
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk with an empty Sonarr library: %v", err)
 		}
@@ -1198,11 +1228,11 @@ func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
 	})
 	t.Run("all series dropped by the include filter", func(t *testing.T) {
 		fs := &fakeSonarr{
-			series: []arrapi.Series{{ID: 1, Title: "Dropped", Tags: []int{3}}},
+			series: []sonarr.Series{{ID: 1, Title: "Dropped", Tags: []int{3}}},
 			tags:   []arrapi.Tag{{ID: 7, Label: "anime"}},
 		}
-		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
-		snap, err := w.Walk(t.Context())
+		w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: discardLogger()})
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk with every series tag-filtered out: %v", err)
 		}
@@ -1213,10 +1243,10 @@ func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
 }
 
 // TestWalkSonarrEpisodeFailureRedactsErrorURL pins the credential boundary of
-// the recoverable per-series warning: an arr transport error is a *url.Error
-// embedding the full request URL (with any configured userinfo), and the
-// warning sits outside the walk-level LogSafeError boundary, so the log site
-// must apply the same reduction itself before the line reaches Loki.
+// the recoverable per-series warning: a *url.Error-shaped error (defence in
+// depth; arrapi returns none) embeds the full request URL with any userinfo,
+// and the warning sits outside the walk-level LogSafeError boundary, so the
+// log site must apply the same reduction itself before the line reaches Loki.
 func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
 	transportErr := &url.Error{
 		Op:  "Get",
@@ -1224,19 +1254,19 @@ func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
 		Err: errors.New("connection refused"),
 	}
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: "Alpha"},
 			{ID: 2, Title: "Bravo"},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			2: {epFile(1, "PMR")},
 		},
 		epErr: map[int]error{1: transportErr},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
 
-	if _, err := w.Walk(t.Context()); err != nil {
+	if _, _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
 	}
 	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "error", "connection refused") {
@@ -1259,19 +1289,19 @@ func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
 func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
 	const rawTitle = "Frieren\x1b[2J \u202egpj.exe"
 	fs := &fakeSonarr{
-		series: []arrapi.Series{
+		series: []sonarr.Series{
 			{ID: 1, Title: rawTitle},
 			{ID: 2, Title: "Healthy"},
 		},
-		files: map[int][]arrapi.EpisodeFile{
+		files: map[int][]sonarr.EpisodeFile{
 			2: {epFile(1, "PMR")},
 		},
 		epErr: map[int]error{1: errors.New("episode fetch boom")},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
 
-	if _, err := w.Walk(t.Context()); err != nil {
+	if _, _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
 	}
 	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "series", "Frieren [2J  gpj.exe") {
@@ -1296,7 +1326,7 @@ func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 	}{
 		{
 			name:       "sonarr",
-			cfg:        Config{Sonarr: &fakeSonarr{listErr: cause}},
+			cfg:        Config{Sonarr: onePass{&fakeSonarr{listErr: cause}}},
 			wantPrefix: "walking sonarr: ",
 			wantArr:    ArrSonarr,
 		},
@@ -1311,7 +1341,7 @@ func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.cfg.Logger = discardLogger()
 			w := NewWalker(&tc.cfg)
-			_, err := w.Walk(t.Context())
+			_, _, err := w.Walk(t.Context())
 			if err == nil {
 				t.Fatal("Walk returned nil error, want the list failure")
 			}
@@ -1345,14 +1375,14 @@ func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 // just narrows the watch set the operator asked to narrow.
 func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{7}}},
-		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha", Tags: []int{7}}},
+		files:  map[int][]sonarr.EpisodeFile{1: {epFile(1, "PMR")}},
 		tags:   []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"nope", "also-nope"}, Logger: logger})
+	w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"nope", "also-nope"}, Logger: logger})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1392,15 +1422,15 @@ func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
 // the snapshot stays complete - this is a per-item data defect, not a walk that
 // failed to read the library.
 func TestWalkRadarrMissingFilePayloadWarns(t *testing.T) {
-	fr := &fakeRadarr{movies: []arrapi.Movie{
-		{ID: 10, Title: "Flagged But Nil File", HasFile: true, MovieFile: nil},
+	fr := &fakeRadarr{movies: []radarr.Movie{
+		{ID: 10, Title: "Flagged But Nil File", HasFile: true, File: nil},
 		{ID: 20, Title: "Honestly Fileless", HasFile: false},
-		{ID: 30, Title: "With File", HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "PMR"}},
+		{ID: 30, Title: "With File", HasFile: true, File: &radarr.MovieFile{ReleaseGroup: "PMR"}},
 	}}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Radarr: fr, Logger: logger})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1438,14 +1468,14 @@ func TestWalkRadarrMissingFilePayloadWarns(t *testing.T) {
 // side whose every movie is honest logs no degradation warning, so the gate
 // cannot invert to fire on every healthy cycle.
 func TestWalkRadarrCleanWalkLogsNoPayloadWarning(t *testing.T) {
-	fr := &fakeRadarr{movies: []arrapi.Movie{
-		{ID: 10, Title: "With File", HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "PMR"}},
+	fr := &fakeRadarr{movies: []radarr.Movie{
+		{ID: 10, Title: "With File", HasFile: true, File: &radarr.MovieFile{ReleaseGroup: "PMR"}},
 		{ID: 20, Title: "Fileless", HasFile: false},
 	}}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Radarr: fr, Logger: logger})
 
-	if _, err := w.Walk(t.Context()); err != nil {
+	if _, _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	const msg = "radarr movies report a file but carry no file payload; they are kept as placeholders with no comparable file state - re-scan those movies in Radarr (the per-movie ids are logged at debug level)"
@@ -1465,7 +1495,7 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 		wantRadarr string
 	}{
 		"sonarr only": {
-			cfg:        Config{Sonarr: &fakeSonarr{}},
+			cfg:        Config{Sonarr: onePass{&fakeSonarr{}}},
 			wantSonarr: "true",
 			wantRadarr: "false",
 		},
@@ -1481,7 +1511,7 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 			tc.cfg.Logger = logger
 			w := NewWalker(&tc.cfg)
 
-			if _, err := w.Walk(t.Context()); err != nil {
+			if _, _, err := w.Walk(t.Context()); err != nil {
 				t.Fatalf("Walk: %v", err)
 			}
 			const msg = "library walk complete"
@@ -1518,16 +1548,16 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 
 	t.Run("sonarr side emptied by a resolving filter", func(t *testing.T) {
 		fs := &fakeSonarr{
-			series: []arrapi.Series{
+			series: []sonarr.Series{
 				{ID: 1, Title: "Untagged", Tags: []int{3}},
 				{ID: 2, Title: "Also Untagged"},
 			},
 			tags: anime,
 		}
 		logger, rec := capture.New()
-		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: logger})
+		w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: logger})
 
-		snap, err := w.Walk(t.Context())
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
@@ -1553,13 +1583,13 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 
 	t.Run("radarr side emptied by a resolving filter", func(t *testing.T) {
 		fr := &fakeRadarr{
-			movies: []arrapi.Movie{{ID: 10, Title: "Untagged Movie", Tags: []int{3}}},
+			movies: []radarr.Movie{{ID: 10, Title: "Untagged Movie", Tags: []int{3}}},
 			tags:   anime,
 		}
 		logger, rec := capture.New()
 		w := NewWalker(&Config{Radarr: fr, IncludeTags: []string{"anime"}, Logger: logger})
 
-		snap, err := w.Walk(t.Context())
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
@@ -1589,21 +1619,21 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		// the exclude list too.
 		skip := []arrapi.Tag{{ID: 8, Label: "skip"}}
 		fs := &fakeSonarr{
-			series: []arrapi.Series{{ID: 1, Title: "Skipped", Tags: []int{8}}},
+			series: []sonarr.Series{{ID: 1, Title: "Skipped", Tags: []int{8}}},
 			tags:   skip,
 		}
 		fr := &fakeRadarr{
-			movies: []arrapi.Movie{{ID: 10, Title: "Skipped Movie", Tags: []int{8}}},
+			movies: []radarr.Movie{{ID: 10, Title: "Skipped Movie", Tags: []int{8}}},
 			tags:   skip,
 		}
 		logger, rec := capture.New()
 		w := NewWalker(&Config{
-			Sonarr: fs, Radarr: fr,
+			Sonarr: onePass{fs}, Radarr: fr,
 			ExcludeTags: []string{"skip"},
 			Logger:      logger,
 		})
 
-		snap, err := w.Walk(t.Context())
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
@@ -1624,17 +1654,17 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 
 	t.Run("no warning when the filter keeps something", func(t *testing.T) {
 		fs := &fakeSonarr{
-			series: []arrapi.Series{
+			series: []sonarr.Series{
 				{ID: 1, Title: "Kept", Tags: []int{7}},
 				{ID: 2, Title: "Dropped", Tags: []int{3}},
 			},
-			files: map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+			files: map[int][]sonarr.EpisodeFile{1: {epFile(1, "PMR")}},
 			tags:  anime,
 		}
 		logger, rec := capture.New()
-		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: logger})
+		w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: logger})
 
-		snap, err := w.Walk(t.Context())
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
@@ -1660,9 +1690,9 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 	t.Run("no warning for a genuinely empty arr library", func(t *testing.T) {
 		fs := &fakeSonarr{tags: anime}
 		logger, rec := capture.New()
-		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: logger})
+		w := NewWalker(&Config{Sonarr: onePass{fs}, IncludeTags: []string{"anime"}, Logger: logger})
 
-		snap, err := w.Walk(t.Context())
+		snap, _, err := w.Walk(t.Context())
 		if err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
@@ -1690,25 +1720,25 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 // must stay usable, so the assertion is the exact credential-free deep-link.
 func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Alpha", TitleSlug: "alpha"}},
-		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		series: []sonarr.Series{{ID: 1, Title: "Alpha", TitleSlug: "alpha"}},
+		files:  map[int][]sonarr.EpisodeFile{1: {epFile(1, "PMR")}},
 	}
-	fr := &fakeRadarr{movies: []arrapi.Movie{{
-		ID:        2,
-		Title:     "Movie",
-		TmdbID:    1234,
-		HasFile:   true,
-		MovieFile: &arrapi.MovieFile{ReleaseGroup: "PMR"},
+	fr := &fakeRadarr{movies: []radarr.Movie{{
+		ID:      2,
+		Title:   "Movie",
+		IDs:     radarr.ExternalIDs{TMDB: 1234},
+		HasFile: true,
+		File:    &radarr.MovieFile{ReleaseGroup: "PMR"},
 	}}}
 	w := NewWalker(&Config{
-		Sonarr:    fs,
+		Sonarr:    onePass{fs},
 		Radarr:    fr,
 		SonarrURL: "https://sonarr-user:SONARR-LEAK@sonarr.example",
 		RadarrURL: "https://radarr-user:RADARR-LEAK@radarr.example",
 		Logger:    discardLogger(),
 	})
 
-	snap, err := w.Walk(t.Context())
+	snap, _, err := w.Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -1732,32 +1762,31 @@ func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {
 // declared-files-but-empty diagnostic: the series list says the series has
 // episode files while the per-series episode-file call succeeds empty, so the
 // item compares as fileless and the daemon would otherwise resolve the series'
-// prior finding as a genuine no-file state with no signal at all. All three arms
-// of the gate are pinned, because the nil-Statistics and zero-count arms are what
-// keep an honest fileless series quiet.
+// prior finding as a genuine no-file state with no signal at all. Both arms of
+// the gate are pinned, because the zero-count arm is what keeps an honest
+// fileless series quiet.
 func TestWalkWarnsWhenSonarrDeclaresFilesButSendsNone(t *testing.T) {
 	const msg = "sonarr series declares episode files but its episode-file list came back empty; it compares as fileless"
 	tests := []struct {
-		name  string
-		stats *arrapi.SeriesStatistics
-		files map[int][]arrapi.EpisodeFile
-		want  int
+		name      string
+		files     map[int][]sonarr.EpisodeFile
+		fileCount int
+		want      int
 	}{
-		{"declared files but none sent", &arrapi.SeriesStatistics{EpisodeFileCount: 12}, nil, 1},
-		{"declared files and files sent", &arrapi.SeriesStatistics{EpisodeFileCount: 12}, map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}}, 0},
-		{"no files declared", &arrapi.SeriesStatistics{}, nil, 0},
-		{"no statistics block", nil, nil, 0},
+		{"declared files but none sent", nil, 12, 1},
+		{"declared files and files sent", map[int][]sonarr.EpisodeFile{1: {epFile(1, "PMR")}}, 12, 0},
+		{"no files declared", nil, 0, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := &fakeSonarr{
-				series: []arrapi.Series{{ID: 1, Title: "Alpha", Statistics: tc.stats}},
+				series: []sonarr.Series{{ID: 1, Title: "Alpha", FileCount: tc.fileCount}},
 				files:  tc.files,
 			}
 			logger, rec := capture.New()
-			w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+			w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger})
 
-			if _, err := w.Walk(t.Context()); err != nil {
+			if _, _, err := w.Walk(t.Context()); err != nil {
 				t.Fatalf("Walk: %v", err)
 			}
 			if n := rec.CountExact(msg); n != tc.want {
@@ -1768,5 +1797,381 @@ func TestWalkWarnsWhenSonarrDeclaresFilesButSendsNone(t *testing.T) {
 				t.Errorf("declared_files attr = %q, want 12", got)
 			}
 		})
+	}
+}
+
+// TestWalkWarnsOncePerNonAiredOrderSeries pins the walker half of the order rule: each
+// kept series Sonarr numbers in another order than TheTVDB's aired one carries
+// that Order on its item (a failed placeholder included) and logs one WARN per
+// walk naming it, its order name (or type when unnamed) and type; the walk's
+// completion line counts them; an aired-order series and a tag-excluded one
+// carry nothing and log nothing. arrapi's sonarr.Order{} (an empty seasonType,
+// "an unknown order, never aired" per its v5 engine) is withheld like a named
+// order, so rawOrders keeps the fake from turning it into the aired order.
+func TestWalkWarnsOncePerNonAiredOrderSeries(t *testing.T) {
+	const msg = "sonarr series uses a non-aired episode order; seadex-scout does not compare it"
+	fs := &fakeSonarr{
+		series: []sonarr.Series{
+			{ID: 33, Title: "Code Geass", Order: sonarr.Order{Type: "official", Name: "Aired Order", Official: true}},
+			{ID: 2189, Title: "Monogatari", Order: sonarr.Order{Type: "alternate", Name: "Book Order"}},
+			{ID: 2191, Title: "Haruhi", Order: sonarr.Order{Type: "alternate"}},
+			{ID: 2188, Title: "Firefly", Order: sonarr.Order{Type: "dvd", Name: "DVD Order"}},
+			{ID: 9, Title: "Skipped", Order: sonarr.Order{Type: "dvd", Name: "DVD Order"}, Tags: []int{5}},
+			{ID: 2203, Title: "Unknown", Order: sonarr.Order{}},
+		},
+		files:     map[int][]sonarr.EpisodeFile{33: {{ID: 1, Season: 1, ReleaseGroup: "sam"}}, 2189: {{ID: 2, Season: 1, ReleaseGroup: "sam"}}, 2203: {{ID: 3, Season: 1, ReleaseGroup: "sam"}}},
+		epErr:     map[int]error{2188: errors.New("episode file read failed")},
+		tags:      []arrapi.Tag{{ID: 5, Label: "skip"}},
+		rawOrders: true,
+	}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: logger, ExcludeTags: []string{"skip"}})
+
+	snap, _, err := w.Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	orders := map[int]*library.Order{}
+	for i := range snap.Items {
+		orders[snap.Items[i].ArrID] = snap.Items[i].Order
+	}
+	wantOrders := map[int]*library.Order{
+		33:   nil,
+		2189: {Type: "alternate", Name: "Book Order"},
+		2191: {Type: "alternate"},
+		2188: {Type: "dvd", Name: "DVD Order"},
+		2203: {},
+	}
+	if len(orders) != len(wantOrders) {
+		t.Fatalf("items = %v, want ids 33, 2188, 2189, 2191, 2203", orders)
+	}
+	for id, want := range wantOrders {
+		got := orders[id]
+		if (got == nil) != (want == nil) || got != nil && *got != *want {
+			t.Errorf("item %d Order = %+v, want %+v", id, got, want)
+		}
+	}
+	if n := rec.CountLevel(slog.LevelWarn, msg); n != 4 {
+		t.Errorf("WARN-level records = %d, want 4", n)
+	}
+	if got, want := rec.AttrValuesExact(msg, "series"), []string{"Monogatari", "Haruhi", "Firefly", "Unknown"}; !slices.Equal(got, want) {
+		t.Errorf("WARN series = %q, want %q", got, want)
+	}
+	if got, want := rec.AttrValuesExact(msg, "id"), []string{"2189", "2191", "2188", "2203"}; !slices.Equal(got, want) {
+		t.Errorf("WARN id = %q, want %q", got, want)
+	}
+	if got, want := rec.AttrValuesExact(msg, "order"), []string{"Book Order", "alternate", "DVD Order", "an unknown order"}; !slices.Equal(got, want) {
+		t.Errorf("WARN order = %q, want %q", got, want)
+	}
+	if got, want := rec.AttrValuesExact(msg, "order_type"), []string{"alternate", "alternate", "dvd", ""}; !slices.Equal(got, want) {
+		t.Errorf("WARN order_type = %q, want %q", got, want)
+	}
+	if got, _ := rec.AttrValueExact("library walk complete", "non_aired_order"); got != "4" {
+		t.Errorf("library walk complete non_aired_order = %q, want \"4\"", got)
+	}
+
+	if _, _, err := w.Walk(t.Context()); err != nil {
+		t.Fatalf("second Walk: %v", err)
+	}
+	if n := rec.CountExact(msg); n != 8 {
+		t.Errorf("WARN count over two walks = %d, want 8 (one per series per walk)", n)
+	}
+}
+
+// TestWalkRecordsEveryNonAiredOrderSeriesTvdbID pins the order set Walk
+// returns (the Sonarr series with the record's TVDB id, whether or not
+// arr_tags keeps it): every listed series in a non-aired order, arrapi's
+// sonarr.Order{} included, a tag-excluded one included, ascending; an
+// aired-order series and one with no TVDB id are left out, and a library with
+// no such series returns none, so the persisted state gains no member.
+func TestWalkRecordsEveryNonAiredOrderSeriesTvdbID(t *testing.T) {
+	t.Run("ordered series listed", func(t *testing.T) {
+		fs := &fakeSonarr{
+			series: []sonarr.Series{
+				{ID: 2189, Title: "Monogatari", IDs: sonarr.ExternalIDs{TVDB: 102261}, Order: sonarr.Order{Type: "alternate", Name: "Book Order"}},
+				{ID: 33, Title: "Code Geass", IDs: sonarr.ExternalIDs{TVDB: 79525}, Order: sonarr.Order{Type: "official", Name: "Aired Order", Official: true}},
+				{ID: 2188, Title: "Firefly", IDs: sonarr.ExternalIDs{TVDB: 78874}, Order: sonarr.Order{Type: "dvd", Name: "DVD Order"}, Tags: []int{5}},
+				{ID: 2203, Title: "Unknown", IDs: sonarr.ExternalIDs{TVDB: 80000}, Order: sonarr.Order{}},
+				{ID: 2204, Title: "No TVDB", Order: sonarr.Order{Type: "dvd"}},
+			},
+			tags:      []arrapi.Tag{{ID: 5, Label: "skip"}},
+			rawOrders: true,
+		}
+		w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger(), ExcludeTags: []string{"skip"}})
+		_, orders, err := w.Walk(t.Context())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if want := []int{78874, 80000, 102261}; !slices.Equal(orders.NonAired, want) {
+			t.Errorf("non-aired-order ids = %v, want %v", orders.NonAired, want)
+		}
+		if want := []int{79525}; !slices.Equal(orders.Aired, want) {
+			t.Errorf("aired-order ids = %v, want %v", orders.Aired, want)
+		}
+	})
+	t.Run("aired order only", func(t *testing.T) {
+		fs := &fakeSonarr{series: []sonarr.Series{{ID: 33, Title: "Code Geass", IDs: sonarr.ExternalIDs{TVDB: 79525}}}}
+		_, orders, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if orders.NonAired != nil {
+			t.Errorf("non-aired-order ids = %v, want nil", orders.NonAired)
+		}
+		if got := orders.Joined(nil); got != nil {
+			t.Errorf("Joined(nil) = %v, want nil, so the persisted state gains no member", got)
+		}
+	})
+}
+
+// TestWalkKeepsANonAiredOrderTvdbIDUntilListedInAiredOrder pins how a clean
+// walk moves the prior order set (docs/torznab-indexer.md "Series in another
+// episode order"): an id leaves the set only when Sonarr lists a series with
+// that TVDB id in aired order, arr_tags or not. A short, empty or tag-scoped
+// list, a series deleted from Sonarr and a walk with no Sonarr show nothing
+// about an order, so they keep every id. An aired-order Sonarr 4 series
+// counts: arrapi gives every Sonarr 4 series the official order, because
+// v4-develop's Sonarr has no episode-order setting.
+func TestWalkKeepsANonAiredOrderTvdbIDUntilListedInAiredOrder(t *testing.T) {
+	const firefly, haruhi, monogatari = 78874, 79414, 102261
+	codeGeass := sonarr.Series{ID: 33, Title: "Code Geass", IDs: sonarr.ExternalIDs{TVDB: 79525}}
+	aired := func(id, tvdb int, tags ...int) sonarr.Series {
+		return sonarr.Series{ID: id, Title: "Aired", IDs: sonarr.ExternalIDs{TVDB: tvdb}, Tags: tags}
+	}
+	book := sonarr.Series{ID: 2189, Title: "Monogatari", IDs: sonarr.ExternalIDs{TVDB: monogatari}, Order: sonarr.Order{Type: "alternate", Name: "Book Order"}}
+	skippedBook := book
+	skippedBook.Tags = []int{5}
+	for _, tc := range []struct {
+		name   string
+		series []sonarr.Series
+		want   []int
+	}{
+		{name: "truncated list keeps every id", series: []sonarr.Series{codeGeass}, want: []int{firefly, monogatari}},
+		{name: "empty list keeps every id", series: nil, want: []int{firefly, monogatari}},
+		{name: "tag-excluded ordered series stays", series: []sonarr.Series{codeGeass, skippedBook}, want: []int{firefly, monogatari}},
+		{name: "aired-order listing drops it", series: []sonarr.Series{codeGeass, aired(2189, monogatari)}, want: []int{firefly}},
+		{name: "aired-order listing drops it under arr_tags", series: []sonarr.Series{codeGeass, aired(2188, firefly, 5)}, want: []int{monogatari}},
+		{name: "a newly ordered series joins", series: []sonarr.Series{{ID: 2191, Title: "Haruhi", IDs: sonarr.ExternalIDs{TVDB: haruhi}, Order: sonarr.Order{Type: "alternate", Name: "2009 Series"}}}, want: []int{firefly, haruhi, monogatari}},
+		{name: "an aired and an ordered listing of one id keep it", series: []sonarr.Series{aired(9, monogatari), book}, want: []int{firefly, monogatari}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prior := []int{firefly, monogatari}
+			fs := &fakeSonarr{series: tc.series, tags: []arrapi.Tag{{ID: 5, Label: "skip"}}}
+			w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger(), ExcludeTags: []string{"skip"}})
+			_, orders, err := w.Walk(t.Context())
+			if err != nil || !orders.Clean {
+				t.Fatalf("Walk: clean %t, error %v; want a clean walk", orders.Clean, err)
+			}
+			if got := orders.Released(prior); !slices.Equal(got, tc.want) {
+				t.Errorf("order set = %v, want %v", got, tc.want)
+			}
+			if !slices.Equal(prior, []int{firefly, monogatari}) {
+				t.Errorf("Released changed the caller's prior set to %v", prior)
+			}
+		})
+	}
+	t.Run("no sonarr keeps every id", func(t *testing.T) {
+		w := NewWalker(&Config{Radarr: &fakeRadarr{}, Logger: discardLogger()})
+		_, orders, err := w.Walk(t.Context())
+		if err != nil || !orders.Clean {
+			t.Fatalf("Walk: clean %t, error %v; want a clean walk", orders.Clean, err)
+		}
+		if got, want := orders.Released([]int{firefly, monogatari}), []int{firefly, monogatari}; !slices.Equal(got, want) {
+			t.Errorf("order set = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestWalkIsCleanOnlyWhenEveryReadSucceeds pins what each way a walk ends
+// reports of its Sonarr series list (docs/torznab-indexer.md "Series in
+// another episode order"): a list read in full is
+// reported whatever fails after it, and the walk is clean only when it
+// returns no error and no read of it failed, so only a clean walk's
+// aired-order listings may release an id. No exit is classified by its
+// error's type or cause. Monogatari is in book order and Firefly, listed in
+// aired order, is in the prior set, so a list read in full adds Monogatari,
+// and only a clean walk lets Firefly leave. A failed walk publishes no items.
+func TestWalkIsCleanOnlyWhenEveryReadSucceeds(t *testing.T) {
+	const firefly, monogatari = 78874, 102261
+	book := sonarr.Series{ID: 2189, Title: "Monogatari", IDs: sonarr.ExternalIDs{TVDB: monogatari}, Order: sonarr.Order{Type: "alternate", Name: "Book Order"}}
+	airedFirefly := sonarr.Series{ID: 2188, Title: "Firefly", IDs: sonarr.ExternalIDs{TVDB: firefly}}
+	codeGeass := sonarr.Series{ID: 33, Title: "Code Geass", IDs: sonarr.ExternalIDs{TVDB: 79525}}
+	list := []sonarr.Series{book, airedFirefly, codeGeass}
+	readBoom := errors.New("episode file read failed")
+	changed := &arrapi.ServerChangedError{From: "4.0.20.3014", To: "5.0.0.2701"}
+	unconfirmed := &arrapi.ServerChangedError{From: "4.0.20.3014"}
+	failing := func(err error, ids ...int) map[int]error {
+		m := make(map[int]error, len(ids))
+		for _, id := range ids {
+			m[id] = err
+		}
+		return m
+	}
+	var budgetList []sonarr.Series
+	budgetList = append(budgetList, list...)
+	for id := 40; id < 45; id++ {
+		budgetList = append(budgetList, sonarr.Series{ID: id, Title: "Aired", IDs: sonarr.ExternalIDs{TVDB: 9000 + id}})
+	}
+	// Only Code Geass is kept, so its one failed read is every kept read.
+	skipped := func(s sonarr.Series) sonarr.Series { s.Tags = []int{5}; return s }
+	oneKept := []sonarr.Series{skipped(book), skipped(airedFirefly), codeGeass}
+	skipTag := []arrapi.Tag{{ID: 5, Label: "skip"}}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	var (
+		unread = []int{firefly}
+		joined = []int{firefly, monogatari}
+	)
+	for _, tc := range []struct {
+		ctx     context.Context
+		sonarr  func() SonarrClient
+		radarr  RadarrClient
+		name    string
+		wantArr string
+		joined  []int
+		wantErr bool
+		clean   bool
+	}{
+		{name: "the walk succeeds", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list}} }, joined: joined, clean: true},
+		{name: "the pass cannot be opened", sonarr: func() SonarrClient { return pinFails{errors.New("pin failed")} }, joined: unread, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the series list fails", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list, listErr: errors.New("sonarr down")}} }, joined: unread, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the tag read fails", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list, tagErr: errors.New("tag read failed")}} }, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "one kept series' episode-file read fails", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list, epErr: failing(readBoom, 33)}} }, joined: joined},
+		{name: "one kept series' episode list read fails", sonarr: func() SonarrClient {
+			return onePass{&fakeSonarr{series: list, episodesErr: failing(errors.New("episode list read failed"), 33)}}
+		}, joined: joined},
+		{name: "a read leaves the pinned version unconfirmed", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list, epErr: failing(unconfirmed, 33)}} }, joined: joined},
+		{name: "every kept series' episode read fails", sonarr: func() SonarrClient {
+			return onePass{&fakeSonarr{series: list, epErr: failing(readBoom, 2189, 2188, 33)}}
+		}, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the episode failure budget runs out", sonarr: func() SonarrClient {
+			return onePass{&fakeSonarr{series: budgetList, epErr: failing(readBoom, 40, 41, 42, 43, 44)}}
+		}, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "an episode-file read meets another sonarr version", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list, epErr: failing(changed, 33)}} }, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the tag read meets another sonarr version", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list, tagErr: changed}} }, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the only kept series' read meets another sonarr version", sonarr: func() SonarrClient {
+			return onePass{&fakeSonarr{series: oneKept, tags: skipTag, epErr: failing(changed, 33)}}
+		}, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the failure budget trips while a read meets another sonarr version", sonarr: func() SonarrClient {
+			return onePass{lateVersionChange{fakeSonarr: &fakeSonarr{series: budgetList, epErr: failing(readBoom, 40, 41, 42, 43, 44)}, late: 33, started: make(chan struct{})}}
+		}, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+		{name: "the radarr read fails", sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list}} }, radarr: &fakeRadarr{listErr: errors.New("radarr down")}, joined: joined, wantErr: true, wantArr: library.ArrRadarr},
+		{name: "the walk is cancelled after the list", ctx: cancelled, sonarr: func() SonarrClient { return onePass{&fakeSonarr{series: list}} }, joined: joined, wantErr: true, wantArr: library.ArrSonarr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tc.ctx
+			if ctx == nil {
+				ctx = t.Context()
+			}
+			prior := []int{firefly}
+			w := NewWalker(&Config{Sonarr: tc.sonarr(), Radarr: tc.radarr, Logger: discardLogger(), ExcludeTags: []string{"skip"}})
+			snap, orders, err := w.Walk(ctx)
+			if (err != nil) != tc.wantErr || WalkErrArr(err) != tc.wantArr {
+				t.Fatalf("Walk error = %v (side %q), want error %t on side %q", err, WalkErrArr(err), tc.wantErr, tc.wantArr)
+			}
+			if orders.Clean != tc.clean {
+				t.Errorf("Clean = %t, want %t", orders.Clean, tc.clean)
+			}
+			if got := orders.Joined(prior); !slices.Equal(got, tc.joined) {
+				t.Errorf("Joined(prior) = %v, want %v", got, tc.joined)
+			}
+			if tc.clean {
+				if got, want := orders.Released(prior), []int{monogatari}; !slices.Equal(got, want) {
+					t.Errorf("Released(prior) = %v, want %v", got, want)
+				}
+			}
+			if tc.wantErr && (snap.Items != nil || !snap.TakenAt.IsZero()) {
+				t.Errorf("failed walk published items %v at %v, want none", snap.Items, snap.TakenAt)
+			}
+			if !slices.Equal(prior, []int{firefly}) {
+				t.Errorf("the caller's prior set changed to %v", prior)
+			}
+		})
+	}
+}
+
+// TestSonarrOrdersUpdate pins the order set's two updates (docs/torznab-indexer.md
+// "Series in another episode order"):
+// Joined is the prior set plus the list's non-aired-order ids, and Released
+// also drops each id only an aired-order series lists; an id listed both ways
+// stays, and neither changes its argument.
+func TestSonarrOrdersUpdate(t *testing.T) {
+	orders := SonarrOrders{NonAired: []int{102261, 79414}, Aired: []int{78874, 79414, 79525}}
+	prior := []int{78874, 80000}
+	if got, want := orders.Joined(prior), []int{78874, 79414, 80000, 102261}; !slices.Equal(got, want) {
+		t.Errorf("Joined = %v, want %v", got, want)
+	}
+	if got, want := orders.Released(prior), []int{79414, 80000, 102261}; !slices.Equal(got, want) {
+		t.Errorf("Released = %v, want %v", got, want)
+	}
+	if !slices.Equal(prior, []int{78874, 80000}) {
+		t.Errorf("prior changed to %v", prior)
+	}
+	var none SonarrOrders
+	if got := none.Released(prior); !slices.Equal(got, prior) {
+		t.Errorf("a walk that read no list: Released = %v, want the prior %v", got, prior)
+	}
+}
+
+// lateVersionChange is a pass whose episode-file read of series late waits
+// for the fan-out to stop and then answers from another Sonarr version, while
+// each read failing with an ordinary error waits until that read is in flight:
+// the failure budget trips with the version change still pending.
+type lateVersionChange struct {
+	*fakeSonarr
+	started chan struct{}
+	late    int
+}
+
+func (p lateVersionChange) EpisodeFiles(ctx context.Context, seriesID int) ([]sonarr.EpisodeFile, error) {
+	if seriesID == p.late {
+		close(p.started)
+		<-ctx.Done()
+		return nil, &arrapi.ServerChangedError{From: "4.0.20.3014", To: "5.0.0.2701"}
+	}
+	if p.epErr[seriesID] != nil {
+		select {
+		case <-p.started:
+		case <-ctx.Done():
+		}
+	}
+	return p.fakeSonarr.EpisodeFiles(ctx, seriesID)
+}
+
+// TestWalkCopiesSonarrAniListIDs pins that every series item carries the
+// AniList ids arrapi reports, whatever the series' order or file state, and a
+// Sonarr v4 (API v3) series, for which arrapi reports nil (Features.AnimeIDs
+// false), carries nil. Code Geass's ids are its aniListIds in Sonarr 5's
+// /api/v5/series answer.
+func TestWalkCopiesSonarrAniListIDs(t *testing.T) {
+	codeGeass := []int{1575, 2904, 12685, 97880}
+	fs := &fakeSonarr{
+		series: []sonarr.Series{
+			{ID: 33, Title: "Code Geass", IDs: sonarr.ExternalIDs{AniList: codeGeass}},
+			{ID: 2189, Title: "Monogatari", IDs: sonarr.ExternalIDs{AniList: []int{5081}}, Order: sonarr.Order{Type: "alternate", Name: "Book Order"}},
+			{ID: 4, Title: "Sonarr 4 series"},
+			{ID: 5, Title: "Placeholder", IDs: sonarr.ExternalIDs{AniList: []int{21}}},
+		},
+		files: map[int][]sonarr.EpisodeFile{33: {{ID: 1, Season: 1, ReleaseGroup: "sam"}}},
+		epErr: map[int]error{5: errors.New("episode file read failed")},
+	}
+	w := NewWalker(&Config{Sonarr: onePass{fs}, Logger: slog.New(slog.DiscardHandler)})
+
+	snap, _, err := w.Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	got := map[int][]int{}
+	for i := range snap.Items {
+		got[snap.Items[i].ArrID] = snap.Items[i].AniListIDs
+	}
+	want := map[int][]int{33: codeGeass, 2189: {5081}, 4: nil, 5: {21}}
+	if len(got) != len(want) {
+		t.Fatalf("items = %v, want ids 4, 5, 33, 2189", got)
+	}
+	for id, ids := range want {
+		if !slices.Equal(got[id], ids) || (got[id] == nil) != (ids == nil) {
+			t.Errorf("item %d AniListIDs = %#v, want %#v", id, got[id], ids)
+		}
 	}
 }

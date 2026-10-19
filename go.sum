@@ -1,7 +1,7 @@
 github.com/cplieger/animap/mapread v0.1.0 h1:RlfhXChd9SYsSMB+qkpyF4+1TkWLYq+EV+tmje1Iux4=
 github.com/cplieger/animap/mapread v0.1.0/go.mod h1:OIF79IqdTf/wUBiDXycAEkGofwhJ9BjMK3/xE/hrV38=
-github.com/cplieger/arrapi/v2 v2.4.0-dev.4 h1:6IapPcITTVHCrbNaYsD4cuGtUpY22P31OsVJ+hwr3kE=
-github.com/cplieger/arrapi/v2 v2.4.0-dev.4/go.mod h1:/slWOjVYe9KcSUqwxi+qb8ycF1L55G2RlF9C5/ow8+w=
+github.com/cplieger/arrapi/v3 v3.0.0-dev.1 h1:rmF8p4MqhHny4BaRlqRan5hsnV6OSxwYRNF5wPSZVSo=
+github.com/cplieger/arrapi/v3 v3.0.0-dev.1/go.mod h1:gIqrZhGJhJ8hs7iQXFx7XfzVUIp/NAZbKvZiXiD8WzY=
 github.com/cplieger/atomicfile/v4 v4.1.0 h1:vBF59l/60iLtJhTdE+XCMVpvm5OVc9eGK60TzxG1yfs=
 github.com/cplieger/atomicfile/v4 v4.1.0/go.mod h1:C3RUdajRwohBoXTS7pgGj4fMGpVk0f4mYuqHuRz7zHE=
 github.com/cplieger/envx/yamlenv/v2 v2.1.0-dev.1 h1:I9IybraIF3mJ0JR8F0IB+YiikjKgk6oxJp250DQnhKc=

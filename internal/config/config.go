@@ -415,11 +415,12 @@ func (fc *fileConfig) toConfig() Config {
 	return c
 }
 
-// applyArr flattens one arr section: an active arr's trimmed connection details,
-// or empty strings.
+// applyArr flattens one arr section: an active arr's trimmed URLs and its key as
+// written, or empty strings. The arr compares the key byte for byte, so a padded
+// key is left for validateArrPair to refuse, never repaired.
 func applyArr(af *arrFile) (arrURL, key, publicURL string) {
 	if af.on() {
-		return strings.TrimSpace(af.URL), strings.TrimSpace(af.APIKey), strings.TrimSpace(af.PublicURL)
+		return strings.TrimSpace(af.URL), af.APIKey, strings.TrimSpace(af.PublicURL)
 	}
 	return "", "", ""
 }
@@ -563,7 +564,6 @@ func (c *Config) Validate() error {
 	if err := validateArrPair("radarr", c.RadarrURL, c.RadarrAPIKey); err != nil {
 		return err
 	}
-	c.warnArrURLCredentials()
 	if err := c.validateEnabledArrs(); err != nil {
 		return err
 	}
@@ -675,24 +675,6 @@ func (c *Config) warnUnexpandedSecretRefs() {
 			"literal placeholder is baked into every /ab RSS download link - this app "+
 			"reports a served feed while every arr grab fails at AnimeBytes",
 			"field", "indexer.ab_passkey")
-	}
-}
-
-// warnArrURLCredentials warns (field-name-only, never echoing the URL) when an arr
-// url embeds a credential-like userinfo or query parameter, which would otherwise
-// leak into a library-walk-failure *url.Error log. For arr URLs the query half is
-// defense-in-depth only: validateArrPair's no-query rejection fires first.
-func (c *Config) warnArrURLCredentials() {
-	for _, au := range []struct{ name, val string }{
-		{"sonarr.url", c.SonarrURL},
-		{"radarr.url", c.RadarrURL},
-	} {
-		if urlEmbedsCredential(au.val) {
-			slog.Warn("arr url embeds a credential-like query parameter or userinfo; "+
-				"the api key belongs in api_key (sent as a header, never logged) "+
-				"or it will appear in library-walk-failure logs",
-				"field", au.name)
-		}
 	}
 }
 
@@ -819,8 +801,8 @@ func (c *Config) validateABPasskey() error {
 // control rune and no '$'. It is the ONE shape rule every credential field in this
 // config is gated on. The '$' rule is a charset rule, not placeholder pattern
 // matching: every unexpanded-reference spelling contains a dollar sign, so refusing
-// the character refuses all of them without enumerating them, and it keeps each
-// gate's acceptance set a SUBSET of what the runtime will serve behind.
+// the character refuses all of them without enumerating them. The arr keys add
+// arrKeyAlphabet on top (validateArrPair).
 // indexer.ab_passkey is deliberately NOT gated on it (see validateABPasskey).
 func wellFormedCredential(v string) bool {
 	if v == "" {
@@ -844,7 +826,7 @@ const generatedAPIKeyLen = 32
 //
 // It is a GENERATOR, not a VALIDATOR, which is the whole reason nothing fails the
 // config on it: each also reads its *__AUTH__APIKEY environment variable FIRST and
-// checks it only for blank, so an operator-supplied key of ANY shape is a working key
+// checks it only for blank, so an operator-supplied key of any length is a working key
 // against a real arr. Do NOT "tighten" this into a refusal.
 func generatedArrAPIKey(v string) bool {
 	if len(v) != generatedAPIKeyLen {
@@ -875,9 +857,10 @@ func checkAPIKeyShape(field, v string) error {
 	return errors.New(msg)
 }
 
-// warnUnexpectedAPIKeyShape warns when a key that PASSED checkAPIKeyShape is not the
-// 32-lower-case-hex shape all three upstreams generate. Never an error, because the
-// upstreams accept an operator-supplied key of any shape. Field-name-only.
+// warnUnexpectedAPIKeyShape warns when a key that passed its field's hard gate
+// (checkAPIKeyShape and, for Sonarr and Radarr, arrKeyAlphabet) is not the
+// 32-lower-case-hex shape all three upstreams generate. Never an error: such a key
+// is one the upstream and the client accept. Field-name-only.
 func warnUnexpectedAPIKeyShape(field, v string) {
 	// v is non-empty by construction: both callers run this only after
 	// checkAPIKeyShape returned nil, and wellFormedCredential refuses "".
@@ -977,14 +960,15 @@ func (c *Config) warnTorznabURLCredentials() {
 	}
 }
 
+// arrKeyAlphabet is every character the arr client (arrapi's sonarr.New and
+// radarr.New) accepts in a key; the client refuses any other at construction.
+const arrKeyAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+
 // validateArrPair rejects a half-configured enabled arr (a URL with no key, or a URL
 // that is not an absolute http(s) URL with a host), and gates the arr's API key on its
-// FORMAT: the shared wellFormedCredential rule via checkAPIKeyShape, then a warn-only
-// note when the value is not the 32-hex shape the arrs generate.
-//
-// Accepted cost, larger here than for this app's own feed key: a DELIBERATELY custom arr
-// key containing a dollar sign is refused, even though the arrs would accept it. The
-// alternative failure mode - every arr call 401ing - names the arr rather than the typo.
+// FORMAT: the shared wellFormedCredential rule via checkAPIKeyShape, then
+// arrKeyAlphabet, then a warn-only note when the value is not the 32-hex shape the arrs
+// generate. Every key it accepts is one the arr client accepts.
 func validateArrPair(name, rawURL, key string) error {
 	switch {
 	case rawURL == "" && key == "":
@@ -997,14 +981,18 @@ func validateArrPair(name, rawURL, key string) error {
 	if err := checkAPIKeyShape(name+".api_key", key); err != nil {
 		return err
 	}
+	if strings.ContainsFunc(key, func(r rune) bool { return !strings.ContainsRune(arrKeyAlphabet, r) }) {
+		return fmt.Errorf("%s.api_key may hold only letters, digits, '.', '_' and '-'. "+
+			"Sonarr and Radarr generate a 32-character hex key, which always passes; "+
+			"a key you set yourself must use only those characters", name)
+	}
 	warnUnexpectedAPIKeyShape(name+".api_key", key)
 	if err := validateHTTPURL(name+".url", rawURL); err != nil {
 		return err
 	}
-	// arrapi's base-URL contract forbids a query: a non-empty query would pass this
-	// validation only to be rejected by the constructor with an error echoing the full
-	// URL, and a bare trailing '?' turns every appended API path into a query. Reject
-	// both here, field-name-only. validateHTTPURL parsed this same string above.
+	// arrapi's constructor refuses a base URL holding '?', a bare trailing one
+	// included; rejecting it here names the field and the rule.
+	// validateHTTPURL parsed this same string above.
 	u, _ := url.Parse(rawURL)
 	if u.RawQuery != "" || u.ForceQuery {
 		return fmt.Errorf("%s.url must not contain a query", name)
@@ -1035,7 +1023,7 @@ func validateHTTPURL(name, rawURL string) error {
 	// url.Parse accepts URI shapes the base-URL consumers cannot use: a fragment
 	// survives the parse but is never sent over HTTP, and an out-of-range port fails
 	// every later dial. The raw string is scanned for the literal '#' because u.Fragment
-	// misses a bare trailing one, after which arrapi would send every request to '/'.
+	// misses a bare trailing one, which arrapi's constructor also refuses.
 	if strings.Contains(rawURL, "#") {
 		return fmt.Errorf("%s must not contain a URL fragment", name)
 	}

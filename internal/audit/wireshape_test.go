@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -30,9 +31,12 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 				MatchSource: "id", CurrentGroups: []string{"erai"}, AniListID: 154587, Season: 2,
 				Scope:   align.ScopeSeason,
 				Special: true, Incomplete: true, Approx: true, HiddenAnimeBytes: 3, HiddenAnimeBytesBest: 1,
-				GroupsUnknown:   true,
-				CurrentRevision: release.Revision{Version: 1, Marker: release.RevisionNone},
-				BestRevision:    release.Revision{Version: 2, Marker: release.RevisionRepack},
+				GroupsUnknown:    true,
+				Withheld:         align.WithheldOrder,
+				Order:            library.Order{Type: "alternate", Name: "Book Order"},
+				SeriesAniListIDs: []int{154587, 182255},
+				CurrentRevision:  release.Revision{Version: 1, Marker: release.RevisionNone},
+				BestRevision:     release.Revision{Version: 2, Marker: release.RevisionRepack},
 				Releases: []rowRelease{{
 					Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/1",
 					Warnings: []string{"broken"}, Best: true, Filtered: true,
@@ -68,11 +72,22 @@ func TestReportJSONWireShapeKeys(t *testing.T) {
 		wantRowKeys := []string{
 			"al_id", "approx", "arr", "arr_url", "best_revision", "current_groups", "current_revision",
 			"groups_unknown", "hidden_animebytes", "hidden_animebytes_best", "incomplete", "match_source",
-			"qualifier", "releases", "scope", "seadex_url", "season", "special", "title",
+			"order", "qualifier", "reason", "releases", "scope", "seadex_url", "season", "series_anilist_ids", "special", "title",
 			"verdict",
 		}
 		if keys := slices.Sorted(maps.Keys(row)); !slices.Equal(keys, wantRowKeys) {
 			t.Errorf("row JSON keys = %v, want %v", keys, wantRowKeys)
+		}
+
+		if got, want := row["reason"], "order"; got != want {
+			t.Errorf("row reason = %v, want %q", got, want)
+		}
+		if ids, _ := row["series_anilist_ids"].([]any); len(ids) != 2 || ids[0] != 154587.0 || ids[1] != 182255.0 {
+			t.Errorf("row series_anilist_ids = %v, want [154587 182255]", row["series_anilist_ids"])
+		}
+		order, _ := row["order"].(map[string]any)
+		if keys := slices.Sorted(maps.Keys(order)); !slices.Equal(keys, []string{"name", "type"}) {
+			t.Errorf("order JSON keys = %v, want [name type]", keys)
 		}
 
 		rels, _ := row["releases"].([]any)

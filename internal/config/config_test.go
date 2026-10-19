@@ -103,8 +103,8 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	if c.radarrWanted {
 		t.Error("radarrWanted = true, want false (radarr.enabled must transfer to the runtime Config)")
 	}
-	if c.SonarrURL != "http://sonarr:8989" || c.SonarrAPIKey != "key" {
-		t.Errorf("sonarr not trimmed: url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
+	if c.SonarrURL != "http://sonarr:8989" || c.SonarrAPIKey != " key " {
+		t.Errorf("sonarr url=%q key=%q, want the url trimmed and the key as written", c.SonarrURL, c.SonarrAPIKey)
 	}
 	if c.RadarrURL != "" || c.RadarrAPIKey != "" {
 		t.Errorf("disabled radarr should be empty, got url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
@@ -384,8 +384,8 @@ func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 
 	c := fc.toConfig()
 
-	if c.RadarrURL != "http://radarr:7878" || c.RadarrAPIKey != "rk" {
-		t.Errorf("enabled radarr not trimmed: url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
+	if c.RadarrURL != "http://radarr:7878" || c.RadarrAPIKey != " rk " {
+		t.Errorf("enabled radarr url=%q key=%q, want the url trimmed and the key as written", c.RadarrURL, c.RadarrAPIKey)
 	}
 	if c.RadarrPublicURL != "https://radarr.example.com" {
 		t.Errorf("radarr public_url = %q, want trimmed", c.RadarrPublicURL)
@@ -1740,22 +1740,19 @@ func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
 	})
 }
 
-// TestValidateWarnsOnCredentialBearingArrURL pins Validate's credential
-// posture for arr URLs: a query-bearing url (where pasted credentials land)
-// is rejected outright naming ONLY the field — arrapi's base-URL contract
-// forbids a query, and its own rejection would echo the full URL — while a
-// userinfo credential (which still loads) fires the field-name-only warning,
-// and clean URLs stay silent. Neither path may leak the credential value.
-func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
-	const warnMsg = "arr url embeds a credential-like query parameter or userinfo"
-
+// TestValidateArrURLCredentialPosture pins Validate's arr URL posture: a
+// query-bearing url (where pasted credentials land) is rejected naming ONLY the
+// field, since the arr client refuses a base URL with a query; a userinfo url
+// loads (the arr client sends it as HTTP basic auth). Neither path echoes the
+// credential.
+func TestValidateArrURLCredentialPosture(t *testing.T) {
 	t.Run("apikey query param is rejected naming only the sonarr field", func(t *testing.T) {
 		const cred = "leaked-arr-cred-sentinel"
 		rec := capture.Default(t)
 		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989?apikey=" + cred, SonarrAPIKey: "k"}
 		err := c.Validate()
 		if err == nil {
-			t.Fatal("Validate() = nil, want the no-query rejection (arrapi's base-URL contract forbids a query)")
+			t.Fatal("Validate() = nil, want the no-query rejection")
 		}
 		if !strings.Contains(err.Error(), "sonarr.url must not contain a query") {
 			t.Errorf("Validate() error = %q, want the field-name-only no-query rejection", err)
@@ -1768,29 +1765,16 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
 		}
 	})
-	t.Run("userinfo credential warns naming the radarr field", func(t *testing.T) {
+	t.Run("userinfo url loads without echoing the credential", func(t *testing.T) {
 		const cred = "arr-userinfo-pw-sentinel"
 		rec := capture.Default(t)
 		c := Config{RunMode: RunModeDaemon, RadarrURL: "http://user:" + cred + "@radarr:7878", RadarrAPIKey: "k"}
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "radarr.url") {
-			t.Errorf("Validate() log = %v, want the credential warning naming radarr.url", rec.Messages())
-		}
 		corpus := strings.Join(rec.Messages(), "\n")
 		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
 			t.Errorf("Validate() log leaks the userinfo credential value: %v", rec.Messages())
-		}
-	})
-	t.Run("clean arr urls stay silent", func(t *testing.T) {
-		rec := capture.Default(t)
-		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		if rec.Contains(warnMsg) {
-			t.Errorf("Validate() log = %v, want no credential warning for clean urls", rec.Messages())
 		}
 	})
 }
