@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/cplieger/animap/mapread"
@@ -220,6 +221,14 @@ func indexerLogger(log *slog.Logger) *slog.Logger {
 	return log.With("component", "indexer")
 }
 
+// Keep X-Api-Key on the configured origin: net/http forwards this custom header
+// on followed redirects, and httpx's same-host default admits another port.
+func newProwlarrClient() *http.Client {
+	c := httpx.NewClient(prowlarrTimeout)
+	c.CheckRedirect = httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true))
+	return c
+}
+
 // feedWriter returns the indexer feed writer the compare cycle drives when the
 // Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP client
 // - else a nil writer (the cycle then does no feed work) and a no-op. It persists
@@ -230,7 +239,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger, server *indexer.Indexer) (
 	if !cfg.IndexerConfigured() {
 		return nil, func() {}
 	}
-	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
+	prowlarrHTTP := newProwlarrClient()
 	log = indexerLogger(log)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
@@ -258,7 +267,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		return builtIndexer{cleanup: func() {}}
 	}
 	log := indexerLogger(slog.Default())
-	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
+	prowlarrHTTP := newProwlarrClient()
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
