@@ -287,7 +287,7 @@ func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
@@ -840,7 +840,7 @@ func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
 func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, nil, nil)
@@ -872,7 +872,7 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
 			seedEmptyFeed(t, path)
-			if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), nil); err != nil {
+			if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(1), FeedInfo{}); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			ix := warmedIndexer(&Config{SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, nil, nil)
@@ -909,7 +909,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
-	if err := newTestWriter(path, "OLD_PASSKEY", true).Rebuild(t.Context(), entries, nil); err != nil {
+	if err := newTestWriter(path, "OLD_PASSKEY", true).Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -1077,7 +1077,7 @@ func TestConcurrentReadersAgainstAnInstallingLoader(t *testing.T) {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 	// A second cycle over a grown catalogue: entry 1 carries, entry 2 is new.
-	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(2), nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), nyaaTestEntries(2), FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild newer: %v", err)
 	}
 	bumpMtime(t, path)

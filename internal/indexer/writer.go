@@ -516,12 +516,12 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 }
 
 // Rebuild refreshes the persisted feed from the WHOLE SeaDex catalogue
-// (categorized and titled via info, the per-show metadata closure the cycle
-// builds over its persisted state; nil is valid and falls back to file-name
+// (categorized and titled via info, the metadata the cycle builds over its
+// persisted state; the zero FeedInfo is valid and falls back to file-name
 // synthesis). It is the pass at catalogue scope, and that is its ONLY
 // difference from Advance - see run for the shared body and pass.go for the
 // three steps that are genuinely catalogue-only.
-func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc) error {
+func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info FeedInfo) error {
 	return w.run(ctx, entries, info, scopeCatalogue)
 }
 

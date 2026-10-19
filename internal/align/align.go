@@ -64,6 +64,9 @@ type Entry struct {
 	Seasons        []mapping.SeasonRange
 	Specials       []int
 	Episodes       []int
+	// AniListID is the SeaDex entry's own id, not Record.AniListID, which a
+	// title-fallback match leaves 0.
+	AniListID int
 }
 
 // scopeResult is the single scoping decision returned by scope: the semantic

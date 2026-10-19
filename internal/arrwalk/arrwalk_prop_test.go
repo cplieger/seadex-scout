@@ -2,45 +2,39 @@ package arrwalk
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
 )
 
-// TestIsDualAudioPropTokenSetSemantics pins isDualAudio's contract that the
-// result depends only on the SET of case-normalized language tokens: it is
-// invariant under token order, separator choice ('/' vs ','), duplicate
-// tokens, and appended whitespace-only tokens, and the same language repeated
-// in different letter case is never dual audio.
+// TestIsDualAudioPropTokenSetSemantics pins that isDualAudio depends only on the
+// set of languages: it is invariant under track order and
+// duplicate tracks, one language repeated is never dual audio, and adding a
+// second language makes it dual audio.
 func TestIsDualAudioPropTokenSetSemantics(t *testing.T) {
+	pool := []string{"jpn", "eng", "ger", "fre", "spa"}
 	rapid.Check(t, func(t *rapid.T) {
-		langs := rapid.SliceOfN(
-			rapid.SampledFrom([]string{"Japanese", "English", "jpn", "eng", "Commentary", "ger"}), 1, 4,
-		).Draw(t, "langs")
-		sep1 := rapid.SampledFrom([]string{"/", ",", " / ", " , "}).Draw(t, "sep1")
-		sep2 := rapid.SampledFrom([]string{"/", ",", " / ", " , "}).Draw(t, "sep2")
-		base := strings.Join(langs, sep1)
-		got := isDualAudio(base)
+		langs := rapid.SliceOfN(rapid.SampledFrom(pool), 1, 6).Draw(t, "langs")
+		got := isDualAudio(langs)
 
-		reversed := make([]string, 0, len(langs))
-		for _, l := range slices.Backward(langs) {
-			reversed = append(reversed, l)
+		reversed := slices.Clone(langs)
+		slices.Reverse(reversed)
+		if r := isDualAudio(reversed); r != got {
+			t.Fatalf("isDualAudio(%q) = %v, want %v as for %q (order invariance)", reversed, r, got, langs)
 		}
-		if r := isDualAudio(strings.Join(reversed, sep2)); r != got {
-			t.Fatalf("isDualAudio(%q reversed w/ %q) = %v, want %v (order/separator invariance)", base, sep2, r, got)
+		dup := rapid.IntRange(0, len(langs)-1).Draw(t, "dup")
+		if r := isDualAudio(slices.Insert(slices.Clone(langs), dup, langs[dup])); r != got {
+			t.Fatalf("isDualAudio(%q with track %d repeated) = %v, want %v (duplicate invariance)", langs, dup, r, got)
 		}
-		if r := isDualAudio(base + sep1 + langs[0]); r != got {
-			t.Fatalf("isDualAudio(%q + dup token) = %v, want %v (duplicate invariance)", base, r, got)
+
+		same := slices.Repeat(langs[:1], rapid.IntRange(1, 6).Draw(t, "n"))
+		if isDualAudio(same) {
+			t.Fatalf("isDualAudio(%q) = true, want false (one language)", same)
 		}
-		if r := isDualAudio(base + sep1 + "   "); r != got {
-			t.Fatalf("isDualAudio(%q + blank token) = %v, want %v (blank tokens ignored)", base, r, got)
-		}
-		// Case-normalization oracle: one language repeated in different letter
-		// case is a single distinct language, never dual audio.
-		caseDup := langs[0] + sep1 + strings.ToUpper(langs[0])
-		if isDualAudio(caseDup) {
-			t.Fatalf("isDualAudio(%q) = true, want false (case-insensitive duplicate is one language)", caseDup)
+		other := rapid.SampledFrom(pool).Filter(func(l string) bool { return l != langs[0] }).Draw(t, "other")
+		at := rapid.IntRange(0, len(same)).Draw(t, "at")
+		if withOther := slices.Insert(same, at, other); !isDualAudio(withOther) {
+			t.Fatalf("isDualAudio(%q) = false, want true (two languages)", withOther)
 		}
 	})
 }

@@ -400,7 +400,7 @@ func TestServePlaceholderRearmsAfterTheJournalExpires(t *testing.T) {
 	t0 := time.Now().UTC()
 	w.now = func() time.Time { return t0 }
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	tick(ix)
@@ -410,7 +410,7 @@ func TestServePlaceholderRearmsAfterTheJournalExpires(t *testing.T) {
 	}
 
 	w.now = func() time.Time { return t0.Add(feedJournalMaxAge + time.Hour) }
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("expiry Rebuild: %v", err)
 	}
 	tick(ix)
@@ -434,7 +434,7 @@ func TestServePlaceholderUnderConcurrentReload(t *testing.T) {
 		nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv"),
 		nyaaEntry(8, 43, true, "Other - S01E01 (1080p) [G].mkv"),
 	}
-	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+	if err := w.Rebuild(t.Context(), entries, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	populated, err := os.ReadFile(path)
@@ -520,7 +520,7 @@ func TestPlaceholderNeverReachesPersistence(t *testing.T) {
 		t.Fatalf("served %d placeholders, want 1 before the rebuild", got)
 	}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: "http://prowlarr/1/api", Server: ix}, nil, nil)
-	if err := w.Rebuild(t.Context(), []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}, nil); err != nil {
+	if err := w.Rebuild(t.Context(), []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}, FeedInfo{}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	raw, err := os.ReadFile(path)

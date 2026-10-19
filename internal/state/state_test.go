@@ -819,6 +819,48 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	}
 }
 
+// TestStoreNonAiredOrderTvdbIDsShape pins the persisted order set's wire
+// shape: written under non_aired_order_tvdb_ids beside the library snapshot,
+// round-tripped through Load, and absent from a state with no such series, so
+// that state's file keeps its bytes.
+func TestStoreNonAiredOrderTvdbIDsShape(t *testing.T) {
+	saved := func(t *testing.T, st *State) (map[string]json.RawMessage, State) {
+		t.Helper()
+		store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
+		if err := store.Save(t.Context(), st); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		persisted, err := os.ReadFile(store.path)
+		if err != nil {
+			t.Fatalf("read persisted state: %v", err)
+		}
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(persisted, &envelope); err != nil {
+			t.Fatalf("decode persisted envelope: %v", err)
+		}
+		loaded, err := store.Load(t.Context())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return envelope, loaded
+	}
+	t.Run("none listed writes no member", func(t *testing.T) {
+		envelope, _ := saved(t, &State{})
+		if raw, ok := envelope["non_aired_order_tvdb_ids"]; ok {
+			t.Errorf("non_aired_order_tvdb_ids = %s, want the member absent", raw)
+		}
+	})
+	t.Run("listed round trip", func(t *testing.T) {
+		envelope, loaded := saved(t, &State{NonAiredOrderTvdbIDs: []int{78874, 102261}})
+		if got, want := string(envelope["non_aired_order_tvdb_ids"]), `[78874,102261]`; got != want {
+			t.Errorf("non_aired_order_tvdb_ids = %s, want %s", got, want)
+		}
+		if !slices.Equal(loaded.NonAiredOrderTvdbIDs, []int{78874, 102261}) {
+			t.Errorf("loaded NonAiredOrderTvdbIDs = %v, want [78874 102261]", loaded.NonAiredOrderTvdbIDs)
+		}
+	})
+}
+
 // TestStoreLoadIgnoresRetiredScalarShrunkWalks pins the one compatibility property the
 // per-arr shrink streak's field RENAME rests on: a state.json written by a build that
 // persisted the retired scalar `shrunk_walks` must load CLEANLY - the unknown key is

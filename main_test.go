@@ -6,21 +6,28 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3"
+	"github.com/cplieger/arrapi/v3/radarr"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/atomicfile/v4"
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
+	"github.com/cplieger/seadex-scout/internal/logcontract"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
@@ -301,7 +308,7 @@ func TestDispatchRejectsInvalidConfig(t *testing.T) {
 }
 
 // TestArrClientHelpersReturnNilInterface pins the typed-nil guard: passing a
-// nil *arrapi.Sonarr/*arrapi.Radarr straight into the interface field would
+// nil *sonarr.Client/*radarr.Client straight into the interface field would
 // produce a NON-nil interface holding a nil pointer, and the walker would then
 // call through it and panic. The helpers exist to return a true nil interface.
 func TestArrClientHelpersReturnNilInterface(t *testing.T) {
@@ -438,9 +445,9 @@ func TestWriteStarterConfigSeedsAStrongFeedKey(t *testing.T) {
 }
 
 // TestNewArrClients covers the constructor gate: disabled arrs yield nil
-// clients, a valid pair yields a client, and an invalid URL surfaces as a
-// wrapped error naming the arr. arrapi constructors validate parameters
-// without any network I/O, so this is hermetic.
+// clients, a valid pair yields a client, and an invalid URL surfaces as an
+// error naming the arr. arrapi constructors validate parameters without any
+// network I/O, so this is hermetic.
 func TestNewArrClients(t *testing.T) {
 	t.Run("both disabled yields nil clients", func(t *testing.T) {
 		s, r, err := newArrClients(&config.Config{})
@@ -486,6 +493,156 @@ func TestNewArrClients(t *testing.T) {
 			t.Errorf("err = %q, want it to name the radarr client", err)
 		}
 	})
+}
+
+// TestArrKeyGateMatchesArrClient pins that the config's arr key gate and the arr
+// client agree: a Sonarr or Radarr key Validate accepts is one the client accepts,
+// and one Validate refuses the client refuses too, so no configuration passes
+// validation and then fails at startup. The client is the oracle.
+func TestArrKeyGateMatchesArrClient(t *testing.T) {
+	keys := map[string]string{
+		"generated":           "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+		"hand-set in the set": "abc.DEF_1-2",
+		"plus":                "my+key",
+		"tilde":               "a~b",
+		"non-ASCII":           "clé",
+		"slash":               "a/b",
+		"at sign":             "p@ss",
+		"dollar":              "a$b",
+		"inner space":         "two words",
+	}
+	for name, key := range keys {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Config{
+				RunMode:   config.RunModeDaemon,
+				SonarrURL: "http://sonarr:8989", SonarrAPIKey: key,
+				RadarrURL: "http://radarr:7878", RadarrAPIKey: key,
+			}
+			validateErr := cfg.Validate()
+			s, r, clientErr := newArrClients(&cfg)
+			if s != nil {
+				s.Close()
+			}
+			if r != nil {
+				r.Close()
+			}
+			if (validateErr == nil) != (clientErr == nil) {
+				t.Errorf("Validate() = %v but newArrClients() = %v; want both nil or both errors", validateErr, clientErr)
+			}
+		})
+	}
+}
+
+// flakyArr serves routes plus path, which answers 503 with the detection's
+// X-Application-Version (and Retry-After when set) to its first fails requests
+// and 200 [] after; the counter is path's request count.
+func flakyArr(t *testing.T, routes map[string]arrRoute, path string, fails int32, retryAfter string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var sends atomic.Int32
+	version := routes["/api"].version
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == path {
+			w.Header().Set("X-Application-Version", version)
+			if sends.Add(1) <= fails {
+				if retryAfter != "" {
+					w.Header().Set("Retry-After", retryAfter)
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.WriteString(w, "[]")
+			return
+		}
+		rt, ok := routes[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-Application-Version", rt.version)
+		w.WriteHeader(rt.code)
+		_, _ = io.WriteString(w, rt.body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &sends
+}
+
+// TestNewArrClientsPassRetryTuning pins the retry policy newArrClients gives both
+// clients, observed on a transient 503 to a data read. The base delay: arrapi
+// draws the first backoff from [base/2, base] (httpx.JitteredBackoff), so a 5 s
+// base cannot retry inside a 2 s deadline, where arrapi's default 1 s base would
+// and would read the 200. The attempt bound: a persistent 503 is sent exactly
+// three times; Retry-After: 1 replaces the backoff to keep the case short. Three
+// is also arrapi's default, so this pins the count, not the option's presence.
+func TestNewArrClientsPassRetryTuning(t *testing.T) {
+	tests := []struct {
+		routes func() map[string]arrRoute
+		read   func(ctx context.Context, s *sonarr.Client, r *radarr.Client) error
+		cfg    func(url string) *config.Config
+		name   string
+		path   string
+	}{
+		{
+			name: "sonarr", routes: sonarr4Routes, path: "/api/v3/series",
+			cfg: func(url string) *config.Config { return &config.Config{SonarrURL: url, SonarrAPIKey: "test-key"} },
+			read: func(ctx context.Context, s *sonarr.Client, _ *radarr.Client) error {
+				_, err := s.Series(ctx)
+				return err
+			},
+		},
+		{
+			name: "radarr", routes: radarrRoutes, path: "/api/v3/movie",
+			cfg: func(url string) *config.Config { return &config.Config{RadarrURL: url, RadarrAPIKey: "test-key"} },
+			read: func(ctx context.Context, _ *sonarr.Client, r *radarr.Client) error {
+				_, err := r.Movies(ctx)
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			build := func(t *testing.T, url string) (*sonarr.Client, *radarr.Client) {
+				t.Helper()
+				s, r, err := newArrClients(tc.cfg(url))
+				if err != nil {
+					t.Fatalf("newArrClients: %v", err)
+				}
+				t.Cleanup(func() {
+					if s != nil {
+						s.Close()
+					}
+					if r != nil {
+						r.Close()
+					}
+				})
+				return s, r
+			}
+			t.Run("base delay outlasts a 2s deadline", func(t *testing.T) {
+				t.Parallel()
+				srv, sends := flakyArr(t, tc.routes(), tc.path, 1, "")
+				s, r := build(t, srv.URL)
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				err := tc.read(ctx, s, r)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("read = %v, want the deadline to expire during the 5 s base backoff", err)
+				}
+				if n := sends.Load(); n != 1 {
+					t.Errorf("%s sends = %d, want 1: no retry fits before the deadline", tc.path, n)
+				}
+			})
+			t.Run("a persistent 503 is sent three times", func(t *testing.T) {
+				t.Parallel()
+				srv, sends := flakyArr(t, tc.routes(), tc.path, 1<<20, "1")
+				s, r := build(t, srv.URL)
+				if err := tc.read(t.Context(), s, r); err == nil {
+					t.Error("read = nil, want the 503 after the attempts are spent")
+				}
+				if n := sends.Load(); n != 3 {
+					t.Errorf("%s sends = %d, want 3", tc.path, n)
+				}
+			})
+		})
+	}
 }
 
 // TestConfigureLoggerAppliesLevel pins the configured level onto the default
@@ -763,17 +920,17 @@ func TestLogConfigExternalPollInterval(t *testing.T) {
 // a real client must pass through as a non-nil interface, otherwise the walker
 // would treat an enabled arr as disabled.
 func TestArrClientHelpersPassThrough(t *testing.T) {
-	s, err := arrapi.NewSonarr("http://sonarr:8989", "k1")
+	s, err := sonarr.New("http://sonarr:8989", "k1")
 	if err != nil {
-		t.Fatalf("NewSonarr: %v", err)
+		t.Fatalf("sonarr.New: %v", err)
 	}
 	defer s.Close()
 	if got := sonarrClient(s); got == nil {
 		t.Error("sonarrClient(non-nil) = nil, want the client as a non-nil interface")
 	}
-	r, err := arrapi.NewRadarr("http://radarr:7878", "k2")
+	r, err := radarr.New("http://radarr:7878", "k2")
 	if err != nil {
-		t.Fatalf("NewRadarr: %v", err)
+		t.Fatalf("radarr.New: %v", err)
 	}
 	defer r.Close()
 	if got := radarrClient(r); got == nil {
@@ -802,7 +959,7 @@ func TestWriteStarterConfigError(t *testing.T) {
 }
 
 // TestBuildScout pins the composition wiring hermetically: with both arrs
-// disabled each role's component graph builds without any network I/O (pingArrs
+// disabled each role's component graph builds without any network I/O (reportArrs
 // is a no-op on nil clients) and cleanup is callable, and an invalid arr URL
 // propagates as a build error instead of being swallowed.
 func TestBuildScout(t *testing.T) {
@@ -837,41 +994,312 @@ func TestBuildScout(t *testing.T) {
 	})
 }
 
-// TestPingArrs pins the startup-diagnostics contract: pinging is never fatal,
-// a reachable arr logs an INFO reachable line, and an erroring arr logs the
-// WARN ping-failed line (not a false reachable). The arr endpoints are faked
-// with httptest (arrapi.Ping GETs /api/v3/system/status). Serial (swaps
-// slog.Default).
-func TestPingArrs(t *testing.T) {
-	rec := capture.Default(t)
+// arrRoute is one canned answer of a fake arr: the status, the
+// X-Application-Version header when version is set, and the body.
+type arrRoute struct {
+	version string
+	body    string
+	code    int
+}
 
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{}`))
+// newFakeArr serves routes by request path; any other path answers 404 with no
+// version header.
+func newFakeArr(t *testing.T, routes map[string]arrRoute) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rt, ok := routes[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if rt.version != "" {
+			w.Header().Set("X-Application-Version", rt.version)
+		}
+		w.WriteHeader(rt.code)
+		_, _ = io.WriteString(w, rt.body)
 	}))
-	defer up.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The detection answers below follow recorded live GET /api and system/status
+// answers of Sonarr 4.0.20.3014, Sonarr 5.0.0.2635 and Radarr 6.4.4.10685; a
+// status body keeps appName and version.
+func sonarr4Routes() map[string]arrRoute {
+	const v = "4.0.20.3014"
+	return map[string]arrRoute{
+		"/api":                  {code: 200, version: v, body: `{"current":"v3","deprecated":[]}`},
+		"/api/v3/system/status": {code: 200, version: v, body: `{"appName":"Sonarr","version":"` + v + `"}`},
+	}
+}
+
+func sonarr5Routes() map[string]arrRoute {
+	const v = "5.0.0.2635"
+	return map[string]arrRoute{
+		"/api":                  {code: 200, version: v, body: `{"current":"v5","deprecated":["v3"]}`},
+		"/api/v5/system/status": {code: 200, version: v, body: `{"appName":"Sonarr","version":"` + v + `"}`},
+	}
+}
+
+func radarrRoutes() map[string]arrRoute {
+	const v = "6.4.4.10685"
+	return map[string]arrRoute{
+		"/api":                  {code: 200, version: v, body: `{"current":"v3","deprecated":[]}`},
+		"/api/v3/system/status": {code: 200, version: v, body: `{"appName":"Radarr","version":"` + v + `"}`},
+	}
+}
+
+func newTestSonarr(t *testing.T, url string) *sonarr.Client {
+	t.Helper()
+	c, err := sonarr.New(url, "test-key", sonarr.WithMaxAttempts(1))
+	if err != nil {
+		t.Fatalf("sonarr.New: %v", err)
+	}
+	t.Cleanup(c.Close)
+	return c
+}
+
+func newTestRadarr(t *testing.T, url string) *radarr.Client {
+	t.Helper()
+	c, err := radarr.New(url, "test-key", radarr.WithMaxAttempts(1))
+	if err != nil {
+		t.Fatalf("radarr.New: %v", err)
+	}
+	t.Cleanup(c.Close)
+	return c
+}
+
+// reachableAttrKeys returns the sorted attribute keys of every record whose
+// message is msg.
+func reachableAttrKeys(rec *capture.Recorder, msg string) []string {
+	var keys []string
+	for _, r := range rec.Records() {
+		if r.Message != msg {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			keys = append(keys, a.Key)
+			return true
+		})
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// TestReportArrsLogsAPIAndFeatures pins the startup line: each
+// reachable arr logs "<arr> reachable" with its version, API generation and
+// deprecation, and Sonarr also its four features, valued per engine as
+// arrapi documents them, and no other attribute. Serial (swaps slog.Default).
+func TestReportArrsLogsAPIAndFeatures(t *testing.T) {
+	tests := []struct {
+		routes func() map[string]arrRoute
+		want   map[string]string
+		name   string
+	}{
+		{
+			name:   "Sonarr v4 (API v3)",
+			routes: sonarr4Routes,
+			want: map[string]string{
+				"version": "4.0.20.3014", "api": "v3", "deprecated": "false",
+				"series_orders": "false", "season_titles": "false", "translations": "false",
+				"anime_ids": "false",
+			},
+		},
+		{
+			name:   "Sonarr v5 (API v5)",
+			routes: sonarr5Routes,
+			want: map[string]string{
+				"version": "5.0.0.2635", "api": "v5", "deprecated": "false",
+				"series_orders": "true", "season_titles": "true", "translations": "true",
+				"anime_ids": "true",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			reportArrs(t.Context(), newTestSonarr(t, newFakeArr(t, tc.routes()).URL), nil)
+
+			if n := rec.CountExact("sonarr reachable"); n != 1 {
+				t.Fatalf("sonarr reachable lines = %d, want 1; messages = %q", n, rec.Messages())
+			}
+			for key, want := range tc.want {
+				if got, _ := rec.AttrValueExact("sonarr reachable", key); got != want {
+					t.Errorf("sonarr reachable %s = %q, want %q", key, got, want)
+				}
+			}
+			if v, _ := rec.Attr("sonarr reachable", "api"); v.Kind() != slog.KindString {
+				t.Errorf("api attr kind = %v, want a string", v.Kind())
+			}
+			if got, want := reachableAttrKeys(rec, "sonarr reachable"), slices.Sorted(maps.Keys(tc.want)); !slices.Equal(got, want) {
+				t.Errorf("sonarr reachable attr keys = %q, want %q", got, want)
+			}
+		})
+	}
+	t.Run("Radarr (API v3)", func(t *testing.T) {
+		rec := capture.Default(t)
+		reportArrs(t.Context(), nil, newTestRadarr(t, newFakeArr(t, radarrRoutes()).URL))
+
+		if n := rec.CountExact("radarr reachable"); n != 1 {
+			t.Fatalf("radarr reachable lines = %d, want 1; messages = %q", n, rec.Messages())
+		}
+		for key, want := range map[string]string{"version": "6.4.4.10685", "api": "v3", "deprecated": "false"} {
+			if got, _ := rec.AttrValueExact("radarr reachable", key); got != want {
+				t.Errorf("radarr reachable %s = %q, want %q", key, got, want)
+			}
+		}
+	})
+}
+
+// TestSonarrReachableAttrsNamesEachFeature pins each feature attribute to its
+// own sonarr.Features flag: both engines report SeriesOrders with SeasonTitles
+// and Translations with AnimeIDs (arrapi's Features), so only a one-hot Features
+// value tells a swapped pair apart.
+func TestSonarrReachableAttrsNamesEachFeature(t *testing.T) {
+	flags := map[string]sonarr.Features{
+		"series_orders": {SeriesOrders: true},
+		"season_titles": {SeasonTitles: true},
+		"translations":  {Translations: true},
+		"anime_ids":     {AnimeIDs: true},
+	}
+	for set, features := range flags {
+		t.Run(set, func(t *testing.T) {
+			attrs := sonarrReachableAttrs(&sonarr.Info{Features: features})
+			got := map[string]any{}
+			for i := 0; i+1 < len(attrs); i += 2 {
+				got[attrs[i].(string)] = attrs[i+1]
+			}
+			for key := range flags {
+				if want := key == set; got[key] != want {
+					t.Errorf("%s = %v, want %v", key, got[key], want)
+				}
+			}
+		})
+	}
+}
+
+// TestReportArrsUnsupportedAPIIsOneError pins the unsupported arm:
+// a server arrapi refuses with an *arrapi.UnsupportedAPIError, whatever the
+// reason, logs one ERROR "<arr> API unsupported" carrying the error's own
+// one-line text, and no reachable or ping-failed line; the message is a
+// log-contract row of docs/monitoring.md. Each fake reproduces
+// the detection arm arrapi's internal/detect tests drive for that reason; the
+// test first confirms the fake yields it. Serial (swaps slog.Default).
+func TestReportArrsUnsupportedAPIIsOneError(t *testing.T) {
+	contract, err := logcontract.Load(".")
+	if err != nil {
+		t.Fatalf("load the log contract: %v", err)
+	}
+	html := `<!doctype html><html><body>Sonarr</body></html>`
+	tests := []struct {
+		routes map[string]arrRoute
+		name   string
+		arr    string
+		reason arrapi.UnsupportedReason
+	}{
+		{
+			name: "Sonarr 5 with /api/v5 blocked", arr: "sonarr", reason: arrapi.ReasonV5Unreachable,
+			routes: map[string]arrRoute{
+				"/api":                  sonarr5Routes()["/api"],
+				"/api/v5/system/status": {code: 404, body: "blocked"},
+			},
+		},
+		{
+			// Never Sonarr 5 over /api/v3: /api and /api/v5 hidden, only the v3 status answers.
+			name: "Sonarr 5 reachable only over /api/v3", arr: "sonarr", reason: arrapi.ReasonV5Unreachable,
+			routes: map[string]arrRoute{
+				"/api/v3/system/status": {code: 200, version: "5.0.0.2635", body: `{"appName":"Sonarr","version":"5.0.0.2635"}`},
+			},
+		},
+		{
+			name: "Sonarr 3", arr: "sonarr", reason: arrapi.ReasonUnsupportedVersion,
+			routes: map[string]arrRoute{
+				"/api":                  {code: 200, version: "3.0.10.1567", body: `{"current":"v3","deprecated":[]}`},
+				"/api/v3/system/status": {code: 200, version: "3.0.10.1567", body: `{"appName":"Sonarr","version":"3.0.10.1567"}`},
+			},
+		},
+		{
+			name: "a Sonarr announcing only API v6", arr: "sonarr", reason: arrapi.ReasonUnknownGeneration,
+			routes: map[string]arrRoute{
+				"/api":                  {code: 200, version: "6.0.0.1", body: `{"current":"v6","deprecated":[]}`},
+				"/api/v6/system/status": {code: 200, version: "6.0.0.1", body: `{"appName":"Sonarr","version":"6.0.0.1"}`},
+			},
+		},
+		{name: "Radarr behind the Sonarr URL", arr: "sonarr", reason: arrapi.ReasonWrongApp, routes: radarrRoutes()},
+		{name: "Sonarr behind the Radarr URL", arr: "radarr", reason: arrapi.ReasonWrongApp, routes: sonarr4Routes()},
+		{
+			name: "a web page at every status path", arr: "sonarr", reason: arrapi.ReasonNotAPI,
+			routes: map[string]arrRoute{
+				"/api":                  {code: 200, body: html},
+				"/api/v5/system/status": {code: 200, body: html},
+				"/api/v3/system/status": {code: 200, body: html},
+			},
+		},
+		{
+			name: "a proxy stripping X-Application-Version", arr: "sonarr", reason: arrapi.ReasonNoVersionHeader,
+			routes: map[string]arrRoute{
+				"/api":                  {code: 200, body: `{"current":"v3","deprecated":[]}`},
+				"/api/v3/system/status": {code: 200, body: `{"appName":"Sonarr","version":"4.0.20.3014"}`},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			url := newFakeArr(t, tc.routes).URL
+			var sc *sonarr.Client
+			var rc *radarr.Client
+			var err error
+			if tc.arr == "sonarr" {
+				sc = newTestSonarr(t, url)
+				_, err = sc.Info(t.Context())
+			} else {
+				rc = newTestRadarr(t, url)
+				_, err = rc.Info(t.Context())
+			}
+			unsupported, ok := errors.AsType[*arrapi.UnsupportedAPIError](err)
+			if !ok || unsupported.Reason != tc.reason {
+				t.Fatalf("fake's Info error = %v, want an *arrapi.UnsupportedAPIError with reason %d", err, tc.reason)
+			}
+
+			rec := capture.Default(t)
+			reportArrs(t.Context(), sc, rc)
+
+			msg := tc.arr + " API unsupported"
+			if n := rec.CountLevel(slog.LevelError, msg); n != 1 {
+				t.Fatalf("%q ERROR lines = %d, want 1; messages = %q", msg, n, rec.Messages())
+			}
+			if got, _ := rec.AttrValueExact(msg, "error"); got != err.Error() || strings.ContainsAny(got, "\r\n") {
+				t.Errorf("error attr = %q, want the error's one-line text %q", got, err.Error())
+			}
+			if rec.Contains(tc.arr+" reachable") || rec.Contains(tc.arr+" ping failed at startup") {
+				t.Errorf("messages = %q, want no reachable or ping-failed line beside the ERROR", rec.Messages())
+			}
+			if !slices.Contains(contract.Messages[msg], "error") {
+				t.Errorf("%s lists %q with attributes %q, want a log-contract row carrying error", logcontract.Path, msg, contract.Messages[msg])
+			}
+		})
+	}
+}
+
+// TestReportArrsUnreachableArrWarns pins the transient arm: an arr that answers
+// 500 everywhere logs the WARN ping-failed line, never the ERROR reserved for an
+// unsupported API, and startup goes on. Serial (swaps slog.Default).
+func TestReportArrsUnreachableArrWarns(t *testing.T) {
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
-	defer down.Close()
+	t.Cleanup(down.Close)
+	rec := capture.Default(t)
 
-	s, err := arrapi.NewSonarr(up.URL, "k")
-	if err != nil {
-		t.Fatalf("NewSonarr: %v", err)
-	}
-	defer s.Close()
-	r, err := arrapi.NewRadarr(down.URL, "k")
-	if err != nil {
-		t.Fatalf("NewRadarr: %v", err)
-	}
-	defer r.Close()
+	reportArrs(t.Context(), newTestSonarr(t, down.URL), newTestRadarr(t, down.URL))
 
-	pingArrs(t.Context(), s, r)
-
-	if !rec.Contains("sonarr reachable") {
-		t.Errorf("missing sonarr reachable info line: %v", rec.Messages())
-	}
-	if !rec.Contains("radarr ping failed at startup") {
-		t.Errorf("missing radarr ping-failed warn line: %v", rec.Messages())
+	for _, arr := range []string{"sonarr", "radarr"} {
+		if n := rec.CountLevel(slog.LevelWarn, arr+" ping failed at startup"); n != 1 {
+			t.Errorf("%s ping-failed WARN lines = %d, want 1; messages = %q", arr, n, rec.Messages())
+		}
+		if rec.Contains(arr + " API unsupported") {
+			t.Errorf("%s logged the unsupported-API ERROR for a 500", arr)
+		}
 	}
 }
 
@@ -1011,24 +1439,44 @@ func TestProbeReportDirAcceptsWritableDir(t *testing.T) {
 	}
 }
 
-// TestLogPingClassifiesShutdownCancellation pins the shutdown-classification
-// branch of logPing: a context-cancelled startup ping is a routine shutdown
-// (DEBUG), not the operator-visible WARN arr-fault line. Serial (swaps
-// slog.Default).
-func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
-	rec := capture.Default(t)
-
-	logPing("sonarr", fmt.Errorf("ping: %w", context.Canceled))
-
-	records := rec.Records()
-	if len(records) != 1 {
-		t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
+// TestLogArrStartupFailureClassifies pins logArrStartupFailure's levels: a
+// cancelled startup check is a routine shutdown (DEBUG), an unsupported API
+// found anywhere in the chain is the ERROR an operator must fix, and any other
+// failure is the WARN ping-failed line. Serial (swaps slog.Default).
+func TestLogArrStartupFailureClassifies(t *testing.T) {
+	tests := []struct {
+		err   error
+		name  string
+		msg   string
+		level slog.Level
+	}{
+		{
+			name: "cancelled by shutdown", err: fmt.Errorf("ping: %w", context.Canceled),
+			level: slog.LevelDebug, msg: "sonarr startup ping cancelled by shutdown",
+		},
+		{
+			name: "a wrapped unsupported API", err: fmt.Errorf("info: %w", &arrapi.UnsupportedAPIError{Reason: arrapi.ReasonWrongApp, App: "Radarr", Want: "Sonarr"}),
+			level: slog.LevelError, msg: "sonarr API unsupported",
+		},
+		{
+			name: "a server error", err: &arrapi.StatusError{Path: "/api", Code: 503},
+			level: slog.LevelWarn, msg: "sonarr ping failed at startup",
+		},
 	}
-	if records[0].Level != slog.LevelDebug {
-		t.Errorf("level = %v, want DEBUG", records[0].Level)
-	}
-	if records[0].Message != "sonarr startup ping cancelled by shutdown" {
-		t.Errorf("msg = %q, want the cancelled-by-shutdown line", records[0].Message)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := capture.Default(t)
+
+			logArrStartupFailure("sonarr", tc.err)
+
+			records := rec.Records()
+			if len(records) != 1 {
+				t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
+			}
+			if records[0].Level != tc.level || records[0].Message != tc.msg {
+				t.Errorf("record = %v %q, want %v %q", records[0].Level, records[0].Message, tc.level, tc.msg)
+			}
+		})
 	}
 }
 

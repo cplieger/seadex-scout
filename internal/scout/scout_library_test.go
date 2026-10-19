@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -28,7 +28,7 @@ func librarySeasonTwoEntry() seadex.Entry {
 
 // libraryScout builds a scout over one Frieren series holding Erai-raws for
 // season 1, against the Frieren entry plus librarySeasonTwoEntry.
-func libraryScout(t *testing.T, sonarr arrwalk.SonarrClient, st *state.State) (*Scout, *capture.Recorder) {
+func libraryScout(t *testing.T, sonarr arrwalk.SonarrPass, st *state.State) (*Scout, *capture.Recorder) {
 	t.Helper()
 	logger, recorder := capture.New()
 	st.Mapping = mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
@@ -38,7 +38,7 @@ func libraryScout(t *testing.T, sonarr arrwalk.SonarrClient, st *state.State) (*
 	return New(&Deps{
 		Logger:   logger,
 		Store:    &fakeStore{st: *st},
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: append(seadexFrierenEntry(), librarySeasonTwoEntry())},
 		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
@@ -50,8 +50,8 @@ func libraryScout(t *testing.T, sonarr arrwalk.SonarrClient, st *state.State) (*
 
 func frierenSonarr() *fakeSonarr {
 	return &fakeSonarr{
-		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		files:  map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}},
+		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
+		files:  map[int][]sonarr.EpisodeFile{7: {{Season: 1, ReleaseGroup: "Erai-raws"}}},
 	}
 }
 
@@ -75,11 +75,11 @@ func TestReconcileLogsTheLibraryOnACleanWalk(t *testing.T) {
 
 func TestReconcileWithholdsTheLibraryOnAnIncompleteWalk(t *testing.T) {
 	partial := &flakySonarr{
-		series: []arrapi.Series{
-			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-			{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+		series: []sonarr.Series{
+			{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+			{ID: 8, Title: "Broken Series", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
 		},
-		files:        map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}},
+		files:        map[int][]sonarr.EpisodeFile{7: {{Season: 1, ReleaseGroup: "Erai-raws"}}},
 		failEpisodes: map[int]bool{8: true},
 	}
 	// The guard carries the suspect side's PRIOR items, so the prior Frieren is
@@ -93,7 +93,7 @@ func TestReconcileWithholdsTheLibraryOnAnIncompleteWalk(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "B"},
 	}}}
 	for name, tc := range map[string]struct {
-		sonarr arrwalk.SonarrClient
+		sonarr arrwalk.SonarrPass
 		prior  *state.State
 		reason string
 	}{

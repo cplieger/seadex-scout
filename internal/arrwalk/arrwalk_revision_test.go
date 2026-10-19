@@ -4,23 +4,25 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3"
+	"github.com/cplieger/arrapi/v3/radarr"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-func revisedEpFile(season int, group string, version int, isRepack bool) arrapi.EpisodeFile {
+func revisedEpFile(season int, group string, version int, isRepack bool) sonarr.EpisodeFile {
 	f := epFile(season, group)
-	f.Quality = &arrapi.QualityModel{Revision: &arrapi.Revision{Version: version, IsRepack: isRepack}}
+	f.Revision = &arrapi.Revision{Version: version, IsRepack: isRepack}
 	return f
 }
 
-func walkOneSeries(t *testing.T, files []arrapi.EpisodeFile) Item {
+func walkOneSeries(t *testing.T, files []sonarr.EpisodeFile) Item {
 	t.Helper()
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Show"}},
-		files:  map[int][]arrapi.EpisodeFile{1: files},
+		series: []sonarr.Series{{ID: 1, Title: "Show"}},
+		files:  map[int][]sonarr.EpisodeFile{1: files},
 	}
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -33,7 +35,7 @@ func walkOneSeries(t *testing.T, files []arrapi.EpisodeFile) Item {
 func TestWalkSonarrFoldsNewestRevisionPerSeasonAndGroup(t *testing.T) {
 	v2 := release.Revision{Version: 2, Marker: release.RevisionVersion}
 	none1 := release.Revision{Version: 1, Marker: release.RevisionNone}
-	it := walkOneSeries(t, []arrapi.EpisodeFile{
+	it := walkOneSeries(t, []sonarr.EpisodeFile{
 		revisedEpFile(1, "G", 1, false),
 		revisedEpFile(1, "G", 1, false),
 		revisedEpFile(1, "G", 2, false),
@@ -65,7 +67,7 @@ func TestWalkSonarrFoldsNewestRevisionPerSeasonAndGroup(t *testing.T) {
 func TestWalkSonarrRevisionFallsBackToExplicitNameToken(t *testing.T) {
 	named := epFile(1, "G")
 	named.SceneName = "[G] Show - 03v2 (BD 1080p)"
-	it := walkOneSeries(t, []arrapi.EpisodeFile{named})
+	it := walkOneSeries(t, []sonarr.EpisodeFile{named})
 	if got := it.SeasonRevisions[1]["g"]; got != (release.Revision{Version: 2, Marker: release.RevisionVersion}) {
 		t.Errorf("SeasonRevisions[1][g] with no recorded quality and a v2 scene name = %+v, want explicit v2", got)
 	}
@@ -74,7 +76,7 @@ func TestWalkSonarrRevisionFallsBackToExplicitNameToken(t *testing.T) {
 func TestWalkSonarrUnknownRevisionPoisonsItsUnit(t *testing.T) {
 	unread := epFile(1, "G")
 	unread.RelativePath = "Season 01/Show - S01E02 - Title [Bluray-1080p].mkv"
-	it := walkOneSeries(t, []arrapi.EpisodeFile{revisedEpFile(1, "G", 2, false), unread, revisedEpFile(2, "G", 1, false)})
+	it := walkOneSeries(t, []sonarr.EpisodeFile{revisedEpFile(1, "G", 2, false), unread, revisedEpFile(2, "G", 1, false)})
 	if got := it.SeasonRevisions[1]["g"]; got.Known() {
 		t.Errorf("SeasonRevisions[1][g] beside a file with no revision evidence = %+v, want unknown", got)
 	}
@@ -88,11 +90,11 @@ func TestWalkSonarrUnknownRevisionPoisonsItsUnit(t *testing.T) {
 
 func TestWalkSonarrFilelessAndFailedSeriesCarryNoRevisions(t *testing.T) {
 	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Fileless"}, {ID: 2, Title: "Failed"}, {ID: 3, Title: "Fine"}},
-		files:  map[int][]arrapi.EpisodeFile{1: {}, 3: {revisedEpFile(1, "G", 1, false)}},
+		series: []sonarr.Series{{ID: 1, Title: "Fileless"}, {ID: 2, Title: "Failed"}, {ID: 3, Title: "Fine"}},
+		files:  map[int][]sonarr.EpisodeFile{1: {}, 3: {revisedEpFile(1, "G", 1, false)}},
 		epErr:  map[int]error{2: errors.New("episode fetch boom")},
 	}
-	snap, err := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Sonarr: onePass{fs}, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -108,15 +110,15 @@ func TestWalkSonarrFilelessAndFailedSeriesCarryNoRevisions(t *testing.T) {
 
 func TestWalkRadarrCarriesRecordedRepackRevision(t *testing.T) {
 	repack := release.Revision{Version: 2, Marker: release.RevisionRepack}
-	fr := &fakeRadarr{movies: []arrapi.Movie{{
+	fr := &fakeRadarr{movies: []radarr.Movie{{
 		ID: 1, Title: "Given", HasFile: true,
-		MovieFile: &arrapi.MovieFile{
+		File: &radarr.MovieFile{
 			ReleaseGroup: "Grp",
 			RelativePath: "Given (2020) [Bluray-1080p].mkv",
-			Quality:      &arrapi.QualityModel{Revision: &arrapi.Revision{Version: 2, IsRepack: true}},
+			Revision:     &arrapi.Revision{Version: 2, IsRepack: true},
 		},
 	}}}
-	snap, err := NewWalker(&Config{Radarr: fr, Logger: discardLogger()}).Walk(t.Context())
+	snap, _, err := NewWalker(&Config{Radarr: fr, Logger: discardLogger()}).Walk(t.Context())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}

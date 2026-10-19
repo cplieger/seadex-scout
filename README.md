@@ -22,7 +22,7 @@ You can leave out remuxes, require dual audio, skip specials and add AnimeBytes 
 
 seadex-scout is built for people who keep an anime library in Sonarr or Radarr and want it on the releases SeaDex recommends. It compares the files you already have, one season, film or special at a time. Without it, you would open each show on SeaDex and compare its release groups with your files by hand.
 
-You need a Sonarr instance, a Radarr instance or both, with anime in them. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
+You need a Sonarr instance, a Radarr instance or both, with anime in them. Sonarr 4 and Sonarr 5 both work. Behind a reverse proxy, the proxy must pass the `X-Application-Version` header, and Sonarr 5 must be reachable on `/api/v5`. A Sonarr 5 series set to an episode order other than TheTVDB's aired one is not compared. seadex-scout reports through its log, so its alerts come from your Loki and Alertmanager, and its dashboard from Grafana. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. The optional indexer needs a Prowlarr instance with its Nyaa or AnimeBytes indexer.
 
 seadex-scout is free software under the GPL-3.0-or-later license.
 <!-- hub-overview END -->
@@ -148,6 +148,7 @@ The healthcheck runs `seadex-scout health`, which reads a marker file each compl
 - The container restarts in a loop at the first start. The `config` folder does not belong to the container user. Run the `chown` from the quick start.
 - The log says `no config found; wrote a starter config, but it cannot start yet`. `SONARR_URL` or `SONARR_API_KEY` did not reach the container. Check `.env`, then restart.
 - The log says `sonarr ping failed at startup`. Use Sonarr's network address, not `localhost`, and check that Sonarr is running.
+- The log says `sonarr API unsupported`. Sonarr answered, but seadex-scout cannot read its API. The `error` text names the fix, and [Monitoring and alerts](docs/monitoring.md#log-contract) lists each one.
 - The indexer finds nothing on searches. Tick **Anime Standard Format Search** on the indexer in Sonarr.
 
 ## Monitoring

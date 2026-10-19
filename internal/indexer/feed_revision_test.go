@@ -67,7 +67,7 @@ func TestSynthesizeTitleCarriesPayloadRevision(t *testing.T) {
 		{
 			"repack film",
 			seadex.Torrent{ReleaseGroup: "PTP", Files: []seadex.File{{Name: "Given.2020.REPACK.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC-PTP.mkv", Length: 1 << 30}}},
-			EntryInfo{Title: "Given", Year: 2020, IsMovie: true},
+			EntryInfo{Title: "Given", Year: 2020, Kind: KindMovie},
 			"Given (2020) REPACK 1080p [PTP]",
 		},
 		{

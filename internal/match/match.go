@@ -77,7 +77,7 @@ func (m *Match) SpecialsUnknown() bool {
 
 // AlignEntry is the match as align.Decide reads it. It aliases m.Record.
 func (m *Match) AlignEntry() *align.Entry {
-	return &align.Entry{Record: &m.Record, SiblingSeasons: m.SiblingSeasons, Seasons: m.Seasons, Specials: m.Specials, Episodes: m.Episodes}
+	return &align.Entry{Record: &m.Record, SiblingSeasons: m.SiblingSeasons, Seasons: m.Seasons, Specials: m.Specials, Episodes: m.Episodes, AniListID: m.Entry.AniListID}
 }
 
 // coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
@@ -436,7 +436,7 @@ func formatArr(format string) string {
 
 // LibIndex indexes a library snapshot by external ID and normalized title;
 // the ID lookup is arr-consistent (see FindByID). Shared by the matcher and
-// the feed-info builder (scout's feedEntryInfo).
+// the feed-info builder (scout's feedInfo).
 type LibIndex struct {
 	byTvdb  map[int]*library.Item
 	byTmdb  map[int]*library.Item

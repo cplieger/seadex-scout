@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/arrapi/v2"
+	"github.com/cplieger/arrapi/v3/sonarr"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -51,11 +51,11 @@ func tickDeps(logger *slog.Logger, sea *fakeSeaDex, feed FeedWriter, notifier *n
 	if notifier == nil {
 		notifier = notify.NewNotifier(logger, nil)
 	}
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	return &Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       sea,
 		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
@@ -1094,20 +1094,20 @@ func tickDegradedReasons(recorder *capture.Recorder) []string {
 func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 	logger, recorder := capture.New()
 	sonarr := &flakySonarr{
-		series: []arrapi.Series{
-			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
-			{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+		series: []sonarr.Series{
+			{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+			{ID: 8, Title: "Second Show", IDs: sonarr.ExternalIDs{TVDB: 124}, Year: 2024},
 		},
-		files: map[int][]arrapi.EpisodeFile{
-			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
-			8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		files: map[int][]sonarr.EpisodeFile{
+			7: {{Season: 1, ReleaseGroup: "Erai-raws"}},
+			8: {{Season: 1, ReleaseGroup: "Erai-raws"}},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    &fakeStore{st: state.State{Mapping: twoRecordMappingCache()}},
-		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),

@@ -12,8 +12,10 @@
 # `enabled: false` to its block.
 #
 # api_key shape: the arrs generate a 32-character hex key, shown under Settings,
-# then General, then API Key. A key of any other shape is accepted, because the arrs
-# honour whatever key you set. Startup logs a warning that names the field.
+# then General, then API Key. That key always passes. A key you set yourself must
+# use only letters, digits, '.', '_' and '-', or startup stops with an error that
+# names the field. Such a key of another length or shape is accepted, and startup
+# logs a warning that names the field.
 # A value containing a '$' is refused. It means a ${VAR} reference was never
 # expanded, and the literal placeholder would fail every call with a 401.
 # The one exception is an api_key that is exactly one unset reference, like
@@ -99,5 +101,5 @@ indexer:
   feed_api_key: "" # the arrs send this and the feed checks it. No spaces and no '$'. The first-boot starter fills this with a generated key. A ${SEADEX_SCOUT_FEED_KEY} reference also works
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, for example http://prowlarr:9696/1/api. "" means off
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL. "" means off
-  prowlarr_api_key: "" # Prowlarr API key, a secret that is never logged. "" is valid with Prowlarr auth disabled for local addresses, otherwise 32 hex chars, the same shape rule as the arr keys. A ${SEADEX_SCOUT_PROWLARR_KEY} reference works
+  prowlarr_api_key: "" # Prowlarr API key, a secret that is never logged. "" is valid with Prowlarr auth disabled for local addresses, otherwise one run of printable characters with no whitespace, control character or '$'. Prowlarr generates 32 hex chars, as the arrs do, and a key of another shape logs a warning. A ${SEADEX_SCOUT_PROWLARR_KEY} reference works
   ab_passkey: "" # AnimeBytes passkey for AnimeBytes RSS download links. "" turns AnimeBytes RSS off. 32, 48 or 56 chars. A ${SEADEX_SCOUT_AB_PASSKEY} reference works

@@ -383,6 +383,35 @@ func TestItemSpecialsRoundTripAndLegacyReadsUnknown(t *testing.T) {
 	}
 }
 
+// A series whose episode list names a season-0 file its file list lacks holds
+// unknown specials though no season-0 group is known, and the
+// state survives the persisted snapshot and counts as a change.
+func TestItemSpecialsFileUnknownWithoutSeasonZeroGroup(t *testing.T) {
+	in := Item{Arr: ArrSonarr, ArrID: 1, SeasonGroups: map[int][]string{1: {"g"}}, SpecialsFileUnknown: true}
+	if !in.SpecialsUnknown() {
+		t.Error("SpecialsUnknown() = false for SpecialsFileUnknown with no season-0 group, want true")
+	}
+	b, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var out Item
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("json.Unmarshal(%s): %v", b, err)
+	}
+	if !out.SpecialsUnknown() {
+		t.Errorf("round trip of %s reads specials known, want unknown", b)
+	}
+	known := in
+	known.SpecialsFileUnknown = false
+	if known.SpecialsUnknown() {
+		t.Error("SpecialsUnknown() = true for a series with no season-0 file, want false")
+	}
+	if d := DiffSnapshots(&Snapshot{Items: []Item{known}}, &Snapshot{Items: []Item{in}}); d.Changed != 1 {
+		t.Errorf("DiffSnapshots(specials became unknown) = %+v, want Changed=1", d)
+	}
+}
+
 // TestDiffSnapshotsDetectsAReplacedFile pins that a file replaced by another of
 // the same group, which changes no group or fingerprint, still reads as a change.
 func TestDiffSnapshotsDetectsAReplacedFile(t *testing.T) {
@@ -401,5 +430,146 @@ func TestDiffSnapshotsDetectsAReplacedFile(t *testing.T) {
 				t.Errorf("diff = %+v, want one changed item", d)
 			}
 		})
+	}
+}
+
+// TestItemOrderSnapshotShape pins the persisted Order shape: a series in a
+// non-aired order round-trips its Order, and an official series (Order nil)
+// encodes byte-identically to the snapshot before Order existed (the expected
+// bytes were recorded from that code).
+func TestItemOrderSnapshotShape(t *testing.T) {
+	t.Run("official series unchanged", func(t *testing.T) {
+		it := Item{
+			Arr: ArrSonarr, ArrID: 7, Title: "Code Geass", TvdbID: 79525, HasFile: true,
+			SeasonGroups: map[int][]string{1: {"sam"}}, Groups: []string{"sam"},
+		}
+		b, err := json.Marshal(&it)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		const want = `{"season_groups":{"1":["sam"]},"arr":"sonarr","title":"Code Geass","groups":["sam"],"current":{},"arr_id":7,"tvdb_id":79525,"has_file":true}`
+		if string(b) != want {
+			t.Errorf("official item JSON = %s, want %s", b, want)
+		}
+	})
+	t.Run("non-aired order round trip", func(t *testing.T) {
+		in := Item{Arr: ArrSonarr, ArrID: 2189, Title: "Monogatari", Order: &Order{Type: "alternate", Name: "Book Order"}}
+		b, err := json.Marshal(&in)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", b, err)
+		}
+		if got, want := string(raw["order"]), `{"type":"alternate","name":"Book Order"}`; got != want {
+			t.Errorf("order member = %s, want %s", got, want)
+		}
+		var out Item
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", b, err)
+		}
+		if out.Order == nil || *out.Order != *in.Order {
+			t.Errorf("round trip Order = %+v, want %+v", out.Order, in.Order)
+		}
+	})
+	// arrapi reports an empty seasonType as sonarr.Order{}, "an unknown order,
+	// never aired": it must survive a restart as an order, or the series would
+	// compare in aired order after the snapshot reloads.
+	t.Run("unknown order round trip", func(t *testing.T) {
+		in := Item{Arr: ArrSonarr, ArrID: 2203, Title: "Unknown", Order: &Order{}}
+		b, err := json.Marshal(&in)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", b, err)
+		}
+		if got, want := string(raw["order"]), `{"type":""}`; got != want {
+			t.Errorf("order member = %s, want %s", got, want)
+		}
+		var out Item
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", b, err)
+		}
+		if out.Order == nil || *out.Order != (Order{}) {
+			t.Errorf("round trip Order = %+v, want &Order{}", out.Order)
+		}
+	})
+}
+
+// TestOrderLabel pins the order naming rule: the order's name when Sonarr
+// lists one, else its type code, else a phrase for the unknown order arrapi
+// reports for an empty seasonType.
+func TestOrderLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		order Order
+		want  string
+	}{
+		{name: "named", order: Order{Type: "alternate", Name: "Book Order"}, want: "Book Order"},
+		{name: "unnamed", order: Order{Type: "alternate"}, want: "alternate"},
+		{name: "unknown", order: Order{}, want: "an unknown order"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.order.Label(); got != tc.want {
+				t.Errorf("Order%+v.Label() = %q, want %q", tc.order, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDiffSnapshotsDetectsAnOrderChange pins that a series switching between
+// aired and another order reads as a change: it decides whether it compares.
+func TestDiffSnapshotsDetectsAnOrderChange(t *testing.T) {
+	aired := diffItem(ArrSonarr, 1, "g")
+	dvd := aired
+	dvd.Order = &Order{Type: "dvd", Name: "DVD Order"}
+	if d := DiffSnapshots(&Snapshot{Items: []Item{aired}}, &Snapshot{Items: []Item{dvd}}); d.Changed != 1 {
+		t.Errorf("DiffSnapshots(aired to DVD order) = %+v, want Changed=1", d)
+	}
+	same := dvd
+	same.Order = &Order{Type: "dvd", Name: "DVD Order"}
+	if d := DiffSnapshots(&Snapshot{Items: []Item{dvd}}, &Snapshot{Items: []Item{same}}); d.Changed != 0 {
+		t.Errorf("DiffSnapshots(equal orders in distinct pointers) = %+v, want Changed=0", d)
+	}
+}
+
+// TestItemAniListIDsSnapshotShape pins the persisted AniList ids
+// (anilist_ids, omitted when empty, so a Sonarr 4 series' snapshot is
+// unchanged, as TestItemOrderSnapshotShape's official case shows) and that a
+// change to them reads as a change: they decide whether a season compares.
+func TestItemAniListIDsSnapshotShape(t *testing.T) {
+	in := Item{Arr: ArrSonarr, ArrID: 33, Title: "Code Geass", AniListIDs: []int{1575, 2904}}
+	b, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("json.Unmarshal(%s): %v", b, err)
+	}
+	if got, want := string(raw["anilist_ids"]), `[1575,2904]`; got != want {
+		t.Errorf("anilist_ids member = %s, want %s", got, want)
+	}
+	var out Item
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("json.Unmarshal(%s): %v", b, err)
+	}
+	if !slices.Equal(out.AniListIDs, in.AniListIDs) {
+		t.Errorf("round trip AniListIDs = %v, want %v", out.AniListIDs, in.AniListIDs)
+	}
+
+	before := diffItem(ArrSonarr, 1, "g")
+	after := before
+	after.AniListIDs = []int{1575}
+	if d := DiffSnapshots(&Snapshot{Items: []Item{before}}, &Snapshot{Items: []Item{after}}); d.Changed != 1 {
+		t.Errorf("DiffSnapshots(AniList ids added) = %+v, want Changed=1", d)
+	}
+	same := after
+	same.AniListIDs = []int{1575}
+	if d := DiffSnapshots(&Snapshot{Items: []Item{after}}, &Snapshot{Items: []Item{same}}); d.Changed != 0 {
+		t.Errorf("DiffSnapshots(equal AniList ids) = %+v, want Changed=0", d)
 	}
 }

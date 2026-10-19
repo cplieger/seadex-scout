@@ -53,11 +53,14 @@ const (
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
 	// (present in the mapping) but SeaDex lists no entry for it.
 	VerdictNotOnSeaDex Verdict = "not_on_seadex"
+	// verdictWithheld means the app does not compare this entry because it does
+	// not trust where the entry sits in the item; the row's reason says why.
+	verdictWithheld Verdict = "withheld"
 )
 
 // verdictOrder is the report's most-actionable-first ordering. not_on_seadex is
 // last: it is informational (no SeaDex recommendation exists to act on).
-var verdictOrder = []Verdict{VerdictUnlisted, verdictAlt, VerdictOlderRevision, VerdictUnverified, verdictUnattributed, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
+var verdictOrder = []Verdict{VerdictUnlisted, verdictAlt, VerdictOlderRevision, VerdictUnverified, verdictUnattributed, verdictWithheld, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
 
 // Qualifier annotates a row's verdict with the daemon's finding vocabulary for
 // the same (item, entry). It annotates; it never forks the verdict enum.
@@ -116,6 +119,11 @@ type reportRow struct {
 	MatchSource   string       `json:"match_source"`
 	CurrentGroups []string     `json:"current_groups,omitempty"`
 	Releases      []rowRelease `json:"releases,omitempty"`
+	// Order is set only on a row withheld for the series' episode order.
+	Order library.Order `json:"order,omitzero"`
+	// SeriesAniListIDs is set only on a row withheld for AniList: the ids
+	// Sonarr links the series to.
+	SeriesAniListIDs []int `json:"series_anilist_ids,omitempty"`
 	// Episodes and MissingEpisodes are set only on an "episodes" row: the
 	// episodes of Season, 0 or positive, the entry is, and those with no file.
 	Episodes        []int `json:"episodes,omitempty"`
@@ -127,6 +135,8 @@ type reportRow struct {
 	BestRevision    release.Revision `json:"best_revision,omitzero"`
 	AniListID       int              `json:"al_id"`
 	Season          int              `json:"season,omitempty"`
+	// Withheld is set only on a withheld row: why it was not compared.
+	Withheld align.WithholdReason `json:"reason,omitempty"`
 	// Scope is the comparison scope resolved for the row: the shared decision's
 	// kind on a matched row (align.Decide), align.ItemKind on an uncovered one.
 	// align.ScopeWholeSeries, the zero value, encodes and renders as "series".
@@ -167,8 +177,8 @@ type itemCounts struct {
 	// WithEntry is the items at least one SeaDex entry matched.
 	WithEntry int `json:"with_entry"`
 	// AllBest is the items with an entry whose every COMPARED row is have_best. A
-	// row nothing was compared on (no_file, unattributed) neither earns nor blocks
-	// it, so an item made only of such rows is not counted.
+	// row nothing was compared on (no_file, unattributed, withheld) neither earns
+	// nor blocks it, so an item made only of such rows is not counted.
 	AllBest int `json:"all_best"`
 	// AllBestOrAlt is the items with an entry whose every compared row is
 	// have_best or have_alt, by the same rules as AllBest, so it includes AllBest.
@@ -271,7 +281,7 @@ func (s itemStanding) with(v Verdict) itemStanding {
 		s.alt = true
 	case VerdictOlderRevision, VerdictUnlisted, VerdictUnverified:
 		s.belowAlt = true
-	case VerdictNoFile, verdictUnattributed, VerdictNotOnSeaDex:
+	case VerdictNoFile, verdictUnattributed, verdictWithheld, VerdictNotOnSeaDex:
 	}
 	return s
 }
@@ -383,6 +393,13 @@ func (a *Auditor) assess(m *match.Match) reportRow {
 	row.CurrentGroups, row.Approx = d.Groups, d.Approx
 	row.Verdict = verdictFor(&d, row.GroupsUnknown)
 	row.Qualifier = rowQualifier(&m.Entry, &d)
+	row.Withheld = d.Withheld
+	switch d.Withheld {
+	case align.WithheldOrder:
+		row.Order = *m.Item.Order
+	case align.WithheldAniList:
+		row.SeriesAniListIDs = slices.Clone(m.Item.AniListIDs)
+	}
 	if d.Standing == align.StandingBestSuperseded {
 		row.CurrentRevision, row.BestRevision = d.HeldRevision, d.ListedRevision
 	}
@@ -390,13 +407,17 @@ func (a *Auditor) assess(m *match.Match) reportRow {
 }
 
 // verdictFor renders the shared decision core's group-ladder standing in the
-// report's verdict vocabulary. Every standing maps 1:1 except unverified, which
+// report's verdict vocabulary, a withheld outcome first, since it carries no
+// standing. Every standing maps 1:1 except unverified, which
 // the report splits by origin: an OFFERED unit whose file data was read is
 // unattributed (the app does not compare it), while a NOGRP side or a placeholder
 // whose files could not be read (groupsUnknown, which is also what separates an
 // unreadable film from an offered one, since the two decisions are identical)
 // stays unverified.
 func verdictFor(d *align.Decision, groupsUnknown bool) Verdict {
+	if d.Outcome == align.OutcomeWithheld {
+		return verdictWithheld
+	}
 	switch d.Standing {
 	case align.StandingNoFile:
 		return VerdictNoFile
@@ -421,9 +442,12 @@ func verdictFor(d *align.Decision, groupsUnknown bool) Verdict {
 // rowQualifier derives the daemon-vocabulary qualifier for a row from the shared
 // decision. With no best release listed at all (d.NoBest, read independently of
 // the outcome), the classify.Fallback precedence picks theoretical or incomplete;
-// an aligned row is never qualified, and neither is an unverifiable row of an
-// entry that still lists a best.
+// an aligned or withheld row is never qualified, and neither is an
+// unverifiable row of an entry that still lists a best.
 func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
+	if d.Outcome == align.OutcomeWithheld {
+		return ""
+	}
 	if d.NoBest {
 		switch classify.Fallback(entry) {
 		case classify.FallbackTheoretical:

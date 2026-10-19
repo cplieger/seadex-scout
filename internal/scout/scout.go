@@ -19,6 +19,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/classify"
@@ -39,13 +40,13 @@ import (
 // shared SeaDex snapshot, so the findings and the RSS feed the arrs grab from are
 // produced by one data engine. Deps.Feed is nil when no Torznab feed is
 // configured. info supplies the per-show metadata the writer synthesizes RSS
-// titles from, built over persisted state only, keeping the rebuild
+// titles from, built with no arr call (feedInfo), keeping the rebuild
 // arr-independent.
 type FeedWriter interface {
-	Rebuild(ctx context.Context, entries []seadex.Entry, info indexer.EntryInfoFunc) error
+	Rebuild(ctx context.Context, entries []seadex.Entry, info indexer.FeedInfo) error
 	// Advance folds a bounded window of recently-changed entries into the
 	// persisted feed without re-deriving what a window cannot speak for.
-	Advance(ctx context.Context, window []seadex.Entry, info indexer.EntryInfoFunc) error
+	Advance(ctx context.Context, window []seadex.Entry, info indexer.FeedInfo) error
 }
 
 // SeaDexSource supplies the SeaDex entries snapshot a cycle compares and rebuilds
@@ -323,15 +324,20 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		s.restoreStanding(st.Standing)
 	}
 
-	snap, walkErr := s.library.Walk(ctx)
-	if walkErr != nil && ctx.Err() != nil {
-		// A shutdown cancelled the cycle mid-walk: not an arr fault, so neither the
-		// walk-failed ERROR (it would trip the cycle-error alert on every redeploy)
-		// nor an unhealthy verdict - the rule every later interruption arm applies.
+	snap, orders, walkErr := s.library.Walk(ctx)
+	if ctx.Err() != nil {
+		// A shutdown cancelled the cycle during or right after the walk: not an arr
+		// fault, so neither the walk-failed ERROR (it would trip the cycle-error
+		// alert on every redeploy) nor an unhealthy verdict - the rule every later
+		// interruption arm applies.
 		s.log.Warn("cycle interrupted by shutdown during library walk", "cause", context.Cause(ctx))
+		s.saveInterruptedOrders(ctx, &st, &orders)
 		return true
 	}
-	if s.stopAfterWalkFailure(walkErr) {
+	// Only a pass still live here may release ids; every later save of the pass
+	// persists this set.
+	st.NonAiredOrderTvdbIDs = s.nextOrderSet(&st, &snap, &orders)
+	if s.stopAfterWalkFailure(ctx, &st, walkErr) {
 		return false
 	}
 
@@ -402,10 +408,10 @@ func (c *core) warnCatalogueLinkQuality(entries []seadex.Entry) {
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
 // should stop immediately. A genuine walk failure is unhealthy (a
-// shutdown-cancelled walk never reaches here); an alert-only deployment stops
-// right away, while a configured feed falls through so the arr-independent feed
-// rebuild still runs.
-func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
+// shutdown-cancelled walk never reaches here); an alert-only deployment saves
+// st and stops right away, while a configured feed falls through so the
+// arr-independent feed rebuild still runs.
+func (s *Scout) stopAfterWalkFailure(ctx context.Context, st *state.State, walkErr error) bool {
 	if walkErr == nil {
 		return false
 	}
@@ -414,9 +420,11 @@ func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 	attrs := walkFailureAttrs(walkErr)
 	s.log.Error("library walk failed; cycle unhealthy", attrs...)
 	// Alert-only (no Torznab feed): a failed walk is unhealthy and nothing else
-	// remains, so emit the completion line here - the ERROR above carries the
-	// fault. With a feed configured, fall through to refresh it from SeaDex + animap.
+	// remains, so save the order set and emit the completion line here - the
+	// ERROR above carries the fault. With a feed configured, fall through to
+	// refresh it from SeaDex + animap.
 	if s.feed == nil {
+		s.save(ctx, st)
 		s.cycleGateDegraded("walk-failed", attrs...)
 		return true
 	}
@@ -429,10 +437,9 @@ func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 const attrError = "error"
 
 // walkFailureAttrs builds the attribute set shared by the walk-failure log
-// boundaries: the LogSafeError-reduced error - a transport failure wraps a
-// *url.Error embedding the request URL, which may carry configured userinfo
-// credentials - plus a bounded `arr` attribute naming the failed side. The side
-// must come from the ORIGINAL error: the reduction discards arrwalk's wrapper.
+// boundaries: the LogSafeError-reduced error (defence in depth: arrapi's errors
+// carry no request URL) plus a bounded `arr` attribute naming the failed side. The
+// side must come from the ORIGINAL error: the reduction can discard arrwalk's wrapper.
 func walkFailureAttrs(walkErr error) []any {
 	attrs := []any{attrError, httpx.LogSafeError(walkErr)}
 	if arr := arrwalk.WalkErrArr(walkErr); arr != "" {
@@ -728,24 +735,27 @@ func specialsUnread(items []library.Item) int {
 // splitFailedMatches partitions the match set around the model's placeholder rule
 // (library.Item.Comparable): a match linked to an item whose file data the walk
 // could not establish is excluded from the compare (its file state is missing,
-// not empty, so comparing would misread every recommendation as unmet), and those
-// copies are returned so resolution can preserve their prior findings.
-func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems notify.Preserve) {
-	clean = make([]match.Match, 0, len(matches))
+// not empty, so comparing would misread every recommendation as unmet), unless
+// align.Withholding withholds it, which needs no file data. Every failed copy is
+// returned, for the partial-walk count and for preserved.
+func splitFailedMatches(matches []match.Match) (compared []match.Match, failedItems notify.Preserve) {
+	compared = make([]match.Match, 0, len(matches))
 	for i := range matches {
 		if m := &matches[i]; m.InLibrary() && !m.Item.Comparable() {
 			if failedItems == nil {
 				failedItems = make(notify.Preserve)
 			}
 			failedItems[copyOwner(m)] = struct{}{}
-			continue
+			if align.Withholding(m.Item, m.AlignEntry()) == align.WithheldNone {
+				continue
+			}
 		}
-		clean = append(clean, matches[i])
+		compared = append(compared, matches[i])
 	}
 	if failedItems == nil {
 		return matches, nil
 	}
-	return clean, failedItems
+	return compared, failedItems
 }
 
 func copyOwner(m *match.Match) notify.Owner {
@@ -754,8 +764,9 @@ func copyOwner(m *match.Match) notify.Owner {
 
 // preserved is the finding-preservation scope: the owners whose evidence this
 // pass could not establish. A failed item and a placed entry whose season-0
-// files the walk could not read preserve their own arr copy; a failed AniList
-// lookup preserves every copy of its entry.
+// files the walk could not read preserve their own arr copy, unless
+// align.Withholding withholds its comparison, which no file evidence changes; a
+// failed AniList lookup preserves every copy of its entry.
 func preserved(failedItems notify.Preserve, result *match.Result) notify.Preserve {
 	p := maps.Clone(failedItems)
 	add := func(o notify.Owner) {
@@ -768,7 +779,10 @@ func preserved(failedItems notify.Preserve, result *match.Result) notify.Preserv
 		add(notify.Owner{AniListID: id})
 	}
 	for i := range result.Matches {
-		if m := &result.Matches[i]; m.SpecialsUnknown() {
+		switch m := &result.Matches[i]; {
+		case m.InLibrary() && align.Withholding(m.Item, m.AlignEntry()) != align.WithheldNone:
+			delete(p, copyOwner(m))
+		case m.SpecialsUnknown():
 			add(copyOwner(m))
 		}
 	}
@@ -788,15 +802,16 @@ func mapUsable(mapErr error) bool {
 
 // rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared SeaDex
 // snapshot, independent of the arr walk (the feed needs only SeaDex + animap +
-// persisted state, so an arr outage must not freeze it). It is a no-op when no
-// feed is configured, the SeaDex fetch failed, or the map is unusable - the
+// st: the persisted items and memo and this walk's order set, with no arr call,
+// so an arr outage must not freeze it). It is a no-op when no feed is
+// configured, the SeaDex fetch failed, or the map is unusable - the
 // last-good feed is then kept, because rebuilding against an unusable map would
 // categorize every entry as anime and drop all SeaDex movies from Radarr's view.
 func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, st *state.State, errs cycleOutcomes) {
 	if s.feed == nil || errs.seadex != nil || len(entries) == 0 || !mapUsable(errs.mapping) {
 		return
 	}
-	info := feedEntryInfo(idx, &st.Library, st.Memo)
+	info := feedInfo(idx, &st.Library, st.NonAiredOrderTvdbIDs, st.Memo)
 	if err := s.feed.Rebuild(ctx, entries, info); err != nil && ctx.Err() == nil {
 		// A cancelled rebuild is the shutdown, not a feed fault; the pre-compare
 		// gate logs the interruption (the last-good feed is kept either way).
@@ -812,7 +827,7 @@ func (s *Scout) advanceFeed(ctx context.Context, window []seadex.Entry, idx *map
 	if s.feed == nil || len(window) == 0 {
 		return
 	}
-	info := feedEntryInfo(idx, &st.Library, st.Memo)
+	info := feedInfo(idx, &st.Library, st.NonAiredOrderTvdbIDs, st.Memo)
 	if err := s.feed.Advance(ctx, window, info); err != nil && ctx.Err() == nil {
 		s.log.Warn("indexer feed advance failed; keeping previous feed", "error", err)
 	}
@@ -883,15 +898,18 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 }
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
-// walk is unhealthy and persists only the refreshed mapping cache. It is the ONLY
-// arm that stops the cycle here: a walk that shrank suspiciously still compares
-// (mergeShrunkSides carries that side's prior items instead), and a partial
-// snapshot is not gated either - the compare proceeds on the clean items with the
-// Failed items' rows carried forward.
+// walk is unhealthy: it saves st with the refreshed mapping cache, the order set
+// and the SeaDex streak recorded before it, and keeps the prior snapshot's
+// items, the findings and the memo. It is the ONLY arm that stops the cycle
+// here: a walk that shrank suspiciously still compares (mergeShrunkSides
+// carries that side's prior items instead), and a partial snapshot is not gated
+// either - the compare proceeds on the clean items with the Failed items' rows
+// carried forward.
 func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, mapCache *mapping.Cache, errs cycleOutcomes) (handled, healthy bool) {
 	if errs.walk != nil {
-		// Persist only the refreshed mapping cache: discarding it re-downloads an
-		// updated animap body next cycle. Findings, memo and the prior snapshot stay.
+		// Keep the refreshed mapping cache (discarding it re-downloads an updated
+		// animap body next cycle); the failed walk's itemless snapshot must not
+		// replace the prior one.
 		st.Mapping = *mapCache
 		s.save(ctx, st)
 		// The cycle ran to its degraded end, so emit the completion line the deadman
@@ -918,6 +936,53 @@ func countItemsByArr(items []library.Item) map[string]int {
 	return counts
 }
 
+// nextOrderSet is the order set this pass's feed and state read: the walk's
+// non-aired orders always join, and its aired orders release ids only on a
+// clean pass, one whose walk read everything and whose snapshot the shrink
+// guard leaves as walked. Any other pass's list may come from a server that no
+// longer answers the URL, so no failure is told apart by its cause.
+func (s *Scout) nextOrderSet(st *state.State, snap *library.Snapshot, orders *arrwalk.SonarrOrders) []int {
+	if !orders.Clean || s.shrinkCarriesPrior(st, snap) {
+		return orders.Joined(st.NonAiredOrderTvdbIDs)
+	}
+	return orders.Released(st.NonAiredOrderTvdbIDs)
+}
+
+// saveInterruptedOrders saves st with only the walk's non-aired orders joined
+// to its order set, when they add an id: a cancelled pass never releases one,
+// and the next process's feed builds start from the persisted set.
+func (s *Scout) saveInterruptedOrders(ctx context.Context, st *state.State, orders *arrwalk.SonarrOrders) {
+	joined := orders.Joined(st.NonAiredOrderTvdbIDs)
+	if slices.Equal(joined, st.NonAiredOrderTvdbIDs) {
+		return
+	}
+	st.NonAiredOrderTvdbIDs = joined
+	s.save(ctx, st)
+}
+
+// shrinkCarriesPrior reports whether mergeShrunkSides will carry any arr's
+// prior items into snap.
+func (s *Scout) shrinkCarriesPrior(st *state.State, snap *library.Snapshot) bool {
+	prior, current := countItemsByArr(st.Library.Items), countItemsByArr(snap.Items)
+	for _, arr := range s.library.EnabledArrs() {
+		if streak := shrinkStreak(st, prior, current, arr); streak > 0 && streak < degradation.ShrunkWalkAcceptThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+// shrinkStreak is arr's shrink-guard streak with this walk counted: 0 when the
+// walk is not a suspicious truncation of arr's own prior count
+// (degradation.Shrunk; a side whose prior count is zero never is), else the
+// consecutive shrunken reconciles including this one.
+func shrinkStreak(st *state.State, prior, current map[string]int, arr string) int {
+	if prior[arr] == 0 || !degradation.Shrunk(current[arr], prior[arr]) {
+		return 0
+	}
+	return st.ShrunkWalksByArr[arr] + 1
+}
+
 // mergeShrunkSides applies the library shrink guard PER ARR and returns the arrs
 // it left suspect: for every ENABLED arr whose fresh item count is a suspicious
 // truncation of its OWN prior count (degradation.Shrunk), it substitutes that
@@ -931,14 +996,14 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 	var suspect []string
 	for _, arr := range s.library.EnabledArrs() {
 		key := standingKey{cond: degradation.LibraryWalkShrunk, arr: arr}
-		if prior[arr] == 0 || !degradation.Shrunk(current[arr], prior[arr]) {
+		streak := shrinkStreak(st, prior, current, arr)
+		if streak == 0 {
 			// A recovered (or never-tripped) side ends its OWN streak; deleting rather
 			// than zeroing keeps the map to the sides with evidence against them.
 			delete(st.ShrunkWalksByArr, arr)
 			s.standing.clear(key)
 			continue
 		}
-		streak := st.ShrunkWalksByArr[arr] + 1
 		attrs := shrunkWalkAttrs(arr, current[arr], prior[arr], streak)
 		if streak >= degradation.ShrunkWalkAcceptThreshold {
 			// The guard has withheld this side for its whole tolerance, so it accepts.

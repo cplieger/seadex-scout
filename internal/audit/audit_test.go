@@ -39,6 +39,9 @@ func TestVerdictFor(t *testing.T) {
 		// The one origin that is a different verdict: an offered unit whose bucket
 		// was read, which the app never compares.
 		{name: "unattributed offered comparable", decision: align.Decision{Standing: align.StandingUnverified, Kind: align.ScopeOffered}, want: verdictUnattributed},
+		// A withheld comparison is its own verdict whatever the zero Standing
+		// beside it reads.
+		{name: "withheld for the order", decision: align.Decision{Outcome: align.OutcomeWithheld, Withheld: align.WithheldOrder, Kind: align.ScopeSeason}, want: verdictWithheld},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1412,5 +1415,114 @@ func TestAuditDecoratedSeaDexLabelsReadAsHeldGroup(t *testing.T) {
 	}
 	if got, want := displayBestGroups(row.Releases), []string{"Baws (1080p SDR)", "Baws (4k HDR)"}; !slices.Equal(got, want) {
 		t.Errorf("displayBestGroups = %q, want %q", got, want)
+	}
+}
+
+// TestAuditWithholdsANonAiredOrderSeries pins the report half of the order rule: a
+// Monogatari-shaped series in Sonarr's "Book Order" gets a withheld row for
+// the order, carrying the order and the record's season, counted under
+// withheld and neither earning nor blocking the item's all-best standing,
+// while the same series in aired order is compared (have_unlisted).
+func TestAuditWithholdsANonAiredOrderSeries(t *testing.T) {
+	entry := seadex.Entry{AniListID: 5081, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "best", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+	}}
+	rec := mapping.Record{Type: "TV", TvdbID: 102261, SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
+	item := func(order *library.Order) *library.Item {
+		return &library.Item{
+			Arr: library.ArrSonarr, ArrID: 2189, Title: "Monogatari", TvdbID: 102261, HasFile: true,
+			SeasonGroups: map[int][]string{2: {"wrong"}}, Groups: []string{"wrong"}, Order: order,
+		}
+	}
+	audit := func(it *library.Item) Report {
+		return New(Config{}).Audit([]match.Match{{Item: it, Arr: library.ArrSonarr, Source: match.SourceID, Entry: entry, Record: rec}}, nil, nil, nil)
+	}
+
+	rep := audit(item(&library.Order{Type: "alternate", Name: "Book Order"}))
+	if len(rep.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rep.Rows))
+	}
+	row := rep.Rows[0]
+	if row.Verdict != verdictWithheld || row.Withheld != align.WithheldOrder {
+		t.Errorf("verdict, reason = %q, %v, want %q, %v", row.Verdict, row.Withheld, verdictWithheld, align.WithheldOrder)
+	}
+	if row.Order != (library.Order{Type: "alternate", Name: "Book Order"}) {
+		t.Errorf("Order = %+v, want the series' Book Order", row.Order)
+	}
+	if row.Scope != align.ScopeSeason || row.Season != 2 || row.Qualifier != "" {
+		t.Errorf("scope, season, qualifier = %v, %d, %q, want season, 2, none", row.Scope, row.Season, row.Qualifier)
+	}
+	if rep.Totals[string(verdictWithheld)] != 1 {
+		t.Errorf("totals = %v, want withheld 1", rep.Totals)
+	}
+	if want := (itemCounts{Anime: 1, WithEntry: 1}); rep.Items != want {
+		t.Errorf("Items = %+v, want %+v (a withheld row compares nothing)", rep.Items, want)
+	}
+	md := renderMarkdown(&rep)
+	note := "Sonarr numbers this series in Book Order, which seadex-scout cannot map to TheTVDB's aired seasons, so it is not compared."
+	if !strings.Contains(md, "## withheld (1)") || !strings.Contains(md, note) {
+		t.Errorf("markdown lacks the withheld section or the row's note %q:\n%s", note, md)
+	}
+
+	if aired := audit(item(nil)); len(aired.Rows) != 1 || aired.Rows[0].Verdict != VerdictUnlisted || aired.Rows[0].Withheld != align.WithheldNone {
+		t.Errorf("aired-order rows = %+v, want one have_unlisted row with no reason", aired.Rows)
+	}
+
+	// An entry SeaDex marks incomplete with no best would read `incomplete` on a
+	// compared row; nothing was compared here, so the reason stands alone.
+	entry = seadex.Entry{AniListID: 5081, Incomplete: true}
+	if noBest := audit(item(&library.Order{Type: "alternate", Name: "Book Order"})); len(noBest.Rows) != 1 || noBest.Rows[0].Qualifier != "" {
+		t.Errorf("no-best withheld rows = %+v, want one row with no qualifier", noBest.Rows)
+	}
+}
+
+// TestAuditWithholdsAnAniListExcludedEntry pins the report half of the
+// AniList guard: a season entry whose AniList id Sonarr's ids for the series
+// exclude gets a withheld row for AniList that carries the series' ids and a
+// note naming both, and is counted under withheld; a member entry is
+// compared. The record carries no AniList id, as on a title-fallback match,
+// so the guard reads the SeaDex entry's own id.
+func TestAuditWithholdsAnAniListExcludedEntry(t *testing.T) {
+	codeGeass := []int{1575, 2904, 12685, 97880}
+	item := &library.Item{
+		Arr: library.ArrSonarr, ArrID: 33, Title: "Code Geass", TvdbID: 79525, HasFile: true,
+		SeasonGroups: map[int][]string{2: {"wrong"}}, Groups: []string{"wrong"}, AniListIDs: codeGeass,
+	}
+	rec := mapping.Record{Type: "TV", TvdbID: 79525, SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
+	audit := func(aniListID int) Report {
+		entry := seadex.Entry{AniListID: aniListID, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "best", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		}}
+		return New(Config{}).Audit([]match.Match{{Item: item, Arr: library.ArrSonarr, Source: match.SourceID, Entry: entry, Record: rec}}, nil, nil, nil)
+	}
+
+	rep := audit(20)
+	if len(rep.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rep.Rows))
+	}
+	row := rep.Rows[0]
+	if row.Verdict != verdictWithheld || row.Withheld != align.WithheldAniList {
+		t.Errorf("verdict, reason = %q, %v, want %q, %v", row.Verdict, row.Withheld, verdictWithheld, align.WithheldAniList)
+	}
+	if !slices.Equal(row.SeriesAniListIDs, codeGeass) {
+		t.Errorf("SeriesAniListIDs = %v, want %v", row.SeriesAniListIDs, codeGeass)
+	}
+	if row.Order != (library.Order{}) {
+		t.Errorf("Order = %+v, want none on an AniList-withheld row", row.Order)
+	}
+	if row.Scope != align.ScopeSeason || row.Season != 2 || len(row.CurrentGroups) != 0 {
+		t.Errorf("scope, season, groups = %v, %d, %v, want season, 2, none", row.Scope, row.Season, row.CurrentGroups)
+	}
+	if rep.Totals[string(verdictWithheld)] != 1 {
+		t.Errorf("totals = %v, want withheld 1", rep.Totals)
+	}
+	md := renderMarkdown(&rep)
+	note := "Sonarr links this series to AniList 1575, 2904, 12685, 97880, which do not include this entry's 20, so the match is not trusted and it is not compared."
+	if !strings.Contains(md, "S2 (anilist)") || !strings.Contains(md, note) {
+		t.Errorf("markdown lacks the S2 (anilist) scope or the row's note %q:\n%s", note, md)
+	}
+
+	if member := audit(2904); len(member.Rows) != 1 || member.Rows[0].Verdict != VerdictUnlisted || member.Rows[0].SeriesAniListIDs != nil {
+		t.Errorf("member rows = %+v, want one have_unlisted row with no series ids", member.Rows)
 	}
 }

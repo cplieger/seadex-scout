@@ -99,7 +99,7 @@ func holdsOnlyTheEntry(t *seadex.Torrent, info *EntryInfo, runLen int) bool {
 	switch {
 	case files < 1 || files > max(entry, runLen, 1) || episodes > max(entry, runLen):
 		return false
-	case entry == 0 && !info.IsMovie:
+	case entry == 0 && info.Kind != KindMovie:
 		return false
 	case runLen == 1:
 		return true

@@ -12,6 +12,14 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
+// kindOf types a fixture entry as a film or a series.
+func kindOf(movie bool) MediaKind {
+	if movie {
+		return KindMovie
+	}
+	return KindSeries
+}
+
 // coveredEpisodes counts the distinct episodes a raw file list spans. It is the
 // two-step census rule (narrow to the counted population, then count) spelled as
 // one call, and it lives HERE because production has no use for that spelling:
@@ -485,13 +493,13 @@ func TestSynthesizeTitle(t *testing.T) {
 			t: seadex.Torrent{Files: []seadex.File{
 				{Name: "A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv"},
 			}, ReleaseGroup: "Group"},
-			meta: EntryInfo{Title: "A Silent Voice", Year: 2016, IsMovie: true},
+			meta: EntryInfo{Title: "A Silent Voice", Year: 2016, Kind: KindMovie},
 			want: "A Silent Voice (2016) 1080p [Group]",
 		},
 		{
 			name: "movie without a year stays a bare title",
 			t:    seadex.Torrent{Files: []seadex.File{{Name: "Movie [Grp].mkv"}}},
-			meta: EntryInfo{Title: "Movie", IsMovie: true},
+			meta: EntryInfo{Title: "Movie", Kind: KindMovie},
 			want: "Movie",
 		},
 		{
@@ -1244,6 +1252,37 @@ func TestPackFromTitleReadsSonarrCleanedTitles(t *testing.T) {
 			pack, known := packFromTitle(tc.title)
 			if pack != tc.wantPack || known != tc.wantKnown {
 				t.Errorf("packFromTitle(%q) = (%v, %v), want (%v, %v)", tc.title, pack, known, tc.wantPack, tc.wantKnown)
+			}
+		})
+	}
+}
+
+// TestSynthesizeTitleKeepsOwnSeasonWithoutSeasonFacts pins the feed's
+// rendering half: for a series in a non-aired order the feed's EntryInfo
+// carries the arr's title and no season facts, so a Monogatari-shaped release
+// keeps its own S02 token (pack and single episode alike) and gets no twin.
+func TestSynthesizeTitleKeepsOwnSeasonWithoutSeasonFacts(t *testing.T) {
+	meta := EntryInfo{Title: "Monogatari", Year: 2009, TvdbID: 102261}
+	for _, tc := range []struct {
+		name  string
+		files []seadex.File
+		want  string
+	}{
+		{name: "pack", files: []seadex.File{
+			{Name: "Monogatari - S02E01 (1080p) [Grp].mkv"},
+			{Name: "Monogatari - S02E02 (1080p) [Grp].mkv"},
+		}, want: "Monogatari S02 1080p [Grp]"},
+		{name: "single episode", files: []seadex.File{
+			{Name: "Monogatari - S02E05 (1080p) [Grp].mkv"},
+		}, want: "Monogatari S02E05 1080p [Grp]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			torrent := &seadex.Torrent{Files: tc.files, ReleaseGroup: "Grp"}
+			if got := synthesizeTitle(torrent, &meta); got != tc.want {
+				t.Errorf("synthesizeTitle = %q, want %q", got, tc.want)
+			}
+			if twin := twinTitle(torrent, &meta); twin != "" {
+				t.Errorf("twinTitle = %q, want none", twin)
 			}
 		})
 	}
