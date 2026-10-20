@@ -8,7 +8,6 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"slices"
 	"strings"
 	"time"
 
@@ -57,7 +56,8 @@ type Match struct {
 	// its record is not scoped to that season (align.ScopeSeason).
 	Episodes []int
 	// Uncompared is the entry's copy in the other arr when copies judged only
-	// one: it holds no file for the entry, yet the entry still covers it.
+	// one: it holds no file for the entry. align.ClaimsCoverage decides whether
+	// the entry covers it.
 	Uncompared *library.Item
 	Arr        string
 	Source     source
@@ -317,20 +317,20 @@ func (r *matchRun) placedFilmInRadarr(rec *mapping.Record) *library.Item {
 	return r.lib.filmCopy(rec, "")
 }
 
-// copies is m plus the entry's copy in the other arr, for a film or special
-// the map places on season-0 episodes: each copy that holds a file is judged
-// on its own. When neither holds one, m alone says no_file.
+// copies is m plus the entry's copy in the other arr, whatever the map's
+// placement: each copy that holds a file (align.HoldsFile) is judged on its
+// own. When neither holds one, m alone is judged.
 func (r *matchRun) copies(m *Match) []Match {
-	if !m.InLibrary() || len(m.Specials) == 0 {
+	if !m.InLibrary() {
 		return []Match{*m}
 	}
-	other := r.lib.otherCopy(&m.Record, m.Item)
+	other := r.lib.otherCopy(m)
 	if other == nil {
 		return []Match{*m}
 	}
 	second := *m
 	second.Item, second.Arr = other, other.Arr
-	switch mine, theirs := holdsCopy(m.Item, m.Specials), holdsCopy(other, m.Specials); {
+	switch mine, theirs := align.HoldsFile(m.Item, m.AlignEntry()), align.HoldsFile(other, second.AlignEntry()); {
 	case mine && theirs:
 		return []Match{*m, second}
 	case theirs:
@@ -340,19 +340,6 @@ func (r *matchRun) copies(m *Match) []Match {
 		m.Uncompared = other
 		return []Match{*m}
 	}
-}
-
-// holdsCopy reports whether it may hold the entry's file: a Radarr film with a
-// file, a Sonarr series with a file on a placed episode, or an item whose file
-// data is unknown.
-func holdsCopy(it *library.Item, specials []int) bool {
-	switch {
-	case it.Failed, it.SpecialsUnknown():
-		return true
-	case it.Arr == library.ArrRadarr:
-		return it.HasFile
-	}
-	return slices.ContainsFunc(specials, func(ep int) bool { return it.Specials[ep].HasFile })
 }
 
 // matchUnmappedEntry links an entry with no mapping record through the AniList
@@ -543,16 +530,23 @@ func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	return nil
 }
 
-// otherCopy is the entry's item in the arr primary is not in: for a Radarr
-// film the Sonarr series its TVDB id names, for a Sonarr series its filmCopy.
-func (li *LibIndex) otherCopy(rec *mapping.Record, primary *library.Item) *library.Item {
-	if primary.Arr == library.ArrRadarr {
-		if tvdb, _, _ := rec.AllIDs(); tvdb > 0 {
+// otherCopy is the entry's item in the arr m.Item is not in: for a Radarr film
+// the Sonarr series the record's TVDB id names, when the map places the entry
+// in it (align.PlacedInSeries); for a Sonarr series the Radarr film its TMDB
+// movie ids name. Its IMDb ids reach Radarr only for an entry placed on
+// season-0 episodes (filmCopy), as FindByID never takes a non-MOVIE record's
+// IMDb ids there.
+func (li *LibIndex) otherCopy(m *Match) *library.Item {
+	if m.Item.Arr == library.ArrRadarr {
+		if tvdb, _, _ := m.Record.AllIDs(); tvdb > 0 && align.PlacedInSeries(m.AlignEntry()) {
 			return li.byTvdb[tvdb]
 		}
 		return nil
 	}
-	return li.filmCopy(rec, imdbKey(primary.ImdbID))
+	if len(m.Specials) == 0 {
+		return li.findMovieByTMDB(m.Record.TmdbMovies)
+	}
+	return li.filmCopy(&m.Record, imdbKey(m.Item.ImdbID))
 }
 
 // SpecialsSeries is the Sonarr series rec's TVDB id names, or nil. The caller
@@ -582,9 +576,7 @@ func (li *LibIndex) filmCopy(rec *mapping.Record, seriesImdb string) *library.It
 	return nil
 }
 
-// findMovieByTMDB resolves the first of ids that names an indexed Radarr movie.
-// Shared by findMovie, FindByID's secondary lookup and filmCopy, so the
-// movie-id half of the ID bridge has one lookup.
+// findMovieByTMDB resolves the first indexed Radarr movie named by ids.
 func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 	for _, id := range ids { // callers pass only usable (positive) ids
 		if it := li.byTmdb[id]; it != nil { // byTmdb holds only Radarr items
