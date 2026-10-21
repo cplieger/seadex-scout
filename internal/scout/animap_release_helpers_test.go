@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/cplieger/animap/mapread"
@@ -21,12 +20,7 @@ func seriesDocument(t *testing.T, ids ...int) []byte {
 	t.Helper()
 	doc := &mapread.Document{
 		Version: mapread.Version, GeneratedAt: "2026-10-17T00:00:00Z",
-		Sources: mapread.Sources{
-			AnimeOfflineDatabase: mapread.OfflineDatabaseSource{Repository: "r", Release: "2026-42", Asset: "a", SHA256: strings.Repeat("0", 64)},
-			AnimeLists:           mapread.AnimeListsSource{Repository: "r", Commit: strings.Repeat("a", 40), File: "f"},
-			AniDBMirror:          mapread.AniDBMirrorSource{Repository: "r", Commit: strings.Repeat("b", 40)},
-			Overlay:              mapread.OverlaySource{SHA256: strings.Repeat("1", 64), Entries: 1},
-		},
+		Sources:     mapread.Sources{Mapping: mapread.MappingSource{Revision: "r"}, AniDB: mapread.AniDBSource{TitlesDump: "2026-10-17"}},
 		Attribution: mapread.Attribution{License: "ODbL-1.0", LicenseURL: "u", ContentsLicense: "DbCL-1.0", ContentsLicenseURL: "u", Notice: "n"},
 		Anime:       []mapread.Anime{},
 		Entries:     []mapread.Entry{},

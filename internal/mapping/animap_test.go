@@ -166,11 +166,14 @@ func TestProject_derivesTheRecordFromWhereTheEpisodesLand(t *testing.T) {
 func TestProject_routesAndKeys(t *testing.T) {
 	anime := []mapread.Anime{
 		{
-			AniDBID: 1, Type: "MOVIE", TVDBID: 500, TMDBMovieIDs: []int{42}, IMDbIDs: []string{"tt0000042"}, Last: mapread.Last{Regular: 1, Special: 2},
-			Episodes: []mapread.Run{regular(1, 1, targets(at(0, 3))), {Kind: mapread.Special, Start: 1, End: 2, TVDB: targets(at(0, 8))}},
+			AniDBID: 1, Type: "MOVIE", TVDBID: 500, IMDbIDs: []string{"tt0000042"}, Last: mapread.Last{Regular: 1, Special: 2},
+			Episodes: []mapread.Run{
+				{Kind: mapread.Regular, Start: 1, End: 1, TVDB: targets(at(0, 3)), TMDBMovies: []int{42}},
+				{Kind: mapread.Special, Start: 1, End: 2, TVDB: targets(at(0, 8))},
+			},
 		},
 		{AniDBID: 2, Type: "TV", TVDBID: 600, Last: mapread.Last{Regular: 2}, Episodes: []mapread.Run{regular(1, 2, targets(at(1, 1)))}},
-		{AniDBID: 3, Type: "MOVIE", TMDBMovieIDs: []int{77}, Last: mapread.Last{Regular: 1}},
+		{AniDBID: 3, Type: "MOVIE", Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: []int{77}}}},
 		{AniDBID: 4, Type: "TV", TVDBID: 700, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{regular(1, 1, targets(at(0, 1)))}},
 	}
 	entries := []mapread.Entry{
@@ -179,7 +182,6 @@ func TestProject_routesAndKeys(t *testing.T) {
 		{AniListID: 12, Type: "TV", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Special, Start: 1, End: 1}, {AniDBID: 2, Kind: mapread.Regular, Start: 1, End: 2}}},
 		{AniListID: 13, Type: "MOVIE", Parts: []mapread.Part{{AniDBID: 3, Kind: mapread.Regular}}},
 		{AniListID: 14, Type: "TV", IDs: &mapread.IDs{AniDB: []int{2, 4}}},
-		{Type: "TV", IDs: &mapread.IDs{Kitsu: []int{9}}, Parts: []mapread.Part{{AniDBID: 2, Kind: mapread.Regular}}},
 	}
 	p, got := projected(t, encode(t, document(anime, entries)))
 	t.Run("a whole film", func(t *testing.T) {
@@ -226,10 +228,103 @@ func TestProject_routesAndKeys(t *testing.T) {
 		if keys := slices.Sorted(maps.Keys(p.mappings)); !slices.Equal(keys, []int{1, 2, 4}) {
 			t.Errorf("AniDB-keyed facts = %v, want every anime on a TVDB series with facts, AniDB 4 included", keys)
 		}
-		if len(p.records) != 5 || p.entries != 6 {
-			t.Errorf("records = %d, entries = %d, want 5 AniList records of 6 entry rows", len(p.records), p.entries)
+		if len(p.records) != 5 {
+			t.Errorf("records = %d, want one per entry, 5", len(p.records))
 		}
 	})
+}
+
+func TestProject_anEpisodeFiledOnAnotherSeries(t *testing.T) {
+	onOther := mapread.Run{Kind: mapread.Regular, Start: 1, End: 1, AniDBEpisodeIDs: []int{4001}, TVDB: targets(mapread.Target{Series: 950, Season: 1, Episode: 3})}
+	for _, tc := range []struct {
+		episode2   *[]mapread.Target
+		name       string
+		wantKind   SeasonKind
+		wantSeason int
+		wantStated bool
+	}{
+		{name: "unstated on its own series", wantKind: SeasonAbsent},
+		{name: "nowhere on its own series", episode2: targets(), wantKind: SeasonPresent, wantSeason: 1, wantStated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := mapread.Anime{AniDBID: 40, Type: "TV", TVDBID: 900, Last: mapread.Last{Regular: 2}, EpisodesListed: true, Episodes: []mapread.Run{
+				onOther, {Kind: mapread.Regular, Start: 2, End: 2, AniDBEpisodeIDs: []int{4002}, TVDB: tc.episode2},
+			}}
+			e := mapread.Entry{AniListID: 41, Type: "TV", Parts: []mapread.Part{{AniDBID: 40, Kind: mapread.Regular, Start: 1, End: 2}}}
+			p, got := projected(t, encode(t, document([]mapread.Anime{a}, []mapread.Entry{e})))
+			if rec := got[41].rec; rec.TvdbID != 950 || rec.SeasonKind != tc.wantKind || rec.SeasonTvdb != tc.wantSeason {
+				t.Errorf("record = %+v, want TVDB 950 with season %s %d", rec, tc.wantKind, tc.wantSeason)
+			}
+			if want := []SeasonRange{{Season: 1, First: 1, Last: 1}}; !slices.Equal(got[41].m.Seasons, want) || got[41].m.SeasonsTvdb != 950 {
+				t.Errorf("facts = %+v, want season 1 of TVDB 950 for entry episode 1", got[41].m)
+			}
+			_, stated := p.aniListFullyStated[41]
+			_, animeStated := p.fullyStated[40]
+			if stated != tc.wantStated || animeStated != tc.wantStated {
+				t.Errorf("fully stated = %v by AniList and %v by AniDB, want %v", stated, animeStated, tc.wantStated)
+			}
+		})
+	}
+}
+
+// TestProject_anEpisodeOffTVDBLandsNowhere pins mapread's reading of an
+// AniDB episode off TVDB as landing nowhere on the entry's series, which is
+// no evidence that the map states it: Decode refuses "tvdb": [] on a row
+// with no tvdb_id, so its run names no tvdb.
+func TestProject_anEpisodeOffTVDBLandsNowhere(t *testing.T) {
+	for _, tc := range []struct {
+		film mapread.Anime
+		name string
+	}{
+		{
+			name: "listed",
+			film: mapread.Anime{AniDBID: 52, Type: "MOVIE", Last: mapread.Last{Regular: 1}, EpisodesListed: true, Episodes: []mapread.Run{
+				{Kind: mapread.Regular, Start: 1, End: 1, AniDBEpisodeIDs: []int{5201}, TMDBMovies: []int{77}},
+			}},
+		},
+		{
+			name: "not listed",
+			film: mapread.Anime{AniDBID: 52, Type: "MOVIE", Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
+				{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: []int{77}},
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			anime := []mapread.Anime{
+				{AniDBID: 50, Type: "TV", TVDBID: 960, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{regular(1, 1, targets(at(1, 1)))}},
+				tc.film,
+			}
+			e := mapread.Entry{AniListID: 51, Type: "TV", Parts: []mapread.Part{{AniDBID: 50, Kind: mapread.Regular}, {AniDBID: 52, Kind: mapread.Regular}}}
+			p, got := projected(t, encode(t, document(anime, []mapread.Entry{e})))
+			if rec := got[51].rec; rec.TvdbID != 960 || rec.SeasonKind != SeasonPresent || rec.SeasonTvdb != 1 {
+				t.Errorf("record = %+v, want TVDB 960 season 1", rec)
+			}
+			if want := []SeasonRange{{Season: 1, First: 1, Last: 1}}; !slices.Equal(got[51].m.Seasons, want) || got[51].m.SeasonsTvdb != 960 {
+				t.Errorf("facts = %+v, want season 1 of TVDB 960 for entry episode 1", got[51].m)
+			}
+			if _, stated := p.aniListFullyStated[51]; stated {
+				t.Error("entry reads fully stated, want not: an episode off TVDB is stated nowhere")
+			}
+		})
+	}
+}
+
+func TestProject_readsAnAnimeWithNoSeriesOfItsOwn(t *testing.T) {
+	a := mapread.Anime{AniDBID: 60, Type: "OVA", Last: mapread.Last{Regular: 2}, Episodes: []mapread.Run{
+		regular(1, 2, targets(mapread.Target{Series: 980, Season: 2, Episode: 4})),
+	}}
+	e := mapread.Entry{AniListID: 61, Type: "OVA", Parts: []mapread.Part{{AniDBID: 60, Kind: mapread.Regular}}}
+	p, got := projected(t, encode(t, document([]mapread.Anime{a}, []mapread.Entry{e})))
+	want := Mapping{Seasons: []SeasonRange{{Season: 2, First: 1, Last: 2}}, SeasonsTvdb: 980, Episodes: []int{4, 5}, EpisodesTvdb: 980, EpisodesSeason: 2}
+	if rec := got[61].rec; rec.AniDBID != 60 || rec.TvdbID != 980 || rec.SeasonKind != SeasonPresent || rec.SeasonTvdb != 2 {
+		t.Errorf("record = %+v, want AniDB 60 on TVDB 980 season 2", rec)
+	}
+	if !sameMapping(p.mappings[60], want) || !sameMapping(got[61].m, want) {
+		t.Errorf("facts keyed %+v by AniDB 60, served %+v, want %+v", p.mappings[60], got[61].m, want)
+	}
+	if _, stated := p.fullyStated[60]; !stated {
+		t.Error("AniDB 60 does not read fully stated, want every episode stated on TVDB 980")
+	}
 }
 
 // TestProject_overrideOnAnAnimeNoEntryNamesKeepsItsSeasonRanges pins that
@@ -259,10 +354,12 @@ func TestProject_overrideOnAnAnimeNoEntryNamesKeepsItsSeasonRanges(t *testing.T)
 	}
 }
 
-// fixture is a subset of animap's 2026-10 version 2 build (content hash
-// fe2e67a1…6fe7ef): the entries these tests name and every anime their parts
-// reach, with AniDB's episode listing and the service ids left out, which
-// the projection does not read.
+// fixture is a subset of animap's 2026-10 build (content hash fe2e67a1…6fe7ef
+// in the earlier version 2 shape), rewritten in the new shape: the entries
+// these tests name and every anime their parts reach, with every TVDB
+// placement kept, the anime's TMDB movie ids moved onto its regular
+// episodes, and AniDB's episode listing left out, so its tvdb [] runs went
+// with it.
 func fixture(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/animap-v2.json")
@@ -440,14 +537,15 @@ func TestProject_boundsTheAnimeEpisodes(t *testing.T) {
 		return document([]mapread.Anime{
 			{AniDBID: 1, TVDBID: 5, Last: mapread.Last{Regular: 6}},
 			{AniDBID: 2, TVDBID: 6, Last: mapread.Last{Regular: 4}},
-			{AniDBID: 3, TMDBTVID: 7, Last: mapread.Last{Regular: 100}},
+			{AniDBID: 3, Type: "TV", Last: mapread.Last{Regular: 100}},
+			{AniDBID: 4, Type: "OVA", Last: mapread.Last{Regular: 2}, Episodes: []mapread.Run{regular(1, 1, targets(mapread.Target{Series: 8, Season: 1, Episode: 1}))}},
 		}, nil)
 	}
-	if _, err := project(doc(), 10); err != nil {
-		t.Errorf("project(10 episodes on TVDB, budget 10) = %v, want the document read", err)
+	if _, err := project(doc(), 12); err != nil {
+		t.Errorf("project(12 episodes on TVDB, budget 12) = %v, want the document read", err)
 	}
-	if p, err := project(doc(), 9); !errors.Is(err, mapread.ErrTooLarge) || p.records != nil || p.mappings != nil {
-		t.Errorf("project(10 episodes on TVDB, budget 9) = %+v, %v, want nothing and mapread.ErrTooLarge", p, err)
+	if p, err := project(doc(), 11); !errors.Is(err, mapread.ErrTooLarge) || p.records != nil || p.mappings != nil {
+		t.Errorf("project(12 episodes on TVDB, budget 11) = %+v, %v, want nothing and mapread.ErrTooLarge", p, err)
 	}
 }
 

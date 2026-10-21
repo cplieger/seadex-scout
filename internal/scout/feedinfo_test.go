@@ -405,6 +405,58 @@ func TestFeedEntryInfoFilmOnSonarrItemKeepsItsOwnTitle(t *testing.T) {
 	}
 }
 
+func TestFeedEntryInfoSeriesRecordResolvedToAFilmIsServedAsAFilm(t *testing.T) {
+	idx := mapping.NewIndex(mapping.Source{
+		Records: []mapping.Record{
+			{AniListID: 1, Type: "TV", TvdbID: 79460, AniDBID: 11367, TmdbMovies: []int{4321}, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 6},
+		},
+		Mappings: map[int]mapping.Mapping{11367: {Seasons: []mapping.SeasonRange{{Season: 6, First: 1, Last: 22}}, SeasonsTvdb: 79460}},
+	})
+	lib := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 11, TmdbID: 4321, Title: "Some Film", Year: 2013},
+	}}
+	got := feedInfo(idx, lib, nil, match.Memo{}).Entry(1)
+	if got.Title != "Some Film" || got.Year != 2013 {
+		t.Errorf("info(1) = %+v, want the Radarr film's own title and year", got)
+	}
+	if got.Kind != indexer.KindMovie {
+		t.Errorf("info(1).Kind = %d, want KindMovie: the entry resolved to a Radarr film", got.Kind)
+	}
+	if got.SeasonKnown || got.Season != 0 || got.Seasons != nil {
+		t.Errorf("info(1) = %+v, want no season and no season ranges for a film", got)
+	}
+}
+
+func TestFeedEntryInfoPlacedFilmInRadarrIsServedAsAFilm(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		specials []int
+		wantKind indexer.MediaKind
+	}{
+		{name: "placed", specials: []int{9}, wantKind: indexer.KindMovie},
+		{name: "not placed", wantKind: indexer.KindSeries},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := mapping.NewIndex(mapping.Source{
+				Records: []mapping.Record{
+					{AniListID: 1, Type: "OVA", TvdbID: 500, AniDBID: 70, IMDbIDs: []string{"tt0000042"}, SeasonKind: mapping.SeasonPresent},
+				},
+				Mappings: map[int]mapping.Mapping{70: {Specials: tc.specials, SpecialsTvdb: 500}},
+			})
+			lib := &library.Snapshot{Items: []library.Item{
+				{Arr: library.ArrRadarr, ArrID: 3, ImdbID: "tt0000042", Title: "Some Film", Year: 2013},
+			}}
+			got := feedInfo(idx, lib, nil, match.Memo{}).Entry(1)
+			if got.Kind != tc.wantKind {
+				t.Errorf("info(1).Kind = %d, want %d", got.Kind, tc.wantKind)
+			}
+			if titled := got.Title == "Some Film"; titled != (tc.wantKind == indexer.KindMovie) {
+				t.Errorf("info(1).Title = %q, want the Radarr film's title only when served as a film", got.Title)
+			}
+		})
+	}
+}
+
 // TestFeedEntryInfoProjectsTheEpisodeFacts pins the projection of the
 // record's episode facts onto the feed metadata. The twin's season-0 run is
 // stamped ONLY for the offered class, beside the title of the Sonarr series it

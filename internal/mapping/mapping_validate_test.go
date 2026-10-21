@@ -29,7 +29,7 @@ func TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected(t *testing.T) 
 		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
 		candidate = append(candidate, Record{AniListID: id, Type: "TV", TvdbID: id})
 	}
-	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
+	if err := validateRefreshedRecords(previous, candidate); err == nil {
 		t.Fatal("refresh that lost every movie identifier returned nil error, want rejection")
 	}
 }
@@ -56,7 +56,7 @@ func TestValidateRefreshedRecordsRoutingMidBandCollapseRejected(t *testing.T) {
 	for i := 40; i < 200; i++ {
 		movieMidBand[i].TmdbMovies = nil
 	}
-	if err := validateRefreshedRecords(previous, movieMidBand, len(movieMidBand)); err == nil {
+	if err := validateRefreshedRecords(previous, movieMidBand); err == nil {
 		t.Error("mid-band movie-routed collapse (200 -> 40, above the 1% floor) returned nil error, want rejection")
 	}
 
@@ -65,7 +65,7 @@ func TestValidateRefreshedRecordsRoutingMidBandCollapseRejected(t *testing.T) {
 	for i := 1000; i < body; i++ {
 		seriesMidBand[i].TvdbID = 0
 	}
-	if err := validateRefreshedRecords(previous, seriesMidBand, len(seriesMidBand)); err == nil {
+	if err := validateRefreshedRecords(previous, seriesMidBand); err == nil {
 		t.Error("mid-band series-routed collapse (1800 -> 800, above the 1% floor) returned nil error, want rejection")
 	}
 }
@@ -93,7 +93,7 @@ func TestValidateRefreshedRecordsCollapseExactlyAtTheSignificanceFloorRejected(t
 	candidate[1].TmdbMovies = nil
 	candidate[2].TmdbMovies = nil
 
-	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
+	if err := validateRefreshedRecords(previous, candidate); err == nil {
 		t.Error("movie-routed collapse 3 -> 1 with the significance floor at 3 returned nil error, want rejection")
 	}
 }

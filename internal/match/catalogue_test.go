@@ -16,14 +16,8 @@ func TestCatalogueHas(t *testing.T) {
 	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: []mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 100},
 		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
-		// Wrong-arm identifiers must not be catalogued (the HasArrIdentifier
-		// contract): a MOVIE record's stray TVDB id must not recognize a
-		// Sonarr item, nor a series record's IMDb id a Radarr item (TVDB
-		// reuses a film's IMDb id on the parent series). A series-typed
-		// record's unambiguous movie TMDB ids DO claim a Radarr movie when the
-		// record routes no series id (mirroring FindByID's
-		// secondary movie lookup); a record that routes a TVDB id keeps series
-		// routing as its only claim.
+		// Wrong-arm ids are not catalogued: a MOVIE record's TVDB id names
+		// its parent series, and TVDB reuses a film's IMDb id on that series.
 		{AniListID: 3, Type: "MOVIE", TvdbID: 555},
 		{AniListID: 4, Type: "OVA", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
 		{AniListID: 5, Type: "TV", TvdbID: 700, TmdbMovies: []int{800}},
@@ -44,7 +38,7 @@ func TestCatalogueHas(t *testing.T) {
 		{"sonarr not catalogued via a movie record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 555}, false},
 		{"radarr catalogued via a seriesless record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 600}, true},
 		{"radarr not catalogued via a series record's imdb id", library.Item{Arr: library.ArrRadarr, ImdbID: "tt888"}, false},
-		{"radarr not catalogued via a tvdb-routed record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 800}, false},
+		{"radarr catalogued via a tvdb-routed record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 800}, true},
 		{"sonarr still catalogued by the tvdb-routed record", library.Item{Arr: library.ArrSonarr, TvdbID: 700}, true},
 		{"unknown arr never matches even a catalogued tvdb id", library.Item{Arr: "lidarr", TvdbID: 100}, false},
 	}

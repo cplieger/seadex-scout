@@ -266,7 +266,7 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 		return r.matchIDLessEntry(ctx, e, rec, arr)
 	}
 	if item == nil {
-		item = r.placedFilmInRadarr(rec)
+		item = r.lib.PlacedFilm(r.idx, rec)
 	}
 	// The record carries a usable arr id: the ID mapping resolved, so this
 	// is a coverage hit whether or not the item is in the library.
@@ -302,19 +302,6 @@ func (r *matchRun) mapped(m *Match) Match {
 		}
 	}
 	return *m
-}
-
-// placedFilmInRadarr is the Radarr film a record names, when the map places
-// the record on season-0 episodes: such an entry may be held in either arr,
-// while FindByID stops at a non-MOVIE record's TVDB id.
-func (r *matchRun) placedFilmInRadarr(rec *mapping.Record) *library.Item {
-	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
-		return nil
-	}
-	if facts, ok := r.idx.MappingFor(rec); !ok || len(facts.Specials) == 0 {
-		return nil
-	}
-	return r.lib.filmCopy(rec, "")
 }
 
 // copies is m plus the entry's copy in the other arr, whatever the map's
@@ -386,9 +373,9 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 		arr = formatArr(media.Format)
 		// Typing can make identifiers the record ALREADY carried usable, so
 		// the record may no longer be id-less: RoutedIDs only routes the
-		// TMDB-movie/IMDb fields once the type says MOVIE, and both animap
-		// (tmdb_movie_ids / imdb_ids) and an operator override
-		// (tmdb_movies / imdb_ids) can carry them on an untyped record.
+		// TMDB-movie/IMDb fields once the type says MOVIE, and both animap and
+		// an operator override (tmdb_movies / imdb_ids) can carry them on an
+		// untyped record.
 		if rec.HasArrIdentifier() {
 			return r.matchMappedEntry(ctx, e, rec, r.lib.FindByID(rec), false)
 		}
@@ -456,7 +443,7 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 func (li *LibIndex) indexIDs(it *library.Item) {
 	switch it.Arr {
 	case library.ArrSonarr:
-		if it.TvdbID > 0 { // only positive ids are reachable: FindByID guards tvdb > 0
+		if it.TvdbID > 0 { // positive ids only: FindByID looks a record with no TVDB id up under 0
 			li.byTvdb[it.TvdbID] = it
 		}
 	case library.ArrRadarr:
@@ -484,10 +471,10 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 	}
 }
 
-// FindByID looks up a library item by the arr IDs in a mapping record, own arr
-// first: a MOVIE record tries its movie TMDB ids, then its IMDb ids, then its
-// TVDB id; every other type tries its TVDB id, then the movie TMDB ids, and its
-// IMDb ids never reach Radarr (TVDB reuses a film's IMDb id on its parent series).
+// FindByID looks up a library item by a mapping record's arr IDs, own arr first:
+// a MOVIE record tries its movie TMDB ids, then IMDb ids, then TVDB id; any other
+// type tries its TVDB id, then its movie TMDB ids, and its IMDb ids never reach
+// Radarr (TVDB reuses a film's IMDb id on its parent series).
 //
 // A licensed reader of mapping.Record.AllIDs (with otherCopy and filmCopy),
 // because it holds both indexes: byTvdb is Sonarr-only and
@@ -497,13 +484,10 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 		return li.findMovie(rec)
 	}
 	tvdb, _, _ := rec.RoutedIDs()
-	// RoutedIDs already drops every non-usable id it returns, scalar and slice
-	// alike, so the usability POLICY has one home there and this is a presence
-	// check, not a second policy check.
-	if tvdb > 0 {
-		// byTvdb is populated only with Sonarr items (indexIDs' arr switch),
-		// so the map miss IS the arr gate.
-		return li.byTvdb[tvdb]
+	// byTvdb holds only Sonarr items under positive ids (indexIDs), so the
+	// lookup is both the presence check and the arr gate.
+	if it := li.byTvdb[tvdb]; it != nil {
+		return it
 	}
 	return li.findMovieByTMDB(rec.TmdbMovies)
 }
@@ -555,6 +539,19 @@ func (li *LibIndex) otherCopy(m *Match) *library.Item {
 // copy FindByID resolved.
 func (li *LibIndex) SpecialsSeries(rec *mapping.Record) *library.Item {
 	return li.byTvdb[rec.TvdbID] // byTvdb is Sonarr-only, positive ids only (indexIDs)
+}
+
+// PlacedFilm is the Radarr film rec names, nil for none, when idx lists rec's
+// season-0 episodes in Mapping.Specials: such an entry may be held in either
+// arr, while FindByID never takes a non-MOVIE record's IMDb ids to Radarr.
+func (li *LibIndex) PlacedFilm(idx *mapping.Index, rec *mapping.Record) *library.Item {
+	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
+		return nil
+	}
+	if facts, ok := idx.MappingFor(rec); !ok || len(facts.Specials) == 0 {
+		return nil
+	}
+	return li.filmCopy(rec, "")
 }
 
 // filmCopy is the Radarr film rec's TMDB movie ids, then its IMDb ids, name.

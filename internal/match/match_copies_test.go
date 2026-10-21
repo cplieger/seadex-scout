@@ -94,6 +94,8 @@ func TestMatchFindsAPlacedOVAHeldOnlyInRadarr(t *testing.T) {
 	otherIMDb.IMDbIDs = []string{"tt0000099"}
 	season := ova
 	season.SeasonTvdb = 1
+	imdbSeason := imdbOnly
+	imdbSeason.SeasonTvdb = 1
 	for _, tc := range []struct {
 		name     string
 		rec      mapping.Record
@@ -101,10 +103,12 @@ func TestMatchFindsAPlacedOVAHeldOnlyInRadarr(t *testing.T) {
 		want     bool
 	}{
 		{"placed", ova, []int{9}, true},
-		{"not placed", ova, nil, false},
+		{"not placed, known by its TMDB movie id", ova, nil, true},
+		{"not placed, known only by IMDb id", imdbOnly, nil, false},
 		{"placed, known only by IMDb id", imdbOnly, []int{9}, true},
 		{"placed, known only by an IMDb id Radarr lacks", otherIMDb, []int{9}, false},
-		{"placed, filed under a real season", season, []int{9}, false},
+		{"filed under a real season, known by its TMDB movie id", season, []int{9}, true},
+		{"filed under a real season, known only by IMDb id", imdbSeason, []int{9}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := &library.Snapshot{Items: []library.Item{radarrFilm(true)}}

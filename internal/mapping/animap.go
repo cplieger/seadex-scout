@@ -77,17 +77,14 @@ func (m *Mapping) SpecialRun() (episodes []int, entryEpisodes int) {
 // AniList entry; the facts of each anime on a TVDB series, keyed by AniDB
 // id, which an entry that is one whole anime and an override naming that id
 // join on; the facts of every other entry, keyed by AniList id; the keys of
-// each space read fully stated on their series (tvdbView.fullyStated); how
-// many entry rows the document carries, every acceptance floor's
-// denominator; and the regular episodes its anime on TVDB place, which
-// maxAnimeEpisodes caps.
+// each space read fully stated on their series (tvdbView.fullyStated); and
+// the regular episodes its anime on TVDB place, which maxAnimeEpisodes caps.
 type projection struct {
 	mappings           map[int]Mapping
 	aniListMappings    map[int]Mapping
 	fullyStated        map[int]struct{}
 	aniListFullyStated map[int]struct{}
 	records            []Record
-	entries            int
 	animeEpisodes      int
 }
 
@@ -102,11 +99,10 @@ func project(doc *mapread.Document, budget int) (projection, error) {
 	p := projection{
 		mappings: make(map[int]Mapping), aniListMappings: make(map[int]Mapping),
 		fullyStated: make(map[int]struct{}), aniListFullyStated: make(map[int]struct{}),
-		entries: len(doc.Entries),
 	}
-	var series, aniList []int
+	var series []int
 	for i := range doc.Anime {
-		if doc.Anime[i].TVDBID == 0 {
+		if len(doc.Anime[i].TVDBSeries()) == 0 {
 			continue
 		}
 		if p.animeEpisodes += doc.Anime[i].Last.Regular; p.animeEpisodes > budget {
@@ -114,18 +110,13 @@ func project(doc *mapread.Document, budget int) (projection, error) {
 		}
 		series = append(series, doc.Anime[i].AniDBID)
 	}
-	for i := range doc.Entries {
-		if al := doc.Entries[i].AniListID; al > 0 {
-			aniList = append(aniList, al)
-		}
-	}
 	x := mapread.NewIndex(doc)
 	for _, aid := range series {
 		p.addAnime(x, aid)
 	}
-	p.records = make([]Record, 0, len(aniList))
-	for _, al := range aniList {
-		p.addEntry(x, al)
+	p.records = make([]Record, 0, len(doc.Entries))
+	for i := range doc.Entries {
+		p.addEntry(x, doc.Entries[i].AniListID)
 	}
 	return p, nil
 }
@@ -186,10 +177,9 @@ func wholeAnime(e mapread.Entry) int {
 	return 0
 }
 
-// tvdbView is an entry's episodes read on its one TVDB series. An entry
-// episode lands when it lands on any season there; it is unstated when it
-// lands on none and one of its AniDB episodes states nothing there or is on
-// no TVDB series, as animap's watch reads it; else it lands nowhere.
+// tvdbView is an entry's episodes read on its one TVDB series, each landing
+// on seasons there, unstated or landing nowhere, as mapread.TVDBReading.On
+// reads it.
 type tvdbView struct {
 	x        *mapread.Index
 	landings map[int][]int
@@ -197,44 +187,38 @@ type tvdbView struct {
 	series   int
 	unstated int
 	nowhere  int
-	// implicit counts the nowhere episodes that are not listedNowhere.
+	// implicit counts the nowhere episodes that are off TVDB or not
+	// listedNowhere.
 	implicit int
-	// defaulted is a landing that rests on a node default alone.
+	// defaulted is a landing that rests on a default alone.
 	defaulted bool
 }
 
+// readTVDB reads e on series, which must be the one series e's routes
+// reach: targets takes every placement to be on it.
 func readTVDB(x *mapread.Index, e mapread.Entry, series int) *tvdbView {
 	v := &tvdbView{x: x, series: series, episodes: x.Episodes(e), landings: make(map[int][]int)}
 	for _, ep := range v.episodes {
 		r := x.OnTVDB(ep)
-		on := onSeries(r, series)
+		on := r.On(series)
 		switch {
-		case on != nil && len(on.Seasons) > 0:
+		case len(on.Seasons) > 0:
 			for _, b := range on.Seasons {
 				v.landings[b.Season] = append(v.landings[b.Season], ep.Number)
 				v.defaulted = v.defaulted || b.Default
 			}
-		case r.Off || on != nil && on.Unstated:
+		case on.Unstated:
 			v.unstated++
 		default:
 			v.nowhere++
-			if !listedNowhere(x, ep) {
+			// Off TVDB lands nowhere but carries no TVDB statement, so it is
+			// no evidence the map states it.
+			if r.Off || !listedNowhere(x, ep) {
 				v.implicit++
 			}
 		}
 	}
 	return v
-}
-
-// onSeries is r's reading on series, nil when none of its AniDB episodes'
-// anime is on it.
-func onSeries(r mapread.TVDBReading, series int) *mapread.SeriesReading {
-	for i := range r.Series {
-		if r.Series[i].Series == series {
-			return &r.Series[i]
-		}
-	}
-	return nil
 }
 
 // listedNowhere reports that AniDB's list holds every AniDB episode of ep,
@@ -338,8 +322,8 @@ func (v *tvdbView) ranges() []SeasonRange {
 	return out
 }
 
-// targets is every TVDB episode of season the entry's episodes land on,
-// ascending, and whether one of those landings is stated.
+// targets is every TVDB episode of season on the view's series the entry's
+// episodes land on, ascending, and whether one of those landings is stated.
 func (v *tvdbView) targets(season int) (episodes []int, stated bool) {
 	seen := make(map[int]struct{})
 	for _, ep := range v.episodes {
@@ -348,10 +332,10 @@ func (v *tvdbView) targets(season int) (episodes []int, stated bool) {
 			if !ok || st.TVDB == nil {
 				continue
 			}
-			for _, t := range st.TVDB.Targets {
-				if t.Season == season {
-					seen[t.Episode] = struct{}{}
-					stated = stated || !t.Default
+			for _, p := range st.TVDB.Placements {
+				if p.Season == season {
+					seen[p.Episode] = struct{}{}
+					stated = stated || !p.Default
 				}
 			}
 		}

@@ -1,5 +1,5 @@
-github.com/cplieger/animap/mapread v0.1.0 h1:RlfhXChd9SYsSMB+qkpyF4+1TkWLYq+EV+tmje1Iux4=
-github.com/cplieger/animap/mapread v0.1.0/go.mod h1:OIF79IqdTf/wUBiDXycAEkGofwhJ9BjMK3/xE/hrV38=
+github.com/cplieger/animap/mapread v0.1.1-0.20261019200124-344e1af75a68 h1:3dx0fIASu/COUlaXlMyQY3D23a+8L7cMWxUuvMXk3/I=
+github.com/cplieger/animap/mapread v0.1.1-0.20261019200124-344e1af75a68/go.mod h1:XpxwLvDzAOOtNwbDB0L0VmdJtp9GKBlQ1ytXjJaZGlA=
 github.com/cplieger/arrapi/v3 v3.1.0-dev.2 h1:EVHpEgaSwuK8wGPQ22mvzEAxVIfuoDdtuy5zGBC1SZs=
 github.com/cplieger/arrapi/v3 v3.1.0-dev.2/go.mod h1:oexDlPBJi8X9yfKO/UfJht9E/LbV/aysoSyGQmat4DY=
 github.com/cplieger/atomicfile/v4 v4.2.0-dev.1 h1:lixaaBswMeINmVqdDCLOjtrbP8Sv4A//sEZc5Job0CY=
