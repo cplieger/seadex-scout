@@ -3,7 +3,7 @@ module github.com/cplieger/seadex-scout
 go 1.27.3
 
 require (
-	github.com/cplieger/animap/mapread v0.1.1-0.20261019200124-344e1af75a68
+	github.com/cplieger/animap/mapread v0.2.0
 	github.com/cplieger/arrapi/v3 v3.1.0-dev.2
 	github.com/cplieger/atomicfile/v4 v4.2.0-dev.1
 	github.com/cplieger/envx/yamlenv/v2 v2.2.0-dev.1
