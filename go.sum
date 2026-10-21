@@ -2,8 +2,8 @@ github.com/cplieger/animap/mapread v0.2.0 h1:xOAlmVPEL16sqWmPUZqmv5gNl/3dmEM+HUh
 github.com/cplieger/animap/mapread v0.2.0/go.mod h1:hVCWYNZSMzcX0uavZx/VPIauQDtCWLSeJ4tJ61ayX9M=
 github.com/cplieger/arrapi/v3 v3.1.0-dev.2 h1:EVHpEgaSwuK8wGPQ22mvzEAxVIfuoDdtuy5zGBC1SZs=
 github.com/cplieger/arrapi/v3 v3.1.0-dev.2/go.mod h1:oexDlPBJi8X9yfKO/UfJht9E/LbV/aysoSyGQmat4DY=
-github.com/cplieger/atomicfile/v4 v4.2.0-dev.1 h1:lixaaBswMeINmVqdDCLOjtrbP8Sv4A//sEZc5Job0CY=
-github.com/cplieger/atomicfile/v4 v4.2.0-dev.1/go.mod h1:hwmPt/GCOA/SHUX3hrxNRqdhQeaC2P1Ku1FxpnOi3fA=
+github.com/cplieger/atomicfile/v4 v4.2.0 h1:hbruc99AEUNLHzJWSS34NsR6k6vjGYr6uL3TRiPGcdw=
+github.com/cplieger/atomicfile/v4 v4.2.0/go.mod h1:hwmPt/GCOA/SHUX3hrxNRqdhQeaC2P1Ku1FxpnOi3fA=
 github.com/cplieger/envx/yamlenv/v2 v2.2.0-dev.1 h1:o8boM166rAGBc1U6saPeaU/gdhJqITKe9Y/dg+owSUA=
 github.com/cplieger/envx/yamlenv/v2 v2.2.0-dev.1/go.mod h1:idpaUHFHf3XxK7soZZP93XbrjgJzZ0AZvkBR9K/iVdo=
 github.com/cplieger/health v1.10.0-dev.1 h1:IJhPNa3a5VBBKzY0QM2Uzt/9J8qO+a9+l7gVtOrOU2k=
