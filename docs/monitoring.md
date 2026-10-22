@@ -14,11 +14,11 @@ A newer revision of a group you already hold logs the same `warn` message with `
 
 Informational cases log at `info`. Their statuses are `incomplete`, `theoretical_best`, `mixed_group_manual` and `unverifiable`.
 
-Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per report row. A film or special both Sonarr and Radarr hold has a row for each copy, so it logs two.
+Every pass ends with a completion line. A healthy pass logs `tick complete` or `cycle complete`. A pass that ran but could not compare logs `tick degraded` or `cycle degraded` at `warn`, with a `reason`, when an upstream outage or a safety check skipped the comparison. Every full pass also logs `reconcile complete`. Report mode logs one `report item` line per report row. An entry with a file in both Sonarr and Radarr has a row for each copy, so it logs two.
 
 Each full pass and each report run logs one `info` line, `sonarr series uses a non-aired episode order; seadex-scout does not compare it`, for each Sonarr series that `arr_tags` includes and that is set to another episode order than TheTVDB's aired one. It names the series in `series` and `id`, the order in `order` and its Sonarr type in `order_type`. seadex-scout does not compare such a series, as [The report](how-it-works.md#the-report) explains. Set the series back to the aired order in Sonarr to have it compared again.
 
-When the library read was partial, `cycle degraded` has `reason=partial-walk` and `failed_items`, the number of SeaDex entries matched to an item that could not be read. A film both Sonarr and Radarr hold counts once for each.
+When the library read was partial, `cycle degraded` has `reason=partial-walk` and `failed_items`, the number of SeaDex entries matched to an item that could not be read. An entry both Sonarr and Radarr hold counts once for each.
 Every full pass whose library read was complete also logs one `library summary` line. It carries the report's counts per verdict, `anime_items`, `items_with_entry`, `items_all_best` and `items_all_best_or_alt`. `items_all_best_or_alt` counts the anime where every season, film or special you have that seadex-scout compares is SeaDex's best or an alt, so it includes `items_all_best`. Report mode logs the same item counts on its `report summary` line. The two messages differ, so a count never adds a report run to a daily pass. The [log contract](#log-contract) lists the stable attributes of each message.
 
 A finding is logged again on every pass for as long as it is true, so an alert keeps firing until you upgrade the release. It stops when a later pass no longer finds it.
@@ -49,7 +49,7 @@ The dashboard has three variables at the top. **Data source** picks your Loki da
 
 The dashboard has two tabs:
 
-- Overview shows the number of upgrades and the number of findings to check by hand, one above the other. Beside them, Library overview counts SeaDex entries by what you have, one per season, film or special SeaDex lists. A film or special both Sonarr and Radarr hold counts once per copy. Below them, Upgrades available and Check by hand list the upgrades and the findings. Above them, a tile appears only while something needs a look, as [Attention tiles](#attention-tiles) describes.
+- Overview shows the number of upgrades and the number of findings to check by hand, one above the other. Beside them, Library overview counts SeaDex entries by what you have, one per season, film or special SeaDex lists. An entry with a file in both Sonarr and Radarr counts once per copy. Below them, Upgrades available and Check by hand list the upgrades and the findings. Above them, a tile appears only while something needs a look, as [Attention tiles](#attention-tiles) describes.
 - Scout health lists the errors logged in the selected time range. It also shows how long the daily full check takes, the checks that ran degraded, and how Sonarr and Radarr use the Torznab feed.
 
 Three Library overview bars need a word. Season not found means no files sit where the entry maps. They are missing, or Sonarr files that season elsewhere, such as under TVDB's specials. Untagged release means your file or SeaDex's release names no group, so seadex-scout cannot compare them. When neither names a group, the two count as the same release.

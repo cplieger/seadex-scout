@@ -105,7 +105,7 @@ func TestValidateRefreshedRecordsUnchangedRefreshAlwaysAccepted(t *testing.T) {
 		if !cacheUsable(cache) {
 			t.Skip("not a usable accepted-cache shape")
 		}
-		if err := validateRefreshedRecords(cache, cache, len(cache)); err != nil {
+		if err := validateRefreshedRecords(cache, cache); err != nil {
 			t.Fatalf("unchanged refresh rejected: %v (records %+v)", err, cache)
 		}
 	})

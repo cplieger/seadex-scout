@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/cplieger/animap/mapread"
@@ -18,7 +17,7 @@ import (
 )
 
 // linksDocument is a version 2 document whose entries reach their anime
-// through overlay links, as animap publishes them: AniList 1563 is the second
+// through parts, as animap publishes them: AniList 1563 is the second
 // cour of AniDB 127 (its episodes 21 to 49, stated on season 2), 2593 one film
 // of AniDB 4932 (season 1), 2269 three specials of AniDB 5000, and 6090 the
 // whole of AniDB 1466, a film off TVDB.
@@ -31,19 +30,16 @@ func linksDocument() *mapread.Document {
 	}
 	return &mapread.Document{
 		Version: mapread.Version, GeneratedAt: "2026-10-17T00:00:00Z",
-		Sources: mapread.Sources{
-			AnimeOfflineDatabase: mapread.OfflineDatabaseSource{Repository: "r", Release: "2026-42", Asset: "a", SHA256: strings.Repeat("0", 64)},
-			AnimeLists:           mapread.AnimeListsSource{Repository: "r", Commit: strings.Repeat("a", 40), File: "f"},
-			AniDBMirror:          mapread.AniDBMirrorSource{Repository: "r", Commit: strings.Repeat("b", 40)},
-			Overlay:              mapread.OverlaySource{SHA256: strings.Repeat("1", 64), Entries: 1, Links: 3},
-		},
+		Sources:     mapread.Sources{Mapping: mapread.MappingSource{Revision: "r"}, AniDB: mapread.AniDBSource{TitlesDump: "2026-10-17"}},
 		Attribution: mapread.Attribution{License: "ODbL-1.0", LicenseURL: "u", ContentsLicense: "DbCL-1.0", ContentsLicenseURL: "u", Notice: "n"},
 		Anime: []mapread.Anime{
 			{AniDBID: 127, Type: "TV", TVDBID: 71634, Last: mapread.Last{Regular: 49}, Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 20, TVDB: &[]mapread.Target{{Season: 1, Episode: 1, Default: true}}},
 				{Kind: mapread.Regular, Start: 21, End: 49, TVDB: stated(2, 1)},
 			}},
-			{AniDBID: 1466, Type: "OVA", TMDBMovieIDs: []int{66033}, IMDbIDs: []string{"tt0167846"}, Last: mapread.Last{Regular: 1}},
+			{AniDBID: 1466, Type: "OVA", IMDbIDs: []string{"tt0167846"}, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
+				{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: []int{66033}},
+			}},
 			{AniDBID: 4932, Type: "TV", TVDBID: 82099, Last: mapread.Last{Regular: 7}, Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 7, TVDB: stated(1, 1)},
 			}},

@@ -94,6 +94,8 @@ func TestMatchFindsAPlacedOVAHeldOnlyInRadarr(t *testing.T) {
 	otherIMDb.IMDbIDs = []string{"tt0000099"}
 	season := ova
 	season.SeasonTvdb = 1
+	imdbSeason := imdbOnly
+	imdbSeason.SeasonTvdb = 1
 	for _, tc := range []struct {
 		name     string
 		rec      mapping.Record
@@ -101,10 +103,12 @@ func TestMatchFindsAPlacedOVAHeldOnlyInRadarr(t *testing.T) {
 		want     bool
 	}{
 		{"placed", ova, []int{9}, true},
-		{"not placed", ova, nil, false},
+		{"not placed, known by its TMDB movie id", ova, nil, true},
+		{"not placed, known only by IMDb id", imdbOnly, nil, false},
 		{"placed, known only by IMDb id", imdbOnly, []int{9}, true},
 		{"placed, known only by an IMDb id Radarr lacks", otherIMDb, []int{9}, false},
-		{"placed, filed under a real season", season, []int{9}, false},
+		{"filed under a real season, known by its TMDB movie id", season, []int{9}, true},
+		{"filed under a real season, known only by IMDb id", imdbSeason, []int{9}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := &library.Snapshot{Items: []library.Item{radarrFilm(true)}}
@@ -120,22 +124,33 @@ func TestMatchFindsAPlacedOVAHeldOnlyInRadarr(t *testing.T) {
 	}
 }
 
-func TestMatchCopiesStayWithinThePlacedOfferedClass(t *testing.T) {
+func TestMatchJudgesOnlyTheRadarrFilmWhenSonarrHoldsNoPlacedFile(t *testing.T) {
 	season := placedFilm
 	season.SeasonTvdb = 1
+	tvOVA := placedFilm
+	tvOVA.Type = "OVA"
 	for _, tc := range []struct {
-		name     string
-		rec      mapping.Record
-		specials []int
+		name           string
+		rec            mapping.Record
+		specials       []int
+		wantUncompared string
 	}{
-		{"not placed", placedFilm, nil},
-		{"filed under a real season", season, []int{9}},
+		{"a film offered on season 0, placed on no episode", placedFilm, nil, ""},
+		{"filed under a real season it holds no file on", season, []int{9}, library.ArrSonarr},
+		{"an OVA offered on season 0, placed on no episode", tvOVA, nil, library.ArrSonarr},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := &library.Snapshot{Items: []library.Item{radarrFilm(true), sonarrSeries(true)}}
 			res := New(&countingAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 1}}, snap, copiesIndex(tc.rec, tc.specials), Memo{})
 			if got := matchedArrs(res.Matches); len(res.Matches) != 1 || len(got) != 1 || got[0] != library.ArrRadarr {
-				t.Errorf("Match(%s) arrs = %v over %d matches, want only the Radarr film", tc.name, got, len(res.Matches))
+				t.Fatalf("Match(%s) arrs = %v over %d matches, want only the Radarr film", tc.name, got, len(res.Matches))
+			}
+			uncompared := ""
+			if u := res.Matches[0].Uncompared; u != nil {
+				uncompared = u.Arr
+			}
+			if uncompared != tc.wantUncompared {
+				t.Errorf("Match(%s).Uncompared arr = %q, want %q", tc.name, uncompared, tc.wantUncompared)
 			}
 		})
 	}
@@ -160,36 +175,19 @@ func TestOtherCopySkipsTheSeriesOwnIMDbID(t *testing.T) {
 	series := sonarrSeries(true)
 	reused := library.Item{Arr: library.ArrRadarr, ArrID: 4, ImdbID: series.ImdbID, HasFile: true}
 	own := library.Item{Arr: library.ArrRadarr, ArrID: 5, ImdbID: "tt0000042", HasFile: true}
-	special := mapping.Record{AniDBID: 70, Type: "SPECIAL", TvdbID: 500, IMDbIDs: []string{series.ImdbID}}
+	m := Match{Item: &series, Specials: []int{9}, Record: mapping.Record{AniDBID: 70, Type: "SPECIAL", TvdbID: 500, IMDbIDs: []string{series.ImdbID}}}
 	li := NewLibIndex(&library.Snapshot{Items: []library.Item{series, reused}})
-	if got := li.otherCopy(&special, &series); got != nil {
+	if got := li.otherCopy(&m); got != nil {
 		t.Errorf("otherCopy(series' own IMDb id) = %+v, want nil", got)
 	}
-	special.IMDbIDs = []string{series.ImdbID, "tt0000042"}
+	m.Record.IMDbIDs = []string{series.ImdbID, "tt0000042"}
 	li = NewLibIndex(&library.Snapshot{Items: []library.Item{series, reused, own}})
-	if got := li.otherCopy(&special, &series); got == nil || got.ArrID != 5 {
+	if got := li.otherCopy(&m); got == nil || got.ArrID != 5 {
 		t.Errorf("otherCopy(series' id, then the film's) = %+v, want the film ArrID 5", got)
 	}
-}
-
-func TestHoldsCopyReadsUnknownAsHeld(t *testing.T) {
-	unread := sonarrSeries(false)
-	unread.Specials = nil
-	empty := unread
-	empty.SeasonGroups = map[int][]string{1: {"oz"}}
-	for _, tc := range []struct {
-		name string
-		it   library.Item
-		want bool
-	}{
-		{"a failed placeholder", library.Item{Arr: library.ArrRadarr, Failed: true}, true},
-		{"season-0 episodes unread while season 0 holds a file", unread, true},
-		{"season-0 episodes unread and season 0 empty", empty, false},
-		{"another work on season 0", sonarrSeries(false), false},
-	} {
-		if got := holdsCopy(&tc.it, []int{9}); got != tc.want {
-			t.Errorf("holdsCopy(%s) = %v, want %v", tc.name, got, tc.want)
-		}
+	m.Specials = nil
+	if got := li.otherCopy(&m); got != nil {
+		t.Errorf("otherCopy(film's IMDb id, no season-0 placement) = %+v, want nil", got)
 	}
 }
 

@@ -131,6 +131,36 @@ func TestAuditPlacedCopyMatchDoesNotJudgeStillCovers(t *testing.T) {
 	}
 }
 
+func TestAuditFilmPlacedOnNoSeasonLeavesItsParentSeriesUncovered(t *testing.T) {
+	film := mapping.Record{AniListID: 1, AniDBID: 110, Type: "MOVIE", TvdbID: 900, TmdbMovies: []int{91}, SeasonKind: mapping.SeasonAbsent}
+	series := mapping.Record{AniListID: 9, AniDBID: 111, Type: "TV", TvdbID: 900, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 3, Title: "Film", TmdbID: 91, HasFile: true, Groups: []string{"mtbb"}},
+		{Arr: library.ArrSonarr, ArrID: 7, Title: "Parent", TvdbID: 900, Groups: []string{"oz"}, HasFile: true, SeasonGroups: map[int][]string{1: {"oz"}, 2: {"oz"}}},
+	}}
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{film, series}})
+	entry := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{IsBest: true, ReleaseGroup: "MTBB", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}}
+	res := match.New(nil, nil).Match(t.Context(), []seadex.Entry{entry}, snap, idx, match.Memo{})
+	rep := New(Config{}).Audit(res.Matches, snap, idx, nil)
+	var compared, uncovered []string
+	for _, row := range rep.Rows {
+		if row.Verdict == VerdictNotOnSeaDex {
+			uncovered = append(uncovered, row.Arr)
+		} else {
+			compared = append(compared, row.Arr+" "+string(row.Verdict))
+		}
+	}
+	if want := []string{library.ArrRadarr + " " + string(VerdictBest)}; !slices.Equal(compared, want) {
+		t.Errorf("Audit compared rows = %v, want %v", compared, want)
+	}
+	if want := []string{library.ArrSonarr}; !slices.Equal(uncovered, want) {
+		t.Errorf("Audit not_on_seadex rows = %v, want %v: the film covers none of its parent series", uncovered, want)
+	}
+	if rep.Items.Anime != 2 {
+		t.Errorf("Items.Anime = %d, want 2: the film and its parent series", rep.Items.Anime)
+	}
+}
+
 func TestAuditPlacedSpecialRowJSON(t *testing.T) {
 	rep := placedOVAReport(t)
 	b, err := json.Marshal(rep.Rows)

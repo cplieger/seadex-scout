@@ -190,6 +190,48 @@ func TestLoader_refreshCache_refusalsKeepTheCacheAndAdvanceTheStreak(t *testing.
 	}
 }
 
+// TestLoader_refreshCache_crossesToTheNewShape pins the landing order of the
+// new version 2 shape, read by a binary deployed before animap publishes it:
+// a release still in the earlier shape is refused as another schema version
+// and the cache held stays served, and the first release in the new shape is
+// judged against that cache's records, so the acceptance guards still refuse
+// one that loses a population and accept one that keeps them.
+func TestLoader_refreshCache_crossesToTheNewShape(t *testing.T) {
+	rel := newRelease(t, "v2026.10.17", earlierShape(t, entriesBody(t, seriesEntries(4)...)))
+	l := rel.loader(WithRefresh(time.Hour))
+	prev := fourSeries()
+
+	next, err := l.refreshCache(t.Context(), prev)
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok || !errors.Is(err, mapread.ErrVersion) || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh unsupported schema version") {
+		t.Fatalf("refresh(earlier shape) error = %v, want the unsupported schema version refusal", err)
+	}
+	if next.Tag != "v2026.10.16" || len(next.Records) != 4 || next.RefusedTag != "v2026.10.17" || next.RejectedRefreshes != 1 {
+		t.Fatalf("after the earlier shape: tag %q, %d records, refused %q, streak %d, want the 4 cached records on v2026.10.16, v2026.10.17 refused, streak 1",
+			next.Tag, len(next.Records), next.RefusedTag, next.RejectedRefreshes)
+	}
+
+	rel.set("v2026.10.18", entriesBody(t, entry{AniList: 9, Type: "tv", TVDB: 900}))
+	next, err = l.refreshCache(t.Context(), &next)
+	if stale, ok := errors.AsType[*StaleMapError](err); !ok || !attrsContain(stale.LogAttrs(), "stale_reason", "refresh validation failed") {
+		t.Fatalf("refresh(new shape losing 3 of 4 series) error = %v, want the acceptance guard's refusal", err)
+	}
+	if next.Tag != "v2026.10.16" || len(next.Records) != 4 || next.RejectedRefreshes != 2 {
+		t.Fatalf("after the shrunk new shape: tag %q, %d records, streak %d, want the 4 cached records on v2026.10.16, streak 2",
+			next.Tag, len(next.Records), next.RejectedRefreshes)
+	}
+
+	rel.set("v2026.10.19", entriesBody(t, seriesEntries(4)...))
+	next, err = l.refreshCache(t.Context(), &next)
+	if err != nil {
+		t.Fatalf("refresh(new shape keeping every series) error = %v, want acceptance", err)
+	}
+	if next.Tag != "v2026.10.19" || len(next.Records) != 4 || next.RefusedTag != "" || next.RejectedRefreshes != 0 {
+		t.Errorf("accepted new shape: tag %q, %d records, refused %q, streak %d, want v2026.10.19, 4, none, 0",
+			next.Tag, len(next.Records), next.RefusedTag, next.RejectedRefreshes)
+	}
+}
+
 // redirectAsset answers both assets with a 302 to target.
 func redirectAsset(target string) func(http.ResponseWriter, *http.Request) bool {
 	return func(w http.ResponseWriter, req *http.Request) bool {

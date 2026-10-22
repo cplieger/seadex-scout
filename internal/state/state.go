@@ -52,7 +52,8 @@ type State struct {
 	// Never the keys "mapping" or "animap" to "animap_v4": older files hold
 	// another upstream's cache or a projection of animap's version 1, whose
 	// records would load without their facts and be served on a failed
-	// refresh. A change to what the projection derives takes a new key.
+	// refresh. A change to what the projection derives takes a new key,
+	// unless the old and the new decoder accept no release in common.
 	Mapping mapping.Cache `json:"animap_v5"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
 	// judged that arr's fresh item count a suspicious truncation and carried its prior

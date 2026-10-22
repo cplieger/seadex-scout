@@ -945,7 +945,6 @@ func TestRefresh_logsTheCandidateCensus(t *testing.T) {
 	for key, want := range map[string]string{
 		"tag":                    testTag,
 		"records":                "7",
-		"elements":               "7",
 		"typed_records":          "6",
 		"season_scoped_records":  "1",
 		"special_records":        "1",

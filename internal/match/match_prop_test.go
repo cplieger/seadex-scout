@@ -2,6 +2,7 @@ package match
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -144,27 +145,47 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 	})
 }
 
-// TestFindByIDCatalogueConsistencyProperty pins the documented forward/reverse
-// pairing invariant (catalogue.go: the two directions "cannot drift"): for ANY
-// record set and library, an item the forward lookup resolves a record to must
-// be recognized by the reverse catalogue built from the same records, and must
-// belong to the record's routed arr (MOVIE -> Radarr, else Sonarr). IDs draw
-// from a small pool so forward hits, wrong-arr collisions, and shadowing
-// configurations all occur frequently.
+// wantFindByID is FindByID's documented lookup order, as the arr and id the
+// hit must carry: a MOVIE record's TMDB movie ids, then its IMDb ids, in
+// Radarr; any other record's TVDB id in Sonarr, then its TMDB movie ids in
+// Radarr, never its IMDb ids. A MOVIE record's TVDB id is not modelled.
+func wantFindByID(rec *mapping.Record, items []library.Item) (arr string, tmdb, tvdb int, imdb string, found bool) {
+	holds := func(match func(*library.Item) bool) bool {
+		return slices.ContainsFunc(items, func(it library.Item) bool { return match(&it) })
+	}
+	if !rec.IsMovie() && rec.TvdbID > 0 && holds(func(it *library.Item) bool { return it.Arr == library.ArrSonarr && it.TvdbID == rec.TvdbID }) {
+		return library.ArrSonarr, 0, rec.TvdbID, "", true
+	}
+	for _, id := range rec.TmdbMovies {
+		if holds(func(it *library.Item) bool { return it.Arr == library.ArrRadarr && it.TmdbID == id }) {
+			return library.ArrRadarr, id, 0, "", true
+		}
+	}
+	if rec.IsMovie() {
+		for _, id := range rec.IMDbIDs {
+			if holds(func(it *library.Item) bool { return it.Arr == library.ArrRadarr && it.ImdbID == id }) {
+				return library.ArrRadarr, 0, 0, id, true
+			}
+		}
+	}
+	return "", 0, 0, "", false
+}
+
+// TestFindByIDCatalogueConsistencyProperty pins FindByID against its
+// documented lookup order, and every hit as recognized by the Catalogue
+// built from the same records. IDs draw from a small pool so hits, wrong-arr
+// collisions and shadowing all occur often.
 func TestFindByIDCatalogueConsistencyProperty(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		nRec := rapid.IntRange(1, 6).Draw(rt, "records")
 		records := make([]mapping.Record, 0, nRec)
 		for i := range nRec {
-			rec := mapping.Record{AniListID: i + 1}
-			if rapid.Bool().Draw(rt, "movie") {
-				rec.Type = "MOVIE"
-				rec.TmdbMovies = rapid.SliceOfN(rapid.IntRange(1, 8), 0, 2).Draw(rt, "tmdb")
-				for range rapid.IntRange(0, 2).Draw(rt, "nimdb") {
-					rec.IMDbIDs = append(rec.IMDbIDs, fmt.Sprintf("tt%d", rapid.IntRange(1, 8).Draw(rt, "imdb")))
-				}
-			} else {
-				rec.Type = "TV"
+			rec := mapping.Record{AniListID: i + 1, Type: rapid.SampledFrom([]string{"MOVIE", "TV", "OVA", "SPECIAL"}).Draw(rt, "type")}
+			rec.TmdbMovies = rapid.SliceOfNDistinct(rapid.IntRange(1, 8), 0, 2, rapid.ID[int]).Draw(rt, "tmdb")
+			for range rapid.IntRange(0, 2).Draw(rt, "nimdb") {
+				rec.IMDbIDs = append(rec.IMDbIDs, fmt.Sprintf("tt%d", rapid.IntRange(1, 8).Draw(rt, "imdb")))
+			}
+			if !rec.IsMovie() {
 				rec.TvdbID = rapid.IntRange(0, 8).Draw(rt, "tvdb")
 			}
 			records = append(records, rec)
@@ -193,16 +214,16 @@ func TestFindByIDCatalogueConsistencyProperty(t *testing.T) {
 		cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), nil)
 		for i := range records {
 			it := li.FindByID(&records[i])
+			arr, tmdb, tvdb, imdb, found := wantFindByID(&records[i], items)
 			if it == nil {
+				if found {
+					rt.Fatalf("FindByID(%+v) = nil, want a %s item (tmdb %d, tvdb %d, imdb %q)", records[i], arr, tmdb, tvdb, imdb)
+				}
 				continue
 			}
-			wantArr := library.ArrSonarr
-			if records[i].IsMovie() {
-				wantArr = library.ArrRadarr
-			}
-			if it.Arr != wantArr {
-				rt.Fatalf("FindByID(record %d, type %s) resolved a %s item %q; the routed arr is %s",
-					records[i].AniListID, records[i].Type, it.Arr, it.Title, wantArr)
+			if !found || it.Arr != arr || tmdb > 0 && it.TmdbID != tmdb || tvdb > 0 && it.TvdbID != tvdb || imdb != "" && it.ImdbID != imdb {
+				rt.Fatalf("FindByID(%+v) = %s item %q (tmdb %d, tvdb %d, imdb %q), want found %v: %s item (tmdb %d, tvdb %d, imdb %q)",
+					records[i], it.Arr, it.Title, it.TmdbID, it.TvdbID, it.ImdbID, found, arr, tmdb, tvdb, imdb)
 			}
 			if !cat.Has(it) {
 				rt.Fatalf("forward/reverse drift: FindByID(record %d) resolved item %q (arr %s, tvdb %d, tmdb %d, imdb %q) but Catalogue.Has rejects it",
