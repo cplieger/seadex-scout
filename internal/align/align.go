@@ -264,6 +264,44 @@ func ClaimsCoverage(item *library.Item, rec *mapping.Record) bool {
 	return scope(item, rec, nil, nil).Kind != ScopeOffered
 }
 
+// PlacedInSeries reports whether the map places e on some unit of the Sonarr
+// series its record's TVDB id names. It is false for an entry offered on
+// season 0 with no placed episode, whose bucket can hold another work, and for
+// a film placed on no season: a film is one work TVDB files under a parent
+// series, so the parent's seasons are not its file.
+func PlacedInSeries(e *Entry) bool {
+	switch kind, _ := RecordSeason(e.Record); kind {
+	case ScopeOffered:
+		return len(e.Specials) > 0
+	case ScopeWholeSeries:
+		return !e.Record.IsMovie() || len(e.Seasons) > 0
+	default:
+		return true
+	}
+}
+
+// HoldsFile reports whether item may hold e's file on the unit Decide judges
+// it on, false when that unit provably holds none. A placeholder or a withheld
+// comparison holds one whatever the placement: its files are unknown or not
+// trusted to be e's. Otherwise a Sonarr series e is not PlacedInSeries holds
+// none, and unread season-0 episodes of a specials placement hold one.
+func HoldsFile(item *library.Item, e *Entry) bool {
+	switch {
+	case !item.Comparable(), Withholding(item, e) != WithheldNone:
+		return true
+	case item.Arr == library.ArrRadarr:
+		return item.HasFile
+	case !PlacedInSeries(e):
+		return false
+	case len(e.Specials) > 0:
+		return item.SpecialsUnknown() || slices.ContainsFunc(e.Specials, func(ep int) bool { return item.Specials[ep].HasFile })
+	}
+	if scoped := scope(item, e.Record, nil, e.Episodes); scoped.Kind != ScopeWholeSeries {
+		return scoped.HasFile
+	}
+	return summarizeWholeSeries(item, &Listing{}, e.SiblingSeasons, e.Seasons).Seasons > 0
+}
+
 // ItemKind resolves the comparison scope kind of a library item that has no
 // SeaDex-associated mapping record (an item enumerated by the audit's reverse
 // catalogue, not matched to a SeaDex entry): a Radarr movie scopes to the

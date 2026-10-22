@@ -94,7 +94,7 @@ type Record struct {
 	Type       string     `json:"type"`
 	SeasonKind SeasonKind `json:"season_kind,omitempty"`
 	IMDbIDs    []string   `json:"imdb_ids,omitempty"`
-	// TmdbMovies is the TMDB movies of the anime the entry is wholly, read
+	// TmdbMovies is the TMDB movies of the work the entry is wholly, read
 	// for EVERY record type by the ID bridge regardless of the type label: a
 	// TMDB movie id is a Radarr id by construction. Deliberately NOT the IMDb
 	// list, since TVDB reuses a film's IMDb id on the parent series. Canonical
@@ -206,7 +206,7 @@ type Cache struct {
 	// anime, joins them.
 	Mappings map[int]Mapping `json:"anidb_facts,omitempty"`
 	// AniListMappings holds the facts of every other entry, keyed by AniList
-	// id: an overlay link, part of an anime, or several anime.
+	// id: part of an anime, or several anime.
 	AniListMappings map[int]Mapping `json:"anilist_facts,omitempty"`
 	// Tag is the release the records came from; a refresh downloads only
 	// another tag.
@@ -853,7 +853,7 @@ func (l *Loader) acceptRelease(ctx context.Context, prev *Cache, rel mapread.Rel
 	}
 	// Already one record per AniList id: mapread.Decode refuses a repeated one.
 	records := parsed.records
-	if validationErr := validateRefreshedRecords(prev.Records, records, parsed.entries); validationErr != nil {
+	if validationErr := validateRefreshedRecords(prev.Records, records); validationErr != nil {
 		return degradeRefresh(prev, failureValidation, "refresh validation failed", validationErr,
 			fmt.Errorf("mapping: %w and no cache available", validationErr))
 	}
@@ -884,7 +884,6 @@ func (l *Loader) acceptRelease(ctx context.Context, prev *Cache, rel mapread.Rel
 		"tag", rel.Tag,
 		"records", len(records),
 		"previous_records", indexedRecordCount(prev.Records),
-		"elements", parsed.entries,
 		"routed_identifiers", pop.identifiers,
 		"movie_routed", pop.movieRouted,
 		"series_routed", pop.seriesRouted,
@@ -912,25 +911,16 @@ func (l *Loader) acceptRelease(ctx context.Context, prev *Cache, rel mapread.Rel
 }
 
 // validateRefreshedRecords is acceptRelease's acceptance invariant for a
-// fresh document: it rejects a refresh below the AniList-key or arr-identifier
-// coverage floors, and one whose routing populations collapse below half of the
+// fresh document: it rejects a refresh below the arr-identifier coverage
+// floor, and one whose routing populations collapse below half of the
 // previously accepted cache's (populationCollapsed) or vanish entirely
-// (populationExtinct). The conservative 1% floor has ~21x headroom against the
-// real document (8126 routed of 38323 entries, 2026-10). records MUST already
-// be deduplicated, and sourceElements is the document's entry count, so
-// destructive filtering cannot shrink numerator and denominator together.
-func validateRefreshedRecords(previous, records []Record, sourceElements int) error {
+// (populationExtinct). records MUST be one per entry of the document, so the
+// floor's denominator is its entry count.
+func validateRefreshedRecords(previous, records []Record) error {
 	// No zero-record special case: coverageFloor is >= 1 for every input, so
-	// the AniList-key floor below refuses an empty candidate on its own.
-	keyMinimum := coverageFloor(sourceElements)
-	if len(records) < keyMinimum {
-		return fmt.Errorf("AniList-key coverage %d/%d is below minimum %d", len(records), sourceElements, keyMinimum)
-	}
-	// Anchor the arr floor on the SOURCE element count, like the AniList-key floor
-	// above: deriving it from the already-key-filtered candidate would let the two
-	// floors compose multiplicatively (0.01% coverage reading as healthy).
-	if covered := arrIdentifierCount(records); covered < keyMinimum {
-		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, sourceElements, keyMinimum)
+	// the floor refuses an empty candidate on its own.
+	if minimum, covered := coverageFloor(len(records)), arrIdentifierCount(records); covered < minimum {
+		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, len(records), minimum)
 	}
 	// An unusable previous cache must degrade like no cache here too: the loader
 	// refuses to serve it, so it must not anchor the loss-relative guards either -

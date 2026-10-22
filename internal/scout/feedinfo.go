@@ -73,17 +73,27 @@ func nonAiredOrderSet(tvdbIDs []int) map[int]bool {
 	return set
 }
 
-// applyRecordFacts projects rec's typing, TVDB id, order, season and episode
-// facts onto info and returns the item FindByID resolves rec to, nil when none.
+// An entry resolved to a Radarr film is served as one whatever its type, or
+// its film-titled release lands in the series categories Radarr never reads.
 func applyRecordFacts(idx *mapping.Index, rec *mapping.Record, li *match.LibIndex, nonAired map[int]bool, info *indexer.EntryInfo) *library.Item {
+	it := li.FindByID(rec)
+	if it == nil {
+		it = li.PlacedFilm(idx, rec)
+	}
+	film := rec.IsMovie() || it != nil && it.Arr == library.ArrRadarr
 	info.Kind = recordKind(rec)
+	if film {
+		info.Kind = indexer.KindMovie
+	}
 	info.TvdbID = rec.TvdbID
 	info.NonAiredOrder = rec.TvdbID > 0 && nonAired[rec.TvdbID]
 	if !info.NonAiredOrder {
-		info.Season, info.SeasonKnown = resolvedSeason(rec)
-		applyEpisodeFacts(idx, rec, li, info)
+		if !film {
+			info.Season, info.SeasonKnown = resolvedSeason(rec)
+		}
+		applyEpisodeFacts(idx, rec, film, li, info)
 	}
-	return li.FindByID(rec)
+	return it
 }
 
 // recordKind is the typing rec carries: its type, else the series arm a
@@ -101,17 +111,16 @@ func recordKind(rec *mapping.Record) indexer.MediaKind {
 
 // applyEpisodeFacts projects the map's episode facts onto the feed metadata.
 // The season ranges ride along whatever the target (the indexer picks each
-// pack's season token), except for a film, which pins no season
-// (resolvedSeason). The twin's season-0 run is stamped only for the OFFERED
-// class (season scope 0) with the titled Sonarr series it is filed under,
-// whichever arr FindByID resolves the record to: a film also in Radarr still
-// needs its twin.
-func applyEpisodeFacts(idx *mapping.Index, rec *mapping.Record, li *match.LibIndex, info *indexer.EntryInfo) {
+// pack's season token), except for a film, which pins no season. The twin's
+// season-0 run is stamped only for the OFFERED class (season scope 0) with the
+// titled Sonarr series it is filed under, whichever arr FindByID resolves the
+// record to: a film also in Radarr still needs its twin.
+func applyEpisodeFacts(idx *mapping.Index, rec *mapping.Record, film bool, li *match.LibIndex, info *indexer.EntryInfo) {
 	m, mapped := idx.MappingFor(rec)
 	if !mapped {
 		return
 	}
-	if len(m.Seasons) > 0 && !rec.IsMovie() {
+	if len(m.Seasons) > 0 && !film {
 		info.Seasons = make([]indexer.SeasonRange, len(m.Seasons))
 		for i, r := range m.Seasons {
 			info.Seasons[i] = indexer.SeasonRange{Season: r.Season, First: r.First, Last: r.Last}

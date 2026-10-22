@@ -6,10 +6,6 @@ import (
 	"testing"
 )
 
-// Acceptance-guard tests for Loader.refreshCache: the refresh-rejection
-// guards (empty, keyless, low-coverage, collapsed and shrunk documents keep
-// the stale cache) and their acceptance-floor counterparts.
-
 // coverage is total entries, the first covered of them on a TVDB series.
 func coverage(covered, total int) []entry {
 	es := make([]entry, 0, total)
@@ -171,21 +167,6 @@ func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 	}
 	if len(next.Records) != 6 || next.RejectedRefreshes != 0 {
 		t.Errorf("accepted refresh = %d records, streak %d, want 6 and 0", len(next.Records), next.RejectedRefreshes)
-	}
-}
-
-// TestLoader_refreshCache_firstBootKeylessBodyRejected pins the AniList-key
-// coverage floor's denominator: on first boot a document of 200 entries of
-// which 199 have no AniList id is wholesale key loss, not a healthy 1/1 map,
-// because the floor counts every entry row.
-func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
-	es := []entry{{AniList: 1, Type: "tv", TVDB: 100}}
-	for i := 2; i <= 200; i++ {
-		es = append(es, entry{AniList: i, Type: "tv", TVDB: 100, Keyless: true})
-	}
-	next, err := refresh(t, &Cache{}, entriesBody(t, es...))
-	if err == nil || len(next.Records) != 0 || !strings.Contains(err.Error(), "AniList-key coverage 1/200") {
-		t.Fatalf("first-boot refresh with 1/200 AniList-keyed entries = %d records, %v, want the AniList-key floor's rejection", len(next.Records), err)
 	}
 }
 

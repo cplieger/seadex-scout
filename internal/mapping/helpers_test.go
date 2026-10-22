@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
@@ -44,30 +45,28 @@ func regular(start, end int, ts *[]mapread.Target) mapread.Run {
 func document(anime []mapread.Anime, entries []mapread.Entry) *mapread.Document {
 	anime, entries = append([]mapread.Anime{}, anime...), append([]mapread.Entry{}, entries...)
 	slices.SortFunc(anime, func(a, b mapread.Anime) int { return cmp.Compare(a.AniDBID, b.AniDBID) })
-	slices.SortStableFunc(entries, func(a, b mapread.Entry) int {
-		switch {
-		case a.AniListID == 0 && b.AniListID == 0:
-			return 0
-		case a.AniListID == 0:
-			return 1
-		case b.AniListID == 0:
-			return -1
-		}
-		return cmp.Compare(a.AniListID, b.AniListID)
-	})
+	slices.SortFunc(entries, func(a, b mapread.Entry) int { return cmp.Compare(a.AniListID, b.AniListID) })
 	return &mapread.Document{
 		Version:     mapread.Version,
 		GeneratedAt: "2026-10-17T00:00:00Z",
-		Sources: mapread.Sources{
-			AnimeOfflineDatabase: mapread.OfflineDatabaseSource{Repository: "r", Release: "2026-42", Asset: "a", SHA256: strings.Repeat("0", 64)},
-			AnimeLists:           mapread.AnimeListsSource{Repository: "r", Commit: strings.Repeat("a", 40), File: "f"},
-			AniDBMirror:          mapread.AniDBMirrorSource{Repository: "r", Commit: strings.Repeat("b", 40)},
-			Overlay:              mapread.OverlaySource{SHA256: strings.Repeat("1", 64), Entries: 1},
-		},
+		Sources:     mapread.Sources{Mapping: mapread.MappingSource{Revision: "r"}, AniDB: mapread.AniDBSource{TitlesDump: "2026-10-17"}},
 		Attribution: mapread.Attribution{License: "ODbL-1.0", LicenseURL: "u", ContentsLicense: "DbCL-1.0", ContentsLicenseURL: "u", Notice: "n"},
 		Anime:       anime,
 		Entries:     entries,
 	}
+}
+
+func earlierShape(t testing.TB, body []byte) []byte {
+	t.Helper()
+	const sources = `"sources":{"mapping":{"revision":"r"},"anidb":{"titles_dump":"2026-10-17"}}`
+	sha, commit := strings.Repeat("0", 64), strings.Repeat("a", 40)
+	earlier := `"sources":{"anime_offline_database":{"repository":"r","release":"2026-42","asset":"a","sha256":"` + sha + `"},` +
+		`"anime_lists":{"repository":"r","commit":"` + commit + `","file":"f"},"anidb_mirror":{"repository":"r","commit":"` + commit + `"},` +
+		`"overlay":{"sha256":"` + sha + `","entries":1}}`
+	if !bytes.Contains(body, []byte(sources)) {
+		t.Fatalf("body has no %s to rewrite", sources)
+	}
+	return bytes.Replace(body, []byte(sources), []byte(earlier), 1)
 }
 
 func encode(t testing.TB, doc *mapread.Document) []byte {
@@ -82,8 +81,7 @@ func encode(t testing.TB, doc *mapread.Document) []byte {
 // entry is one AniList id that is all the regular episodes of an anime of
 // its own, written the way a Record reads it: TVDB is the anime's series, 0
 // for none, and Lands where its one episode lands there, nil stating
-// nothing; Movies and IMDb are the anime's films. Keyless leaves the entry
-// without an AniList id.
+// nothing; Movies are the TMDB movies that episode is, and IMDb the anime's.
 type entry struct {
 	Lands   *[]mapread.Target
 	Type    string
@@ -91,32 +89,25 @@ type entry struct {
 	IMDb    []string
 	AniList int
 	TVDB    int
-	Keyless bool
 }
 
 // entriesBody is a document holding one anime per entry, keyed by the
-// entry's AniList id (or 100000 past it for a keyless one).
+// entry's AniList id.
 func entriesBody(t testing.TB, es ...entry) []byte {
 	t.Helper()
 	var anime []mapread.Anime
 	var entries []mapread.Entry
 	for _, e := range es {
-		aid := e.AniList
-		if e.Keyless {
-			aid += 100000
-		}
-		a := mapread.Anime{AniDBID: aid, Type: strings.ToUpper(e.Type), TVDBID: e.TVDB, TMDBMovieIDs: e.Movies, IMDbIDs: e.IMDb, Last: mapread.Last{Regular: 1}}
-		if e.TVDB > 0 {
-			a.Episodes = []mapread.Run{regular(1, 1, e.Lands)}
+		a := mapread.Anime{AniDBID: e.AniList, Type: strings.ToUpper(e.Type), TVDBID: e.TVDB, IMDbIDs: e.IMDb, Last: mapread.Last{Regular: 1}}
+		if e.TVDB > 0 || e.Movies != nil {
+			run := mapread.Run{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: e.Movies}
+			if e.TVDB > 0 {
+				run.TVDB = e.Lands
+			}
+			a.Episodes = []mapread.Run{run}
 		}
 		anime = append(anime, a)
-		en := mapread.Entry{Type: strings.ToUpper(e.Type), Parts: []mapread.Part{{AniDBID: aid, Kind: mapread.Regular}}}
-		if e.Keyless {
-			en.IDs = &mapread.IDs{Kitsu: []int{aid}}
-		} else {
-			en.AniListID = e.AniList
-		}
-		entries = append(entries, en)
+		entries = append(entries, mapread.Entry{AniListID: e.AniList, Type: strings.ToUpper(e.Type), Parts: []mapread.Part{{AniDBID: e.AniList, Kind: mapread.Regular}}})
 	}
 	return encode(t, document(anime, entries))
 }
