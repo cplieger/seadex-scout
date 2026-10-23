@@ -15,7 +15,7 @@ require (
 	github.com/cplieger/scheduler/v4 v4.3.0
 	github.com/cplieger/slogx v1.8.0
 	github.com/cplieger/urlform v1.5.0
-	github.com/cplieger/webhttp/v3 v3.0.2
+	github.com/cplieger/webhttp/v3 v3.0.3
 	github.com/cplieger/xmlx v1.1.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/text v0.43.0
