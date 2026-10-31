@@ -17,7 +17,7 @@ require (
 	github.com/cplieger/urlform v1.5.0
 	github.com/cplieger/webhttp/v3 v3.0.3
 	github.com/cplieger/xmlx v1.1.0
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/text v0.43.0
 	pgregory.net/rapid v1.3.0
 )
