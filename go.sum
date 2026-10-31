@@ -26,8 +26,8 @@ github.com/cplieger/webhttp/v3 v3.0.3 h1:2N07M8hpw6VuYRKDqtqs63OcwXu99vV09XKELcE
 github.com/cplieger/webhttp/v3 v3.0.3/go.mod h1:ETPjIF1JDXhcOx3RnfiDS1Fn4//9unvo2TnYtYbr3M0=
 github.com/cplieger/xmlx v1.1.0 h1:kfRja1WrmQRogjDTJWNEIw9+MCINHu3wYU9EPHT82uA=
 github.com/cplieger/xmlx v1.1.0/go.mod h1:723FiLyXl8KuaAPuY7x2QQh3bAxuoN0/1UBaQATK95U=
-go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
-go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+go.yaml.in/yaml/v3 v3.0.6 h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM=
+go.yaml.in/yaml/v3 v3.0.6/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
 golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
 golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
