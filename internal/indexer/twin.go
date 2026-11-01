@@ -14,14 +14,14 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// twinFragment is the fragment the film twin's GUID carries beside the original
+// twinFragment is the fragment the Sonarr item's GUID carries beside the original
 // release's GUID. A fragment is invisible to trackerKeyFromURL and both tracker
 // id extractors (they read the path and the torrentid query only), so the twin
 // keys to the SAME tracker identity while Prowlarr, which dedupes on the GUID
 // string, and Sonarr, which groups by GUID, keep the two items apart.
 const twinFragment = "sonarr"
 
-// twinGUID derives the film twin's GUID from the original's: the one home of the
+// twinGUID derives the Sonarr item's GUID from the original's: the one home of the
 // fragment rule, used by the journal write and derived again at search render
 // time from the Prowlarr GUID. Empty for an empty GUID.
 func twinGUID(guid string) string {
@@ -33,7 +33,7 @@ func twinGUID(guid string) string {
 
 func isTwinGUID(guid string) bool { return strings.HasSuffix(guid, "#"+twinFragment) }
 
-// maxTwinEpisode is the highest season-0 episode a twin token may name: Sonarr's
+// maxTwinEpisode is the highest episode a twin token may name: Sonarr's
 // episode capture is \d{2,3}
 // (https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Parser/Parser.cs#L175).
 const maxTwinEpisode = 999
@@ -43,34 +43,38 @@ func twinTitle(t *seadex.Torrent, info *EntryInfo) string {
 	return title
 }
 
+// twinFor is the release's Sonarr item title and its run, empty when the
+// mapping states no run t can carry. Without a stated token there is no
+// Sonarr item: a series title alone names no episode, and Sonarr would
+// read it as a whole-series pack.
 func twinFor(t *seadex.Torrent, info *EntryInfo) (title string, first, last int) {
 	series := strings.TrimSpace(info.SeriesTitle)
 	first, last, ok := twinRun(t, info)
 	if !ok || series == "" {
 		return "", 0, 0
 	}
-	return joinWithRevision([]string{series, twinToken(first, last)}, t), first, last
+	return joinWithRevision([]string{series, twinToken(info.TwinSeason, first, last)}, t), first, last
 }
 
-// twinToken is the season-0 token for one consecutive run: S00Eaa, or
-// S00Eaa-Ebb, which Sonarr parses as exactly first..last: its multi-episode
+// twinToken is the token for one consecutive run of a season: SxxEaa, or
+// SxxEaa-Ebb, which Sonarr parses as exactly first..last: its multi-episode
 // regexes take the first and last capture and expand the range between them
 // (https://github.com/Sonarr/Sonarr/blob/cab419ade8ac7fcab5bf80394ee492abd35d5f5a/src/NzbDrone.Core/Parser/Parser.cs#L1048-L1057).
-func twinToken(first, last int) string {
-	token := seasonLabel(0) + episodeLabel(first)
+func twinToken(season, first, last int) string {
+	token := seasonLabel(season) + episodeLabel(first)
 	if last > first {
 		token += "-" + episodeLabel(last)
 	}
 	return token
 }
 
-// twinRun is the run of season-0 episodes torrent t may be labeled as, ok false
+// twinRun is the run of TwinSeason episodes torrent t may be labeled as, ok false
 // when the entry's episodes are not one consecutive run Sonarr can parse or t
 // does not hold exactly that entry: a token claims the whole torrent is those
 // episodes, so a season pack carrying the special, or one file of a
 // multi-episode special, must not get it.
 func twinRun(t *seadex.Torrent, info *EntryInfo) (first, last int, ok bool) {
-	run := info.SpecialEpisodes
+	run := info.TwinEpisodes
 	if len(run) == 0 || run[0] < 1 || run[len(run)-1] > maxTwinEpisode {
 		return 0, 0, false
 	}
@@ -93,7 +97,7 @@ func twinRun(t *seadex.Torrent, info *EntryInfo) (first, last int, ok bool) {
 // to its length. With the count unknown only a film can prove one file is the
 // whole entry: a row may name one episode of a several-episode OVA.
 func holdsOnlyTheEntry(t *seadex.Torrent, info *EntryInfo, runLen int) bool {
-	entry := info.SpecialsEpisodes
+	entry := info.TwinEntryEpisodes
 	files := len(payload.Names(t.Files))
 	episodes := payload.DistinctEpisodes(payload.Census(t.Files))
 	switch {
@@ -109,7 +113,7 @@ func holdsOnlyTheEntry(t *seadex.Torrent, info *EntryInfo, runLen int) bool {
 	return files == entry || files == runLen
 }
 
-// sonarrTwin expands a stored item carrying a film twin into the second wire
+// sonarrTwin expands a stored item carrying a Sonarr title into the second wire
 // item the RSS render serves: a copy under the twin's title and GUID, Anime only
 // (the category the series' Sonarr subscribes to), with the two twin fields
 // blank so the copy is not itself expandable. Everything else - the tvdb id (the

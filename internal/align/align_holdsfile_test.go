@@ -9,11 +9,11 @@ import (
 )
 
 func TestPlacedInSeries(t *testing.T) {
-	offered := &mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonPresent}
-	offeredOVA := &mapping.Record{Type: "OVA", TvdbID: 500, SeasonKind: mapping.SeasonPresent}
-	season := &mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2}
-	wholeTV := &mapping.Record{Type: "TV", TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
-	wholeFilm := &mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
+	offered := &mapping.Record{TmdbMovies: []int{1}, TvdbID: 500, SeasonKind: mapping.SeasonPresent}
+	offeredOVA := &mapping.Record{TvdbID: 500, SeasonKind: mapping.SeasonPresent}
+	season := &mapping.Record{TmdbMovies: []int{1}, TvdbID: 500, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2}
+	wholeTV := &mapping.Record{TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
+	wholeFilm := &mapping.Record{TmdbMovies: []int{1}, TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
 	own := []mapping.SeasonRange{{Season: 3, First: 1, Last: 1}}
 	for _, tc := range []struct {
 		name  string
@@ -22,11 +22,11 @@ func TestPlacedInSeries(t *testing.T) {
 	}{
 		{"a film placed on special episodes", align.Entry{Record: offered, Specials: []int{9}}, true},
 		{"a film offered on season 0, placed on no episode", align.Entry{Record: offered}, false},
-		{"an OVA offered on season 0, placed on no episode", align.Entry{Record: offeredOVA}, false},
+		{"a Sonarr-only entry offered on season 0, placed on no episode", align.Entry{Record: offeredOVA}, false},
 		{"a film placed on a season", align.Entry{Record: season}, true},
 		{"a film placed on episodes of a season", align.Entry{Record: season, Episodes: []int{1}}, true},
-		{"a series-wide TV entry with no own season", align.Entry{Record: wholeTV}, true},
-		{"a film placed on no season", align.Entry{Record: wholeFilm}, false},
+		{"a series-wide entry with no Radarr route and no own season", align.Entry{Record: wholeTV}, true},
+		{"an entry with a Radarr route placed on no season", align.Entry{Record: wholeFilm}, false},
 		{"a film placed on its own season of the series", align.Entry{Record: wholeFilm, Seasons: own}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,10 +38,10 @@ func TestPlacedInSeries(t *testing.T) {
 }
 
 func TestHoldsFile(t *testing.T) {
-	offered := &mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonPresent}
-	season := &mapping.Record{Type: "TV", TvdbID: 500, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2}
-	whole := &mapping.Record{Type: "TV", TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
-	unplaced := &mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
+	offered := &mapping.Record{TmdbMovies: []int{1}, TvdbID: 500, SeasonKind: mapping.SeasonPresent}
+	season := &mapping.Record{TvdbID: 500, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2}
+	whole := &mapping.Record{TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
+	unplaced := &mapping.Record{TmdbMovies: []int{1}, TvdbID: 500, SeasonKind: mapping.SeasonAbsent}
 	specials := map[int]library.ListedEpisode{4: {Group: "oz", HasFile: true}, 9: {}}
 	listed := map[int]map[int]library.ListedEpisode{2: {1: {}, 2: {Group: "oz", HasFile: true}, 3: {}}}
 	sonarr := func(seasons map[int][]string) library.Item {

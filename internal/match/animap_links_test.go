@@ -33,26 +33,26 @@ func linksDocument() *mapread.Document {
 		Sources:     mapread.Sources{Mapping: mapread.MappingSource{Revision: "r"}, AniDB: mapread.AniDBSource{TitlesDump: "2026-10-17"}},
 		Attribution: mapread.Attribution{License: "ODbL-1.0", LicenseURL: "u", ContentsLicense: "DbCL-1.0", ContentsLicenseURL: "u", Notice: "n"},
 		Anime: []mapread.Anime{
-			{AniDBID: 127, Type: "TV", TVDBID: 71634, Last: mapread.Last{Regular: 49}, Episodes: []mapread.Run{
+			{AniDBID: 127, TVDBID: 71634, Last: mapread.Last{Regular: 49}, Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 20, TVDB: &[]mapread.Target{{Season: 1, Episode: 1, Default: true}}},
 				{Kind: mapread.Regular, Start: 21, End: 49, TVDB: stated(2, 1)},
 			}},
-			{AniDBID: 1466, Type: "OVA", IMDbIDs: []string{"tt0167846"}, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
+			{AniDBID: 1466, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: []int{66033}},
 			}},
-			{AniDBID: 4932, Type: "TV", TVDBID: 82099, Last: mapread.Last{Regular: 7}, Episodes: []mapread.Run{
+			{AniDBID: 4932, TVDBID: 82099, Last: mapread.Last{Regular: 7}, Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 7, TVDB: stated(1, 1)},
 			}},
-			{AniDBID: 5000, Type: "TV", TVDBID: 254931, Last: mapread.Last{Regular: 12, Special: 3}, Episodes: []mapread.Run{
+			{AniDBID: 5000, TVDBID: 254931, Last: mapread.Last{Regular: 12, Special: 3}, Episodes: []mapread.Run{
 				{Kind: mapread.Special, Start: 1, End: 3, TVDB: stated(0, 2)},
 			}},
 		},
 		Entries: []mapread.Entry{
-			{AniListID: 435, Type: "TV", Parts: []mapread.Part{{AniDBID: 127, Kind: mapread.Regular}}},
-			{AniListID: 1563, Type: "TV", Parts: part(127, mapread.Regular, 21, 49)},
-			{AniListID: 2269, Type: "SPECIAL", Parts: part(5000, mapread.Special, 1, 3)},
-			{AniListID: 2593, Type: "MOVIE", Parts: part(4932, mapread.Regular, 1, 1)},
-			{AniListID: 6090, Type: "OVA", Parts: []mapread.Part{{AniDBID: 1466, Kind: mapread.Regular}}},
+			{AniListID: 435, Parts: []mapread.Part{{AniDBID: 127, Kind: mapread.Regular}}},
+			{AniListID: 1563, Parts: part(127, mapread.Regular, 21, 49)},
+			{AniListID: 2269, Parts: part(5000, mapread.Special, 1, 3)},
+			{AniListID: 2593, Parts: part(4932, mapread.Regular, 1, 1)},
+			{AniListID: 6090, Parts: []mapread.Part{{AniDBID: 1466, Kind: mapread.Regular}}},
 		},
 	}
 }
@@ -175,7 +175,7 @@ func TestAnimapLinksScopeThroughTheMatcher(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := &library.Snapshot{Items: []library.Item{tc.item}}
-			res := New(&countingAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: tc.al}}, snap, idx, Memo{})
+			res := New(Config{AniList: &countingAniList{}}).Match(t.Context(), []seadex.Entry{{AniListID: tc.al}}, snap, idx, Memo{})
 			if len(res.Matches) != 1 || !res.Matches[0].InLibrary() {
 				t.Fatalf("Match(%d) = %+v, want one match on the Sonarr item", tc.al, res.Matches)
 			}
@@ -204,14 +204,14 @@ func TestMatchOverrideOnAnotherSeriesDropsTheSeasonRanges(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			idx := mapping.NewIndex(mapping.Source{
-				Records:   []mapping.Record{{AniListID: 70, Type: "TV", TvdbID: 500, AniDBID: 70, SeasonKind: mapping.SeasonAbsent}},
+				Records:   []mapping.Record{{AniListID: 70, TvdbID: 500, AniDBID: 70, SeasonKind: mapping.SeasonAbsent}},
 				Mappings:  map[int]mapping.Mapping{70: {Seasons: ranges, SeasonsTvdb: 500}},
-				Overrides: []mapping.Record{{AniListID: 70, Type: "TV", TvdbID: tc.series, AniDBID: 70, SeasonKind: mapping.SeasonAbsent}},
+				Overrides: []mapping.Record{{AniListID: 70, TvdbID: tc.series, AniDBID: 70, SeasonKind: mapping.SeasonAbsent}},
 			})
 			snap := &library.Snapshot{Items: []library.Item{
 				{Arr: library.ArrSonarr, ArrID: 1, TvdbID: tc.series, SeasonGroups: map[int][]string{1: {"mtbb"}, 8: {"mtbb"}}},
 			}}
-			res := New(&countingAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 70}}, snap, idx, Memo{})
+			res := New(Config{AniList: &countingAniList{}}).Match(t.Context(), []seadex.Entry{{AniListID: 70}}, snap, idx, Memo{})
 			if len(res.Matches) != 1 || !res.Matches[0].InLibrary() {
 				t.Fatalf("Match = %+v, want one match on TVDB %d", res.Matches, tc.series)
 			}
@@ -230,13 +230,13 @@ func TestMatchOverrideOnAnotherSeriesDropsTheSeasonRanges(t *testing.T) {
 func TestMatchSeasonsAreTheStatedRanges(t *testing.T) {
 	stated := []mapping.SeasonRange{{Season: 1, First: 1, Last: 25}}
 	idx := mapping.NewIndex(mapping.Source{
-		Records:  []mapping.Record{{AniListID: 1199, Type: "TV", TvdbID: 79000, AniDBID: 270, SeasonKind: mapping.SeasonAbsent}},
+		Records:  []mapping.Record{{AniListID: 1199, TvdbID: 79000, AniDBID: 270, SeasonKind: mapping.SeasonAbsent}},
 		Mappings: map[int]mapping.Mapping{270: {Seasons: stated, SeasonsTvdb: 79000}},
 	})
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 1, TvdbID: 79000, SeasonGroups: map[int][]string{1: {"mtbb"}, 5: {"other"}}},
 	}}
-	res := New(&countingAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 1199}}, snap, idx, Memo{})
+	res := New(Config{AniList: &countingAniList{}}).Match(t.Context(), []seadex.Entry{{AniListID: 1199}}, snap, idx, Memo{})
 	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() {
 		t.Fatalf("Match = %+v, want one match on the Sonarr item", res.Matches)
 	}

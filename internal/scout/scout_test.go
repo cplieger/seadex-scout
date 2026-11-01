@@ -229,13 +229,13 @@ func seadexFrierenEntry() []seadex.Entry {
 // cache holding the single Frieren record the orchestration tests key on -
 // the mapping-side twin of seadexFrierenEntry.
 func frierenMappingCache() mapping.Cache {
-	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}}
+	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1}}}
 }
 
 // seasonlessMappingCache returns a fresh mapping cache holding the single
 // seasonless TV record (AniList 111) the shutdown/degradation tests key on.
 func seasonlessMappingCache() mapping.Cache {
-	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}
+	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, TvdbID: 123}}}
 }
 
 func scoutTestLogger() *slog.Logger {
@@ -407,7 +407,7 @@ func TestCycleGateReemitsAStandingSetAfterReadiness(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   sea,
-		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher:  match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(logger, nil),
 	})
@@ -610,15 +610,12 @@ func recordAttr(recorder *capture.Recorder, msg, key string) (string, bool) {
 	return "", false
 }
 
-// TestWalkFailureLogsCarryArrIdentity pins the failed-side attribution on the
-// walk-failure log boundaries: httpx.LogSafeError reduces a *url.Error-shaped
-// error (defence in depth; arrapi returns none) to its underlying cause,
-// discarding library.Walk's textual "walking sonarr/radarr" wrapper, so with
-// both arrs enabled the reduced error alone cannot say which dependency
-// failed - each boundary (the walk-failure ERROR, the alert-only walk-failed
-// completion line, and the feed-configured library gate's walk-failed
-// completion line) must carry the bounded `arr` attribute recovered from the
-// typed walk-side error.
+// TestWalkFailureLogsCarryArrIdentity pins the `arr` attribute on every
+// walk-failure log line (the ERROR, the alert-only completion line and the
+// feed's library-gate completion line): httpx.LogSafeError reduces a
+// *url.Error-shaped error to its cause and drops library.Walk's "walking
+// sonarr/radarr" wrapper, so with both arrs on, the error alone cannot name
+// the failed one; the attribute comes from the typed walk-side error.
 func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 	transportErr := func(host string) error {
 		return &url.Error{

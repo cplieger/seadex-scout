@@ -1037,7 +1037,7 @@ func TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup(t *testing.T) {
 
 // TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink pins the identity
 // fields seriesItem copies from the arr record - the IDs and titles the
-// matcher keys on (byTvdb/byImdb/title fallback) - plus the Sonarr web deep
+// matcher keys on (byTvdb/byTmdb/title fallback) - plus the Sonarr web deep
 // link built from SonarrURL and the series title slug.
 func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 	fs := &fakeSonarr{
@@ -1066,8 +1066,8 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 	if it.Arr != ArrSonarr || it.ArrID != 7 || it.Title != "Ident" {
 		t.Errorf("identity = arr %q id %d title %q, want sonarr/7/Ident", it.Arr, it.ArrID, it.Title)
 	}
-	if it.TvdbID != 555 || it.TmdbID != 777 || it.ImdbID != "tt0000555" || it.Year != 2023 {
-		t.Errorf("ids = tvdb %d tmdb %d imdb %q year %d, want 555/777/tt0000555/2023", it.TvdbID, it.TmdbID, it.ImdbID, it.Year)
+	if it.TvdbID != 555 || it.TmdbID != 777 || it.Year != 2023 {
+		t.Errorf("ids = tvdb %d tmdb %d year %d, want 555/777/2023", it.TvdbID, it.TmdbID, it.Year)
 	}
 	if !slices.Equal(it.AltTitles, []string{"Alt Ident", "Alt Two"}) {
 		t.Errorf("AltTitles = %q, want the distinct non-empty alternate titles, trimmed, in first-seen order", it.AltTitles)
@@ -1987,13 +1987,11 @@ func TestWalkKeepsANonAiredOrderTvdbIDUntilListedInAiredOrder(t *testing.T) {
 
 // TestWalkIsCleanOnlyWhenEveryReadSucceeds pins what each way a walk ends
 // reports of its Sonarr series list (docs/torznab-indexer.md "Series in
-// another episode order"): a list read in full is
-// reported whatever fails after it, and the walk is clean only when it
-// returns no error and no read of it failed, so only a clean walk's
-// aired-order listings may release an id. No exit is classified by its
-// error's type or cause. Monogatari is in book order and Firefly, listed in
-// aired order, is in the prior set, so a list read in full adds Monogatari,
-// and only a clean walk lets Firefly leave. A failed walk publishes no items.
+// another episode order"): a list read in full is reported whatever fails
+// after it, and only a walk with no error and no failed read may release an
+// id, whatever the error's type. Monogatari is in book order and Firefly, in
+// aired order, is in the prior set: a full list adds Monogatari, only a clean
+// walk lets Firefly leave, and a failed walk publishes no items.
 func TestWalkIsCleanOnlyWhenEveryReadSucceeds(t *testing.T) {
 	const firefly, monogatari = 78874, 102261
 	book := sonarr.Series{ID: 2189, Title: "Monogatari", IDs: sonarr.ExternalIDs{TVDB: monogatari}, Order: sonarr.Order{Type: "alternate", Name: "Book Order"}}

@@ -229,8 +229,12 @@ func ownershipOf(entries []seadex.Entry, infoFor EntryInfoFunc) map[string][]own
 				IsBest:  t.IsBest,
 				NonFilm: info.Kind != KindMovie,
 			}
-			r.SonarrTitle, r.TwinFirst, r.TwinLast = twinFor(t, &info)
-			if r.SonarrTitle != "" {
+			var first, last int
+			r.SonarrTitle, first, last = twinFor(t, &info)
+			// Only a special is catalogued: answerSpecial serves season-0
+			// searches, and a positive-season item answers none.
+			if r.SonarrTitle != "" && info.TwinSeason == 0 {
+				r.TwinFirst, r.TwinLast = first, last
 				r.TwinSeries, r.URL, r.Size = strings.TrimSpace(info.SeriesTitle), classify.PublishURL(t), payload.TotalSize(t.Files)
 			}
 			if r.Key == "" && r.Hash == "" {

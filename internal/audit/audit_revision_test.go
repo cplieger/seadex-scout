@@ -31,7 +31,7 @@ func olderRevisionMatch(incomplete bool) match.Match {
 		IsBest: true, ReleaseGroup: "UDF", Tracker: "Nyaa", URL: "https://nyaa.si/view/1",
 		Files: []seadex.File{{Name: "[UDF] 91 Days - 04v2 (BDRip 1080p x264 FLACx2).mkv", Length: 1 << 30}},
 	}}}
-	return match.Match{Item: item, Arr: library.ArrSonarr, Source: match.SourceID, Entry: entry, Record: mapping.Record{Type: "TV", SeasonTvdb: 1}}
+	return match.Match{Item: item, Arr: library.ArrSonarr, Source: match.SourceID, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 }
 
 func TestAuditOlderRevisionRow(t *testing.T) {

@@ -1,9 +1,8 @@
 package mapping
 
 import (
+	"slices"
 	"testing"
-
-	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // FuzzParseOverrides exercises the operator-overrides parse boundary against
@@ -11,7 +10,7 @@ import (
 // key spellings, case-variant canonical keys, the rejected null/object/scalar
 // top levels, and typed-decode failures. Invariants hold for any input: an
 // error yields a zero result (never a partial one); a success returns
-// deduplicated, positively-keyed records with normalized types.
+// deduplicated, positively-keyed records with canonical TMDB movies.
 func FuzzParseOverrides(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
 	f.Add([]byte(`[{"anilist_id":5,"imdb_id":"tt1","season":1},{"anilist_id":6,"themoviedb_id":9}]`))
@@ -46,8 +45,8 @@ func FuzzParseOverrides(f *testing.F) {
 			if r.AniListID <= 0 {
 				t.Errorf("parseOverrides retained a non-positive-AniList-ID record: %+v", r)
 			}
-			if r.Type != mediatype.Normalize(r.Type) {
-				t.Errorf("parseOverrides record Type %q not normalized", r.Type)
+			if slices.ContainsFunc(r.TmdbMovies, func(v int) bool { return v <= 0 }) {
+				t.Errorf("parseOverrides record not canonical: %+v", r)
 			}
 		}
 		seen := make(map[int]struct{}, len(set.records))

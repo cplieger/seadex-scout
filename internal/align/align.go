@@ -94,9 +94,9 @@ type scopeResult struct {
 // and which scope kind pins it: a mapped zero is offered, an absent season is a
 // whole-series comparison, a positive season keeps its season.
 //
-// The dispatch input is the season's PRESENCE, never the type label, because an
-// absent season and a mapped zero mean opposite things upstream and both leave
-// SeasonTvdb 0. A positive season is never overridden: FLCL has no season 0.
+// The dispatch input is the season's PRESENCE, because an absent season and a
+// mapped zero mean opposite things upstream and both leave SeasonTvdb 0. A
+// positive season is never overridden: FLCL has no season 0.
 func RecordSeason(rec *mapping.Record) (kind ScopeKind, season int) {
 	switch rec.SeasonPresence() {
 	case mapping.SeasonPresent:
@@ -107,17 +107,13 @@ func RecordSeason(rec *mapping.Record) (kind ScopeKind, season int) {
 	case mapping.SeasonAbsent:
 		return ScopeWholeSeries, 0
 	}
-	// Unknown reaches here from one producer only, a Record persisted before the
-	// season kind existed. Both halves of the union must stay: IsMovie alone
-	// strands the mapped-zero specials, IsSpecial alone strands the films.
-	switch {
-	case rec.HasMappedSeason():
+	// Unknown has no placement to read: a positive season still pins that
+	// season, and anything else is the whole series. It never returns offered,
+	// which mapping.Record.SonarrSpecial's equivalence rests on.
+	if rec.HasMappedSeason() {
 		return ScopeSeason, rec.SeasonTvdb
-	case rec.IsSpecial() || rec.IsMovie():
-		return ScopeOffered, specialSeason
-	default:
-		return ScopeWholeSeries, 0
 	}
+	return ScopeWholeSeries, 0
 }
 
 // scope resolves the comparison scope of a matched entry once, for every
@@ -267,14 +263,14 @@ func ClaimsCoverage(item *library.Item, rec *mapping.Record) bool {
 // PlacedInSeries reports whether the map places e on some unit of the Sonarr
 // series its record's TVDB id names. It is false for an entry offered on
 // season 0 with no placed episode, whose bucket can hold another work, and for
-// a film placed on no season: a film is one work TVDB files under a parent
-// series, so the parent's seasons are not its file.
+// an entry with a Radarr route placed on no season: a film is one work TVDB
+// files under a parent series, so the parent's seasons are not its file.
 func PlacedInSeries(e *Entry) bool {
 	switch kind, _ := RecordSeason(e.Record); kind {
 	case ScopeOffered:
 		return len(e.Specials) > 0
 	case ScopeWholeSeries:
-		return !e.Record.IsMovie() || len(e.Seasons) > 0
+		return !e.Record.RadarrRoute() || len(e.Seasons) > 0
 	default:
 		return true
 	}

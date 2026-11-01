@@ -745,7 +745,7 @@ func TestAdvanceCarriesAPriorOwnersTwinTitleIntoTheVote(t *testing.T) {
 			window := nyaaEntry(windowHolderID, 777, true, "Minami-ke Special (1080p) [G].mkv")
 			window.Torrents[0].ReleaseGroup = "G"
 			info := func(int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TvdbID: 80000, SpecialEpisodes: []int{2}, SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TvdbID: 80000, TwinEpisodes: []int{2}, SeriesTitle: "Minami-ke"}
 			}
 			if err := advanceTestWriter(path, now).Advance(t.Context(), []seadex.Entry{window}, FeedInfo{Entry: info}); err != nil {
 				t.Fatalf("Advance: %v", err)

@@ -118,7 +118,7 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 			mapping.WithRefresh(mapping.DefaultRefresh), mapping.WithLogger(log)),
 		seadex: seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL,
 			seadexapi.WithPageDelay(seadexapi.DefaultPageDelay), seadexapi.WithLogger(log)),
-		matcher: match.New(anilistClient, log),
+		matcher: match.New(match.Config{AniList: anilistClient, Logger: log, ExcludeSpecials: cfg.ExcludeSpecials}),
 		anilist: anilistClient,
 		cleanup: func() {
 			seadexHTTP.CloseIdleConnections()
@@ -154,11 +154,10 @@ func buildScout(ctx context.Context, cfg *config.Config, server *indexer.Indexer
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
 		Comparer: compare.New(compare.Config{
-			Logger:          c.log,
-			TagFilter:       cfg.TagFilter,
-			Filter:          filterOptions(cfg),
-			ExcludeSpecials: cfg.ExcludeSpecials,
-			AnimeBytes:      cfg.AnimeBytes,
+			Logger:     c.log,
+			TagFilter:  cfg.TagFilter,
+			Filter:     filterOptions(cfg),
+			AnimeBytes: cfg.AnimeBytes,
 		}),
 		Notifier: notify.NewNotifier(c.log, cfg.IgnoreFindings),
 		Auditor:  audit.New(auditConfig(cfg)),

@@ -42,10 +42,10 @@ func twinFixtureInfo(alID int) EntryInfo {
 	if alID == 21519 {
 		return EntryInfo{
 			Title: "Lelouch of the Resurrection", Year: 2019, Kind: KindMovie, TvdbID: 79525,
-			SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: twinSeries,
+			TwinEpisodes: []int{4}, TwinEntryEpisodes: 1, SeriesTitle: twinSeries,
 		}
 	}
-	return EntryInfo{Title: "Code Geass OVA", TvdbID: 79525, SpecialEpisodes: []int{5}, SpecialsEpisodes: 1, SeriesTitle: twinSeries}
+	return EntryInfo{Title: "Code Geass OVA", TvdbID: 79525, TwinEpisodes: []int{5}, TwinEntryEpisodes: 1, SeriesTitle: twinSeries}
 }
 
 func twinFixtureIndexer(t *testing.T, entries []seadex.Entry, body string, cfg Config) *Indexer {
@@ -306,7 +306,7 @@ func TestServeNeverOffersSonarrAFilmWithoutItsTwin(t *testing.T) {
 	const proxiedTitle = "[Group] Some Anime S01 [1080p]"
 	gapped := func(alID int) EntryInfo {
 		info := twinFixtureInfo(alID)
-		info.SpecialEpisodes = []int{4, 6}
+		info.TwinEpisodes = []int{4, 6}
 		return info
 	}
 	pack := twinFixtureEntries()
@@ -516,7 +516,7 @@ func TestServeSpecialSearchKeepsSeriesApartByTheirWordBoundary(t *testing.T) {
 		if alID == 3000 {
 			series = "Kon"
 		}
-		return EntryInfo{Title: "The Movie", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: series}
+		return EntryInfo{Title: "The Movie", Kind: KindMovie, TvdbID: 79525, TwinEpisodes: []int{4}, TwinEntryEpisodes: 1, SeriesTitle: series}
 	}
 	ix := twinIndexer(t, entries, info, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, emptyUpstreamFeed)
@@ -538,7 +538,7 @@ func TestServeALegacySnapshotGivesSonarrNoFilm(t *testing.T) {
 	seedEmptyFeed(t, path)
 	twinless := func(alID int) EntryInfo {
 		info := twinFixtureInfo(alID)
-		info.SpecialEpisodes = nil
+		info.TwinEpisodes = nil
 		return info
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), twinFixtureEntries()[:1], FeedInfo{Entry: twinless}); err != nil {

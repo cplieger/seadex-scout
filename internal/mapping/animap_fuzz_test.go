@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/cplieger/animap/mapread"
-	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // FuzzProject exercises the refresh's decode-and-project path against
@@ -21,7 +20,7 @@ const fuzzEpisodes = 1 << 12
 
 func FuzzProject(f *testing.F) {
 	f.Add(entriesBody(f, seriesEntries(2)...))
-	f.Add(entriesBody(f, entry{AniList: 3, Type: "MOVIE", TVDB: 9, Lands: targets(at(0, 4), at(0, 5)), Movies: []int{7}, IMDb: []string{"tt0000007"}}))
+	f.Add(entriesBody(f, entry{AniList: 3, Type: "MOVIE", TVDB: 9, Lands: targets(at(0, 4), at(0, 5)), Movies: []int{7}}))
 	f.Add(entriesBody(f, entry{AniList: 4, Type: "TV", TVDB: 9}, entry{AniList: 5, Type: "OVA", TVDB: 9, Lands: targets(dflt(2, 1))}))
 	f.Add(entriesBody(f, entry{AniList: 6, Type: "MOVIE", Movies: []int{8}}, entry{AniList: 7, Type: "TV", TVDB: 9}))
 	f.Add(encode(f, document([]mapread.Anime{
@@ -55,7 +54,7 @@ func FuzzProject(f *testing.F) {
 			if r.AniListID <= 0 || i > 0 && r.AniListID <= p.records[i-1].AniListID {
 				t.Errorf("record %d has AniList id %d, want positive ids ascending once", i, r.AniListID)
 			}
-			if r.Type != mediatype.Normalize(r.Type) || slices.ContainsFunc(r.TmdbMovies, func(v int) bool { return v <= 0 }) {
+			if slices.ContainsFunc(r.TmdbMovies, func(v int) bool { return v <= 0 }) {
 				t.Errorf("record not canonical: %+v", r)
 			}
 			if r.SeasonKind != SeasonAbsent && (r.SeasonKind != SeasonPresent || r.TvdbID <= 0) || r.SeasonKind == SeasonAbsent && r.SeasonTvdb != 0 {

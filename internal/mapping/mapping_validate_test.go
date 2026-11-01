@@ -12,22 +12,21 @@ import (
 
 // TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected pins the
 // per-side resolvability of the routing floor: a candidate that keeps every
-// type label and every TVDB id but loses all movie TMDB/IMDb ids preserves the
-// global arr-identifier floor and the type-label routing counts, yet the
-// matcher could then resolve no Radarr entry at all. censusOf must count
-// records that can actually resolve in their routed arr (HasArrIdentifier),
+// TVDB id but loses all TMDB movie ids can preserve the global route floor,
+// yet the matcher could then resolve no Radarr entry at all. censusOf must
+// count each route on its own (RadarrRoute, SonarrRoute),
 // so a collapse of one arr's resolvable population is rejected in favour of
 // the stale map.
 func TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected(t *testing.T) {
 	previous := make([]Record, 0, 200)
 	candidate := make([]Record, 0, 200)
 	for id := 1; id <= 100; id++ {
-		previous = append(previous, Record{AniListID: id, Type: "MOVIE", TmdbMovies: []int{id}})
-		candidate = append(candidate, Record{AniListID: id, Type: "MOVIE"})
+		previous = append(previous, Record{AniListID: id, TmdbMovies: []int{id}})
+		candidate = append(candidate, Record{AniListID: id})
 	}
 	for id := 101; id <= 200; id++ {
-		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
-		candidate = append(candidate, Record{AniListID: id, Type: "TV", TvdbID: id})
+		previous = append(previous, Record{AniListID: id, TvdbID: id})
+		candidate = append(candidate, Record{AniListID: id, TvdbID: id})
 	}
 	if err := validateRefreshedRecords(previous, candidate); err == nil {
 		t.Fatal("refresh that lost every movie identifier returned nil error, want rejection")
@@ -38,17 +37,17 @@ func TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected(t *testing.T) 
 // floor's per-population shrink guards (populationCollapsed): the mid-band -
 // most of one resolvable routing side gutted while the survivors still clear
 // the 1% floor - is what the extinction guard cannot see. Movie-routed
-// 200 -> 40 (TMDB ids stripped, types intact) and series-routed 1800 -> 800
+// 200 -> 40 (TMDB ids stripped) and series-routed 1800 -> 800
 // (TVDB ids zeroed) each keep every other floor green yet must be rejected in
 // favour of the stale map.
 func TestValidateRefreshedRecordsRoutingMidBandCollapseRejected(t *testing.T) {
 	const body = 2000
 	previous := make([]Record, 0, body)
 	for id := 1; id <= 200; id++ {
-		previous = append(previous, Record{AniListID: id, Type: "MOVIE", TmdbMovies: []int{id}})
+		previous = append(previous, Record{AniListID: id, TmdbMovies: []int{id}})
 	}
 	for id := 201; id <= body; id++ {
-		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+		previous = append(previous, Record{AniListID: id, TvdbID: id})
 	}
 
 	movieMidBand := make([]Record, len(previous))
@@ -82,10 +81,10 @@ func TestValidateRefreshedRecordsCollapseExactlyAtTheSignificanceFloorRejected(t
 	const body = 300
 	previous := make([]Record, 0, body)
 	for id := 1; id <= 3; id++ {
-		previous = append(previous, Record{AniListID: id, Type: "MOVIE", TmdbMovies: []int{id}})
+		previous = append(previous, Record{AniListID: id, TmdbMovies: []int{id}})
 	}
 	for id := 4; id <= body; id++ {
-		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+		previous = append(previous, Record{AniListID: id, TvdbID: id})
 	}
 
 	candidate := make([]Record, len(previous))
@@ -109,7 +108,7 @@ func refresh(t *testing.T, prev *Cache, body []byte) (Cache, error) {
 func factsCache(facts map[int]Mapping) *Cache {
 	prev := &Cache{Mappings: facts, AniListMappings: map[int]Mapping{}}
 	for id := 1; id <= 200; id++ {
-		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, Type: "TV", TvdbID: id})
+		prev.Records = append(prev.Records, Record{AniListID: id, AniDBID: id, TvdbID: id})
 	}
 	return prev
 }
@@ -180,7 +179,7 @@ func TestRefresh_aniListKeyedFactsExtinctionRejected(t *testing.T) {
 		prevFacts[id] = Mapping{Seasons: []SeasonRange{{Season: 1, First: 1, Last: 1}}}
 	}
 	prev := factsCache(prevFacts)
-	prev.Records = append(prev.Records, Record{AniListID: 1000, Type: "OVA", TvdbID: 1})
+	prev.Records = append(prev.Records, Record{AniListID: 1000, TvdbID: 1})
 	prev.AniListMappings[1000] = Mapping{Seasons: []SeasonRange{{Season: 2, First: 1, Last: 1}}}
 	const (
 		dropped = iota
@@ -324,7 +323,7 @@ func specialsCache() *Cache {
 		prevFacts[id] = Mapping{Specials: []int{1, 2}, SpecialsTvdb: id, SpecialsEpisodes: 2}
 	}
 	prev := factsCache(prevFacts)
-	prev.Records = append(prev.Records, Record{AniListID: 1000, Type: "OVA", TvdbID: 1})
+	prev.Records = append(prev.Records, Record{AniListID: 1000, TvdbID: 1})
 	prev.AniListMappings[1000] = Mapping{Specials: []int{2}, SpecialsTvdb: 1, SpecialsEpisodes: 1}
 	return prev
 }

@@ -32,8 +32,8 @@ func libraryScout(t *testing.T, sonarr arrwalk.SonarrPass, st *state.State) (*Sc
 	t.Helper()
 	logger, recorder := capture.New()
 	st.Mapping = mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
-		{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
-		{AniListID: 333, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
+		{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1},
+		{AniListID: 333, TvdbID: 123, SeasonTvdb: 2},
 	}}
 	return New(&Deps{
 		Logger:   logger,
@@ -41,7 +41,7 @@ func libraryScout(t *testing.T, sonarr arrwalk.SonarrPass, st *state.State) (*Sc
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: append(seadexFrierenEntry(), librarySeasonTwoEntry())},
-		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher:  match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(logger, nil),
 		Auditor:  audit.New(audit.Config{}),

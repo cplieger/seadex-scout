@@ -63,7 +63,7 @@ func seasonCache(placed bool) mapping.Cache {
 	c := mapping.Cache{
 		FetchedAt: time.Now(),
 		Records: []mapping.Record{{
-			AniListID: seasonEntryID, AniDBID: 71, Type: "TV", TvdbID: 500, SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent,
+			AniListID: seasonEntryID, AniDBID: 71, TvdbID: 500, SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent,
 		}},
 	}
 	if placed {
@@ -110,7 +110,7 @@ func TestCycleResolvesAnAniListExcludedFindingWhileFilesAreUnread(t *testing.T) 
 				Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{fs}, Logger: scoutTestLogger()}),
 				Mapping:      placedMapping{},
 				SeaDex:       &fakeSeaDex{entries: []seadex.Entry{seasonEntry()}},
-				Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+				Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 				Comparer:     compare.New(compare.Config{Logger: logger}),
 				Notifier:     notifier,
 				PollInterval: pollIntervalForEvery(1),

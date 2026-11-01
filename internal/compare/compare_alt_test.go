@@ -30,7 +30,7 @@ func TestCompareAltGroups(t *testing.T) {
 				{ReleaseGroup: "Erai-raws", Tracker: "Nyaa", URL: "https://nyaa.si/view/3"},
 				{ReleaseGroup: "erai-raws", Tracker: "Nyaa", URL: "https://nyaa.si/view/4"},
 			},
-			c:    comparer(filter.Options{}, false),
+			c:    comparer(filter.Options{}),
 			want: []string{"erai-raws", "judas"},
 		},
 		{
@@ -41,13 +41,13 @@ func TestCompareAltGroups(t *testing.T) {
 				{ReleaseGroup: "Kawaiika", Tracker: "Nyaa", URL: "https://nyaa.si/view/7"},
 				{ReleaseGroup: "Judas", Tracker: "Nyaa", URL: "https://nyaa.si/view/8"},
 			},
-			c:    comparer(filter.Options{RequireDualAudio: true}, false),
+			c:    comparer(filter.Options{RequireDualAudio: true}),
 			want: []string{"judas"},
 		},
 		{
 			name:   "an AnimeBytes alt is hidden with the toggle off",
 			others: []seadex.Torrent{{ReleaseGroup: "PMR", Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}},
-			c:      comparer(filter.Options{}, false),
+			c:      comparer(filter.Options{}),
 			want:   nil,
 		},
 		{
@@ -58,7 +58,7 @@ func TestCompareAltGroups(t *testing.T) {
 		},
 		{
 			name: "an entry with only best releases has no alt",
-			c:    comparer(filter.Options{}, false),
+			c:    comparer(filter.Options{}),
 			want: nil,
 		},
 	}
@@ -101,7 +101,7 @@ func TestCompareAltGroupsOnEveryStatus(t *testing.T) {
 			}}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 
 			if len(got) != 1 || got[0].Status != tt.wantStatus {
 				t.Fatalf("Compare(held %v, incomplete %v) = %+v, want one %s finding", tt.held, tt.incomplete, got, tt.wantStatus)

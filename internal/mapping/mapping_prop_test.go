@@ -13,8 +13,8 @@ import (
 // list, the deduplicated slice must index bijectively (len == index len) and
 // produce exactly the same effective index as the raw input, every surviving ID
 // must be positive and unique, each survivor must be the WHOLE last occurrence of
-// its ID (every field, since routing and refresh acceptance consume Type,
-// TmdbMovies, IMDbIDs and SeasonTvdb too), and the operation must be idempotent.
+// its ID (every field, since routing and refresh acceptance consume
+// TmdbMovies, SeasonKind and SeasonTvdb too), and the operation must be idempotent.
 // The acceptance guards measure their counts on the deduplicated set.
 func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -22,23 +22,21 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			return Record{
 				// A small ID range forces duplicate, zero, and negative IDs.
 				AniListID:  rapid.IntRange(-2, 5).Draw(t, "anilist_id"),
-				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
+				SeasonKind: rapid.SampledFrom([]SeasonKind{seasonUnknown, SeasonPresent, SeasonAbsent}).Draw(t, "season_kind"),
 				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
 				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
 				TmdbMovies: rapid.SliceOfN(rapid.IntRange(1, 9), 0, 3).Draw(t, "tmdb_movies"),
-				IMDbIDs:    rapid.SliceOfN(rapid.SampledFrom([]string{"tt1", "tt2", "tt3"}), 0, 3).Draw(t, "imdb_ids"),
 			}
 		}), 0, 20).Draw(t, "records")
 
 		// Freeze the oracle BEFORE the call under test, from a deep copy:
-		// the Record copies would otherwise alias the generated TmdbMovies/
-		// IMDbIDs backing arrays, so an in-place deduplicator regression that
+		// the Record copies would otherwise alias the generated TmdbMovies
+		// backing arrays, so an in-place deduplicator regression that
 		// mutates a survivor's fields could contaminate the oracle and the
 		// output alike, and the parity check would still pass.
 		frozen := make([]Record, len(records))
 		for i, r := range records {
 			r.TmdbMovies = slices.Clone(r.TmdbMovies)
-			r.IMDbIDs = slices.Clone(r.IMDbIDs)
 			frozen[i] = r
 		}
 		rawIdx := NewIndex(Source{Records: frozen})
@@ -69,7 +67,6 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			got, ok := rawIdx.Lookup(r.AniListID)
 			want := r
 			want.TmdbMovies = slices.Clone(r.TmdbMovies)
-			want.IMDbIDs = slices.Clone(r.IMDbIDs)
 			want.canonicalize()
 			if !ok || !reflect.DeepEqual(got, want) {
 				t.Fatalf("raw index disagrees for ID %d: index %+v ok=%v, deduplicated %+v", r.AniListID, got, ok, want)
@@ -94,11 +91,10 @@ func TestValidateRefreshedRecordsUnchangedRefreshAlwaysAccepted(t *testing.T) {
 		raw := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
 			return Record{
 				AniListID:  rapid.IntRange(-2, 50).Draw(t, "anilist_id"),
-				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
+				SeasonKind: rapid.SampledFrom([]SeasonKind{seasonUnknown, SeasonPresent, SeasonAbsent}).Draw(t, "season_kind"),
 				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
 				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
 				TmdbMovies: rapid.SliceOfN(rapid.IntRange(1, 9), 0, 3).Draw(t, "tmdb_movies"),
-				IMDbIDs:    rapid.SliceOfN(rapid.SampledFrom([]string{"tt1", "tt2", "tt3"}), 0, 3).Draw(t, "imdb_ids"),
 			}
 		}), 0, 30).Draw(t, "records")
 		cache := deduplicateRecords(raw)

@@ -40,9 +40,9 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 		memo := Memo{Entries: make(map[int]MemoEntry)}
 		for id := 1; id <= nIDs; id++ {
 			entries = append(entries, seadex.Entry{AniListID: id})
-			// An id-less MOVIE record: the split-mapping shape that needs the
+			// A record with no route: the split-mapping shape that needs the
 			// AniList title fallback, so every id is a lookup candidate.
-			records = append(records, mapping.Record{AniListID: id, Type: "MOVIE"})
+			records = append(records, mapping.Record{AniListID: id})
 			if rapid.Bool().Draw(rt, "known") {
 				media[id] = anilist.Media{Titles: []string{"Movie"}, Format: "MOVIE", Year: 2020}
 			}
@@ -145,49 +145,37 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 	})
 }
 
-// wantFindByID is FindByID's documented lookup order, as the arr and id the
-// hit must carry: a MOVIE record's TMDB movie ids, then its IMDb ids, in
-// Radarr; any other record's TVDB id in Sonarr, then its TMDB movie ids in
-// Radarr, never its IMDb ids. A MOVIE record's TVDB id is not modelled.
-func wantFindByID(rec *mapping.Record, items []library.Item) (arr string, tmdb, tvdb int, imdb string, found bool) {
+// wantRoutes is each route's documented lookup, as the id its hit must carry:
+// the first of the record's TMDB movie ids a Radarr item holds, and its TVDB
+// id when a Sonarr item holds it. 0 means no hit.
+func wantRoutes(rec *mapping.Record, items []library.Item) (tmdb, tvdb int) {
 	holds := func(match func(*library.Item) bool) bool {
 		return slices.ContainsFunc(items, func(it library.Item) bool { return match(&it) })
 	}
-	if !rec.IsMovie() && rec.TvdbID > 0 && holds(func(it *library.Item) bool { return it.Arr == library.ArrSonarr && it.TvdbID == rec.TvdbID }) {
-		return library.ArrSonarr, 0, rec.TvdbID, "", true
-	}
 	for _, id := range rec.TmdbMovies {
 		if holds(func(it *library.Item) bool { return it.Arr == library.ArrRadarr && it.TmdbID == id }) {
-			return library.ArrRadarr, id, 0, "", true
+			tmdb = id
+			break
 		}
 	}
-	if rec.IsMovie() {
-		for _, id := range rec.IMDbIDs {
-			if holds(func(it *library.Item) bool { return it.Arr == library.ArrRadarr && it.ImdbID == id }) {
-				return library.ArrRadarr, 0, 0, id, true
-			}
-		}
+	if rec.TvdbID > 0 && holds(func(it *library.Item) bool { return it.Arr == library.ArrSonarr && it.TvdbID == rec.TvdbID }) {
+		tvdb = rec.TvdbID
 	}
-	return "", 0, 0, "", false
+	return tmdb, tvdb
 }
 
-// TestFindByIDCatalogueConsistencyProperty pins FindByID against its
-// documented lookup order, and every hit as recognized by the Catalogue
-// built from the same records. IDs draw from a small pool so hits, wrong-arr
-// collisions and shadowing all occur often.
-func TestFindByIDCatalogueConsistencyProperty(t *testing.T) {
+// TestRouteLookupCatalogueConsistencyProperty pins the Radarr and Sonarr
+// lookups against their documented order, and every hit as recognized by the
+// Catalogue built from the same records. IDs draw from a small pool so hits,
+// wrong-arr collisions and shadowing all occur often.
+func TestRouteLookupCatalogueConsistencyProperty(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		nRec := rapid.IntRange(1, 6).Draw(rt, "records")
 		records := make([]mapping.Record, 0, nRec)
 		for i := range nRec {
-			rec := mapping.Record{AniListID: i + 1, Type: rapid.SampledFrom([]string{"MOVIE", "TV", "OVA", "SPECIAL"}).Draw(rt, "type")}
+			rec := mapping.Record{AniListID: i + 1}
 			rec.TmdbMovies = rapid.SliceOfNDistinct(rapid.IntRange(1, 8), 0, 2, rapid.ID[int]).Draw(rt, "tmdb")
-			for range rapid.IntRange(0, 2).Draw(rt, "nimdb") {
-				rec.IMDbIDs = append(rec.IMDbIDs, fmt.Sprintf("tt%d", rapid.IntRange(1, 8).Draw(rt, "imdb")))
-			}
-			if !rec.IsMovie() {
-				rec.TvdbID = rapid.IntRange(0, 8).Draw(rt, "tvdb")
-			}
+			rec.TvdbID = rapid.IntRange(0, 8).Draw(rt, "tvdb")
 			records = append(records, rec)
 		}
 		nItems := rapid.IntRange(1, 6).Draw(rt, "items")
@@ -197,37 +185,44 @@ func TestFindByIDCatalogueConsistencyProperty(t *testing.T) {
 			if rapid.Bool().Draw(rt, "radarr") {
 				it.Arr = library.ArrRadarr
 				it.TmdbID = rapid.IntRange(0, 8).Draw(rt, "itemTmdb")
-				if rapid.Bool().Draw(rt, "hasImdb") {
-					it.ImdbID = fmt.Sprintf("tt%d", rapid.IntRange(1, 8).Draw(rt, "itemImdb"))
-				}
+				// A stray same-key TVDB id on the film: the Sonarr route must
+				// not reach a Radarr item.
+				it.TvdbID = rapid.IntRange(0, 8).Draw(rt, "strayTvdb")
 			} else {
 				it.Arr = library.ArrSonarr
 				it.TvdbID = rapid.IntRange(0, 8).Draw(rt, "itemTvdb")
-				// A stray same-key movie id on the series item: the reverse
-				// catalogue must not recognize a Sonarr item through a MOVIE
-				// record's ids any more than FindByID may resolve one.
+				// A stray same-key movie id on the series item: neither the
+				// Radarr route nor the catalogue may recognize a Sonarr item by it.
 				it.TmdbID = rapid.IntRange(0, 8).Draw(rt, "strayTmdb")
 			}
 			items = append(items, it)
 		}
 		li := NewLibIndex(&library.Snapshot{Items: items})
-		cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), nil)
+		cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), false)
 		for i := range records {
-			it := li.FindByID(&records[i])
-			arr, tmdb, tvdb, imdb, found := wantFindByID(&records[i], items)
-			if it == nil {
-				if found {
-					rt.Fatalf("FindByID(%+v) = nil, want a %s item (tmdb %d, tvdb %d, imdb %q)", records[i], arr, tmdb, tvdb, imdb)
+			rec := &records[i]
+			tmdb, tvdb := wantRoutes(rec, items)
+			for _, route := range []struct {
+				arr  string
+				got  *library.Item
+				want int
+				id   func(*library.Item) int
+			}{
+				{library.ArrRadarr, li.Radarr(rec), tmdb, func(it *library.Item) int { return it.TmdbID }},
+				{library.ArrSonarr, li.Sonarr(rec), tvdb, func(it *library.Item) int { return it.TvdbID }},
+			} {
+				if route.got == nil {
+					if route.want > 0 {
+						rt.Fatalf("%s route of %+v = nil, want the item with id %d", route.arr, *rec, route.want)
+					}
+					continue
 				}
-				continue
-			}
-			if !found || it.Arr != arr || tmdb > 0 && it.TmdbID != tmdb || tvdb > 0 && it.TvdbID != tvdb || imdb != "" && it.ImdbID != imdb {
-				rt.Fatalf("FindByID(%+v) = %s item %q (tmdb %d, tvdb %d, imdb %q), want found %v: %s item (tmdb %d, tvdb %d, imdb %q)",
-					records[i], it.Arr, it.Title, it.TmdbID, it.TvdbID, it.ImdbID, found, arr, tmdb, tvdb, imdb)
-			}
-			if !cat.Has(it) {
-				rt.Fatalf("forward/reverse drift: FindByID(record %d) resolved item %q (arr %s, tvdb %d, tmdb %d, imdb %q) but Catalogue.Has rejects it",
-					records[i].AniListID, it.Title, it.Arr, it.TvdbID, it.TmdbID, it.ImdbID)
+				if route.want == 0 || route.got.Arr != route.arr || route.id(route.got) != route.want {
+					rt.Fatalf("%s route of %+v = %s item %q (id %d), want id %d", route.arr, *rec, route.got.Arr, route.got.Title, route.id(route.got), route.want)
+				}
+				if !cat.Has(route.got) {
+					rt.Fatalf("forward/reverse drift: the %s route of record %d resolved %q but Catalogue.Has rejects it", route.arr, rec.AniListID, route.got.Title)
+				}
 			}
 		}
 	})

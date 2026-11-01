@@ -1,6 +1,7 @@
-// Package match links SeaDex entries to library items. It resolves an entry's
-// AniList ID to arr IDs through the animap mapping (overrides already applied),
-// and on a miss falls back to an AniList title lookup plus a conservative
+// Package match links SeaDex entries to library items. An entry's mapping
+// record (overrides already applied) routes it: a TMDB movie id to Radarr, a
+// TVDB id to Sonarr, both to both, each route one copy. An entry with no route
+// falls back to an AniList title lookup plus a conservative
 // normalized-title-plus-year match against the library.
 package match
 
@@ -8,13 +9,13 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"strings"
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/mapping"
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
@@ -68,6 +69,11 @@ type Match struct {
 // InLibrary reports whether the entry was matched to a library item.
 func (m *Match) InLibrary() bool { return m.Item != nil }
 
+// Special reports whether the copy is a special: a Sonarr copy whose record
+// lands only on season 0 (mapping.Record.SonarrSpecial). A Radarr copy and a
+// title-fallback match never are.
+func (m *Match) Special() bool { return m.Arr == library.ArrSonarr && m.Record.SonarrSpecial() }
+
 // SpecialsUnknown reports whether the entry is placed on season-0 episodes of
 // a series whose season-0 files are unknown (library.Item.SpecialsUnknown):
 // such an entry has no verdict this pass, which is not a resolved one.
@@ -81,9 +87,9 @@ func (m *Match) AlignEntry() *align.Entry {
 }
 
 // coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
-// log line. Hits counts entries whose record carries a usable arr id - the ID
-// bridge resolved an arr id - whether or not the item is in the library (a
-// resolved id absent from the library is a missing item, not a mapping gap).
+// log line. Hits counts route copies, so a both-routes entry is a hit in each
+// arr, whether or not the item is in the library (a routed id absent from the
+// library is a missing item, not a mapping gap).
 type coverage struct {
 	Hits     map[string]int
 	Unmapped map[string]int
@@ -101,8 +107,22 @@ type Result struct {
 	Coverage      coverage
 	Memo          Memo
 	IncompleteIDs map[int]struct{}
-	Matches       []Match
-	Degraded      bool
+	// HiddenIDs are the entries an in-library copy was dropped from (a special
+	// with specials excluded, or a series the map places the film on no unit
+	// of). They are evaluated though no match carries them, so a prior finding
+	// on the dropped copy resolves.
+	HiddenIDs map[int]struct{}
+	Matches   []Match
+	Degraded  bool
+}
+
+// Config configures a Matcher.
+type Config struct {
+	AniList AniListClient
+	// Logger may be nil: slog.Default.
+	Logger *slog.Logger
+	// ExcludeSpecials drops every copy that is a special (Match.Special).
+	ExcludeSpecials bool
 }
 
 // Matcher links entries using the mapping index and the AniList fallback.
@@ -112,20 +132,23 @@ type Matcher struct {
 	// now and rand feed the memo-expiry policy (the run clock and the TTL
 	// jitter draw). New fixes them to time.Now and rand.Float64; tests override
 	// the fields for deterministic, sleep-free expiry coverage.
-	now  func() time.Time
-	rand func() float64
+	now             func() time.Time
+	rand            func() float64
+	excludeSpecials bool
 }
 
-// New builds a Matcher. logger may be nil.
-func New(anilistClient AniListClient, logger *slog.Logger) *Matcher {
+// New builds a Matcher.
+func New(cfg Config) *Matcher {
+	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Matcher{
-		anilist: anilistClient,
-		log:     logger,
-		now:     time.Now,
-		rand:    rand.Float64,
+		anilist:         cfg.AniList,
+		log:             logger,
+		now:             time.Now,
+		rand:            rand.Float64,
+		excludeSpecials: cfg.ExcludeSpecials,
 	}
 }
 
@@ -142,7 +165,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	now := m.now()
 	m.restampSkewedExpiries(&memo, now)
 	cov := coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
-	outage := m.prefetch(ctx, entries, idx, lib, &memo, now)
+	outage := m.prefetch(ctx, entries, idx, &memo, now)
 	run := &matchRun{
 		m:    m,
 		lib:  lib,
@@ -163,8 +186,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 			m.log.Debug("match interrupted; remaining entries skipped", "matched", len(matches), "total", len(entries))
 			break
 		}
-		m := run.matchEntry(ctx, &entries[i])
-		matches = append(matches, run.copies(&m)...)
+		matches = append(matches, run.matchEntry(ctx, &entries[i])...)
 	}
 	// Cancellation can arrive while the final entry is being matched, after
 	// the loop's boundary check.
@@ -172,7 +194,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		run.degraded = true
 	}
 	// Match does NOT prune the memo.
-	return Result{at: now, Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
+	return Result{at: now, Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete, HiddenIDs: run.hidden}
 }
 
 // PruneMemo garbage-collects res.Memo against the WHOLE SeaDex catalogue,
@@ -212,6 +234,8 @@ type matchRun struct {
 	// transiently this pass (see markIncomplete); Match surfaces it as
 	// Result.IncompleteIDs. Nil until the first failure.
 	incomplete map[int]struct{}
+	// hidden accumulates Result.HiddenIDs. Nil until the first drop.
+	hidden map[int]struct{}
 	// now is the run's single clock reading: every expiry comparison and stamp
 	// in one Match pass uses it, so a slow (rate-limited) pass cannot straddle
 	// an expiry mid-run and prune agrees with the lookups.
@@ -224,70 +248,62 @@ type matchRun struct {
 
 // aniListNeed classifies an entry's AniList-lookup need - the ONE definition
 // of the trigger BOTH pendingAniListIDs (the batch prefetch) and matchEntry
-// (the per-entry pass) consult, so the two cannot drift. item != nil means
-// resolved by id (no lookup).
-func aniListNeed(alID int, idx *mapping.Index, lib *LibIndex) (rec mapping.Record, recOK bool, item *library.Item, needsLookup bool) {
+// (the per-entry pass) consult, so the two cannot drift. Only an entry with
+// no record, or a record with no route, needs a lookup.
+func aniListNeed(alID int, idx *mapping.Index) (rec mapping.Record, recOK, needsLookup bool) {
 	if alID <= 0 {
-		return mapping.Record{}, false, nil, false
+		return mapping.Record{}, false, false
 	}
 	rec, recOK = idx.Lookup(alID)
-	if !recOK {
-		return rec, false, nil, true
-	}
-	if found := lib.FindByID(&rec); found != nil {
-		return rec, true, found, false
-	}
-	return rec, true, nil, !rec.HasArrIdentifier()
+	return rec, recOK, !recOK || !rec.HasRoute()
 }
 
-// matchEntry links one entry: ID resolution first, AniList title fallback next.
-// The lookup trigger is aniListNeed, shared with the batch prefetch. r.gate
-// fast-fails per-id AniList lookups doomed by an outage (see matchRun).
-func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
-	rec, recOK, item, needsLookup := aniListNeed(e.AniListID, r.idx, r.lib)
-	if !recOK && !needsLookup {
+// matchEntry links one entry: its route copies when its record has a route,
+// else the AniList title fallback. The lookup trigger is aniListNeed, shared
+// with the batch prefetch. r.gate fast-fails per-id AniList lookups doomed by
+// an outage (see matchRun).
+func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) []Match {
+	rec, recOK, needsLookup := aniListNeed(e.AniListID, r.idx)
+	switch {
+	case !recOK && !needsLookup:
 		// Non-positive AniList id: it can never resolve, so do not spend a
 		// rate-limited AniList request confirming it (or degrade the whole
 		// cycle when that request fails transiently).
 		r.cov.Unmapped[arrUnknown]++
-		return Match{Entry: *e, Arr: arrUnknown, Source: sourceUnmapped}
+		return []Match{{Entry: *e, Arr: arrUnknown, Source: sourceUnmapped}}
+	case !recOK:
+		return []Match{r.matchUnmappedEntry(ctx, e)}
+	case needsLookup:
+		return []Match{r.matchIDLessEntry(ctx, e, &rec)}
 	}
-	if recOK {
-		return r.matchMappedEntry(ctx, e, &rec, item, needsLookup)
-	}
-	return r.matchUnmappedEntry(ctx, e)
+	return r.matchMappedEntry(e, &rec)
 }
 
-// matchMappedEntry links an entry whose mapping record resolved, tracking
-// coverage per outcome (ID hit, id-less title fallback, or library miss).
-func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, item *library.Item, needsLookup bool) Match {
-	arr := recordArr(rec)
-	if needsLookup {
-		return r.matchIDLessEntry(ctx, e, rec, arr)
+// matchMappedEntry builds one copy per route of a routed record and returns
+// the ones copies judges. A routed entry is never looked up on AniList, in
+// the library or not: that keeps the fallback off the thousands of SeaDex
+// entries the operator does not have.
+func (r *matchRun) matchMappedEntry(e *seadex.Entry, rec *mapping.Record) []Match {
+	var radarr, sonarr *Match
+	if rec.RadarrRoute() {
+		radarr = r.routeCopy(e, rec, r.lib.Radarr(rec), library.ArrRadarr)
 	}
-	if item == nil {
-		item = r.lib.PlacedFilm(r.idx, rec)
+	if rec.SonarrRoute() {
+		sonarr = r.routeCopy(e, rec, r.lib.Sonarr(rec), library.ArrSonarr)
 	}
-	// The record carries a usable arr id: the ID mapping resolved, so this
-	// is a coverage hit whether or not the item is in the library.
-	if item != nil {
-		// The RESOLVED item's arr is authoritative over the type label's
-		// routing: FindByID's secondary movie lookup can resolve a Radarr movie
-		// from a non-MOVIE-typed record carrying an unambiguous movie TMDB id, and
-		// the per-arr index split guarantees the item belongs to the
-		// arr its id was looked up in - so for every record the type label
-		// already routed correctly this is the same value recordArr returned.
-		arr = item.Arr
-		r.cov.Hits[arr]++
-		return r.mapped(&Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: SourceID})
-	}
+	return r.copies(radarr, sonarr)
+}
+
+// routeCopy is the entry's copy in arr, item nil when the library lacks it,
+// counted as a coverage hit there either way.
+func (r *matchRun) routeCopy(e *seadex.Entry, rec *mapping.Record, item *library.Item, arr string) *Match {
 	r.cov.Hits[arr]++
-	// A record that carries its arr id but missed FindByID is simply not in
-	// the library and is unmatched directly, with no AniList lookup - this
-	// keeps the fallback off the ~thousands of SeaDex entries the operator
-	// does not have, which otherwise dominate a cold cycle's AniList
-	// traffic.
-	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: sourceUnmapped})
+	src := sourceUnmapped
+	if item != nil {
+		src = SourceID
+	}
+	m := r.mapped(&Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: src})
+	return &m
 }
 
 func (r *matchRun) mapped(m *Match) Match {
@@ -304,33 +320,62 @@ func (r *matchRun) mapped(m *Match) Match {
 	return *m
 }
 
-// copies is m plus the entry's copy in the other arr, whatever the map's
-// placement: each copy that holds a file (align.HoldsFile) is judged on its
-// own. When neither holds one, m alone is judged.
-func (r *matchRun) copies(m *Match) []Match {
-	if !m.InLibrary() {
-		return []Match{*m}
+// copies decides which of an entry's route copies are judged, nil meaning the
+// route is absent. A copy left out is never returned, so no consumer filters
+// one again: with specials excluded the Sonarr copy goes before the choice,
+// and the Radarr copy is then judged alone.
+func (r *matchRun) copies(radarr, sonarr *Match) []Match {
+	sonarr = r.keptSonarr(radarr, sonarr)
+	switch {
+	case radarr == nil && sonarr == nil:
+		return nil
+	case sonarr == nil:
+		return []Match{*radarr}
+	case radarr == nil:
+		return []Match{*sonarr}
+	case !radarr.InLibrary() || !sonarr.InLibrary():
+		return []Match{*radarr, *sonarr}
 	}
-	other := r.lib.otherCopy(m)
-	if other == nil {
-		return []Match{*m}
-	}
-	second := *m
-	second.Item, second.Arr = other, other.Arr
-	switch mine, theirs := align.HoldsFile(m.Item, m.AlignEntry()), align.HoldsFile(other, second.AlignEntry()); {
-	case mine && theirs:
-		return []Match{*m, second}
-	case theirs:
-		second.Uncompared = m.Item
-		return []Match{second}
+	switch film, series := align.HoldsFile(radarr.Item, radarr.AlignEntry()), align.HoldsFile(sonarr.Item, sonarr.AlignEntry()); {
+	case film && series:
+		return []Match{*radarr, *sonarr}
+	case series:
+		sonarr.Uncompared = radarr.Item
+		return []Match{*sonarr}
 	default:
-		m.Uncompared = other
-		return []Match{*m}
+		// With no file in either, the Radarr copy is judged: a TMDB route means
+		// every episode of the entry states that film.
+		radarr.Uncompared = sonarr.Item
+		return []Match{*radarr}
 	}
 }
 
+// keptSonarr is the Sonarr copy left after the specials switch and the
+// placement gate, nil when either drops it. A dropped in-library copy is
+// recorded in r.hidden.
+func (r *matchRun) keptSonarr(radarr, sonarr *Match) *Match {
+	if sonarr == nil {
+		return nil
+	}
+	hiddenSpecial := r.m.excludeSpecials && sonarr.Special()
+	// A film's series is a copy only where the map places the film on some
+	// unit of it: otherwise the series' other files would be judged as its own.
+	unplacedSeries := radarr != nil && !align.PlacedInSeries(sonarr.AlignEntry())
+	if !hiddenSpecial && !unplacedSeries {
+		return sonarr
+	}
+	if sonarr.InLibrary() {
+		if r.hidden == nil {
+			r.hidden = make(map[int]struct{})
+		}
+		r.hidden[sonarr.Entry.AniListID] = struct{}{}
+	}
+	return nil
+}
+
 // matchUnmappedEntry links an entry with no mapping record through the AniList
-// title fallback, counting it as unmapped coverage either way.
+// title fallback, counting it as unmapped coverage either way. A title match
+// carries the zero Record: no placement, so a Sonarr match is the whole series.
 func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Match {
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
@@ -343,43 +388,21 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 	if item == nil {
 		return Match{Entry: *e, Arr: arr, Source: sourceUnmapped}
 	}
-	return Match{Item: item, Entry: *e, Record: mapping.RecordFromFormat(media.Format), Arr: item.Arr, Source: sourceTitle}
+	return Match{Item: item, Entry: *e, Arr: item.Arr, Source: sourceTitle}
 }
 
-// matchIDLessEntry links an entry whose mapping record exists but carries no arr
-// id (a split AniList<->arr mapping), where the AniList title is the only
-// remaining link to the arr item. It resolves AniList once: the format types an
-// untyped record and picks the search arr, then the normalized title + year
-// matches within that arr. Coverage counts under the resolved arr either way.
-func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, arr string) Match {
-	// needsLookup under a present record means the record is id-less (see
-	// aniListNeed): the ID bridge could not resolve an arr id from the record
-	// AS LOADED, so unless the AniList typing below makes one of the record's
-	// own ids usable (the re-entry, which counts as a Hit), the entry counts as
-	// Unmapped even when the AniList title fallback links it - keeping the cycle
-	// line's "mapped" an honest count of ID resolutions. The title is the only
-	// remaining link to the arr item, so consult AniList.
+// matchIDLessEntry links an entry whose mapping record has no route, where the
+// AniList title is the only remaining link to the arr item: the format picks
+// the arr, then the normalized title + year matches within it. It counts as
+// unmapped coverage even when the title links it, keeping the cycle line's
+// "mapped" an honest count of route copies.
+func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record) Match {
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
-		r.cov.Unmapped[arr]++
-		return Match{Entry: *e, Record: *rec, Arr: arr, Source: sourceUnmapped}
+		r.cov.Unmapped[arrUnknown]++
+		return Match{Entry: *e, Record: *rec, Arr: arrUnknown, Source: sourceUnmapped}
 	}
-	// An UNTYPED id-less record carries no routing evidence at all: recordArr
-	// routes every non-MOVIE value (including "") to Sonarr, which would
-	// restrict the title search to Sonarr and can miss the real Radarr movie
-	// or bind a same-titled series.
-	if rec.Type == "" {
-		rec.Type = mapping.RecordFromFormat(media.Format).Type
-		arr = formatArr(media.Format)
-		// Typing can make identifiers the record ALREADY carried usable, so
-		// the record may no longer be id-less: RoutedIDs only routes the
-		// TMDB-movie/IMDb fields once the type says MOVIE, and both animap and
-		// an operator override (tmdb_movies / imdb_ids) can carry them on an
-		// untyped record.
-		if rec.HasArrIdentifier() {
-			return r.matchMappedEntry(ctx, e, rec, r.lib.FindByID(rec), false)
-		}
-	}
+	arr := formatArr(media.Format)
 	r.cov.Unmapped[arr]++
 	if matched := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log); matched != nil {
 		return r.mapped(&Match{Item: matched, Entry: *e, Record: *rec, Arr: matched.Arr, Source: sourceTitle})
@@ -387,34 +410,26 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	return r.mapped(&Match{Entry: *e, Record: *rec, Arr: arr, Source: sourceUnmapped})
 }
 
-// recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).
-func recordArr(r *mapping.Record) string {
-	if r.IsMovie() {
+// formatArr is the arr an AniList format's title search runs in: a film
+// searches Radarr, any other format Sonarr, and an empty one both
+// (arrUnknown).
+func formatArr(format string) string {
+	switch format = mediatype.Normalize(format); {
+	case format == "":
+		return arrUnknown
+	case mediatype.IsMovie(format):
 		return library.ArrRadarr
 	}
 	return library.ArrSonarr
 }
 
-// formatArr routes an AniList format to its arr (MOVIE -> Radarr, else Sonarr)
-// by building a Record and reusing the mapping-owned decision, so the "MOVIE"
-// token lives only in mapping. An empty format is unknown.
-func formatArr(format string) string {
-	rec := mapping.RecordFromFormat(format)
-	if rec.Type == "" {
-		return arrUnknown
-	}
-	return recordArr(&rec)
-}
-
 // --- LibIndex: library snapshot lookup indexes (by arr ID and normalized title) ---
 
-// LibIndex indexes a library snapshot by external ID and normalized title;
-// the ID lookup is arr-consistent (see FindByID). Shared by the matcher and
-// the feed-info builder (scout's feedInfo).
+// LibIndex indexes a library snapshot by external ID and normalized title.
+// Shared by the matcher and the feed-info builder (scout's feedInfo).
 type LibIndex struct {
 	byTvdb  map[int]*library.Item
 	byTmdb  map[int]*library.Item
-	byImdb  map[string]*library.Item
 	byTitle map[string][]*library.Item
 }
 
@@ -423,7 +438,6 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 	li := &LibIndex{
 		byTvdb:  make(map[int]*library.Item),
 		byTmdb:  make(map[int]*library.Item),
-		byImdb:  make(map[string]*library.Item),
 		byTitle: make(map[string][]*library.Item),
 	}
 	if snap == nil {
@@ -438,20 +452,17 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 }
 
 // indexIDs adds an item's external IDs to the ID indexes of its arr: byTvdb
-// holds only Sonarr items, byTmdb and byImdb only Radarr items, so for every
-// reader a map miss is the arr gate.
+// holds only Sonarr items, byTmdb only Radarr items, so for every reader a map
+// miss is the arr gate.
 func (li *LibIndex) indexIDs(it *library.Item) {
 	switch it.Arr {
 	case library.ArrSonarr:
-		if it.TvdbID > 0 { // positive ids only: FindByID looks a record with no TVDB id up under 0
+		if it.TvdbID > 0 { // positive ids only: Sonarr looks a record with no TVDB id up under 0
 			li.byTvdb[it.TvdbID] = it
 		}
 	case library.ArrRadarr:
-		if it.TmdbID > 0 { // only positive ids are reachable: findMovie guards id > 0
+		if it.TmdbID > 0 {
 			li.byTmdb[it.TmdbID] = it
-		}
-		if key := imdbKey(it.ImdbID); key != "" {
-			li.byImdb[key] = it
 		}
 	}
 }
@@ -471,111 +482,10 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 	}
 }
 
-// FindByID looks up a library item by a mapping record's arr IDs, own arr first:
-// a MOVIE record tries its movie TMDB ids, then IMDb ids, then TVDB id; any other
-// type tries its TVDB id, then its movie TMDB ids, and its IMDb ids never reach
-// Radarr (TVDB reuses a film's IMDb id on its parent series).
-//
-// A licensed reader of mapping.Record.AllIDs (with otherCopy and filmCopy),
-// because it holds both indexes: byTvdb is Sonarr-only and
-// byTmdb/byImdb Radarr-only, so a map miss IS the arr gate.
-func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
-	if rec.IsMovie() {
-		return li.findMovie(rec)
-	}
-	tvdb, _, _ := rec.RoutedIDs()
-	// byTvdb holds only Sonarr items under positive ids (indexIDs), so the
-	// lookup is both the presence check and the arr gate.
-	if it := li.byTvdb[tvdb]; it != nil {
-		return it
-	}
-	return li.findMovieByTMDB(rec.TmdbMovies)
-}
-
-// findMovie resolves a MOVIE record by TMDB movie id, then by IMDb id - both
-// Radarr-only - and only then by its TVDB id, which reaches the Sonarr series
-// TVDB files the film under. The first two run ahead of it so a film the operator
-// owns in Radarr keeps the comparable match.
-func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
-	tvdb, tmdbMovies, imdbIDs := rec.AllIDs()
-	if it := li.findMovieByTMDB(tmdbMovies); it != nil {
-		return it
-	}
-	for _, imdb := range imdbIDs { // AllIDs returns only canonical ids
-		if it := li.byImdb[imdb]; it != nil { // byImdb holds only Radarr items
-			return it
-		}
-	}
-	if tvdb > 0 {
-		// byTvdb is populated only with Sonarr items (indexIDs' arr switch), so the
-		// map miss IS the arr gate here exactly as on the series branch.
-		return li.byTvdb[tvdb]
-	}
-	return nil
-}
-
-// otherCopy is the entry's item in the arr m.Item is not in: for a Radarr film
-// the Sonarr series the record's TVDB id names, when the map places the entry
-// in it (align.PlacedInSeries); for a Sonarr series the Radarr film its TMDB
-// movie ids name. Its IMDb ids reach Radarr only for an entry placed on
-// season-0 episodes (filmCopy), as FindByID never takes a non-MOVIE record's
-// IMDb ids there.
-func (li *LibIndex) otherCopy(m *Match) *library.Item {
-	if m.Item.Arr == library.ArrRadarr {
-		if tvdb, _, _ := m.Record.AllIDs(); tvdb > 0 && align.PlacedInSeries(m.AlignEntry()) {
-			return li.byTvdb[tvdb]
-		}
-		return nil
-	}
-	if len(m.Specials) == 0 {
-		return li.findMovieByTMDB(m.Record.TmdbMovies)
-	}
-	return li.filmCopy(&m.Record, imdbKey(m.Item.ImdbID))
-}
-
-// SpecialsSeries is the Sonarr series rec's TVDB id names, or nil. The caller
-// owns the precondition that rec is filed in that series' specials (an offered
-// record): only then do its season-0 episodes belong to this item, whichever
-// copy FindByID resolved.
-func (li *LibIndex) SpecialsSeries(rec *mapping.Record) *library.Item {
-	return li.byTvdb[rec.TvdbID] // byTvdb is Sonarr-only, positive ids only (indexIDs)
-}
-
-// PlacedFilm is the Radarr film rec names, nil for none, when idx lists rec's
-// season-0 episodes in Mapping.Specials: such an entry may be held in either
-// arr, while FindByID never takes a non-MOVIE record's IMDb ids to Radarr.
-func (li *LibIndex) PlacedFilm(idx *mapping.Index, rec *mapping.Record) *library.Item {
-	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
-		return nil
-	}
-	if facts, ok := idx.MappingFor(rec); !ok || len(facts.Specials) == 0 {
-		return nil
-	}
-	return li.filmCopy(rec, "")
-}
-
-// filmCopy is the Radarr film rec's TMDB movie ids, then its IMDb ids, name.
-// seriesImdb, the IMDb id of the entry's Sonarr series ("" when it has none),
-// never names the film: TVDB reuses a film's IMDb id on its parent series.
-func (li *LibIndex) filmCopy(rec *mapping.Record, seriesImdb string) *library.Item {
-	_, tmdbMovies, imdbIDs := rec.AllIDs()
-	if it := li.findMovieByTMDB(tmdbMovies); it != nil {
-		return it
-	}
-	for _, imdb := range imdbIDs {
-		if imdb == seriesImdb {
-			continue
-		}
-		if it := li.byImdb[imdb]; it != nil {
-			return it
-		}
-	}
-	return nil
-}
-
-// findMovieByTMDB resolves the first indexed Radarr movie named by ids.
-func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
-	for _, id := range ids { // callers pass only usable (positive) ids
+// Radarr is the Radarr film named by the first of rec's TMDB movie ids the
+// library holds, or nil.
+func (li *LibIndex) Radarr(rec *mapping.Record) *library.Item {
+	for _, id := range rec.TmdbMovies { // canonicalize keeps only positive ids
 		if it := li.byTmdb[id]; it != nil { // byTmdb holds only Radarr items
 			return it
 		}
@@ -583,12 +493,10 @@ func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 	return nil
 }
 
-// imdbKey canonicalizes a library Item's IMDb id into its index/lookup key.
-// Only library-side inputs reach it: a mapping Record's ids are already
-// canonical, because Record.canonicalize trims them at every producer and
-// mapping.NewIndex reapplies the invariant to a decoded cache, so RoutedIDs
-// cannot return a padded or blank id.
-func imdbKey(id string) string { return strings.TrimSpace(id) }
+// Sonarr is the Sonarr series rec's TVDB id names, or nil.
+func (li *LibIndex) Sonarr(rec *mapping.Record) *library.Item {
+	return li.byTvdb[rec.TvdbID] // byTvdb is Sonarr-only, positive ids only (indexIDs)
+}
 
 // narrowByYear applies the AniList year constraint to a title-fallback
 // candidate set, returning the set unchanged when the year is unknown.

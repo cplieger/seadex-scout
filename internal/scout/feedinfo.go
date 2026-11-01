@@ -1,6 +1,7 @@
 package scout
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/align"
@@ -8,6 +9,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // feedInfo builds the feed writer's metadata from a library snapshot, the
@@ -28,8 +30,6 @@ func feedInfo(idx *mapping.Index, lib *library.Snapshot, nonAiredTvdbIDs []int, 
 
 // entryInfo is feedInfo's per-show half.
 func entryInfo(idx *mapping.Index, lib *library.Snapshot, nonAired map[int]bool, memo match.Memo) indexer.EntryInfoFunc {
-	// match.NewLibIndex applies the matcher's arr-consistent ID routing, so a film
-	// carrying its parent series' IMDb id cannot take that Sonarr series' title.
 	// Failed placeholder items keep their ids, so a partial walk still supplies titles.
 	li := match.NewLibIndex(lib)
 	return func(alID int) indexer.EntryInfo {
@@ -37,11 +37,7 @@ func entryInfo(idx *mapping.Index, lib *library.Snapshot, nonAired map[int]bool,
 		rec, ok := idx.Lookup(alID)
 		if ok {
 			it := applyRecordFacts(idx, &rec, li, nonAired, &info)
-			// The item's title is taken only when the item is the entry's own work.
-			// FindByID resolves a MOVIE record to the Sonarr series TVDB files it
-			// under, and that series is a DIFFERENT work, so a film on a Sonarr item
-			// falls through to the memo tier and keeps its own name.
-			if it != nil && (info.Kind != indexer.KindMovie || it.Arr == library.ArrRadarr) && strings.TrimSpace(it.Title) != "" {
+			if it != nil && strings.TrimSpace(it.Title) != "" {
 				info.Title, info.Year = it.Title, it.Year
 				return info
 			}
@@ -73,18 +69,12 @@ func nonAiredOrderSet(tvdbIDs []int) map[int]bool {
 	return set
 }
 
-// An entry resolved to a Radarr film is served as one whatever its type, or
-// its film-titled release lands in the series categories Radarr never reads.
+// applyRecordFacts sets rec's routing facts on info and returns the library
+// copy whose title the original item carries: the Radarr film for an entry
+// with a Radarr route, else the Sonarr series.
 func applyRecordFacts(idx *mapping.Index, rec *mapping.Record, li *match.LibIndex, nonAired map[int]bool, info *indexer.EntryInfo) *library.Item {
-	it := li.FindByID(rec)
-	if it == nil {
-		it = li.PlacedFilm(idx, rec)
-	}
-	film := rec.IsMovie() || it != nil && it.Arr == library.ArrRadarr
+	film := rec.RadarrRoute()
 	info.Kind = recordKind(rec)
-	if film {
-		info.Kind = indexer.KindMovie
-	}
 	info.TvdbID = rec.TvdbID
 	info.NonAiredOrder = rec.TvdbID > 0 && nonAired[rec.TvdbID]
 	if !info.NonAiredOrder {
@@ -93,16 +83,19 @@ func applyRecordFacts(idx *mapping.Index, rec *mapping.Record, li *match.LibInde
 		}
 		applyEpisodeFacts(idx, rec, film, li, info)
 	}
-	return it
+	if film {
+		return li.Radarr(rec)
+	}
+	return li.Sonarr(rec)
 }
 
-// recordKind is the typing rec carries: its type, else the series arm a
-// routed id implies; KindUnknown for an untyped record that routes nothing.
+// recordKind is the kind rec's routes give: a Radarr route is a film, a
+// Sonarr route alone a series; KindUnknown for a record that routes nothing.
 func recordKind(rec *mapping.Record) indexer.MediaKind {
 	switch {
-	case rec.IsMovie():
+	case rec.RadarrRoute():
 		return indexer.KindMovie
-	case rec.Type != "" || rec.HasArrIdentifier():
+	case rec.SonarrRoute():
 		return indexer.KindSeries
 	default:
 		return indexer.KindUnknown
@@ -110,11 +103,12 @@ func recordKind(rec *mapping.Record) indexer.MediaKind {
 }
 
 // applyEpisodeFacts projects the map's episode facts onto the feed metadata.
-// The season ranges ride along whatever the target (the indexer picks each
-// pack's season token), except for a film, which pins no season. The twin's
-// season-0 run is stamped only for the OFFERED class (season scope 0) with the
-// titled Sonarr series it is filed under, whichever arr FindByID resolves the
-// record to: a film also in Radarr still needs its twin.
+// The season ranges ride along for a series (the indexer picks each pack's
+// season token); a film pins no season. The Sonarr item's run is stamped,
+// with the titled Sonarr series it is filed under, only where the map states
+// one: an offered entry's season-0 run, or a film's episodes on its one
+// positive season. A Sonarr-only entry on a positive season needs none,
+// because its original already carries the series title and season.
 func applyEpisodeFacts(idx *mapping.Index, rec *mapping.Record, film bool, li *match.LibIndex, info *indexer.EntryInfo) {
 	m, mapped := idx.MappingFor(rec)
 	if !mapped {
@@ -126,56 +120,47 @@ func applyEpisodeFacts(idx *mapping.Index, rec *mapping.Record, film bool, li *m
 			info.Seasons[i] = indexer.SeasonRange{Season: r.Season, First: r.First, Last: r.Last}
 		}
 	}
-	run, entryEpisodes := m.SpecialRun()
-	if len(run) == 0 {
-		return
-	}
-	if kind, _ := align.RecordSeason(rec); kind != align.ScopeOffered {
-		return
-	}
-	series := li.SpecialsSeries(rec)
+	series := li.Sonarr(rec)
 	if series == nil || strings.TrimSpace(series.Title) == "" {
 		return
 	}
-	info.SpecialEpisodes, info.SpecialsEpisodes, info.SeriesTitle = run, entryEpisodes, series.Title
-}
-
-// applyMemoTyping fills the media typing - and the season that typing implies -
-// from the persisted AniList memo. It runs only when the mapping supplied no ARR
-// ROUTING EVIDENCE at all: no record, or a record BOTH untyped and id-less. An
-// untyped record that still routes a positive TVDB id is itself evidence of a
-// series, so the caller's gate keeps it out of here - a memoized format OUTLIVES
-// the id-less shape it was fetched for, and re-typing from a stale MOVIE format
-// is a routing bug. Without the memo an entry the app KNEW was a movie routed to
-// Anime/5070, which Radarr never sees.
-func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
-	format, hasFormat := memo.StaleFormat(alID)
-	if !hasFormat {
+	switch kind, season := align.RecordSeason(rec); {
+	case kind == align.ScopeOffered:
+		run, entryEpisodes := m.SpecialRun()
+		if len(run) == 0 {
+			return
+		}
+		info.TwinSeason, info.TwinEpisodes, info.TwinEntryEpisodes = 0, run, entryEpisodes
+	case film && kind == align.ScopeSeason && len(m.Episodes) > 0:
+		info.TwinSeason, info.TwinEpisodes, info.TwinEntryEpisodes = season, slices.Clone(m.Episodes), 0
+	default:
 		return
 	}
-	typed := mapping.RecordFromFormat(format)
-	info.Kind = recordKind(&typed)
-	switch {
-	case info.Kind == indexer.KindMovie:
-		// A movie pins no season at all, so a season resolved before the memo typed
-		// it as a movie must not survive: no consumer may see KindMovie with one.
+	info.SeriesTitle = series.Title
+}
+
+// applyMemoTyping types an entry the mapping routes nothing for from the
+// persisted AniList memo's format: a stale MOVIE goes to Movies/2000, which
+// Radarr reads, and any other format to the series categories. Without a
+// route there is no placement, so it pins no season.
+func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
+	format, hasFormat := memo.StaleFormat(alID)
+	if !hasFormat || strings.TrimSpace(format) == "" {
+		return
+	}
+	info.Kind = indexer.KindSeries
+	if mediatype.IsMovie(mediatype.Normalize(format)) {
+		// No consumer may see KindMovie with a season.
+		info.Kind = indexer.KindMovie
 		info.Season, info.SeasonKnown = 0, false
-	case !info.SeasonKnown:
-		// A positive mapped season already resolved by the caller wins: the memo's
-		// format can only ever add the specials bucket.
-		info.Season, info.SeasonKnown = resolvedSeason(&typed)
 	}
 }
 
-// resolvedSeason resolves the season a mapping record pins, once, for the feed: its
-// positive TVDB season, or the specials bucket for a MAPPED season zero. An
-// absolute-numbered run, a title-only match and an untyped entry pin no season,
-// and so does a MOVIE, for the reason applyMemoTyping states. The rule itself is
-// align.RecordSeason, so the feed and the comparison scope cannot drift.
+// resolvedSeason resolves the season a mapping record pins, once, for the feed:
+// its positive TVDB season, or the specials bucket for a MAPPED season zero.
+// The rule itself is align.RecordSeason, so the feed and the comparison scope
+// cannot drift; the caller withholds it from a film.
 func resolvedSeason(rec *mapping.Record) (season int, known bool) {
-	if rec.IsMovie() {
-		return 0, false
-	}
 	kind, season := align.RecordSeason(rec)
 	return season, kind != align.ScopeWholeSeries
 }

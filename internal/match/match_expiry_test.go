@@ -24,7 +24,7 @@ var memoTestClock = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 // jitter sequence: the i-th rand draw returns draws[i%len(draws)], so every
 // stamped expiry is exact and deterministic — no sleeps, no real randomness.
 func expiryMatcher(client AniListClient, draws ...float64) *Matcher {
-	m := New(client, nil)
+	m := New(Config{AniList: client})
 	m.now = func() time.Time { return memoTestClock }
 	i := 0
 	m.rand = func() float64 {
@@ -43,8 +43,8 @@ func expiryMatcher(client AniListClient, draws ...float64) *Matcher {
 func TestMemoStampsJitteredExpiryOnNewEntries(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the lookup; the batch returns it
-		{AniListID: 22, Type: "MOVIE"}, // id-less: the batch omits it -> negative
+		{AniListID: 11}, // id-less: needs the lookup; the batch returns it
+		{AniListID: 22}, // id-less: the batch omits it -> negative
 	}})
 	fake := &batchCountingAniList{media: map[int]anilist.Media{
 		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
@@ -73,9 +73,9 @@ func TestMemoStampsJitteredExpiryOnNewEntries(t *testing.T) {
 func TestMemoStampsExpiryOnSingleFetchWrites(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"}, // partial batch returns it
-		{AniListID: 22, Type: "MOVIE"}, // batch error hits it: single Fetch -> positive
-		{AniListID: 33, Type: "MOVIE"}, // batch error hits it: single Fetch -> not-found
+		{AniListID: 11}, // partial batch returns it
+		{AniListID: 22}, // batch error hits it: single Fetch -> positive
+		{AniListID: 33}, // batch error hits it: single Fetch -> not-found
 	}})
 	fake := &partialBatchAniList{
 		batchMedia: map[int]anilist.Media{11: {Titles: []string{"Returned"}, Format: "MOVIE"}},
@@ -114,8 +114,8 @@ func TestMemoExpiredEntryRefetchedAndRestamped(t *testing.T) {
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "New Title", TmdbID: 200, Year: 2021},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the lookup
-		{AniListID: 22, Type: "MOVIE"}, // id-less: needs the lookup
+		{AniListID: 11}, // id-less: needs the lookup
+		{AniListID: 22}, // id-less: needs the lookup
 	}})
 	fake := &batchCountingAniList{media: map[int]anilist.Media{
 		11: {Titles: []string{"Found Later"}, Format: "MOVIE", Year: 2020},
@@ -163,7 +163,7 @@ func TestMemoUnexpiredEntryServedWithoutRefetch(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
 	}}
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11, Type: "MOVIE"}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11}}})
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
 	expiry := memoTestClock.Add(time.Minute) // one minute of life left: still a hit
@@ -271,7 +271,7 @@ func TestMemoEntryWithoutAnExpiryIsRefetchedNotServed(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
 	}}
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11, Type: "MOVIE"}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11}}})
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
 	memo := Memo{Entries: map[int]MemoEntry{
@@ -349,7 +349,7 @@ func TestMemoEntryExpiryWireFormat(t *testing.T) {
 // (scout/feedinfo.go) still serves them, and they stay pending for next
 // cycle's batch either way.
 func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11, Type: "MOVIE"}}}) // id-less: needs the lookup
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11}}}) // id-less: needs the lookup
 	m := expiryMatcher(degradedAniList{}, 0.5)
 	expired := memoTestClock.Add(-time.Hour)
 	memo := Memo{Entries: map[int]MemoEntry{
@@ -412,7 +412,7 @@ func TestMemoChangedTracksEveryWriteAndNothingElse(t *testing.T) {
 
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11, Type: "MOVIE"}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 11}}})
 	served := m.Match(t.Context(), []seadex.Entry{{AniListID: 11}},
 		&library.Snapshot{}, idx, Memo{Entries: map[int]MemoEntry{11: live}})
 	if served.Memo.Changed() {

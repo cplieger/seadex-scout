@@ -59,7 +59,7 @@ animebytes: false # true if you have an AnimeBytes account. Adds AnimeBytes rele
 filters:
   exclude_remux: false # true drops remuxes (default keeps them)
   require_dual_audio: false # true drops non-dual-audio releases
-  exclude_specials: false # true drops OVAs, ONAs and specials
+  exclude_specials: false # true drops the Sonarr copy of entries in a series' season 0; Radarr copies stay
   # Per-tag, per-surface exclusions keyed on SeaDex's own release tags.
   # Empty, the default, means nothing is filtered. A release SeaDex tagged
   # "Broken" is still alerted on as a better release available, still counts as a

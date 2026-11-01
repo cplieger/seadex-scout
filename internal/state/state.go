@@ -49,12 +49,13 @@ const currentSchemaVersion = 1
 // State is the persisted cross-cycle cache.
 type State struct {
 	Memo match.Memo `json:"anilist_memo"`
-	// Never the keys "mapping" or "animap" to "animap_v4": older files hold
-	// another upstream's cache or a projection of animap's version 1, whose
-	// records would load without their facts and be served on a failed
-	// refresh. A change to what the projection derives takes a new key,
-	// unless the old and the new decoder accept no release in common.
-	Mapping mapping.Cache `json:"animap_v5"`
+	// Never the keys "mapping", "animap" to "animap_v4", or "animap_v5":
+	// older files hold another upstream's cache, a projection of animap's
+	// version 1, whose records would load without their facts, or records
+	// carrying a type and IMDb ids, served on a failed refresh. A change to
+	// what the projection derives takes a new key, unless the old and the new
+	// decoder accept no release in common.
+	Mapping mapping.Cache `json:"animap_v6"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the library shrink guard
 	// judged that arr's fresh item count a suspicious truncation and carried its prior
 	// items forward instead.

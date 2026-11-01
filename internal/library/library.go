@@ -54,10 +54,9 @@ type Item struct {
 	Listed map[int]map[int]ListedEpisode `json:"listed,omitempty"`
 	// Order is the series' episode order when Sonarr numbers it in another
 	// order than TheTVDB's aired one, and nil otherwise.
-	Order  *Order `json:"order,omitempty"`
-	Arr    string `json:"arr"`
-	ImdbID string `json:"imdb_id,omitempty"`
-	Title  string `json:"title"`
+	Order *Order `json:"order,omitempty"`
+	Arr   string `json:"arr"`
+	Title string `json:"title"`
 	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
 	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
 	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an

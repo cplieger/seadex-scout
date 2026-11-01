@@ -238,14 +238,14 @@ func notFoundEntry(expiry time.Time) MemoEntry {
 // handful of batched AniList requests instead of one request per id-less entry
 // — and an expired entry renews through the same batch, since pendingAniListIDs
 // counts it as pending.
-func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) map[int]struct{} {
+func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, memo *Memo, now time.Time) map[int]struct{} {
 	if ctx.Err() != nil {
 		// Mirror the per-entry loop's cancellation guard: a batch issued on an
 		// already-cancelled cycle can only fail with context.Canceled, and the
 		// loop below breaks (and flags the cycle degraded) before using it.
 		return nil
 	}
-	pending := pendingAniListIDs(entries, idx, lib, memo, now)
+	pending := pendingAniListIDs(entries, idx, memo, now)
 	if len(pending) == 0 {
 		return nil
 	}
@@ -343,9 +343,9 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 // pendingAniListIDs returns the distinct AniList ids the match will look up but
 // has no live memo entry for: exactly the entries aniListNeed - the shared
 // trigger matchEntry also consults - classifies as needing a lookup, so the
-// batch fetches no more (which would re-introduce the not-in-library lookups
-// the HasArrIdentifier gate removed) and no less than the per-entry pass needs.
-func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) []int {
+// batch fetches no more (which would look up the routed entries the operator
+// does not have) and no less than the per-entry pass needs.
+func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, memo *Memo, now time.Time) []int {
 	seen := make(map[int]struct{})
 	var ids []int
 	add := func(alID int) {
@@ -359,7 +359,7 @@ func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *LibIndex
 		ids = append(ids, alID)
 	}
 	for i := range entries {
-		if _, _, _, needsLookup := aniListNeed(entries[i].AniListID, idx, lib); needsLookup {
+		if _, _, needsLookup := aniListNeed(entries[i].AniListID, idx); needsLookup {
 			add(entries[i].AniListID)
 		}
 	}

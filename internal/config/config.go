@@ -244,7 +244,7 @@ type Config struct {
 	// AnimeBytes includes AnimeBytes (private tracker) releases and links; the
 	// public trackers (Nyaa, AnimeTosho, RuTracker) are always included.
 	AnimeBytes bool
-	// ExcludeSpecials drops OVA/ONA/special entries (default false: kept).
+	// ExcludeSpecials drops each entry's Sonarr copy on season 0 (default false: kept).
 	ExcludeSpecials bool
 	// PollExternal is set when poll_interval is off/disabled/0: no internal
 	// timer, cycles are triggered out-of-band via the `poll` subcommand.

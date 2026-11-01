@@ -7,21 +7,16 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
 
-// TestCatalogueHas covers the reverse-catalogue predicate directly (moved from
-// audit alongside the catalogue itself), exercising every id path: the Sonarr
-// TVDB match and zero-TVDB short-circuit, and the Radarr TMDB-match plus IMDb
-// fallback. audit only ever reaches Has through the TMDB/TVDB paths, so the
-// IMDb fallback and the zero-TVDB guard are otherwise untested.
+// TestCatalogueHas covers the reverse-catalogue predicate directly, exercising
+// every id path: a Sonarr series by its TVDB id, a Radarr film by its TMDB id,
+// each only in its own arr, and the zero-id short-circuits.
 func TestCatalogueHas(t *testing.T) {
 	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
-		// Wrong-arm ids are not catalogued: a MOVIE record's TVDB id names
-		// its parent series, and TVDB reuses a film's IMDb id on that series.
-		{AniListID: 3, Type: "MOVIE", TvdbID: 555},
-		{AniListID: 4, Type: "OVA", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
-		{AniListID: 5, Type: "TV", TvdbID: 700, TmdbMovies: []int{800}},
-	}}), nil)
+		{AniListID: 1, TvdbID: 100},
+		{AniListID: 2, TmdbMovies: []int{400}},
+		// A film's record with both routes catalogues its series too.
+		{AniListID: 5, TvdbID: 700, TmdbMovies: []int{800}, SeasonKind: mapping.SeasonPresent},
+	}}), false)
 	tests := []struct {
 		name string
 		item library.Item
@@ -31,15 +26,12 @@ func TestCatalogueHas(t *testing.T) {
 		{"sonarr tvdb absent", library.Item{Arr: library.ArrSonarr, TvdbID: 999}, false},
 		{"sonarr tvdb zero is not catalogued", library.Item{Arr: library.ArrSonarr, TvdbID: 0}, false},
 		{"radarr tmdb matches", library.Item{Arr: library.ArrRadarr, TmdbID: 400}, true},
-		{"radarr tmdb miss falls through to imdb match", library.Item{Arr: library.ArrRadarr, TmdbID: 401, ImdbID: "tt777"}, true},
-		{"radarr imdb only matches", library.Item{Arr: library.ArrRadarr, ImdbID: "tt777"}, true},
-		{"radarr neither id matches", library.Item{Arr: library.ArrRadarr, TmdbID: 402, ImdbID: "tt000"}, false},
+		{"radarr tmdb absent", library.Item{Arr: library.ArrRadarr, TmdbID: 402}, false},
 		{"radarr no ids is not catalogued", library.Item{Arr: library.ArrRadarr}, false},
-		{"sonarr not catalogued via a movie record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 555}, false},
-		{"radarr catalogued via a seriesless record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 600}, true},
-		{"radarr not catalogued via a series record's imdb id", library.Item{Arr: library.ArrRadarr, ImdbID: "tt888"}, false},
-		{"radarr catalogued via a tvdb-routed record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 800}, true},
-		{"sonarr still catalogued by the tvdb-routed record", library.Item{Arr: library.ArrSonarr, TvdbID: 700}, true},
+		{"radarr catalogued via a both-routes record's tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 800}, true},
+		{"sonarr catalogued via a both-routes record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 700}, true},
+		{"a radarr item is not catalogued by a tvdb id", library.Item{Arr: library.ArrRadarr, TvdbID: 100}, false},
+		{"a sonarr item is not catalogued by a tmdb id", library.Item{Arr: library.ArrSonarr, TmdbID: 400}, false},
 		{"unknown arr never matches even a catalogued tvdb id", library.Item{Arr: "lidarr", TvdbID: 100}, false},
 	}
 	for _, tt := range tests {
@@ -52,50 +44,34 @@ func TestCatalogueHas(t *testing.T) {
 	}
 }
 
-// TestCatalogueIgnoresBlankMovieIMDbIDs pins the whitespace-only IMDb
-// rejection in the reverse catalogue: operator overrides can supply blank IDs
-// and Catalogue.Has accepts any non-empty library IMDb string, so a blank
-// override id must never be indexed (it would recognize every Radarr item
-// carrying the same whitespace value as anime).
-func TestCatalogueIgnoresBlankMovieIMDbIDs(t *testing.T) {
-	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: []mapping.Record{{
-		AniListID: 1,
-		Type:      "MOVIE",
-		IMDbIDs:   []string{" ", "\t"},
-	}}}), nil)
-	for _, imdb := range []string{" ", "\t"} {
-		item := library.Item{Arr: library.ArrRadarr, ImdbID: imdb}
-		if cat.Has(&item) {
-			t.Errorf("Catalogue.Has() = true for blank IMDb id %q, want false", imdb)
-		}
-	}
-}
-
-// TestCatalogueKeep pins the keep predicate: a rejected record contributes no
-// IDs, a kept sibling sharing the same TVDB id still catalogues the item, and
-// a nil predicate keeps everything. The caller-facing policy this predicate
-// carries (audit's exclude_specials symmetry) stays pinned end to end in
-// audit's TestAuditNotOnSeaDexHonorsExcludeSpecials.
-func TestCatalogueKeep(t *testing.T) {
+// TestCatalogueExcludeSpecials pins the specials policy: a record whose Sonarr
+// copy is a special catalogues no TVDB id, a sibling record on the same series
+// still does, and the special's TMDB movie id stays catalogued because its
+// Radarr copy is never a special. The end-to-end policy is pinned in audit's
+// TestAuditNotOnSeaDexHonorsExcludeSpecials.
+func TestCatalogueExcludeSpecials(t *testing.T) {
 	records := []mapping.Record{
-		{AniListID: 1, Type: "OVA", TvdbID: 500},
-		{AniListID: 2, Type: "OVA", TvdbID: 600},
-		{AniListID: 3, Type: "TV", TvdbID: 600},
+		{AniListID: 1, TvdbID: 500, TmdbMovies: []int{80518}, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 2, TvdbID: 600, SeasonKind: mapping.SeasonPresent},
+		{AniListID: 3, TvdbID: 600, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
 	}
-	keepTV := func(r mapping.Record) bool { return r.Type == "TV" }
-	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), keepTV)
-
-	ovaOnly := library.Item{Arr: library.ArrSonarr, TvdbID: 500}
-	if cat.Has(&ovaOnly) {
-		t.Error("an item whose only records are rejected by keep must not be catalogued")
-	}
+	specialsOnly := library.Item{Arr: library.ArrSonarr, TvdbID: 500}
 	mixed := library.Item{Arr: library.ArrSonarr, TvdbID: 600}
+	film := library.Item{Arr: library.ArrRadarr, TmdbID: 80518}
+
+	cat := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), true)
+	if cat.Has(&specialsOnly) {
+		t.Error("a series whose only record is a special must not be catalogued with specials excluded")
+	}
 	if !cat.Has(&mixed) {
-		t.Error("a kept sibling record sharing the TVDB id must keep the item catalogued")
+		t.Error("a regular-season sibling sharing the TVDB id must keep the series catalogued")
+	}
+	if !cat.Has(&film) {
+		t.Error("a special's TMDB movie id must stay catalogued: its Radarr copy is no special")
 	}
 
-	all := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), nil)
-	if !all.Has(&ovaOnly) {
-		t.Error("a nil keep predicate must catalogue every record")
+	all := NewCatalogue(mapping.NewIndex(mapping.Source{Records: records}), false)
+	if !all.Has(&specialsOnly) {
+		t.Error("with specials kept, every record's TVDB id must be catalogued")
 	}
 }

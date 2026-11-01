@@ -142,11 +142,10 @@ type Finding struct {
 
 // Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
-	log             *slog.Logger
-	tags            tagfilter.Filter
-	opts            filter.Options
-	excludeSpecials bool
-	animeBytes      bool
+	log        *slog.Logger
+	tags       tagfilter.Filter
+	opts       filter.Options
+	animeBytes bool
 }
 
 // Config configures a Comparer.
@@ -157,9 +156,8 @@ type Config struct {
 	// TagFilter is the operator's filters.exclude_tags policy, asked about the
 	// findings surface. Its zero value - the default - excludes nothing, so a
 	// release SeaDex tags Broken produces a finding like any other.
-	TagFilter       tagfilter.Filter
-	Filter          filter.Options
-	ExcludeSpecials bool
+	TagFilter tagfilter.Filter
+	Filter    filter.Options
 	// AnimeBytes includes AnimeBytes (private tracker) releases in the
 	// obtainability check; public trackers are always considered. Off means
 	// AnimeBytes releases are invisible.
@@ -169,25 +167,21 @@ type Config struct {
 // New builds a Comparer from cfg.
 func New(cfg Config) *Comparer {
 	return &Comparer{
-		log:             cmp.Or(cfg.Logger, slog.Default()),
-		tags:            cfg.TagFilter,
-		opts:            cfg.Filter,
-		excludeSpecials: cfg.ExcludeSpecials,
-		animeBytes:      cfg.AnimeBytes,
+		log:        cmp.Or(cfg.Logger, slog.Default()),
+		tags:       cfg.TagFilter,
+		opts:       cfg.Filter,
+		animeBytes: cfg.AnimeBytes,
 	}
 }
 
 // Compare produces a finding for every in-library match that has something to
-// report, skipping matches not in the library, items already aligned, and
-// specials when they are excluded.
+// report, skipping matches not in the library and items already aligned. The
+// matcher owns the specials policy: an excluded copy never reaches here.
 func (c *Comparer) Compare(matches []match.Match) []Finding {
 	var findings []Finding
 	for i := range matches {
 		m := &matches[i]
 		if !m.InLibrary() {
-			continue
-		}
-		if c.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		if f := c.compareOne(m); f != nil {

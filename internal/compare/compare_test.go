@@ -372,10 +372,10 @@ func TestCompareOrdersEqualURLLinksByTracker(t *testing.T) {
 		Record: mapping.Record{SeasonTvdb: 1},
 	}
 
-	forward := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	forward := comparer(filter.Options{}).Compare([]match.Match{m})
 	entry.Torrents[0], entry.Torrents[1] = entry.Torrents[1], entry.Torrents[0]
 	m.Entry = entry
-	reversed := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	reversed := comparer(filter.Options{}).Compare([]match.Match{m})
 	want := []ReleaseLink{
 		{Tracker: "AnimeTosho", URL: sharedURL, Headline: true},
 		{Tracker: "Nyaa", URL: sharedURL, Headline: true},
@@ -388,8 +388,8 @@ func TestCompareOrdersEqualURLLinksByTracker(t *testing.T) {
 	}
 }
 
-func comparer(opts filter.Options, excludeSpecials bool) *Comparer {
-	return New(Config{Filter: opts, ExcludeSpecials: excludeSpecials})
+func comparer(opts filter.Options) *Comparer {
+	return New(Config{Filter: opts})
 }
 
 // abComparer is a comparer with the AnimeBytes tracker toggle enabled (the
@@ -404,7 +404,7 @@ func TestCompareAlignedProducesNoFinding(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("aligned item must produce no finding, got %+v", got)
 	}
 }
@@ -420,7 +420,7 @@ func TestCompareDecoratedSeaDexLabelHeldAsBareGroupIsAligned(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "-ZR-", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 4}}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("Compare(held ZR, SeaDex best -ZR-) = %+v, want no finding", got)
 	}
 }
@@ -431,7 +431,7 @@ func TestCompareBetterRelease(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
 	}
@@ -466,7 +466,7 @@ func TestCompareUnverifiableEvidenceIsInfo(t *testing.T) {
 			}}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 			if len(got) != 1 {
 				t.Fatalf("expected 1 unverifiable finding, got %d: %+v", len(got), got)
 			}
@@ -485,7 +485,7 @@ func TestCompareUnverifiableEvidenceIsInfo(t *testing.T) {
 			// finding, so the dedupe key notify derives from it is stable and
 			// the reporter's cross-cycle dedupe suppresses re-emission
 			// exactly like every other finding.
-			again := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			again := comparer(filter.Options{}).Compare([]match.Match{m})
 			if len(again) != 1 || !reflect.DeepEqual(again[0], f) {
 				t.Errorf("finding not stable across cycles: %+v vs %+v", f, again[0])
 			}
@@ -507,7 +507,7 @@ func TestCompareSeasonScopedFindingSeed(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/200"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 2}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
 	}
@@ -532,7 +532,7 @@ func TestCompareSeasonScopedRecommendationNotMaskedByOtherSeason(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/202"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 2}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("season 2 missing a recommended group must produce a finding even when another season has it, got %d", len(got))
 	}
@@ -547,7 +547,7 @@ func TestCompareTheoreticalBestIsInfo(t *testing.T) {
 	item := &library.Item{Title: "X", Arr: library.ArrSonarr, Groups: []string{"whatever"}, SeasonGroups: map[int][]string{1: {"whatever"}}}
 	entry := seadex.Entry{AniListID: 1, TheoreticalBest: "a stated remux"}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 || got[0].Status != StatusTheoretical {
 		t.Fatalf("expected one theoretical_best/info finding, got %+v", got)
 	}
@@ -561,7 +561,7 @@ func TestCompareSeasonNotOnDiskTheoreticalIsSilent(t *testing.T) {
 	item := &library.Item{Title: "Short", Groups: []string{"a"}, SeasonGroups: map[int][]string{1: {"a"}}}
 	entry := seadex.Entry{AniListID: 404, TheoreticalBest: "a stated remux"}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 3}}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("a theoretical-only entry for a season with no file must be silent, got %+v", got)
 	}
 }
@@ -600,7 +600,7 @@ func TestCompareReportsEveryReportableMatch(t *testing.T) {
 		diverged(13, "Second", "https://nyaa.si/view/13"),
 	}
 
-	got := comparer(filter.Options{}, false).Compare(batch)
+	got := comparer(filter.Options{}).Compare(batch)
 
 	if len(got) != 2 {
 		t.Fatalf("finding count = %d, want 2 (one per reportable match): %+v", len(got), got)
@@ -613,17 +613,10 @@ func TestCompareReportsEveryReportableMatch(t *testing.T) {
 	}
 }
 
-func TestCompareSkipsNotInLibraryAndSpecials(t *testing.T) {
-	notInLib := match.Match{Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 1}}
-	special := match.Match{
-		Item:   &library.Item{Title: "OVA", Groups: []string{"x"}},
-		Arr:    library.ArrSonarr,
-		Entry:  seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{{IsBest: true, ReleaseGroup: "Y", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}}},
-		Record: mapping.Record{Type: "OVA"},
-	}
-	got := comparer(filter.Options{}, true).Compare([]match.Match{notInLib, special})
-	if len(got) != 0 {
-		t.Errorf("not-in-library and excluded specials must be skipped, got %+v", got)
+func TestCompareSkipsNotInLibrary(t *testing.T) {
+	notInLib := match.Match{Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{IsBest: true, ReleaseGroup: "Y", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}}}
+	if got := comparer(filter.Options{}).Compare([]match.Match{notInLib}); len(got) != 0 {
+		t.Errorf("a not-in-library match must be skipped, got %+v", got)
 	}
 }
 
@@ -634,7 +627,7 @@ func TestCompareAnimeBytesRecommendationRequiresOptIn(t *testing.T) {
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Fatalf("AnimeBytes off must make AB-only recommendations silent, got %+v", got)
 	}
 
@@ -665,7 +658,7 @@ func TestCompareMixedGroupSeasonIsInfoNudge(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/400"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %+v", len(got), got)
 	}
@@ -686,7 +679,7 @@ func TestCompareAlignedMixedGroupSeasonIsSilent(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/405"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("an aligned multi-group season must produce no finding, got %+v", got)
 	}
 }
@@ -700,7 +693,7 @@ func TestCompareSeasonNotOnDiskIsSilent(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/401"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 3}}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("a mapped season with no file must produce no finding, got %+v", got)
 	}
 }
@@ -713,7 +706,7 @@ func TestCompareIncompleteSeasonEntryIsInfo(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/402"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
 	}
@@ -733,7 +726,7 @@ func TestRecommendedSkipsNonBestAndContentFiltered(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "RemuxGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/404"},
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	got := comparer(filter.Options{ExcludeRemux: true}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{ExcludeRemux: true}).Compare([]match.Match{m})
 	if len(got) != 0 {
 		t.Errorf("non-best and remux-filtered releases must yield no finding, got %+v", got)
 	}
@@ -763,7 +756,7 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 			}}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+			if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 				t.Fatalf("AnimeBytes off must hide a mislabeled AB-URL recommendation, got %+v", got)
 			}
 			got := abComparer().Compare([]match.Match{m})
@@ -791,7 +784,7 @@ func TestCompareMislabeledAnimeBytesURLChangesLinkSet(t *testing.T) {
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-	off := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	off := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(off) != 1 {
 		t.Fatalf("AnimeBytes off should still surface the public recommendation, got %d", len(off))
 	}
@@ -850,7 +843,7 @@ func TestCompareFindingCarriesArrIdentity(t *testing.T) {
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 
 	if len(got) != 1 {
 		t.Fatalf("finding count = %d, want 1: %+v", len(got), got)
@@ -876,7 +869,7 @@ func TestCompareFindingCarriesClassifiedReleaseFields(t *testing.T) {
 	}}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
@@ -918,7 +911,7 @@ func TestCompareBrokenBestRecommendedByDefault(t *testing.T) {
 				{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/800", Tags: []string{"dual", tag}},
 			}}
 			m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 			if len(got) != 1 || got[0].Status != StatusBetter {
 				t.Fatalf("tag %q: with no exclude_tags configured a warned best must surface as better_release, got %+v", tag, got)
 			}
@@ -934,7 +927,7 @@ func TestCompareBrokenBestRecommendedByDefault(t *testing.T) {
 			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/803"},
 		}}
 		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		got := comparer(filter.Options{}).Compare([]match.Match{m})
 		if len(got) != 1 {
 			t.Fatalf("expected 1 finding, got %d", len(got))
 		}
@@ -1033,7 +1026,7 @@ func TestCompareExcludedTagBestNotRecommended(t *testing.T) {
 			{IsBest: true, ReleaseGroup: "BrokenGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/804", Tags: []string{"Broken"}},
 		}}
 		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-		if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 			t.Errorf("an entry with only a warned best must stay silent, got %+v", got)
 		}
 	})
@@ -1059,13 +1052,13 @@ func TestCompareOfferedKindEmitsNothing(t *testing.T) {
 			name:     "populated single-group bucket, the Code Geass shape",
 			seasons:  map[int][]string{0: {"erai-raws"}, 1: {"subsplease"}},
 			torrents: best,
-			record:   mapping.Record{Type: "OVA"},
+			record:   mapping.Record{SeasonKind: mapping.SeasonPresent},
 		},
 		{
 			name:     "populated multi-group bucket",
 			seasons:  map[int][]string{0: {"erai-raws", "commie"}},
 			torrents: best,
-			record:   mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent},
+			record:   mapping.Record{SeasonKind: mapping.SeasonPresent},
 		},
 		{
 			// The reachable shape of the kind gate compare.go documents: this
@@ -1074,7 +1067,7 @@ func TestCompareOfferedKindEmitsNothing(t *testing.T) {
 			name:     "no isBest torrent at all",
 			seasons:  map[int][]string{0: {"erai-raws"}},
 			torrents: []seadex.Torrent{{ReleaseGroup: "Commie", Tracker: "Nyaa", URL: "https://nyaa.si/view/951"}},
-			record:   mapping.Record{Type: "SPECIAL"},
+			record:   mapping.Record{SeasonKind: mapping.SeasonPresent},
 		},
 	}
 	for _, tt := range tests {
@@ -1082,7 +1075,7 @@ func TestCompareOfferedKindEmitsNothing(t *testing.T) {
 			item := &library.Item{Title: "Offered", Arr: library.ArrSonarr, SeasonGroups: tt.seasons}
 			entry := seadex.Entry{AniListID: 950, TheoreticalBest: "SubsPlease", Torrents: tt.torrents}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: tt.record}
-			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+			if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 				t.Errorf("findings = %+v, want none (an unattributable unit is offered, never compared)", got)
 			}
 		})
@@ -1109,28 +1102,28 @@ func TestCompareComparableClassesAreUntouched(t *testing.T) {
 			name:      "radarr movie",
 			arr:       library.ArrRadarr,
 			item:      library.Item{Title: "Mugen Train", Arr: library.ArrRadarr, Groups: []string{"erai-raws"}, HasFile: true},
-			record:    mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent},
+			record:    mapping.Record{SeasonKind: mapping.SeasonPresent},
 			wantScope: "movie",
 		},
 		{
 			name:      "positive-season series",
 			arr:       library.ArrSonarr,
 			item:      library.Item{Title: "Frieren", Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"erai-raws"}}},
-			record:    mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+			record:    mapping.Record{SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
 			wantScope: "season",
 		},
 		{
 			name:      "absent-season special compares against the real seasons",
 			arr:       library.ArrSonarr,
 			item:      library.Item{Title: "LoGH", Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}, 1: {"erai-raws"}}},
-			record:    mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonAbsent},
+			record:    mapping.Record{SeasonKind: mapping.SeasonAbsent},
 			wantScope: "series",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := match.Match{Item: &tt.item, Arr: tt.arr, Entry: entry, Record: tt.record}
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 			if len(got) != 1 {
 				t.Fatalf("finding count = %d, want 1 (a comparable class still reports): %+v", len(got), got)
 			}
@@ -1141,12 +1134,6 @@ func TestCompareComparableClassesAreUntouched(t *testing.T) {
 				t.Errorf("Scope = %q, want %q", got[0].Scope, tt.wantScope)
 			}
 		})
-	}
-
-	special := tests[2]
-	m := match.Match{Item: &special.item, Arr: special.arr, Entry: entry, Record: special.record}
-	if excluded := comparer(filter.Options{}, true).Compare([]match.Match{m}); len(excluded) != 0 {
-		t.Errorf("exclude_specials on must silence a comparable special, got %+v", excluded)
 	}
 }
 
@@ -1174,21 +1161,21 @@ func TestCompareFindingCarriesScopeAndApprox(t *testing.T) {
 			name:      "mapped season is an exact season scope",
 			arr:       library.ArrSonarr,
 			seasons:   map[int][]string{1: {"erai-raws"}},
-			record:    mapping.Record{Type: "TV", SeasonTvdb: 1},
+			record:    mapping.Record{SeasonTvdb: 1},
 			wantScope: "season",
 		},
 		{
 			name:       "whole-series aggregate spanning two seasons is approximate",
 			arr:        library.ArrSonarr,
 			seasons:    map[int][]string{1: {"erai-raws"}, 2: {"erai-raws"}},
-			record:     mapping.Record{Type: "TV"},
+			record:     mapping.Record{},
 			wantScope:  "series",
 			wantApprox: true,
 		},
 		{
 			name:      "movie is an exact movie scope",
 			arr:       library.ArrRadarr,
-			record:    mapping.Record{Type: "MOVIE"},
+			record:    mapping.Record{SeasonKind: mapping.SeasonPresent},
 			wantScope: "movie",
 		},
 	}
@@ -1196,7 +1183,7 @@ func TestCompareFindingCarriesScopeAndApprox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &library.Item{Title: "Scoped", Arr: tt.arr, SeasonGroups: tt.seasons, Groups: []string{"erai-raws"}, HasFile: true}
 			m := match.Match{Item: item, Arr: tt.arr, Entry: best, Record: tt.record}
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 			if len(got) != 1 {
 				t.Fatalf("finding count = %d, want 1: %+v", len(got), got)
 			}
@@ -1218,7 +1205,7 @@ func TestCompareFindingSeasonField(t *testing.T) {
 	t.Run("season-scoped finding carries the mapped TVDB season", func(t *testing.T) {
 		item := &library.Item{Title: "Seasoned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{2: {"erai-raws"}}}
 		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 2}}
-		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		got := comparer(filter.Options{}).Compare([]match.Match{m})
 		if len(got) != 1 {
 			t.Fatalf("expected 1 finding, got %d", len(got))
 		}
@@ -1229,8 +1216,8 @@ func TestCompareFindingSeasonField(t *testing.T) {
 
 	t.Run("negative mapped season clamps to 0", func(t *testing.T) {
 		item := &library.Item{Title: "Negative Season", Arr: library.ArrSonarr, Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
-		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{Type: "TV", SeasonTvdb: -1}}
-		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: -1}}
+		got := comparer(filter.Options{}).Compare([]match.Match{m})
 		if len(got) != 1 {
 			t.Fatalf("expected 1 whole-series finding, got %d", len(got))
 		}
@@ -1263,7 +1250,7 @@ func TestCompareNonAiredOrderSeriesEmitsNothing(t *testing.T) {
 			}
 			entry := seadex.Entry{AniListID: 5081, Torrents: tc.torrents}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 2}}
-			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+			if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 				t.Errorf("Compare(non-aired order) = %+v, want no finding", got)
 			}
 		})
@@ -1271,7 +1258,7 @@ func TestCompareNonAiredOrderSeriesEmitsNothing(t *testing.T) {
 	t.Run("aired order converse", func(t *testing.T) {
 		item := &library.Item{Arr: library.ArrSonarr, Title: "Monogatari", Groups: []string{"erai-raws"}, HasFile: true, SeasonGroups: map[int][]string{2: {"erai-raws"}}}
 		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 5081, Torrents: []seadex.Torrent{best}}, Record: mapping.Record{SeasonTvdb: 2}}
-		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		got := comparer(filter.Options{}).Compare([]match.Match{m})
 		if len(got) != 1 || got[0].Status != StatusBetter {
 			t.Errorf("Compare(aired order) = %+v, want one better_release", got)
 		}

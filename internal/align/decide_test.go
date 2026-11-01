@@ -16,7 +16,7 @@ import (
 // relying on Decide to handle the placeholder (the daemon's compare pass drops
 // these matches beforehand) and no other align test passes Decide a Failed item.
 func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
-	movieRec := mapping.Record{Type: "MOVIE"}
+	movieRec := mapping.Record{TmdbMovies: []int{1}}
 	for name, item := range map[string]library.Item{
 		"failed movie":                   {Arr: library.ArrRadarr, Failed: true},
 		"failed movie Radarr filed":      {Arr: library.ArrRadarr, Failed: true, HasFile: true},
@@ -26,7 +26,7 @@ func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rec := movieRec
 			if item.Arr == library.ArrSonarr {
-				rec = mapping.Record{Type: "TV", SeasonTvdb: 1}
+				rec = mapping.Record{SeasonTvdb: 1}
 			}
 			d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"sam"}})
 			if d.Standing != align.StandingUnverified {
@@ -51,8 +51,8 @@ func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
 // than mixed or diverged), a proven best group aligns however many groups the unit
 // spans, and a not-aligned all-known unit is mixed exactly when it spans several.
 func TestDecideSingleUnit(t *testing.T) {
-	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
-	movieRec := mapping.Record{Type: "MOVIE"}
+	seasonRec := mapping.Record{SeasonTvdb: 1}
+	movieRec := mapping.Record{TmdbMovies: []int{1}}
 	tests := []struct {
 		name         string
 		item         library.Item
@@ -169,7 +169,7 @@ func TestDecideSingleUnit(t *testing.T) {
 // from the decision without re-scoping).
 func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
 	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}}
-	rec := mapping.Record{Type: "TV", SeasonTvdb: 2}
+	rec := mapping.Record{SeasonTvdb: 2}
 	d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"sam"}})
 	if d.Kind != align.ScopeSeason {
 		t.Errorf("Kind = %v, want ScopeSeason", d.Kind)
@@ -190,7 +190,7 @@ func TestDecideRecordsScopeKindAndGroups(t *testing.T) {
 // Unverifiability of the best comparison short-circuits BEFORE the alt rung: when
 // "do you have the best?" is unanswerable, a proven alt must not imply you lack it.
 func TestDecideTriStateEvidence(t *testing.T) {
-	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	seasonRec := mapping.Record{SeasonTvdb: 1}
 	tests := []struct {
 		name         string
 		item         library.Item
@@ -289,21 +289,20 @@ func TestDecideTriStateEvidence(t *testing.T) {
 func TestDecideSeasonLabel(t *testing.T) {
 	tests := []struct {
 		name       string
-		recType    string
 		arr        string
 		seasonTvdb int
 		want       int
 	}{
-		{"positive season passes through", "TV", library.ArrSonarr, 2, 2},
-		{"negative absolute-numbered mapping scopes whole-series and carries 0", "TV", library.ArrSonarr, -1, 0},
-		{"movie carries 0", "MOVIE", library.ArrRadarr, 0, 0},
-		{"special carries 0", "OVA", library.ArrSonarr, 0, 0},
-		{"movie ignores irrelevant positive season metadata", "MOVIE", library.ArrRadarr, 2, 0},
+		{"positive season passes through", library.ArrSonarr, 2, 2},
+		{"negative absolute-numbered mapping scopes whole-series and carries 0", library.ArrSonarr, -1, 0},
+		{"movie carries 0", library.ArrRadarr, 0, 0},
+		{"special carries 0", library.ArrSonarr, 0, 0},
+		{"movie ignores irrelevant positive season metadata", library.ArrRadarr, 2, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := library.Item{Arr: tt.arr, HasFile: true, SeasonGroups: map[int][]string{2: {"sam"}}}
-			rec := mapping.Record{Type: tt.recType, SeasonTvdb: tt.seasonTvdb}
+			rec := mapping.Record{SeasonTvdb: tt.seasonTvdb}
 			if d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"sam"}}); d.Season != tt.want {
 				t.Errorf("Season = %d, want %d", d.Season, tt.want)
 			}
@@ -318,7 +317,7 @@ func TestDecideSeasonLabel(t *testing.T) {
 // row exact.
 func TestDecideSingleUnitApproxPassThrough(t *testing.T) {
 	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}}
-	rec := mapping.Record{Type: "OVA"}
+	rec := mapping.Record{SeasonKind: mapping.SeasonPresent}
 	d := align.Decide(&item, &align.Entry{Record: &rec}, &align.Listing{Best: []string{"cait-sidhe"}})
 	if !d.Approx {
 		t.Error("Approx = false, want true (multi-group specials bucket is approximate)")
@@ -352,14 +351,14 @@ func TestDecideWithholdsANonAiredOrderSeries(t *testing.T) {
 		wantKind   align.ScopeKind
 		wantSeason int
 	}{
-		{name: "mapped season", entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
-		{name: "whole series", entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonKind: mapping.SeasonAbsent}}, wantKind: align.ScopeWholeSeries},
-		{name: "placed special", entry: align.Entry{Record: &mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonPresent}, Specials: []int{3}}, wantKind: align.ScopeOffered},
-		{name: "season with no file", mutate: func(it *library.Item) { it.SeasonGroups = nil; it.HasFile = false }, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
-		{name: "failed placeholder", mutate: func(it *library.Item) { *it = library.Item{Arr: library.ArrSonarr, Failed: true, Order: bookOrder} }, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 1},
+		{name: "mapped season", entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
+		{name: "whole series", entry: align.Entry{Record: &mapping.Record{SeasonKind: mapping.SeasonAbsent}}, wantKind: align.ScopeWholeSeries},
+		{name: "placed special", entry: align.Entry{Record: &mapping.Record{SeasonKind: mapping.SeasonPresent}, Specials: []int{3}}, wantKind: align.ScopeOffered},
+		{name: "season with no file", mutate: func(it *library.Item) { it.SeasonGroups = nil; it.HasFile = false }, entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
+		{name: "failed placeholder", mutate: func(it *library.Item) { *it = library.Item{Arr: library.ArrSonarr, Failed: true, Order: bookOrder} }, entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 1},
 		// arrapi maps an empty Sonarr v5 seasonType to Order{}, an unknown order,
 		// never aired (arrapi sonarr/engine_sonarr_v5_api_v5.go, sonarrV5Series.order).
-		{name: "unknown order", mutate: func(it *library.Item) { it.Order = &library.Order{} }, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
+		{name: "unknown order", mutate: func(it *library.Item) { it.Order = &library.Order{} }, entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, wantKind: align.ScopeSeason, wantSeason: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -382,7 +381,7 @@ func TestDecideWithholdsANonAiredOrderSeries(t *testing.T) {
 	t.Run("aired order compares", func(t *testing.T) {
 		item := monogatari()
 		item.Order = nil
-		d := align.Decide(&item, &align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, listing)
+		d := align.Decide(&item, &align.Entry{Record: &mapping.Record{SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}}, listing)
 		if d.Outcome != align.OutcomeDiverged || d.Withheld != align.WithheldNone {
 			t.Errorf("Outcome, Withheld = %v, %v, want %v, %v", d.Outcome, d.Withheld, align.OutcomeDiverged, align.WithheldNone)
 		}
@@ -410,8 +409,8 @@ func TestDecideAniListMembershipGuard(t *testing.T) {
 			AniListIDs: ids,
 		}
 	}
-	seasonRec := &mapping.Record{Type: "TV", SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
-	wholeRec := &mapping.Record{Type: "TV", SeasonKind: mapping.SeasonAbsent}
+	seasonRec := &mapping.Record{SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
+	wholeRec := &mapping.Record{SeasonKind: mapping.SeasonAbsent}
 	listing := &align.Listing{Best: []string{"best"}}
 	tests := []struct {
 		name         string
@@ -426,14 +425,14 @@ func TestDecideAniListMembershipGuard(t *testing.T) {
 		{name: "whole series non-member", ids: codeGeass, entry: align.Entry{Record: wholeRec, AniListID: 20}, wantKind: align.ScopeWholeSeries, wantWithheld: true},
 		{name: "whole series member", ids: codeGeass, entry: align.Entry{Record: wholeRec, AniListID: 1575}, wantKind: align.ScopeWholeSeries},
 		{name: "whole series empty list", ids: []int{}, entry: align.Entry{Record: wholeRec, AniListID: 20}, wantKind: align.ScopeWholeSeries},
-		{name: "offered non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonPresent}, AniListID: 20}, wantKind: align.ScopeOffered},
-		{name: "special episodes non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonPresent}, Specials: []int{3}, AniListID: 20}, wantKind: align.ScopeEpisodes},
-		{name: "season episodes non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{1}, AniListID: 20}, wantKind: align.ScopeEpisodes},
+		{name: "offered non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{SeasonKind: mapping.SeasonPresent}, AniListID: 20}, wantKind: align.ScopeOffered},
+		{name: "special episodes non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{SeasonKind: mapping.SeasonPresent}, Specials: []int{3}, AniListID: 20}, wantKind: align.ScopeEpisodes},
+		{name: "season episodes non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{1}, AniListID: 20}, wantKind: align.ScopeEpisodes},
 		// A placement that does not resolve to part of the season (every listed
 		// episode, an episode Sonarr does not list, a season whose listing is
 		// unknown) is a season comparison, so the guard applies to it.
-		{name: "placed on every listed episode non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{1, 2}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
-		{name: "placed on an unlisted episode non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{3}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
+		{name: "placed on every listed episode non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{1, 2}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
+		{name: "placed on an unlisted episode non-member", ids: codeGeass, entry: align.Entry{Record: &mapping.Record{SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}, Episodes: []int{3}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
 		{name: "placed on an unlisted season non-member", ids: codeGeass, entry: align.Entry{Record: seasonRec, Episodes: []int{1}, AniListID: 20}, wantKind: align.ScopeSeason, wantWithheld: true},
 	}
 	for _, tt := range tests {
@@ -483,7 +482,7 @@ func TestDecideAniListMembershipGuard(t *testing.T) {
 func TestDecideAniListGuardOnAFailedPlaceholder(t *testing.T) {
 	failed := library.Item{Arr: library.ArrSonarr, ArrID: 33, Title: "Code Geass", Failed: true, AniListIDs: []int{1575, 2904, 12685, 97880}}
 	listing := &align.Listing{Best: []string{"best"}}
-	seasonRec := &mapping.Record{Type: "TV", SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}
+	seasonRec := &mapping.Record{SeasonTvdb: 1, SeasonKind: mapping.SeasonPresent}
 	tests := []struct {
 		name         string
 		entry        align.Entry
@@ -491,7 +490,7 @@ func TestDecideAniListGuardOnAFailedPlaceholder(t *testing.T) {
 		wantOutcome  align.Outcome
 	}{
 		{name: "season non-member", entry: align.Entry{Record: seasonRec, AniListID: 20}, wantWithheld: align.WithheldAniList, wantOutcome: align.OutcomeWithheld},
-		{name: "whole series non-member", entry: align.Entry{Record: &mapping.Record{Type: "TV", SeasonKind: mapping.SeasonAbsent}, AniListID: 20}, wantWithheld: align.WithheldAniList, wantOutcome: align.OutcomeWithheld},
+		{name: "whole series non-member", entry: align.Entry{Record: &mapping.Record{SeasonKind: mapping.SeasonAbsent}, AniListID: 20}, wantWithheld: align.WithheldAniList, wantOutcome: align.OutcomeWithheld},
 		{name: "season member", entry: align.Entry{Record: seasonRec, AniListID: 2904}, wantOutcome: align.OutcomeUnverifiable},
 		{name: "placed on season episodes non-member", entry: align.Entry{Record: seasonRec, Episodes: []int{1}, AniListID: 20}, wantOutcome: align.OutcomeUnverifiable},
 	}

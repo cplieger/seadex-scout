@@ -111,7 +111,7 @@ func revisionCases() []revisionCase {
 }
 
 func TestDecideSeasonRevision(t *testing.T) {
-	rec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	rec := mapping.Record{SeasonTvdb: 1}
 	for _, tc := range revisionCases() {
 		item := library.Item{
 			Arr: library.ArrSonarr, HasFile: true,
@@ -123,7 +123,7 @@ func TestDecideSeasonRevision(t *testing.T) {
 }
 
 func TestDecideMovieRevision(t *testing.T) {
-	rec := mapping.Record{Type: "MOVIE"}
+	rec := mapping.Record{TmdbMovies: []int{1}}
 	for _, tc := range revisionCases() {
 		item := library.Item{Arr: library.ArrRadarr, HasFile: true, Groups: tc.groups, Revisions: tc.held}
 		checkRevisionDecision(t, "movie", &tc, align.Decide(&item, &align.Entry{Record: &rec}, &tc.listing))
@@ -153,12 +153,12 @@ func TestDecideRevisionNeverOverridesPlaceholderOrOffered(t *testing.T) {
 	listing := align.Listing{Best: []string{"G"}, BestRevisions: map[string]release.Revision{"g": v2}}
 	held := map[int]map[string]release.Revision{0: {"g": none1}, 1: {"g": none1}}
 	failed := library.Item{Arr: library.ArrSonarr, Failed: true, SeasonGroups: map[int][]string{1: {"g"}}, SeasonRevisions: held}
-	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	seasonRec := mapping.Record{SeasonTvdb: 1}
 	if d := align.Decide(&failed, &align.Entry{Record: &seasonRec}, &listing); d.Outcome != align.OutcomeUnverifiable {
 		t.Errorf("Decide(placeholder).Outcome = %v, want unverifiable", d.Outcome)
 	}
 	offered := library.Item{Arr: library.ArrSonarr, HasFile: true, SeasonGroups: map[int][]string{0: {"g"}}, SeasonRevisions: held}
-	offeredRec := mapping.Record{Type: "MOVIE", TvdbID: 1, SeasonKind: mapping.SeasonPresent}
+	offeredRec := mapping.Record{TmdbMovies: []int{1}, TvdbID: 1, SeasonKind: mapping.SeasonPresent}
 	if d := align.Decide(&offered, &align.Entry{Record: &offeredRec}, &listing); d.Standing != align.StandingUnverified || d.Kind != align.ScopeOffered {
 		t.Errorf("Decide(offered bucket) = %v/%v, want unverified offered", d.Kind, d.Standing)
 	}
@@ -241,7 +241,7 @@ func TestDecideWholeSeriesRevision(t *testing.T) {
 }
 
 func TestDecideSupersededReportsNewestOnBothSides(t *testing.T) {
-	rec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	rec := mapping.Record{SeasonTvdb: 1}
 	item := library.Item{
 		Arr: library.ArrSonarr, HasFile: true,
 		SeasonGroups:    map[int][]string{1: {"g", "k"}},

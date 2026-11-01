@@ -27,10 +27,10 @@ func seriesDocument(t *testing.T, ids ...int) []byte {
 	}
 	for _, id := range ids {
 		doc.Anime = append(doc.Anime, mapread.Anime{
-			AniDBID: id, Type: "TV", TVDBID: id * 100, Last: mapread.Last{Regular: 1},
+			AniDBID: id, TVDBID: id * 100, Last: mapread.Last{Regular: 1},
 			Episodes: []mapread.Run{{Kind: mapread.Regular, Start: 1, End: 1}},
 		})
-		doc.Entries = append(doc.Entries, mapread.Entry{AniListID: id, Type: "TV", Parts: []mapread.Part{{AniDBID: id, Kind: mapread.Regular}}})
+		doc.Entries = append(doc.Entries, mapread.Entry{AniListID: id, Parts: []mapread.Part{{AniDBID: id, Kind: mapread.Regular}}})
 	}
 	b, err := mapread.Encode(doc)
 	if err != nil {

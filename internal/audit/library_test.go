@@ -23,7 +23,7 @@ func seasonMatch(item *library.Item, alID, season int, best, alt string) match.M
 	return match.Match{
 		Item: item, Arr: item.Arr, Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: alID, Torrents: torrents},
-		Record: mapping.Record{Type: "TV", TvdbID: item.TvdbID, SeasonTvdb: season},
+		Record: mapping.Record{TvdbID: item.TvdbID, SeasonTvdb: season},
 	}
 }
 
@@ -60,15 +60,15 @@ func TestAuditItemTotals(t *testing.T) {
 		},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 4, Type: "TV", TvdbID: 200},
-		{AniListID: 6, Type: "TV", TvdbID: 300},
-		{AniListID: 7, Type: "TV", TvdbID: 400},
-		{AniListID: 9, Type: "TV", TvdbID: 500},
-		{AniListID: 10, Type: "TV", TvdbID: 600},
+		{AniListID: 1, TvdbID: 100},
+		{AniListID: 4, TvdbID: 200},
+		{AniListID: 6, TvdbID: 300},
+		{AniListID: 7, TvdbID: 400},
+		{AniListID: 9, TvdbID: 500},
+		{AniListID: 10, TvdbID: 600},
 	}})
 	offered := seasonMatch(&snap.Items[4], 8, 0, "best", "")
-	offered.Record = mapping.Record{Type: "MOVIE", TvdbID: 500, SeasonKind: mapping.SeasonPresent}
+	offered.Record = mapping.Record{TvdbID: 500, SeasonKind: mapping.SeasonPresent}
 	matches := []match.Match{
 		seasonMatch(&snap.Items[0], 1, 1, "good", ""),
 		seasonMatch(&snap.Items[0], 2, 2, "good", ""),

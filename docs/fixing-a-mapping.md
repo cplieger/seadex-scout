@@ -4,14 +4,14 @@ This page shows what to do when a SeaDex entry does not match a show you have in
 
 ## Spotting a wrong or missing match
 
-seadex-scout links each SeaDex entry to your library through the [animap](https://github.com/cplieger/animap) ID map, which turns the entry's AniList ID into a TVDB, TMDB or IMDb ID. Some entries are missing from the map, or their record has no ID for your Sonarr or Radarr server. For those, seadex-scout matches the entry's titles against your library instead, ignoring case, spaces and punctuation. It also checks the year when AniList and your library both have one. It skips the entry when more than one show fits.
+seadex-scout links each SeaDex entry to your library through the [animap](https://github.com/cplieger/animap) ID map, which turns the entry's AniList ID into a TVDB or TMDB ID. Some entries are missing from the map, or their record has no ID for your Sonarr or Radarr server. For those, seadex-scout matches the entry's titles against your library instead, ignoring case, spaces and punctuation. It also checks the year when AniList and your library both have one. It skips the entry when more than one show fits.
 
 A wrong or missing ID shows up in the [report](how-it-works.md#the-report) and on the dashboard in these ways:
 
 - The report lists a show you have under `not_on_seadex`, or does not list it at all, though the show has a page on [SeaDex](https://seadex.moe).
-- A row sits under `no_file (season not found)` though you have that season. The dashboard counts it as Season not found. The entry points at another season, or Sonarr files that season elsewhere. A film you keep in Radarr also sits here when the map names its special episode but has no TMDB or IMDb ID for it. The report then looks for it only in the series' Sonarr specials, and its notes name the missing episode, such as `missing S00E09`. Add the film's TMDB movie ID in `tmdb_movies` with an overrides.json record, as [A film or special filed under a series](#a-film-or-special-filed-under-a-series) shows. A row whose Scope names episodes, such as `S01E03`, is judged on those episodes alone, and its notes name the ones with no file, such as `missing S01E03`. Check that episode on TVDB before you change the map.
-- A row's `seadex` link opens a different show than the row's title. The entry points at the wrong TVDB, TMDB or IMDb ID.
-- A film or special sits under `unattributed (episode not known)`. The dashboard counts it as Episode not known. The map files it under its series' Sonarr specials but does not say which special episode it is, so it is not compared. A map record that names its episodes fixes it, as [Getting it fixed for everyone](#getting-it-fixed-for-everyone) explains. A film you keep in Radarr also sits here when the map neither names its episode nor has a TMDB or IMDb ID for it. Adding its TMDB movie ID in `tmdb_movies` fixes that too.
+- A row sits under `no_file (season not found)` though you have that season. The dashboard counts it as Season not found. The entry points at another season, or Sonarr files that season elsewhere. A film you keep in Radarr also sits here when the map names its special episode but has no TMDB ID for it. The report then looks for it only in the series' Sonarr specials, and its notes name the missing episode, such as `missing S00E09`. Add the film's TMDB movie ID in `tmdb_movies` with an overrides.json record, as [A film or special filed under a series](#a-film-or-special-filed-under-a-series) shows. A row whose Scope names episodes, such as `S01E03`, is judged on those episodes alone, and its notes name the ones with no file, such as `missing S01E03`. Check that episode on TVDB before you change the map.
+- A row's `seadex` link opens a different show than the row's title. The entry points at the wrong TVDB or TMDB ID.
+- A film or special sits under `unattributed (episode not known)`. The dashboard counts it as Episode not known. The map files it under its series' Sonarr specials but does not say which special episode it is, so it is not compared. A map record that names its episodes fixes it, as [Getting it fixed for everyone](#getting-it-fixed-for-everyone) explains. A film you keep in Radarr also sits here when the map neither names its episode nor has a TMDB ID for it. Adding its TMDB movie ID in `tmdb_movies` fixes that too.
 - The log says `anilist record unusable for matching; add an overrides.json entry to map it directly`, with the entry's `al_id`.
 
 ## Finding the IDs
@@ -29,7 +29,7 @@ jq '.entries[] | select(.anilist_id == 12345)' animap.json
 jq '.anime[] | select(.anidb_id == 11111)' animap.json
 ```
 
-The entry's `parts` name the AniDB anime it is. Look that anime up with the second command, using the `anidb_id` its part names. Each run in the anime's `episodes` says where its episodes land: a `tvdb` target is on the anime's `tvdb_id` unless it names its own `series`. Each part contributes the series its episodes land on, or its anime's `tvdb_id` when none of them lands, and the record gets a `tvdb_id` only when the parts reach exactly one TVDB series. The record's `tmdb_movies` are the run's `tmdb_movies` when every episode of the entry carries that same list, and it gets none when one episode carries another list or none. An anime's `imdb_ids` become the record's `imdb_ids` only when that part is regular, has no `start` or `end`, and is not `combined`, because those ids name the whole anime. When the `tvdb` targets of the entry's episodes name one season other than 0, that season is the record's `season_tvdb`, and when they name only season 0, `season_tvdb` is 0. Either way, write `"season_kind": "present"`. When some of the entry's episodes sit in a run with no `tvdb` on an anime that has a `tvdb_id`, or name two seasons other than 0, the record is `"season_kind": "absent"`. An episode in a run with `"tvdb": []`, or in a run with no `tvdb` on an anime with no `tvdb_id`, lands nowhere and does not by itself remove an otherwise unique season. Copy only the fields the examples below use. The overrides file reads no other field, so pasting animap's entry logs an unknown-keys warning.
+The entry's `parts` name the AniDB anime it is. Look that anime up with the second command, using the `anidb_id` its part names. Each run in the anime's `episodes` says where its episodes land: a `tvdb` target is on the anime's `tvdb_id` unless it names its own `series`. Each part contributes the series its episodes land on, or its anime's `tvdb_id` when none of them lands, and the record gets a `tvdb_id` only when the parts reach exactly one TVDB series. The record's `tmdb_movies` are the run's `tmdb_movies` when every episode of the entry carries that same list, and it gets none when one episode carries another list or none. When the `tvdb` targets of the entry's episodes name one season other than 0, that season is the record's `season_tvdb`, and when they name only season 0, `season_tvdb` is 0. Either way, write `"season_kind": "present"`. When some of the entry's episodes sit in a run with no `tvdb` on an anime that has a `tvdb_id`, or name two seasons other than 0, the record is `"season_kind": "absent"`. An episode in a run with `"tvdb": []`, or in a run with no `tvdb` on an anime with no `tvdb_id`, lands nowhere and does not by itself remove an otherwise unique season. Copy only the fields the examples below use. The overrides file reads no other field, so pasting animap's entry logs an unknown-keys warning.
 
 ## Fixing it now with overrides.json
 
@@ -43,7 +43,6 @@ A record replaces animap's whole record for that entry, with no field-by-field m
 [
   {
     "anilist_id": 12345,
-    "type": "TV",
     "tvdb_id": 67890,
     "season_kind": "present",
     "season_tvdb": 1
@@ -59,7 +58,6 @@ Put in the entry's AniList ID, the right TVDB ID and the season the entry covers
 [
   {
     "anilist_id": 12345,
-    "type": "TV",
     "tvdb_id": 67890,
     "season_kind": "present",
     "season_tvdb": 2
@@ -75,9 +73,7 @@ Keep the TVDB ID animap has and change `season_tvdb`. For an entry that covers a
 [
   {
     "anilist_id": 12345,
-    "type": "MOVIE",
     "tmdb_movies": [54321],
-    "imdb_ids": ["tt1234567"],
     "tvdb_id": 67890,
     "season_kind": "present",
     "season_tvdb": 0,
@@ -86,9 +82,9 @@ Keep the TVDB ID animap has and change `season_tvdb`. For an entry that covers a
 ]
 ```
 
-A `MOVIE` record is looked up in Radarr by `tmdb_movies`, then by `imdb_ids`. When neither is in Radarr, it falls back to the series `tvdb_id` in Sonarr. `season_tvdb` 0 then places it in Sonarr's specials. Copy `anidb_id` from the entry's part when the part names the whole anime, with no `start`. animap's row for that anime says which special episodes the film is, which lets the report compare it and the indexer name it to Sonarr, whichever app holds the film. Both use it only while `tvdb_id` matches the anime's `tvdb_id`, because the episode numbers belong to that series. Without it the report lists the film as `unattributed`.
+`tmdb_movies` links the entry to Radarr and `tvdb_id` to Sonarr, so a film with both is looked for in both apps. `season_tvdb` 0 places it in Sonarr's specials. Copy `anidb_id` from the entry's part when the part names the whole anime, with no `start`. animap's row for that anime says which special episodes the film is, which lets the report compare it and the indexer name it to Sonarr, whichever app holds the film. Both use it only while `tvdb_id` matches the anime's `tvdb_id`, because the episode numbers belong to that series. Without it the report lists the film as `unattributed`.
 
-For an OVA or a special you keep in Sonarr's specials, write `"type": "OVA"` or `"type": "SPECIAL"`, keep `tvdb_id`, `season_kind` and `season_tvdb`, and leave out the movie IDs.
+For an OVA or a special you keep in Sonarr's specials, keep `tvdb_id`, write `"season_kind": "present"` and `"season_tvdb": 0`, and leave out `tmdb_movies` unless it is also one film you keep in Radarr.
 
 ### An entry with no mapping at all
 
@@ -96,7 +92,6 @@ For an OVA or a special you keep in Sonarr's specials, write `"type": "OVA"` or 
 [
   {
     "anilist_id": 12345,
-    "type": "MOVIE",
     "tmdb_movies": [54321]
   }
 ]
@@ -114,10 +109,12 @@ docker exec seadex-scout /seadex-scout report
 
 The report reads `overrides.json` itself and prints its log lines in your terminal. `mapping: applied overrides` with a `count` means the file was read. Then open the new report in `config/reports` and find the entry's row. These lines mean a record was not used as you meant:
 
-- `mapping: overrides.json malformed, pinned mappings not applied` means the file is not one valid JSON array, or a field holds the wrong kind of value. An ID in quotes and `imdb_ids` written without `[ ]` are the common cases. No record in the file is used until you fix it.
+- `mapping: overrides.json malformed, pinned mappings not applied` means the file is not one valid JSON array, or a field holds the wrong kind of value. An ID in quotes and `tmdb_movies` written without `[ ]` are the common cases. No record in the file is used until you fix it.
+- `mapping: overrides.json names imdb_ids, which seadex-scout no longer reads` means the file still has an `imdb_ids` field. No record in the file is used until you replace it with the film's `tmdb_movies`. You can find the film's TMDB ID at themoviedb.org.
+- `mapping: overrides.json names type with no usable season_kind` means a record names `type` and a `tvdb_id` but no `season_kind`, or one whose `season_kind` is neither `present` nor `absent`, and no `season_tvdb` above 0. `type` used to decide whether such an entry sat in Sonarr's specials or covered the whole series, and seadex-scout no longer reads it. No record in the file is used until you add `"season_kind": "present"` with `"season_tvdb": 0` for an entry in the specials, or `"season_kind": "absent"` for one spread over the series. The log line's `al_id` names the record.
 - `mapping: overrides.json unreadable` means the container user cannot read the file. For permissions, run `sudo chown 1000:1000 config/overrides.json`, or use your `PUID` and `PGID`. The same line appears when `overrides.json` is a folder, a link that leads outside the `config` folder, or larger than 4 MiB.
-- `mapping: overrides contain unknown keys, ignored` means a field name is misspelled or is not one the file reads, such as `imdb_id`, `themoviedb_id`, `season` or animap's `parts`.
-- `mapping: overrides carry no arr identifier and un-map their entry` means a record has no ID for its app, so its entry now matches nothing. A `MOVIE` record needs `tmdb_movies` or `imdb_ids`, and every other type needs `tvdb_id`.
+- `mapping: overrides contain unknown keys, ignored` means a field name is misspelled or is not one the file reads, such as `imdb_id`, `themoviedb_id`, `season` or animap's `parts`. `type` is read as an unknown field too: where the entry goes comes from its IDs, `tmdb_movies` for Radarr, `tvdb_id` for Sonarr and both for both, and its season comes from `season_kind` and `season_tvdb`.
+- `mapping: overrides carry no arr identifier and un-map their entry` means a record has no ID for either app, so its entry now matches nothing. A record needs `tmdb_movies` for Radarr or `tvdb_id` for Sonarr.
 - `mapping: overrides with missing or invalid anilist_id skipped` means a record has no positive `anilist_id`.
 
 The running container reads the file again at each start and at every full pass. With a `poll_interval` of 24 hours or less, the default included, a full pass runs at least once a day. A longer `poll_interval` makes every check a full pass. To apply a change now, run `docker restart seadex-scout`. With `poll_interval: off`, each `poll` run reads the file itself, so no restart is needed.

@@ -15,7 +15,7 @@ func TestComparePlacedSpecialAlertsLikeASeason(t *testing.T) {
 	entry := seadex.Entry{AniListID: 960, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "MTBB", Tracker: "Nyaa", URL: "https://nyaa.si/view/960"},
 	}}
-	rec := mapping.Record{Type: "OVA", TvdbID: 1, SeasonKind: mapping.SeasonPresent}
+	rec := mapping.Record{TvdbID: 1, SeasonKind: mapping.SeasonPresent}
 	item := func(group string) *library.Item {
 		it := &library.Item{
 			Title: "Series", Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"mtbb", "oz"}},
@@ -29,7 +29,7 @@ func TestComparePlacedSpecialAlertsLikeASeason(t *testing.T) {
 	}
 	compare := func(it *library.Item) []Finding {
 		m := match.Match{Item: it, Arr: library.ArrSonarr, Entry: entry, Record: rec, Specials: []int{9, 10}}
-		return comparer(filter.Options{}, false).Compare([]match.Match{m})
+		return comparer(filter.Options{}).Compare([]match.Match{m})
 	}
 	got := compare(item("oz"))
 	if len(got) != 1 {

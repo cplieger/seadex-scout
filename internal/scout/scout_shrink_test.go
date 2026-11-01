@@ -24,12 +24,12 @@ import (
 // --- the two-arr fixture the per-arr shrink guard is pinned on ---
 
 // shrinkMappingCache is the ID bridge for the shrink fixture: the Frieren TV
-// record (Sonarr side) plus a MOVIE record carrying its TMDB id (Radarr side),
+// record (Sonarr side) plus a record carrying a TMDB id (Radarr side),
 // so each arr owns one comparable, curated item.
 func shrinkMappingCache() mapping.Cache {
 	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
-		{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
-		{AniListID: 500, Type: "MOVIE", TmdbMovies: []int{900}},
+		{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1},
+		{AniListID: 500, TmdbMovies: []int{900}},
 	}}
 }
 
@@ -106,7 +106,7 @@ func (f *twoArrShrinkFixture) scout(logger *slog.Logger) *Scout {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{f.sonarr}, Radarr: f.radarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries()},
-		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
@@ -421,7 +421,7 @@ func TestCycleSingleArrDeploymentShrinksAsBefore(t *testing.T) {
 			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: shrinkSeaDexEntries()},
-			Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+			Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 			Comparer:     compare.New(compare.Config{}),
 			Notifier:     notify.NewNotifier(logger, nil),
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),

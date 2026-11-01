@@ -32,8 +32,8 @@ const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 type EntryInfo struct {
 	Title string
 	// SeriesTitle is the Sonarr series the entry is filed under, set only beside
-	// SpecialEpisodes: the second title the twin is labeled with, since Title
-	// keeps the entry's own name.
+	// TwinEpisodes: the title the release's Sonarr item is labeled with, since
+	// Title keeps the entry's own name.
 	SeriesTitle string
 	// Seasons are the TVDB seasons this entry's episodes fall into, as runs
 	// of entry episodes from the map; nil for a film, when the map names none
@@ -41,14 +41,17 @@ type EntryInfo struct {
 	// entries need 6, 8 and 2 distinct seasons across their packs, so one
 	// season per entry mislabels most of them.
 	Seasons []SeasonRange
-	// SpecialEpisodes are the TVDB season-0 episodes of SeriesTitle this offered
-	// entry is, ascending, nil when the map names none or under NonAiredOrder;
-	// SpecialsEpisodes is the entry episode count they answer, 0 when unknown.
-	// They let the feed serve a release a second time as "<SeriesTitle>
-	// S00Exx", which Sonarr can parse.
-	SpecialEpisodes  []int
-	SpecialsEpisodes int
-	Year             int
+	// TwinEpisodes are the TVDB episodes of season TwinSeason of SeriesTitle
+	// this entry is, ascending, nil when the map states none or under
+	// NonAiredOrder. TwinEntryEpisodes is the entry episode count they answer,
+	// 0 when unknown. They let the feed serve a release a second time as
+	// "<SeriesTitle> SxxEyy", which Sonarr can parse.
+	TwinEpisodes      []int
+	TwinEntryEpisodes int
+	// TwinSeason is TwinEpisodes' season: 0 for a special, positive only for
+	// a film placed on a regular season.
+	TwinSeason int
+	Year       int
 	// Season is the season number this entry's releases belong to, and SeasonKnown
 	// reports whether one was resolved at all.
 	Season int
@@ -133,9 +136,9 @@ func entryInfoFunc(info EntryInfoFunc) EntryInfoFunc {
 	return func(int) EntryInfo { return EntryInfo{} }
 }
 
-// categoriesFor maps a show's mapping type to its Torznab categories: a movie to
-// Movies (Radarr) whichever arr holds it, since Sonarr is offered a film only as
-// its twin (twinsFor), and everything else to Anime. The unknown case defaults to
+// categoriesFor maps a show's route to its Torznab categories: a film to
+// Movies (Radarr), since Sonarr is offered a film only as its twin
+// (twinsFor), and everything else to Anime. The unknown case defaults to
 // Anime: a single-file OVA looks like a movie by file name, and a special
 // mis-routed to Radarr can never match there.
 func categoriesFor(isMovie bool) []int {
@@ -395,7 +398,7 @@ var multiSpace = regexp.MustCompile(`\s{2,}`)
 
 // derivedTitle is the file-name derivation with the entry's known mapping
 // applied: when the entry pins a season (a positive mapped TVDB season, or a
-// mapping-typed special's mapped season 0), the pack's collapsed season label
+// season-0 placement), the pack's collapsed season label
 // (SxxExx and absolute arms alike) and a single release's LAST SxxExx season
 // half are relabeled to it - the same cour-local correction episodeMarker
 // applies on the assembled path, with the same precedence (the mapped season

@@ -18,10 +18,10 @@ import (
 func fourSeries() *Cache {
 	prev := staleCache("v2026.10.16")
 	prev.Records = []Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
-		{AniListID: 3, Type: "TV", TvdbID: 300},
-		{AniListID: 4, Type: "TV", TvdbID: 400},
+		{AniListID: 1, TvdbID: 100},
+		{AniListID: 2, TvdbID: 200},
+		{AniListID: 3, TvdbID: 300},
+		{AniListID: 4, TvdbID: 400},
 	}
 	return prev
 }

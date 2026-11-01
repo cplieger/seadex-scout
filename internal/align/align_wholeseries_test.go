@@ -14,7 +14,7 @@ import (
 
 // wholeRec is the record shape that classifies as a whole-series comparison:
 // a Sonarr series with no positive mapped TVDB season and not a special.
-var wholeRec = mapping.Record{Type: "TV", SeasonTvdb: 0}
+var wholeRec = mapping.Record{SeasonTvdb: 0}
 
 // decideWhole runs the shared decision for a whole-series item over the given
 // per-season groups.
@@ -258,7 +258,7 @@ func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
 				continue
 			}
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{season: groups}}
-			rec := mapping.Record{Type: "TV", SeasonTvdb: season}
+			rec := mapping.Record{SeasonTvdb: season}
 			single := align.Decide(item, &align.Entry{Record: &rec}, &align.Listing{Best: best, Alt: alt})
 			if !filed || standingConservativeness[single.Standing] > standingConservativeness[want] {
 				want = single.Standing
@@ -344,12 +344,12 @@ func TestDecideWholeSeriesDropsSiblingMappedSeasons(t *testing.T) {
 func TestDecideSiblingSeasonsOnlyReachTheWholeSeriesAggregate(t *testing.T) {
 	best := []string{"cbt"}
 	seasonItem := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{3: {"cbt"}}}
-	seasonRec := mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent, SeasonTvdb: 3}
+	seasonRec := mapping.Record{SeasonKind: mapping.SeasonPresent, SeasonTvdb: 3}
 	if d := align.Decide(seasonItem, &align.Entry{Record: &seasonRec, SiblingSeasons: []int{3}}, &align.Listing{Best: best}); d.Standing != align.StandingBest {
 		t.Errorf("season-scoped Standing = %v, want %v (a cour-split sibling must not blank the entry's own season)", d.Standing, align.StandingBest)
 	}
 	movieItem := &library.Item{Arr: library.ArrRadarr, Groups: []string{"cbt"}, HasFile: true}
-	movieRec := mapping.Record{Type: "MOVIE", SeasonKind: mapping.SeasonPresent}
+	movieRec := mapping.Record{TmdbMovies: []int{1}, SeasonKind: mapping.SeasonPresent}
 	if d := align.Decide(movieItem, &align.Entry{Record: &movieRec, SiblingSeasons: []int{1, 2}}, &align.Listing{Best: best}); d.Standing != align.StandingBest {
 		t.Errorf("movie Standing = %v, want %v", d.Standing, align.StandingBest)
 	}

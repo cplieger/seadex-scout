@@ -375,7 +375,7 @@ func TestServeEmitsTheFilmTwinOnBothRenderPaths(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, TwinEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)

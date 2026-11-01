@@ -62,16 +62,16 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 		{Arr: library.ArrRadarr, ArrID: 4, Title: "UncoveredMovie", TmdbID: 400, HasFile: true},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
-		{AniListID: 4, Type: "MOVIE", TmdbMovies: []int{400}},
+		{AniListID: 1, TvdbID: 100},
+		{AniListID: 2, TvdbID: 200},
+		{AniListID: 4, TmdbMovies: []int{400}},
 	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 1},
-		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+		Record: mapping.Record{TvdbID: 100, SeasonTvdb: 1},
 	}}
 
 	rep := a.Audit(matches, snap, idx, nil)
@@ -119,15 +119,15 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 		},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
+		{AniListID: 1, TvdbID: 100},
+		{AniListID: 2, TvdbID: 200},
 	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 1},
-		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+		Record: mapping.Record{TvdbID: 100, SeasonTvdb: 1},
 	}}
 
 	rep := New(Config{}).Audit(matches, snap, idx, nil)
@@ -151,19 +151,19 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 }
 
 // TestAuditNotOnSeaDexHonorsExcludeSpecials pins the exclude_specials symmetry:
-// with the filter on, a specials-only library item (its only mapping
-// record is an OVA) must not surface as not_on_seadex — matching the
-// matched-rows arm, which drops specials — while a mixed series (a sibling TV
-// record sharing the TVDB id) stays catalogued and is still listed.
+// with the filter on, a specials-only library item (its only mapping record
+// lands on season 0) must not surface as not_on_seadex, matching the matcher,
+// which drops that copy, while a mixed series (a sibling record on a regular
+// season of the same TVDB id) stays catalogued and is still listed.
 func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialsOnly", TvdbID: 500, Groups: []string{"g"}, HasFile: true},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "MixedSeries", TvdbID: 600, Groups: []string{"g"}, HasFile: true},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "OVA", TvdbID: 500},
-		{AniListID: 2, Type: "OVA", TvdbID: 600},
-		{AniListID: 3, Type: "TV", TvdbID: 600},
+		{SeasonKind: mapping.SeasonPresent, AniListID: 1, TvdbID: 500},
+		{SeasonKind: mapping.SeasonPresent, AniListID: 2, TvdbID: 600},
+		{AniListID: 3, TvdbID: 600},
 	}})
 
 	rowsFor := func(exclude bool) map[string]bool {
@@ -215,13 +215,13 @@ func TestAuditUntaggedGroupEvidence(t *testing.T) {
 				Arr: library.ArrSonarr, ArrID: 9, Title: "Groupless", TvdbID: 900,
 				SeasonGroups: map[int][]string{1: {tt.diskGroup}}, Groups: []string{tt.diskGroup}, HasFile: true,
 			}}}
-			idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 9, Type: "TV", TvdbID: 900}}})
+			idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 9, TvdbID: 900}}})
 			matches := []match.Match{{
 				Item:   &snap.Items[0],
 				Arr:    library.ArrSonarr,
 				Source: match.SourceID,
 				Entry:  seadex.Entry{AniListID: 9, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: tt.bestGroup, IsBest: true, URL: "https://nyaa.si/view/9"}}},
-				Record: mapping.Record{Type: "TV", TvdbID: 900, SeasonTvdb: 1},
+				Record: mapping.Record{TvdbID: 900, SeasonTvdb: 1},
 			}}
 
 			rep := a.Audit(matches, snap, idx, nil)
@@ -248,10 +248,9 @@ func TestAuditUntaggedGroupEvidence(t *testing.T) {
 // TestAuditRoutesWholeSeriesAndSkips exercises Audit's row loop end to end: a
 // seasonless non-special Sonarr match routes through the whole-series verdict
 // (conservative, approximate over two seasons), a match not in the library is
-// skipped, an excluded special is skipped, and a nil snapshot/index adds no
-// not_on_seadex rows.
+// skipped, and a nil snapshot/index adds no not_on_seadex rows.
 func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
-	a := New(Config{ExcludeSpecials: true})
+	a := New(Config{})
 	inLib := library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Absolute Run", TvdbID: 100,
 		SeasonGroups: map[int][]string{1: {"a&c"}, 2: {"zzz"}},
@@ -261,22 +260,17 @@ func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
 		{ // seasonless non-special: routed through the whole-series verdict
 			Item: &inLib, Arr: library.ArrSonarr, Source: match.SourceID,
 			Entry:  seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: "A&C", IsBest: true, URL: "https://nyaa.si/view/1"}}},
-			Record: mapping.Record{Type: "TV", TvdbID: 100},
+			Record: mapping.Record{TvdbID: 100},
 		},
 		{ // not in the library: skipped entirely
-			Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 2}, Record: mapping.Record{Type: "TV"},
-		},
-		{ // special with exclude_specials on: skipped
-			Item: &inLib, Arr: library.ArrSonarr, Source: match.SourceID,
-			Entry:  seadex.Entry{AniListID: 3},
-			Record: mapping.Record{Type: "OVA", TvdbID: 100},
+			Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 2}, Record: mapping.Record{},
 		},
 	}
 
 	rep := a.Audit(matches, nil, nil, nil)
 
 	if len(rep.Rows) != 1 {
-		t.Fatalf("rows = %d, want 1 (not-in-library and excluded special skipped; nil snapshot adds nothing)", len(rep.Rows))
+		t.Fatalf("rows = %d, want 1 (not-in-library skipped; nil snapshot adds nothing)", len(rep.Rows))
 	}
 	row := rep.Rows[0]
 	if row.Verdict != VerdictUnlisted {
@@ -320,7 +314,7 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 			Arr:    library.ArrSonarr,
 			Source: match.SourceID,
 			Entry:  entry,
-			Record: mapping.Record{Type: "TV", TvdbID: 1100, SeasonTvdb: 1},
+			Record: mapping.Record{TvdbID: 1100, SeasonTvdb: 1},
 		}}
 
 		for _, tt := range []struct {
@@ -395,7 +389,7 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  entry,
-		Record: mapping.Record{Type: "TV", TvdbID: 1200, SeasonTvdb: 1},
+		Record: mapping.Record{TvdbID: 1200, SeasonTvdb: 1},
 	}}
 
 	a := New(Config{})
@@ -542,7 +536,7 @@ func TestRowQualifier(t *testing.T) {
 		{"unverifiable row is unqualified", seadex.Entry{}, map[int][]string{1: {"nogrp"}}, []string{"sam"}, nil, ""},
 		{"unverifiable row of an incomplete entry is still unqualified", seadex.Entry{Incomplete: true}, map[int][]string{1: {"nogrp"}}, []string{"sam"}, nil, ""},
 	}
-	rec := mapping.Record{Type: "TV", SeasonTvdb: 1}
+	rec := mapping.Record{SeasonTvdb: 1}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
@@ -683,7 +677,7 @@ func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) reportRow {
 			Arr:    library.ArrSonarr,
 			Source: match.SourceID,
 			Entry:  seadex.Entry{AniListID: 10, Torrents: torrents},
-			Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+			Record: mapping.Record{TvdbID: 100, SeasonTvdb: 1},
 		}}
 		rep := a.Audit(matches, nil, nil, nil)
 		if len(rep.Rows) != 1 {
@@ -712,7 +706,7 @@ func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 			Arr:    library.ArrSonarr,
 			Source: match.SourceID,
 			Entry:  seadex.Entry{AniListID: 10, Torrents: torrents},
-			Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+			Record: mapping.Record{TvdbID: 100, SeasonTvdb: 1},
 		}}
 		rep := a.Audit(matches, nil, nil, nil)
 		if len(rep.Rows) != 1 {
@@ -749,41 +743,6 @@ func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 	})
 }
 
-// TestAuditExcludedSpecialMatchStillCoversItem pins the covered-mark ordering in
-// Audit's row loop: an item whose only SeaDex match is a special dropped by
-// exclude_specials is marked covered BEFORE the filter fires, so it never
-// resurfaces as not_on_seadex when the item IS on SeaDex via that entry. The
-// sibling TV record keeps it catalogued, so this fails if the mark moves below the
-// filter. The special's season is ABSENT, so it is comparable, which is the only
-// shape that still isolates the ordering now that an offered special claims none.
-func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
-	a := New(Config{ExcludeSpecials: true})
-	snap := &library.Snapshot{Items: []library.Item{{
-		Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialOnly", TvdbID: 700,
-		Groups: []string{"g"}, HasFile: true,
-	}}}
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 5, Type: "OVA", TvdbID: 700},
-		{AniListID: 6, Type: "TV", TvdbID: 700},
-	}})
-	matches := []match.Match{{
-		Item:   &snap.Items[0],
-		Arr:    library.ArrSonarr,
-		Source: match.SourceID,
-		Entry:  seadex.Entry{AniListID: 5},
-		Record: mapping.Record{Type: "OVA", TvdbID: 700, SeasonKind: mapping.SeasonAbsent},
-	}}
-
-	rep := a.Audit(matches, snap, idx, nil)
-
-	if len(rep.Rows) != 0 {
-		t.Errorf("rows = %+v, want none (the excluded-special match still covers its item, which must not resurface as not_on_seadex)", rep.Rows)
-	}
-	if n := rep.Totals[string(VerdictNotOnSeaDex)]; n != 0 {
-		t.Errorf("not_on_seadex total = %d, want 0", n)
-	}
-}
-
 // TestAuditCoverageFollowsComparability pins that coverage is a property of the
 // COMPARISON, not of the link. The alternative was measured - resolving a film to
 // its parent series marks the series covered, which silently deletes the two
@@ -801,20 +760,20 @@ func TestAuditCoverageFollowsComparability(t *testing.T) {
 	}{
 		{
 			name:          "an offered film on a Sonarr series claims no coverage",
-			record:        mapping.Record{Type: "MOVIE", TvdbID: 700, SeasonKind: mapping.SeasonPresent},
+			record:        mapping.Record{TvdbID: 700, SeasonKind: mapping.SeasonPresent},
 			item:          library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "Macross", TvdbID: 700, Groups: []string{"g"}, HasFile: true, SeasonGroups: map[int][]string{1: {"g"}}},
 			wantUncovered: true,
 		},
 		{
 			name:   "a comparable season entry claims coverage",
-			record: mapping.Record{Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+			record: mapping.Record{TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
 			item:   library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "Macross", TvdbID: 700, Groups: []string{"g"}, HasFile: true, SeasonGroups: map[int][]string{1: {"g"}}},
 		},
 		{
 			// The same mapped-zero record on the arr that CAN identify the file:
 			// scope's Radarr early return keeps it a movie, so it still covers.
 			name:   "a Radarr-owned film with a mapped zero keeps its coverage",
-			record: mapping.Record{Type: "MOVIE", TmdbMovies: []int{635302}, SeasonKind: mapping.SeasonPresent},
+			record: mapping.Record{TmdbMovies: []int{635302}, SeasonKind: mapping.SeasonPresent},
 			item:   library.Item{Arr: library.ArrRadarr, ArrID: 2, Title: "Mugen Train", TmdbID: 635302, Groups: []string{"g"}, HasFile: true},
 		},
 		{
@@ -822,7 +781,7 @@ func TestAuditCoverageFollowsComparability(t *testing.T) {
 			// the real seasons, so it keeps coverage. Fails if the dispatch reads
 			// the type label.
 			name:   "an absent-season special is comparable and keeps its coverage",
-			record: mapping.Record{Type: "OVA", TvdbID: 700, SeasonKind: mapping.SeasonAbsent},
+			record: mapping.Record{TvdbID: 700, SeasonKind: mapping.SeasonAbsent},
 			item:   library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "LoGH", TvdbID: 700, Groups: []string{"koala"}, HasFile: true, SeasonGroups: map[int][]string{1: {"koala"}}},
 		},
 	}
@@ -834,12 +793,11 @@ func TestAuditCoverageFollowsComparability(t *testing.T) {
 			indexed.AniListID = 5
 			records := []mapping.Record{indexed}
 			if tt.item.Arr == library.ArrSonarr {
-				// The reverse catalogue is what makes an uncovered item VISIBLE, and
-				// RoutedIDs deliberately still drops a MOVIE record's tvdb id (only
-				// FindByID reads the type-blind AllIDs). A sibling series record is
-				// what catalogues the item live - Macross Plus's own shape - so every
-				// negative assertion here is against an item the catalogue can see.
-				records = append(records, mapping.Record{AniListID: 9, Type: "TV", TvdbID: tt.item.TvdbID})
+				// The reverse catalogue is what makes an uncovered item VISIBLE. A
+				// sibling series record catalogues the item whatever tt.record
+				// routes - Macross Plus's own shape - so every negative assertion
+				// here is against an item the catalogue can see.
+				records = append(records, mapping.Record{AniListID: 9, TvdbID: tt.item.TvdbID})
 			}
 			idx := mapping.NewIndex(mapping.Source{Records: records})
 			matches := []match.Match{{
@@ -874,14 +832,17 @@ func TestAuditOfferedRowIsHonest(t *testing.T) {
 	entry := seadex.Entry{AniListID: 5, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/5"},
 	}}
-	for _, typ := range []string{"MOVIE", "SPECIAL"} {
-		t.Run(typ, func(t *testing.T) {
+	for _, shape := range []struct {
+		name string
+		tmdb []int
+	}{{"film", []int{635302}}, {"special", nil}} {
+		t.Run(shape.name, func(t *testing.T) {
 			a := New(Config{})
 			snap := &library.Snapshot{Items: []library.Item{{
 				Arr: library.ArrSonarr, ArrID: 1, Title: "Bucketed", TvdbID: 700,
 				Groups: []string{"erai-raws"}, HasFile: true, SeasonGroups: map[int][]string{0: {"erai-raws"}},
 			}}}
-			rec := mapping.Record{Type: typ, TvdbID: 700, SeasonKind: mapping.SeasonPresent}
+			rec := mapping.Record{TvdbID: 700, TmdbMovies: shape.tmdb, SeasonKind: mapping.SeasonPresent}
 			matches := []match.Match{{
 				Item: &snap.Items[0], Arr: library.ArrSonarr, Source: match.SourceID, Entry: entry, Record: rec,
 			}}
@@ -917,7 +878,7 @@ func TestAuditOfferedEmptyBucketKeepsNoFile(t *testing.T) {
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Bucketed", TvdbID: 700,
 		Groups: []string{"koala"}, HasFile: true, SeasonGroups: map[int][]string{1: {"koala"}},
 	}}}
-	rec := mapping.Record{Type: "MOVIE", TvdbID: 700, SeasonKind: mapping.SeasonPresent}
+	rec := mapping.Record{TvdbID: 700, SeasonKind: mapping.SeasonPresent}
 	matches := []match.Match{{
 		Item: &snap.Items[0], Arr: library.ArrSonarr, Source: match.SourceID,
 		Entry: seadex.Entry{AniListID: 5, Torrents: []seadex.Torrent{
@@ -957,9 +918,9 @@ func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
 			SeasonGroups: map[int][]string{1: {"cbt"}, 5: {"kh"}, 10: {"kh"}},
 		}}}
 		idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-			{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonAbsent},
-			{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 5},
-			{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 10},
+			{AniListID: 918, TvdbID: 79895, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 100, TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 5},
+			{AniListID: 101, TvdbID: 79895, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 10},
 		}})
 		rec, _ := idx.Lookup(918)
 		matches := []match.Match{{
@@ -985,10 +946,10 @@ func TestAuditWholeSeriesSiblingSeasonsAndFairyTail(t *testing.T) {
 			SeasonGroups: map[int][]string{1: {"kitsune"}, 2: {"kitsune"}},
 		}}}
 		records := []mapping.Record{
-			{AniListID: 6702, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
-			{AniListID: 20626, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
-			{AniListID: 99749, Type: "TV", TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
-			{AniListID: 9982, Type: "SPECIAL", TvdbID: 114701, SeasonKind: mapping.SeasonPresent},
+			{AniListID: 6702, TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 20626, TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 99749, TvdbID: 114701, SeasonKind: mapping.SeasonAbsent},
+			{AniListID: 9982, TvdbID: 114701, SeasonKind: mapping.SeasonPresent},
 		}
 		idx := mapping.NewIndex(mapping.Source{Records: records})
 		var matches []match.Match
@@ -1033,9 +994,9 @@ func TestAuditFairyTailOwnSeasonsAreTruthful(t *testing.T) {
 		},
 	}}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 6702, Type: "TV", TvdbID: 114801, AniDBID: 6662, SeasonKind: mapping.SeasonAbsent},
-		{AniListID: 20626, Type: "TV", TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
-		{AniListID: 99749, Type: "TV", TvdbID: 114801, AniDBID: 13295, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 6702, TvdbID: 114801, AniDBID: 6662, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 20626, TvdbID: 114801, AniDBID: 9980, SeasonKind: mapping.SeasonAbsent},
+		{AniListID: 99749, TvdbID: 114801, AniDBID: 13295, SeasonKind: mapping.SeasonAbsent},
 	}, Mappings: map[int]mapping.Mapping{
 		6662:  {Seasons: []mapping.SeasonRange{{Season: 1, First: 1, Last: 48}, {Season: 2, First: 49, Last: 96}, {Season: 3, First: 97, Last: 150}, {Season: 4, First: 151, Last: 175}}, SeasonsTvdb: 114801},
 		9980:  {Seasons: []mapping.SeasonRange{{Season: 5, First: 1, Last: 51}, {Season: 6, First: 52, Last: 90}, {Season: 7, First: 91, Last: 102}}, SeasonsTvdb: 114801},
@@ -1091,13 +1052,13 @@ func TestAuditPartialWalkKeepsCoverage(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Frieren", TvdbID: 700, Failed: true,
 	}}}
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 5, Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 5, TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 5},
-		Record: mapping.Record{Type: "TV", TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
+		Record: mapping.Record{TvdbID: 700, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1},
 	}}
 
 	rep := a.Audit(matches, snap, idx, nil)
@@ -1122,7 +1083,7 @@ func TestAssessClampsNegativeSeason(t *testing.T) {
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 1},
-		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: -1},
+		Record: mapping.Record{TvdbID: 100, SeasonTvdb: -1},
 	})
 
 	if row.Season != 0 {
@@ -1137,8 +1098,8 @@ func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredSeries", TvdbID: 200, Groups: []string{"grp"}, HasFile: true},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{400}},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
+		{AniListID: 1, TmdbMovies: []int{400}},
+		{AniListID: 2, TvdbID: 200},
 	}})
 
 	rep := a.Audit(nil, snap, idx, nil)
@@ -1164,7 +1125,7 @@ func TestAssessCarriesEntryStateFlags(t *testing.T) {
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 1, Incomplete: true},
-		Record: mapping.Record{Type: "OVA", TvdbID: 100},
+		Record: mapping.Record{SeasonKind: mapping.SeasonPresent, TvdbID: 100},
 	})
 
 	if !row.Incomplete {
@@ -1226,7 +1187,7 @@ func TestBestCellMarksOnlyHiddenBests(t *testing.T) {
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Hidden", TvdbID: 100,
 		SeasonGroups: map[int][]string{1: {"mine"}}, Groups: []string{"mine"}, HasFile: true,
 	}
-	record := mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1}
+	record := mapping.Record{TvdbID: 100, SeasonTvdb: 1}
 
 	tests := []struct {
 		name       string
@@ -1295,16 +1256,16 @@ func TestAuditGroupsUnknownMarksPlaceholders(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 3, Title: "UncoveredHealthy", TvdbID: 300, Groups: []string{"erai"}, HasFile: true},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "TV", TvdbID: 200},
-		{AniListID: 3, Type: "TV", TvdbID: 300},
+		{AniListID: 1, TvdbID: 100},
+		{AniListID: 2, TvdbID: 200},
+		{AniListID: 3, TvdbID: 300},
 	}})
 	matches := []match.Match{{
 		Item:   &snap.Items[0],
 		Arr:    library.ArrSonarr,
 		Source: match.SourceID,
 		Entry:  seadex.Entry{AniListID: 1},
-		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+		Record: mapping.Record{TvdbID: 100, SeasonTvdb: 1},
 	}}
 
 	rep := a.Audit(matches, snap, idx, nil)
@@ -1404,7 +1365,7 @@ func TestAuditDecoratedSeaDexLabelsReadAsHeldGroup(t *testing.T) {
 		{IsBest: true, ReleaseGroup: "Baws (1080p SDR)", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{IsBest: true, ReleaseGroup: "Baws (4k HDR)", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
 	}}
-	m := match.Match{Item: item, Arr: library.ArrRadarr, Source: match.SourceID, Entry: entry, Record: mapping.Record{Type: "MOVIE", TmdbMovies: []int{533514}}}
+	m := match.Match{Item: item, Arr: library.ArrRadarr, Source: match.SourceID, Entry: entry, Record: mapping.Record{TmdbMovies: []int{533514}}}
 	rep := New(Config{}).Audit([]match.Match{m}, nil, nil, nil)
 	if len(rep.Rows) != 1 {
 		t.Fatalf("Audit rows = %d, want 1", len(rep.Rows))
@@ -1427,7 +1388,7 @@ func TestAuditWithholdsANonAiredOrderSeries(t *testing.T) {
 	entry := seadex.Entry{AniListID: 5081, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "best", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 	}}
-	rec := mapping.Record{Type: "TV", TvdbID: 102261, SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
+	rec := mapping.Record{TvdbID: 102261, SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
 	item := func(order *library.Order) *library.Item {
 		return &library.Item{
 			Arr: library.ArrSonarr, ArrID: 2189, Title: "Monogatari", TvdbID: 102261, HasFile: true,
@@ -1488,7 +1449,7 @@ func TestAuditWithholdsAnAniListExcludedEntry(t *testing.T) {
 		Arr: library.ArrSonarr, ArrID: 33, Title: "Code Geass", TvdbID: 79525, HasFile: true,
 		SeasonGroups: map[int][]string{2: {"wrong"}}, Groups: []string{"wrong"}, AniListIDs: codeGeass,
 	}
-	rec := mapping.Record{Type: "TV", TvdbID: 79525, SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
+	rec := mapping.Record{TvdbID: 79525, SeasonTvdb: 2, SeasonKind: mapping.SeasonPresent}
 	audit := func(aniListID int) Report {
 		entry := seadex.Entry{AniListID: aniListID, Torrents: []seadex.Torrent{
 			{IsBest: true, ReleaseGroup: "best", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},

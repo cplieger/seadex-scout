@@ -47,7 +47,7 @@ type curation struct {
 
 // curatedSignal is what one identity signal's owners agreed on, folded at build
 // time: whether any of them marks the release best or is not a film, and the
-// tvdb id and film twin title they agree on, each as a vote keeping
+// tvdb id and Sonarr item title they agree on, each as a vote keeping
 // contradiction apart. A vote must carry
 // "contradicted" as its own state, because a bare zero conflates it with "no
 // owner supplied one" and then reads as abstention at the cross-signal fold,
@@ -100,8 +100,8 @@ func (m *curationMatch) accept(sig curatedSignal, ok bool) bool {
 // is curated at all, whether it is the best one, whether it was rejected by an
 // identity CONTRADICTION rather than by not being curated, whether any holder is
 // not a film, and the two facts every holder of every accepted signal agrees on -
-// the TVDB id (0 when none supplied one or they disagreed) and the film twin
-// title ("" likewise).
+// the TVDB id (0 when none supplied one or they disagreed) and the Sonarr
+// item title ("" likewise).
 type curationVerdict struct {
 	sonarrTitle string
 	tvdbID      int
@@ -284,7 +284,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 
 	if stats.feed {
 		// The category filter applies to the SYNTHESIZED feed only: those items carry
-		// the app's own mapping-typed vocabulary, so the client's cat list is meaningful
+		// the app's own route-derived categories, so the client's cat list is meaningful
 		// against them. Proxied results carry the TRACKER's categories and cat was
 		// already forwarded upstream, so re-filtering would empty every Movies search.
 		cats := parseCats(q.Get("cat"))

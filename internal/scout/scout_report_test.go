@@ -46,7 +46,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.New(notFoundAniList{}, logger),
+		Matcher: match.New(match.Config{AniList: notFoundAniList{}, Logger: logger}),
 		Auditor: audit.New(audit.Config{}),
 	})
 
@@ -99,7 +99,7 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: entries},
-		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher: match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Auditor: audit.New(audit.Config{}),
 	})
 
@@ -306,7 +306,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	// mapping URL unreachable: Load returns the cached index wrapped in a
 	// *mapping.StaleMapError.
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1}}},
 	}}
 	sonarr := &fakeSonarr{
 		series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}},
@@ -320,7 +320,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher: match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Auditor: audit.New(audit.Config{}),
 	})
 
@@ -356,7 +356,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-			Matcher: match.New(degradedMatcherAniList{}, logger),
+			Matcher: match.New(match.Config{AniList: degradedMatcherAniList{}, Logger: logger}),
 			Auditor: audit.New(audit.Config{}),
 		})
 
@@ -390,7 +390,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-			Matcher: match.New(&ctxCancellingAniList{cancel: cancel}, logger),
+			Matcher: match.New(match.Config{AniList: &ctxCancellingAniList{cancel: cancel}, Logger: logger}),
 		})
 
 		_, err := s.Report(ctx)
@@ -414,7 +414,7 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 	defer cancel()
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, TvdbID: 123}}},
 	}}
 	sonarr := &fakeSonarr{series: []sonarr.Series{{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023}}}
 	s := NewReporter(&ReportDeps{
@@ -475,7 +475,7 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 	// A stale-but-usable cached map, so the refresh is attempted (and fails at
 	// the transport) rather than skipped as fresh.
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1}}},
 	}}
 	// A directory at the overrides path fails the bounded read with a
 	// non-ErrNotExist error whatever the test user's privileges.
@@ -495,7 +495,7 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: mapping.NewLoader(noNetworkClient(), noSource, mapping.WithOverridesPath(overrides), mapping.WithRefresh(time.Hour), mapping.WithLogger(logger)),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher: match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Auditor: audit.New(audit.Config{}),
 	})
 
@@ -556,7 +556,7 @@ func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
 				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 				Mapping: fakeMapping{},
 				SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-				Matcher: match.New(notFoundAniList{}, scoutTestLogger()),
+				Matcher: match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 				Auditor: audit.New(audit.Config{}),
 			})
 

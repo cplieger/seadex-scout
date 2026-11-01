@@ -178,7 +178,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:      match.New(notFoundAniList{}, logger),
+		Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: logger}),
 		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notify.NewNotifier(logger, nil),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(logger))),
@@ -279,8 +279,8 @@ func (*probingFeed) Advance(context.Context, []seadex.Entry, indexer.FeedInfo) e
 }
 
 // TestCycleFeedInfoClassifiesViaMappingIndex pins the per-show metadata closure
-// Cycle hands the feed writer: Kind must be KindMovie for a MOVIE record,
-// KindSeries for a TV record, and KindUnknown for an unmapped id (which renders
+// Cycle hands the feed writer: Kind must be KindMovie for a TMDB-routed record,
+// KindSeries for a TVDB-routed one, and KindUnknown for an unmapped id (which renders
 // as the safe Anime default) - a wrong kind silently moves entries between Radarr's Movies
 // (2000) and Sonarr's Anime (5070) RSS categories - and the TV record's
 // mapped TVDB season must ride along for the season marker. The persisted
@@ -293,8 +293,8 @@ func TestCycleFeedInfoClassifiesViaMappingIndex(t *testing.T) {
 	// so the index the info closure reads is fully controlled.
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
-			{AniListID: 100, Type: "MOVIE"},
-			{AniListID: 200, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
+			{AniListID: 100, TmdbMovies: []int{900}},
+			{AniListID: 200, TvdbID: 123, SeasonTvdb: 2},
 		}},
 		NonAiredOrderTvdbIDs: []int{102261},
 	}}
@@ -405,7 +405,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-		Matcher: match.New(degradedMatcherAniList{}, scoutTestLogger()),
+		Matcher: match.New(match.Config{AniList: degradedMatcherAniList{}, Logger: scoutTestLogger()}),
 		Feed:    feed,
 	})
 
@@ -624,7 +624,7 @@ func TestCycleNonAiredOrderSeriesStaysWithheldUntilListedInAiredOrder(t *testing
 	// its range. Its twin needs a kept series to title it, so arr_tags already
 	// rules it out here (TestFeedEntryInfoWithholdsTwinForNonOfficialSeries).
 	idx := mapping.NewIndex(mapping.Source{Records: append(shrinkMappingCache().Records,
-		mapping.Record{AniListID: 1, Type: "TV", TvdbID: monogatariTvdb, AniDBID: 9001, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2},
+		mapping.Record{AniListID: 1, TvdbID: monogatariTvdb, AniDBID: 9001, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2},
 	), Mappings: map[int]mapping.Mapping{
 		9001: {Seasons: []mapping.SeasonRange{{Season: 2, First: 1, Last: 26}}, SeasonsTvdb: monogatariTvdb},
 	}})
@@ -661,7 +661,7 @@ func TestCycleNonAiredOrderSeriesStaysWithheldUntilListedInAiredOrder(t *testing
 			}),
 			Mapping:      fixedMapping{idx: idx},
 			SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-			Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+			Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 			Comparer:     compare.New(compare.Config{}),
 			Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),

@@ -1,0 +1,1564 @@
+{
+ "version": 2,
+ "generated_at": "2026-10-21T15:06:52Z",
+ "sources": {
+  "mapping": {
+   "revision": "051ec3f7db309c7cc28bccd06535231ed4f13194"
+  },
+  "anidb": {
+   "titles_dump": "2026-10-21"
+  }
+ },
+ "attribution": {
+  "license": "ODbL-1.0",
+  "license_url": "https://opendatacommons.org/licenses/odbl/1-0/",
+  "contents_license": "DbCL-1.0",
+  "contents_license_url": "https://opendatacommons.org/licenses/dbcl/1-0/",
+  "notice": "animap is made available under the Open Database License (ODbL) 1.0; its contents under the Database Contents License (DbCL) 1.0. It contains information from AniDB (https://anidb.net): which episodes exist, with their kind, number and AniDB episode id, the anime types and MyAnimeList links, licensed under CC BY-NC-SA 4.0; the initial AniList links from anime-offline-database (https://github.com/cedya77/anime-offline-database), made available under the ODbL 1.0 and DbCL 1.0; the initial mappings from Anime-Lists (https://github.com/Anime-Lists/anime-lists); and AniList ids (https://anilist.co). This product uses the TMDB API but is not endorsed or certified by TMDB. TVDB series and episode ids are from TheTVDB (https://thetvdb.com)."
+ },
+ "anime": [
+  {
+   "anidb_id": 61,
+   "type": "MOVIE",
+   "tvdb_id": 73749,
+   "mal_ids": [
+    43
+   ],
+   "imdb_ids": [
+    "tt0113568"
+   ],
+   "last": {
+    "regular": 6,
+    "special": 5,
+    "credit": 1,
+    "promotion": 2
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      378
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        358419
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 2,
+     "anidb_episode_ids": [
+      11800
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        358419
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 3,
+     "end": 3,
+     "anidb_episode_ids": [
+      14397
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        358419
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 4,
+     "end": 4,
+     "anidb_episode_ids": [
+      55811
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        358419
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 5,
+     "end": 5,
+     "anidb_episode_ids": [
+      55812
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        358419
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 6,
+     "end": 6,
+     "anidb_episode_ids": [
+      55813
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        358419
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 3,
+     "anidb_episode_ids": [
+      18758,
+      46668,
+      128185
+     ],
+     "tvdb": []
+    },
+    {
+     "kind": "special",
+     "start": 4,
+     "end": 5,
+     "anidb_episode_ids": [
+      314889,
+      314890
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 4,
+       "episode_ids": [
+        381274,
+        377870
+       ],
+       "default": true
+      }
+     ]
+    },
+    {
+     "kind": "credit",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      120910
+     ],
+     "tvdb": []
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 2,
+     "anidb_episode_ids": [
+      81630,
+      134776
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 306,
+   "type": "MOVIE",
+   "mal_ids": [
+    416
+   ],
+   "imdb_ids": [
+    "tt0104652"
+   ],
+   "last": {
+    "regular": 6,
+    "special": 3,
+    "promotion": 4
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 6,
+     "anidb_episode_ids": [
+      4012,
+      6026,
+      6027,
+      24398,
+      24400,
+      24401
+     ],
+     "tmdb_movies": [
+      11621
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 3,
+     "anidb_episode_ids": [
+      37551,
+      37550,
+      252918
+     ]
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 4,
+     "anidb_episode_ids": [
+      37546,
+      37547,
+      37548,
+      37549
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 335,
+   "type": "SPECIAL",
+   "mal_ids": [
+    743
+   ],
+   "imdb_ids": [
+    "tt0108432"
+   ],
+   "last": {
+    "regular": 6,
+    "special": 1,
+    "credit": 1,
+    "promotion": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 6,
+     "anidb_episode_ids": [
+      4067,
+      67921,
+      67920,
+      46286,
+      46287,
+      46288
+     ],
+     "tmdb_movies": [
+      21057
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      192958
+     ]
+    },
+    {
+     "kind": "credit",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      228836
+     ]
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      228837
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 625,
+   "type": "MOVIE",
+   "tvdb_id": 70900,
+   "mal_ids": [
+    187
+   ],
+   "imdb_ids": [
+    "tt0388130"
+   ],
+   "last": {
+    "regular": 3,
+    "special": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      10174
+     ],
+     "tvdb": [
+      {
+       "season": 3,
+       "episode": 1,
+       "episode_ids": [
+        299247
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      80741
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 2,
+     "anidb_episode_ids": [
+      6957
+     ],
+     "tvdb": [
+      {
+       "season": 3,
+       "episode": 1,
+       "episode_ids": [
+        299247
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      80741
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 3,
+     "end": 3,
+     "anidb_episode_ids": [
+      6959
+     ],
+     "tvdb": [
+      {
+       "season": 3,
+       "episode": 1,
+       "episode_ids": [
+        299247
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      80741
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      52057
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 856,
+   "type": "MOVIE",
+   "mal_ids": [
+    216
+   ],
+   "imdb_ids": [
+    "tt1178592"
+   ],
+   "last": {
+    "regular": 1,
+    "credit": 2,
+    "promotion": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      8846
+     ]
+    },
+    {
+     "kind": "credit",
+     "start": 1,
+     "end": 2,
+     "anidb_episode_ids": [
+      66812,
+      66813
+     ]
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      85390
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 884,
+   "type": "SPECIAL",
+   "tvdb_id": 72025,
+   "mal_ids": [
+    399
+   ],
+   "last": {
+    "regular": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      9169
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 3,
+       "episode_ids": [
+        1205321
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      89496
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 996,
+   "type": "MOVIE",
+   "tvdb_id": 73038,
+   "mal_ids": [
+    1089
+   ],
+   "imdb_ids": [
+    "tt0087660"
+   ],
+   "last": {
+    "regular": 6,
+    "promotion": 6
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      10233
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        635381
+       ],
+       "default": true
+      }
+     ],
+     "tmdb_movies": [
+      14132
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 2,
+     "anidb_episode_ids": [
+      25134
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        635381
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      14132
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 3,
+     "end": 3,
+     "anidb_episode_ids": [
+      25135
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        635381
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      14132
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 4,
+     "end": 4,
+     "anidb_episode_ids": [
+      72130
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        635381
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      14132
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 5,
+     "end": 5,
+     "anidb_episode_ids": [
+      72129
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        635381
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      14132
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 6,
+     "end": 6,
+     "anidb_episode_ids": [
+      72128
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        635381
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      14132
+     ]
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 6,
+     "anidb_episode_ids": [
+      91388,
+      91389,
+      91390,
+      91391,
+      176390,
+      176389
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 1141,
+   "type": "MOVIE",
+   "tvdb_id": 76666,
+   "mal_ids": [
+    502
+   ],
+   "imdb_ids": [
+    "tt0142251"
+   ],
+   "last": {
+    "regular": 1,
+    "promotion": 2
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      12250
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 1,
+       "episode_ids": [
+        375376
+       ],
+       "default": true
+      }
+     ],
+     "tmdb_movies": [
+      39144
+     ]
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 2,
+     "anidb_episode_ids": [
+      86543,
+      86544
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 2249,
+   "type": "OVA",
+   "tvdb_id": 398170,
+   "mal_ids": [
+    619
+   ],
+   "imdb_ids": [
+    "tt0188104"
+   ],
+   "last": {
+    "regular": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      45089
+     ],
+     "tvdb": [
+      {
+       "season": 1,
+       "episode": 1,
+       "episode_ids": [
+        8270034
+       ],
+       "default": true
+      }
+     ],
+     "tmdb_movies": [
+      146006
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 2708,
+   "type": "TV",
+   "mal_ids": [
+    310
+   ],
+   "last": {
+    "regular": 50,
+    "credit": 2
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 50,
+     "anidb_episode_ids": [
+      52351,
+      76098,
+      76097,
+      76096,
+      76095,
+      76094,
+      76093,
+      76092,
+      76091,
+      76090,
+      76089,
+      76088,
+      76087,
+      76086,
+      76085,
+      76084,
+      76083,
+      76082,
+      76081,
+      76080,
+      76079,
+      76078,
+      76077,
+      76076,
+      76075,
+      76074,
+      76073,
+      76072,
+      76071,
+      76070,
+      76069,
+      76068,
+      76067,
+      76066,
+      76065,
+      76064,
+      76063,
+      76062,
+      76061,
+      76060,
+      76059,
+      76058,
+      76057,
+      76056,
+      76055,
+      76054,
+      76053,
+      76052,
+      76051,
+      76050
+     ]
+    },
+    {
+     "kind": "credit",
+     "start": 1,
+     "end": 2,
+     "anidb_episode_ids": [
+      127743,
+      127742
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 8090,
+   "type": "MOVIE",
+   "tvdb_id": 85249,
+   "mal_ids": [
+    9135,
+    10842
+   ],
+   "imdb_ids": [
+    "tt1776196"
+   ],
+   "last": {
+    "regular": 3,
+    "special": 1,
+    "promotion": 13
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      130959
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 21,
+       "episode_ids": [
+        3389471
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      80518
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 2,
+     "anidb_episode_ids": [
+      203600
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 21,
+       "episode_ids": [
+        3389471
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      80518
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 3,
+     "end": 3,
+     "anidb_episode_ids": [
+      203601
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 21,
+       "episode_ids": [
+        3389471
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      80518
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      242860
+     ],
+     "tvdb": []
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 13,
+     "anidb_episode_ids": [
+      126613,
+      135873,
+      137719,
+      137718,
+      137717,
+      137716,
+      137715,
+      137714,
+      137713,
+      137712,
+      137711,
+      137710,
+      137709
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 13332,
+   "type": "OVA",
+   "tvdb_id": 278157,
+   "mal_ids": [
+    35321
+   ],
+   "last": {
+    "regular": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      189919
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 5,
+       "episode_ids": [
+        6476467
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "anidb_id": 13430,
+   "type": "OVA",
+   "tvdb_id": 305089,
+   "mal_ids": [
+    36286,
+    38414,
+    39921,
+    41590
+   ],
+   "last": {
+    "regular": 2,
+    "special": 2,
+    "promotion": 5
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      208231
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 26,
+       "episode_ids": [
+        6727916
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      532321,
+      566451
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 2,
+     "anidb_episode_ids": [
+      208422
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 28,
+       "episode_ids": [
+        7427328
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      532321,
+      566451
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      217894
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 27,
+       "episode_ids": [
+        7230382
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 2,
+     "end": 2,
+     "anidb_episode_ids": [
+      227922
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 29,
+       "episode_ids": [
+        7672388
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "promotion",
+     "start": 1,
+     "end": 5,
+     "anidb_episode_ids": [
+      226014,
+      214232,
+      279976,
+      286498,
+      286499
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 16187,
+   "type": "ONA",
+   "tvdb_id": 262954,
+   "mal_ids": [
+    48661
+   ],
+   "last": {
+    "regular": 12,
+    "credit": 3
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 12,
+     "anidb_episode_ids": [
+      250393,
+      250420,
+      250421,
+      250422,
+      250423,
+      250424,
+      250425,
+      250426,
+      250427,
+      250428,
+      250429,
+      250430
+     ],
+     "tvdb": [
+      {
+       "season": 5,
+       "episode": 1,
+       "episode_ids": [
+        8854306,
+        8860783,
+        8860784,
+        8860785,
+        8860786,
+        8860787,
+        8860788,
+        8860789,
+        8860790,
+        8860791,
+        8860792,
+        8860793
+       ],
+       "default": true
+      }
+     ]
+    },
+    {
+     "kind": "credit",
+     "start": 1,
+     "end": 3,
+     "anidb_episode_ids": [
+      251674,
+      257181,
+      251675
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 18278,
+   "type": "TV",
+   "tvdb_id": 429934,
+   "mal_ids": [
+    57181
+   ],
+   "last": {
+    "regular": 25,
+    "credit": 4
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      286674
+     ],
+     "tvdb": [
+      {
+       "season": 1,
+       "episode": 1,
+       "episode_ids": [
+        10152847
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 25,
+     "anidb_episode_ids": [
+      286675,
+      286676,
+      286677,
+      287391,
+      287392,
+      287393,
+      287394,
+      288741,
+      288742,
+      288743,
+      288744,
+      289767,
+      289768,
+      289769,
+      289770,
+      291446,
+      291447,
+      291448,
+      291449,
+      292761,
+      292762,
+      292763,
+      292764,
+      292765
+     ],
+     "tvdb": [
+      {
+       "season": 1,
+       "episode": 2,
+       "episode_ids": [
+        10691954,
+        10691955,
+        10691956,
+        10691957,
+        10691958,
+        10691959,
+        10691960,
+        10691961,
+        10691962,
+        10691963,
+        10691964,
+        10720982,
+        10720983,
+        10720984,
+        10720985,
+        10720986,
+        10720987,
+        10720988,
+        10720989,
+        10720990,
+        10720991,
+        10720992,
+        10720993,
+        10720994
+       ],
+       "default": true
+      }
+     ]
+    },
+    {
+     "kind": "credit",
+     "start": 1,
+     "end": 4,
+     "anidb_episode_ids": [
+      287113,
+      291827,
+      291116,
+      291826
+     ],
+     "tvdb": []
+    }
+   ]
+  },
+  {
+   "anidb_id": 18699,
+   "type": "MOVIE",
+   "tvdb_id": 348545,
+   "mal_ids": [
+    59192,
+    62546
+   ],
+   "imdb_ids": [
+    "tt32820897"
+   ],
+   "last": {
+    "regular": 3,
+    "special": 1
+   },
+   "episodes_listed": true,
+   "episodes": [
+    {
+     "kind": "regular",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      293778
+     ],
+     "tvdb": [
+      {
+       "season": 0,
+       "episode": 16,
+       "episode_ids": [
+        11573737
+       ]
+      }
+     ],
+     "tmdb_movies": [
+      1311031
+     ]
+    },
+    {
+     "kind": "regular",
+     "start": 2,
+     "end": 3,
+     "anidb_episode_ids": [
+      293779,
+      293780
+     ],
+     "tmdb_movies": [
+      1311031
+     ]
+    },
+    {
+     "kind": "special",
+     "start": 1,
+     "end": 1,
+     "anidb_episode_ids": [
+      309019
+     ],
+     "tvdb": []
+    }
+   ]
+  }
+ ],
+ "entries": [
+  {
+   "anilist_id": 43,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     61
+    ],
+    "mal": [
+     43
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 61,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 187,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     625
+    ],
+    "mal": [
+     187
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 625,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 216,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     856
+    ],
+    "mal": [
+     216
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 856,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 310,
+   "type": "TV",
+   "ids": {
+    "anidb": [
+     2708
+    ],
+    "mal": [
+     310
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 2708,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 399,
+   "type": "SPECIAL",
+   "ids": {
+    "anidb": [
+     884
+    ],
+    "mal": [
+     399
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 884,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 416,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     306
+    ],
+    "mal": [
+     416
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 306,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 502,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     1141
+    ],
+    "mal": [
+     502
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 1141,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 619,
+   "type": "OVA",
+   "ids": {
+    "anidb": [
+     2249
+    ],
+    "mal": [
+     619
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 2249,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 743,
+   "type": "SPECIAL",
+   "ids": {
+    "anidb": [
+     335
+    ],
+    "mal": [
+     743
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 335,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 1089,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     996
+    ],
+    "mal": [
+     1089
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 996,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 9135,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     8090
+    ],
+    "mal": [
+     9135
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 8090,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 100049,
+   "type": "OVA",
+   "ids": {
+    "anidb": [
+     13430
+    ],
+    "mal": [
+     36286
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 13430,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 107351,
+   "type": "OVA",
+   "ids": {
+    "anidb": [
+     13332
+    ],
+    "mal": [
+     35321
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 13332,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 131942,
+   "type": "ONA",
+   "ids": {
+    "anidb": [
+     16187
+    ],
+    "mal": [
+     48661
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 16187,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 170942,
+   "type": "TV",
+   "ids": {
+    "anidb": [
+     18278
+    ],
+    "mal": [
+     57181
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 18278,
+     "kind": "regular"
+    }
+   ]
+  },
+  {
+   "anilist_id": 178788,
+   "type": "MOVIE",
+   "ids": {
+    "anidb": [
+     18699
+    ],
+    "mal": [
+     59192
+    ]
+   },
+   "parts": [
+    {
+     "anidb_id": 18699,
+     "kind": "regular"
+    }
+   ]
+  }
+ ]
+}

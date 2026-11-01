@@ -81,12 +81,12 @@ func encode(t testing.TB, doc *mapread.Document) []byte {
 // entry is one AniList id that is all the regular episodes of an anime of
 // its own, written the way a Record reads it: TVDB is the anime's series, 0
 // for none, and Lands where its one episode lands there, nil stating
-// nothing; Movies are the TMDB movies that episode is, and IMDb the anime's.
+// nothing; Movies are the TMDB movies that episode is. Type is the published
+// type, which the projection does not read.
 type entry struct {
 	Lands   *[]mapread.Target
 	Type    string
 	Movies  []int
-	IMDb    []string
 	AniList int
 	TVDB    int
 }
@@ -98,7 +98,7 @@ func entriesBody(t testing.TB, es ...entry) []byte {
 	var anime []mapread.Anime
 	var entries []mapread.Entry
 	for _, e := range es {
-		a := mapread.Anime{AniDBID: e.AniList, Type: strings.ToUpper(e.Type), TVDBID: e.TVDB, IMDbIDs: e.IMDb, Last: mapread.Last{Regular: 1}}
+		a := mapread.Anime{AniDBID: e.AniList, Type: strings.ToUpper(e.Type), TVDBID: e.TVDB, Last: mapread.Last{Regular: 1}}
 		if e.TVDB > 0 || e.Movies != nil {
 			run := mapread.Run{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: e.Movies}
 			if e.TVDB > 0 {

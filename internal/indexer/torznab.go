@@ -45,11 +45,12 @@ type item struct {
 	InfoHash             string    `json:"InfoHash"`
 	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
 	// SonarrTitle and SonarrGUID are the twin's two facts, set on a release every
-	// holder twins identically (twinVote): the "<Series> S00Exx <flags>" title
-	// Sonarr's parser can match, and the original GUID with a fragment. The render expands
-	// a stored item carrying them into a second wire item (sonarrTwin); nothing is
-	// journaled twice. Additive and omitempty, re-derived every reconcile, so an
-	// older binary drops them and nothing accumulates.
+	// holder twins identically (twinVote): the "<Series> SxxEyy <flags>" title
+	// Sonarr's parser can match, and the original GUID with a fragment. The
+	// render expands a stored item carrying them into a second wire item
+	// (sonarrTwin); nothing is journaled twice. Additive and omitempty,
+	// re-derived every reconcile, so an older binary drops them and nothing
+	// accumulates.
 	SonarrTitle string `json:"SonarrTitle,omitempty"`
 	SonarrGUID  string `json:"SonarrGUID,omitempty"`
 	Categories  []int  `json:"Categories"`
