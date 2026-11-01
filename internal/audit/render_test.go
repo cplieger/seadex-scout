@@ -243,13 +243,13 @@ func TestRenderMarkdownScopePrecedence(t *testing.T) {
 			a.assess(&match.Match{
 				Item:   movie,
 				Arr:    library.ArrRadarr,
-				Record: mapping.Record{Type: "OVA", SeasonTvdb: 2},
+				Record: mapping.Record{SeasonTvdb: 2},
 			}),
 			// A positive mapped TVDB season wins over the record being a special.
 			a.assess(&match.Match{
 				Item:   series,
 				Arr:    library.ArrSonarr,
-				Record: mapping.Record{Type: "OVA", SeasonTvdb: 2},
+				Record: mapping.Record{SeasonTvdb: 2},
 			}),
 		},
 	}

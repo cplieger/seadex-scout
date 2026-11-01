@@ -20,7 +20,7 @@ import (
 func freshCache() *Cache {
 	return &Cache{
 		FetchedAt: time.Now(),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		Records:   []Record{{AniListID: 1, TvdbID: 100}},
 	}
 }
 
@@ -30,7 +30,7 @@ func staleCache(tag string) *Cache {
 	return &Cache{
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Tag:       tag,
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		Records:   []Record{{AniListID: 1, TvdbID: 100}},
 	}
 }
 
@@ -192,9 +192,9 @@ func TestLoader_refreshCache_unchangedTagOnAnUnusableCacheDownloads(t *testing.T
 	for name, records := range map[string][]Record{
 		"no records":            nil,
 		"a zero AniList id":     {{}},
-		"no arr identifier":     {{AniListID: 1, Type: "TV"}},
-		"non-canonical ids":     {{AniListID: 7, Type: "MOVIE", TmdbMovies: []int{0}, IMDbIDs: []string{"  "}}},
-		"negative AniList keys": {{AniListID: -1, Type: "TV", TvdbID: 100}},
+		"no arr identifier":     {{AniListID: 1}},
+		"non-canonical ids":     {{AniListID: 7, TmdbMovies: []int{0}}},
+		"negative AniList keys": {{AniListID: -1, TvdbID: 100}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rel := newRelease(t, testTag, entriesBody(t, entry{AniList: 42, Type: "tv", TVDB: 100, Lands: targets(at(1, 1))}))
@@ -235,7 +235,7 @@ func TestLoader_Load_nilCacheFetches(t *testing.T) {
 
 func TestLoader_Load_overrideWinsOverUpstream(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"tmdb_movies":[42]}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
 	_, idx, err := unused(WithOverridesPath(overrides), WithRefresh(time.Hour)).Load(t.Context(), freshCache())
@@ -243,8 +243,8 @@ func TestLoader_Load_overrideWinsOverUpstream(t *testing.T) {
 		t.Fatalf("Load error: %v", err)
 	}
 	rec, ok := idx.Lookup(1)
-	if !ok || rec.Type != "MOVIE" || !slices.Equal(rec.TmdbMovies, []int{42}) {
-		t.Errorf("override not applied: got %+v ok=%v, want Type MOVIE / TmdbMovies [42]", rec, ok)
+	if !ok || rec.TvdbID != 0 || !slices.Equal(rec.TmdbMovies, []int{42}) {
+		t.Errorf("override not applied: got %+v ok=%v, want the override alone, TmdbMovies [42]", rec, ok)
 	}
 }
 
@@ -254,7 +254,7 @@ func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load with missing overrides error: %v", err)
 	}
-	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" {
+	if rec, ok := idx.Lookup(1); !ok || rec.TvdbID != 100 {
 		t.Errorf("missing overrides changed the mapping record: %+v ok=%v", rec, ok)
 	}
 	bad := filepath.Join(dir, "bad.json")
@@ -294,7 +294,7 @@ func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
 func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 	rel := newRelease(t, testTag, []byte(`{}`))
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"tmdb_movies":[42]}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
 	_, idx, err := rel.loader(WithOverridesPath(overrides), WithRefresh(time.Hour)).Load(t.Context(), staleCache(""))
@@ -302,8 +302,8 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 		t.Fatal("Load with a refused refresh returned nil error, want a degraded error")
 	}
 	rec, ok := idx.Lookup(1)
-	if !ok || rec.Type != "MOVIE" || !slices.Equal(rec.TmdbMovies, []int{42}) {
-		t.Errorf("degraded Load did not overlay overrides: got %+v ok=%v, want Type MOVIE / TmdbMovies [42]", rec, ok)
+	if !ok || rec.TvdbID != 0 || !slices.Equal(rec.TmdbMovies, []int{42}) {
+		t.Errorf("degraded Load did not overlay overrides: got %+v ok=%v, want the override alone, TmdbMovies [42]", rec, ok)
 	}
 }
 
@@ -314,8 +314,8 @@ func TestLoader_Load_noOverridesPathServesUpstreamUnmodified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load with no overrides path error: %v", err)
 	}
-	if rec, ok := idx.Lookup(1); idx.Len() != 1 || !ok || rec.Type != "TV" || rec.TvdbID != 100 {
-		t.Errorf("Load with no overrides path record = %+v ok=%v of %d, want unmodified TV/100", rec, ok, idx.Len())
+	if rec, ok := idx.Lookup(1); idx.Len() != 1 || !ok || rec.TvdbID != 100 {
+		t.Errorf("Load with no overrides path record = %+v ok=%v of %d, want unmodified TVDB 100", rec, ok, idx.Len())
 	}
 }
 
@@ -409,9 +409,9 @@ func TestLoader_refreshCache_unusableCacheFetchFailureErrors(t *testing.T) {
 func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
 	for name, records := range map[string][]Record{
 		"a zero AniList id":                   {{}},
-		"a zero-id record carrying the TVDB":  {{AniListID: 1, Type: "TV"}, {AniListID: 0, Type: "TV", TvdbID: 100}},
-		"keyed but with no arr identifier":    {{AniListID: 1, Type: "TV"}},
-		"only negative AniList ids, mappable": {{AniListID: -1, Type: "TV", TvdbID: 100}, {AniListID: -2, Type: "TV", TvdbID: 200}},
+		"a zero-id record carrying the TVDB":  {{AniListID: 1}, {AniListID: 0, TvdbID: 100}},
+		"keyed but with no arr identifier":    {{AniListID: 1}},
+		"only negative AniList ids, mappable": {{AniListID: -1, TvdbID: 100}, {AniListID: -2, TvdbID: 200}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if cacheUsable(records) {

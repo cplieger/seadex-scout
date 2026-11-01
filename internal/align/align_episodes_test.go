@@ -23,7 +23,7 @@ func specialsItem() library.Item {
 	}
 }
 
-var mappedZeroOVA = mapping.Record{Type: "OVA", TvdbID: 1, SeasonKind: mapping.SeasonPresent}
+var mappedZeroOVA = mapping.Record{TvdbID: 1, SeasonKind: mapping.SeasonPresent}
 
 func TestDecideEpisodesJudgesOnlyThePlacedFiles(t *testing.T) {
 	item := specialsItem()
@@ -95,7 +95,7 @@ func TestDecideEpisodesNeverOverridesTheArrOrASeason(t *testing.T) {
 		t.Errorf("Decide(Radarr film, placed) kind = %v, want movie", d.Kind)
 	}
 	item := specialsItem()
-	season := mapping.Record{Type: "TV", TvdbID: 1, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
+	season := mapping.Record{TvdbID: 1, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
 	if d := align.Decide(&item, &align.Entry{Record: &season, Specials: []int{9}}, &align.Listing{Best: []string{"subsplease"}}); d.Kind != align.ScopeSeason || d.Episodes != nil {
 		t.Errorf("Decide(season 1, placed) = %v episodes %v, want season and no episodes", d.Kind, d.Episodes)
 	}
@@ -157,7 +157,7 @@ func filmsItem() library.Item {
 	}
 }
 
-var seasonOneFilm = mapping.Record{Type: "MOVIE", TvdbID: 1, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
+var seasonOneFilm = mapping.Record{TmdbMovies: []int{1}, TvdbID: 1, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
 
 // An entry placed on some of a positive season's listed episodes is judged
 // on those files only, its season stamped on the decision.

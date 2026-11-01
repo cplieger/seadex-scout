@@ -88,7 +88,7 @@ The indexer is off until you set it up. It offers SeaDex's picks to Sonarr and R
 
 You fill in the `indexer` section of `config.yaml`, add port `9118` to the service, and add the feed to Sonarr and Radarr as a Torznab indexer. Give it category `5070` in Sonarr and `2000` in Radarr, because the indexer tells the two apart by them. Then you create two Custom Formats, one for SeaDex's best picks and one for its alternatives. In that indexer's settings in Sonarr, tick **Anime Standard Format Search**. Without it, Sonarr asks only for single episodes, which the indexer answers only for specials, and you get nothing else.
 
-A film or special that TVDB files under a series reaches Sonarr under that series' title and special episode, such as `Code Geass S00E04`. A film also reaches Radarr under its own title. A film the map cannot name that way is offered to Radarr only, so Sonarr never has to guess which special it is.
+An entry with a TMDB movie ID reaches Radarr under its own title, and one with a TVDB ID reaches Sonarr. A film or special that TVDB files under a series, or on episodes of one of its seasons, reaches Sonarr under that series' title and episodes, such as `Code Geass S00E04` or `Initial D S03E01`. A film the map cannot name that way is offered to Radarr only, so Sonarr never has to guess which episode it is. It reaches Sonarr once animap places its episodes on TVDB.
 
 Right after setup, the indexer's RSS list is empty. It lists only picks SeaDex adds from then on. Sonarr and Radarr find the older ones when they search. [Torznab feed setup](docs/torznab-indexer.md) has every click.
 
@@ -115,7 +115,7 @@ The settings most people change:
 | `animebytes` | `false` | Set `true` when you have an AnimeBytes account, to include its releases and links. |
 | `filters.exclude_remux` | `false` | Leave out releases classified as remux. |
 | `filters.require_dual_audio` | `false` | Leave out releases that are not dual audio. |
-| `filters.exclude_specials` | `false` | Leave out OVA, ONA and special entries. |
+| `filters.exclude_specials` | `false` | Leave out the Sonarr copy of entries that land only in a series' season 0, such as specials and films TVDB lists there. Their Radarr copy stays. |
 | `filters.ignore` | `[]` | AniList IDs of shows to stop warning about. They still appear in the report and the indexer. |
 | `arr_tags.include` | `[]` | Check only items with one of these Sonarr or Radarr tags. `[]` checks everything. |
 | `arr_tags.exclude` | `[]` | Never check items with one of these tags. An exclude wins over an include. |

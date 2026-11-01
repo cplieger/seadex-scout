@@ -111,9 +111,9 @@ func TestStaleOrFail_recordsReportIndexedCount(t *testing.T) {
 	prev := &Cache{
 		FetchedAt: time.Now().Add(-90 * time.Second),
 		Records: []Record{
-			{AniListID: 1, Type: "TV", TvdbID: 100},
-			{AniListID: 1, Type: "TV", TvdbID: 101},
-			{AniListID: 0, Type: "TV", TvdbID: 102},
+			{AniListID: 1, TvdbID: 100},
+			{AniListID: 1, TvdbID: 101},
+			{AniListID: 0, TvdbID: 102},
 		},
 	}
 	next, err := staleOrFail(prev, "refresh failed", errors.New("boom"), errors.New("mapping: no cache"))

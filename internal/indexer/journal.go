@@ -344,7 +344,7 @@ type hashLookup func(hash string) []curatedRef
 // foldRefs applies the order-independent folds across every HOLDER of this
 // torrent's identity: best-wins on the download-volume-factor marker, the
 // category union, and the two votes it returns for the caller to collapse once
-// every holder has been seen - the tvdb id and the film twin title.
+// every holder has been seen - the tvdb id and the Sonarr item title.
 //
 // All of them see the union of the KEY's occurrences and those sharing only its
 // bare HASH. Without it each fold oscillates between pass kinds, since a
@@ -377,7 +377,7 @@ func foldHolderCategories(it *journalItem, info *EntryInfo) {
 	}
 }
 
-// stampTwin collapses the film twin vote onto the item, once, after every holder
+// stampTwin collapses the Sonarr item vote onto the item, once, after every holder
 // - the pass's own and the carried unevaluated owners - has been seen, and after
 // the item's GUID is final (the twin GUID derives from it).
 func stampTwin(it *journalItem, twin twinVote) {
@@ -555,12 +555,11 @@ func (p *journalPass) carryStoredItem(it *journalItem) (journalItem, bool) {
 // applyStoredOrder judges a stored render under a non-aired order: that of the
 // series the current EntryInfo of the entry whose title it carries names, or
 // that of the series its stored TvdbID names, since the entry's mapping may
-// have gone or moved since the render. Every holder twins identically
-// (twinVote), so that series is the twin's too. The twin goes; so does an item
-// whose title is not a film's by its stored NonFilm or the entry's current
-// KindSeries, since the title may hold a TheTVDB season and cannot be
-// re-rendered. KindUnknown is no such evidence: a film whose typing is gone
-// keeps its title.
+// have moved since the render. Every holder twins identically (twinVote), so
+// that series is the twin's too. The twin goes; so does an item whose title is
+// not a film's by its stored NonFilm or the entry's current KindSeries, since
+// the title may hold a TheTVDB season and cannot be re-rendered. KindUnknown
+// is no such evidence: a film whose typing is gone keeps its title.
 func (p *journalPass) applyStoredOrder(it *journalItem) (journalItem, bool) {
 	info := p.infoFor(it.AniListID)
 	if !info.NonAiredOrder && !p.nonAired(it.TvdbID) {

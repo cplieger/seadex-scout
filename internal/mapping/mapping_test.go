@@ -17,24 +17,55 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-func TestRecord_IsMovie(t *testing.T) {
-	if !(&Record{Type: "MOVIE"}).IsMovie() {
-		t.Error("Record{MOVIE}.IsMovie() = false, want true")
+// TestRecord_routes pins the user's rule on the record: a TMDB movie id is a
+// Radarr route, a TVDB id a Sonarr route, and both are both.
+func TestRecord_routes(t *testing.T) {
+	tests := []struct {
+		name                  string
+		rec                   Record
+		radarr, sonarr, route bool
+	}{
+		{name: "tmdb only", rec: Record{TmdbMovies: []int{4}}, radarr: true, route: true},
+		{name: "tvdb only", rec: Record{TvdbID: 100}, sonarr: true, route: true},
+		{name: "both", rec: Record{TvdbID: 100, TmdbMovies: []int{4}}, radarr: true, sonarr: true, route: true},
+		{name: "neither", rec: Record{AniDBID: 7, SeasonKind: SeasonPresent}},
 	}
-	if (&Record{Type: "TV"}).IsMovie() {
-		t.Error("Record{TV}.IsMovie() = true, want false")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.RadarrRoute(); got != tt.radarr {
+				t.Errorf("RadarrRoute() = %v, want %v", got, tt.radarr)
+			}
+			if got := tt.rec.SonarrRoute(); got != tt.sonarr {
+				t.Errorf("SonarrRoute() = %v, want %v", got, tt.sonarr)
+			}
+			if got := tt.rec.HasRoute(); got != tt.route {
+				t.Errorf("HasRoute() = %v, want %v", got, tt.route)
+			}
+		})
 	}
 }
 
-func TestRecord_IsSpecial(t *testing.T) {
-	tests := map[string]bool{
-		"OVA": true, "ONA": true, "SPECIAL": true, "MUSIC": true,
-		"TV": false, "MOVIE": false, "": false,
+// TestRecord_SonarrSpecial pins specials to season 0: a record is a special
+// only for a TVDB series it lands on season 0 of, whatever its TMDB link.
+func TestRecord_SonarrSpecial(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  Record
+		want bool
+	}{
+		{name: "season 0", rec: Record{TvdbID: 1, SeasonKind: SeasonPresent}, want: true},
+		{name: "a film in season 0", rec: Record{TvdbID: 1, TmdbMovies: []int{4}, SeasonKind: SeasonPresent}, want: true},
+		{name: "a positive season", rec: Record{TvdbID: 1, SeasonKind: SeasonPresent, SeasonTvdb: 2}},
+		{name: "the whole series", rec: Record{TvdbID: 1, SeasonKind: SeasonAbsent}},
+		{name: "unknown season", rec: Record{TvdbID: 1}},
+		{name: "no series", rec: Record{TmdbMovies: []int{4}, SeasonKind: SeasonPresent}},
 	}
-	for typ, want := range tests {
-		if got := (&Record{Type: typ}).IsSpecial(); got != want {
-			t.Errorf("Record{%q}.IsSpecial() = %v, want %v", typ, got, want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.SonarrSpecial(); got != tt.want {
+				t.Errorf("SonarrSpecial() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -80,10 +111,10 @@ func TestRecord_SeasonPresence(t *testing.T) {
 // while a record's real kind round-trips untouched.
 func TestNewIndex_canonicalizesSeasonKind(t *testing.T) {
 	idx := NewIndex(Source{Records: []Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100, SeasonKind: "mapped-positive", SeasonTvdb: 2},
-		{AniListID: 2, Type: "TV", TvdbID: 200, SeasonKind: SeasonPresent},
-		{AniListID: 3, Type: "OVA", TvdbID: 300, SeasonKind: SeasonAbsent},
-		{AniListID: 4, Type: "TV", TvdbID: 400},
+		{AniListID: 1, TvdbID: 100, SeasonKind: "mapped-positive", SeasonTvdb: 2},
+		{AniListID: 2, TvdbID: 200, SeasonKind: SeasonPresent},
+		{AniListID: 3, TvdbID: 300, SeasonKind: SeasonAbsent},
+		{AniListID: 4, TvdbID: 400},
 	}})
 	want := map[int]SeasonKind{1: seasonUnknown, 2: SeasonPresent, 3: SeasonAbsent, 4: seasonUnknown}
 	for id, kind := range want {
@@ -107,7 +138,7 @@ func TestNewIndex_canonicalizesSeasonKind(t *testing.T) {
 // survive a Cache write and read.
 func TestRecord_seasonKindRoundTrips(t *testing.T) {
 	for _, kind := range []SeasonKind{seasonUnknown, SeasonPresent, SeasonAbsent} {
-		encoded, err := json.Marshal(Record{AniListID: 7, Type: "TV", SeasonKind: kind})
+		encoded, err := json.Marshal(Record{AniListID: 7, SeasonKind: kind})
 		if err != nil {
 			t.Fatalf("Marshal(%q) error: %v", kind, err)
 		}
@@ -131,9 +162,9 @@ func TestRecord_seasonKindRoundTrips(t *testing.T) {
 // unknown while still counting as a RECOGNIZED key.
 func TestParseOverrides_seasonKind(t *testing.T) {
 	set, err := parseOverrides([]byte(`[
-		{"anilist_id":5,"type":"tv","tvdb_id":100,"season_kind":"present","season_tvdb":0},
-		{"anilist_id":6,"type":"tv","tvdb_id":200,"season_kind":"absent"},
-		{"anilist_id":7,"type":"tv","tvdb_id":300,"season_kind":"maybe"}
+		{"anilist_id":5,"tvdb_id":100,"season_kind":"present","season_tvdb":0},
+		{"anilist_id":6,"tvdb_id":200,"season_kind":"absent"},
+		{"anilist_id":7,"tvdb_id":300,"season_kind":"maybe"}
 	]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
@@ -161,8 +192,8 @@ func TestParseOverrides_seasonKind(t *testing.T) {
 // and the key is recognized rather than counted unknown.
 func TestParseOverrides_anidbID(t *testing.T) {
 	set, err := parseOverrides([]byte(`[
-		{"anilist_id":5,"type":"movie","anidb_id":12276},
-		{"anilist_id":6,"type":"tv","tvdb_id":200,"anidb_id":-3}
+		{"anilist_id":5,"anidb_id":12276},
+		{"anilist_id":6,"tvdb_id":200,"anidb_id":-3}
 	]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
@@ -181,62 +212,17 @@ func TestParseOverrides_anidbID(t *testing.T) {
 	}
 }
 
-// TestRecord_HasArrIdentifier pins the arr-routed identifier predicate: only
-// the fields the record's routed arr consumes count (TMDB-movie/IMDb for
-// movies, TVDB for series), so a wrong-arm identifier can neither satisfy the
-// refresh coverage floor nor catalogue an item for the opposite arr.
-func TestRecord_HasArrIdentifier(t *testing.T) {
-	tests := []struct {
-		name string
-		rec  Record
-		want bool
-	}{
-		{"series with tvdb", Record{Type: "TV", TvdbID: 100}, true},
-		{"series with only movie ids", Record{Type: "TV", TmdbMovies: []int{4}, IMDbIDs: []string{"tt1"}}, false},
-		{"movie with tmdb", Record{Type: "MOVIE", TmdbMovies: []int{4}}, true},
-		{"movie with imdb", Record{Type: "MOVIE", IMDbIDs: []string{"tt1"}}, true},
-		{"movie with only tvdb", Record{Type: "MOVIE", TvdbID: 100}, false},
-		{"no ids", Record{Type: "TV"}, false},
-		{"series with negative tvdb", Record{Type: "TV", TvdbID: -1}, false},
-		{"movie with a canonicalized tmdb list", Record{Type: "MOVIE", TmdbMovies: []int{4}}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.rec.HasArrIdentifier(); got != tt.want {
-				t.Errorf("HasArrIdentifier() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestRecord_CrossTypeMovieIDDoesNotWidenRouting guards the seam the ID bridge
-// keeps: exposing cross-type movie evidence must NOT make a non-MOVIE record read as
-// id-ful, because HasArrIdentifier is what gates the AniList title fallback -
-// widening it there would strand such a record with no fallback at all.
-func TestRecord_CrossTypeMovieIDDoesNotWidenRouting(t *testing.T) {
-	rec := Record{Type: "OVA", TmdbMovies: []int{4}}
-	if rec.HasArrIdentifier() {
-		t.Error("HasArrIdentifier() = true for a non-MOVIE record carrying only movie ids, want false")
-	}
-	if tvdb, movies, imdb := rec.RoutedIDs(); tvdb != 0 || movies != nil || imdb != nil {
-		t.Errorf("RoutedIDs() = (%d, %v, %v), want the empty series routing", tvdb, movies, imdb)
-	}
-}
-
-// TestArrIdentifierCountIgnoresWrongArmIdentifiers pins the refresh coverage
-// guard to the same arr-routed predicate the matcher uses: a TV record
-// carrying only movie ids (or a MOVIE record carrying only a TVDB id) cannot
-// count toward the acceptance floor, because FindByID would never consume
-// those fields for that record's arr.
-func TestArrIdentifierCountIgnoresWrongArmIdentifiers(t *testing.T) {
+// TestRoutedCountCountsEitherRoute pins the coverage floor's count: a record
+// with either route counts once, a both-routes record included.
+func TestRoutedCountCountsEitherRoute(t *testing.T) {
 	records := []Record{
-		{AniListID: 1, Type: "TV", TmdbMovies: []int{4}, IMDbIDs: []string{"tt1"}},
-		{AniListID: 2, Type: "MOVIE", TvdbID: 100},
-		{AniListID: 3, Type: "TV", TvdbID: 100},
-		{AniListID: 4, Type: "MOVIE", IMDbIDs: []string{"tt2"}},
+		{AniListID: 1, TmdbMovies: []int{4}},
+		{AniListID: 2, TvdbID: 100},
+		{AniListID: 3, TvdbID: 100, TmdbMovies: []int{5}},
+		{AniListID: 4},
 	}
-	if got := arrIdentifierCount(records); got != 2 {
-		t.Errorf("arrIdentifierCount = %d, want 2 (wrong-arm identifiers must not count)", got)
+	if got := routedCount(records); got != 3 {
+		t.Errorf("routedCount = %d, want 3", got)
 	}
 }
 
@@ -265,7 +251,7 @@ func TestIndex_nilSafe(t *testing.T) {
 func TestIndex_MappingFor(t *testing.T) {
 	want := Mapping{Specials: []int{8}, SpecialsTvdb: 79151, SpecialsEpisodes: 1, Seasons: []SeasonRange{{Season: 1, First: 1, Last: 13}}, SeasonsTvdb: 79151}
 	idx := NewIndex(Source{
-		Records:  []Record{{AniListID: 1, Type: "MOVIE", AniDBID: 12276, TvdbID: 79151}, {AniListID: 2, Type: "TV", AniDBID: 999}, {AniListID: 3, Type: "TV"}},
+		Records:  []Record{{AniListID: 1, AniDBID: 12276, TvdbID: 79151}, {AniListID: 2, AniDBID: 999}, {AniListID: 3}},
 		Mappings: map[int]Mapping{12276: want, 0: {Seasons: []SeasonRange{{Season: 9, First: 1, Last: 1}}}},
 	})
 	tests := []struct {
@@ -359,7 +345,7 @@ func TestIndex_MappingForKeepsSeasonRangesOnTheirSeries(t *testing.T) {
 // and a record with an AniDB id never does, whatever its AniList id.
 func TestIndex_MappingForJoinsARecordWithoutAniDBOnItsAniListID(t *testing.T) {
 	link := Mapping{Specials: []int{8}, SpecialsTvdb: 303073, SpecialsEpisodes: 1}
-	idx := NewIndex(Source{Records: []Record{{AniListID: 21777, Type: "SPECIAL"}}, AniListMappings: map[int]Mapping{21777: link}})
+	idx := NewIndex(Source{Records: []Record{{AniListID: 21777}}, AniListMappings: map[int]Mapping{21777: link}})
 	if got, ok := idx.MappingFor(&Record{AniListID: 21777, TvdbID: 303073}); !ok || !sameMapping(got, link) {
 		t.Errorf("MappingFor(no AniDB id, AniList 21777) = %+v ok=%v, want %+v", got, ok, link)
 	}
@@ -401,7 +387,7 @@ func TestIndex_MappingForDropsEpisodesOfAnotherSeriesOrSeason(t *testing.T) {
 // the facts.
 func TestLoader_Load_overrideAniDBIDJoinsThatAnime(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":42,"type":"movie","tmdb_movies":[7],"tvdb_id":100,"anidb_id":12276}]`), 0o600); err != nil {
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":42,"tmdb_movies":[7],"tvdb_id":100,"anidb_id":12276}]`), 0o600); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
 	doc := document([]mapread.Anime{
@@ -414,7 +400,7 @@ func TestLoader_Load_overrideAniDBIDJoinsThatAnime(t *testing.T) {
 		t.Fatalf("Load error: %v", err)
 	}
 	rec, ok := idx.Lookup(42)
-	if !ok || rec.AniDBID != 12276 || !rec.IsMovie() {
+	if !ok || rec.AniDBID != 12276 || !rec.RadarrRoute() {
 		t.Fatalf("Lookup(42) = %+v ok=%v, want the override record carrying anidb_id 12276", rec, ok)
 	}
 	if m, ok := idx.MappingFor(&rec); !ok || !slices.Equal(m.Specials, []int{8}) || m.SpecialsEpisodes != 1 {
@@ -476,18 +462,12 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  ","imdb_ids":[" tt2222222 ",""],"tmdb_movies":[0,42,-5]}]`))
+	set, err := parseOverrides([]byte(`[{"anilist_id":5,"tmdb_movies":[0,42,-5]}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(set.records) != 1 || set.records[0].Type != "MOVIE" {
-		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", set.records)
-	}
-	// IMDb ids must be normalized like animap's (trimmed, blanks dropped) so
-	// HasArrIdentifier, findMovie, and the report catalogue agree on the
-	// exact lookup key.
-	if got := set.records[0].IMDbIDs; !slices.Equal(got, []string{"tt2222222"}) {
-		t.Errorf("IMDbIDs = %v, want [tt2222222] (trimmed, blank dropped)", got)
+	if len(set.records) != 1 || set.records[0].AniListID != 5 {
+		t.Fatalf("parseOverrides = %+v, want one record for AniList 5", set.records)
 	}
 	// TMDB movie ids likewise: non-positive entries are dropped to match the
 	// canonical form the animap decoder guarantees, so an
@@ -528,17 +508,17 @@ func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 }
 
 // TestParseOverridesAcceptsCaseVariantKeys pins the diagnostic's key matching
-// to encoding/json's: a case-variant canonical key (e.g. "ANILIST_ID", "TYPE")
+// to encoding/json's: a case-variant canonical key (e.g. "ANILIST_ID", "TVDB_ID")
 // is decoded and applied by the typed unmarshal, so it must not be reported as
 // unknown and "ignored" - that would tell the operator an accepted field was
 // discarded.
 func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
-	set, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TYPE":"movie"}]`))
+	set, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TVDB_ID":9,"Season_Kind":"absent"}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(set.records) != 1 || set.records[0].AniListID != 5 || set.records[0].Type != "MOVIE" {
-		t.Errorf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", set.records)
+	if len(set.records) != 1 || set.records[0].AniListID != 5 || set.records[0].TvdbID != 9 || set.records[0].SeasonKind != SeasonAbsent {
+		t.Errorf("parseOverrides = %+v, want one record with AniListID 5, TVDB 9 and an absent season", set.records)
 	}
 	if set.unknown != 0 {
 		t.Errorf("unknown keys = %d, want none for case-variant canonical keys (encoding/json accepts them)", set.unknown)
@@ -551,10 +531,10 @@ func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
 // upstream ordering cannot silently retain a stale record.
 func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 	idx := NewIndex(Source{Records: []Record{
-		{AniListID: 0, Type: "TV", TvdbID: 99},
-		{AniListID: -7, Type: "TV", TvdbID: 77},
-		{AniListID: 42, Type: "TV", TvdbID: 100},
-		{AniListID: 42, Type: "TV", TvdbID: 200},
+		{AniListID: 0, TvdbID: 99},
+		{AniListID: -7, TvdbID: 77},
+		{AniListID: 42, TvdbID: 100},
+		{AniListID: 42, TvdbID: 200},
 	}})
 
 	if got := idx.Len(); got != 1 {
@@ -581,11 +561,11 @@ func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 // counts every keyed transport row.
 func TestParseOverrides_duplicateIDKeepsLastRecord(t *testing.T) {
 	set, err := parseOverrides([]byte(`[
-		{"anilist_id":1,"type":"TV","tvdb_id":10},
-		{"anilist_id":1,"type":"TV","tvdb_id":11},
-		{"anilist_id":1,"type":"TV","tvdb_id":12},
-		{"anilist_id":2,"type":"TV","tvdb_id":20},
-		{"anilist_id":2,"type":"TV","tvdb_id":21}
+		{"anilist_id":1,"tvdb_id":10},
+		{"anilist_id":1,"tvdb_id":11},
+		{"anilist_id":1,"tvdb_id":12},
+		{"anilist_id":2,"tvdb_id":20},
+		{"anilist_id":2,"tvdb_id":21}
 	]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
@@ -629,46 +609,6 @@ func TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream(t *testing.T) 
 	}
 }
 
-// TestRecord_RoutedIDsRoutesToTheSelectedArrArm pins the exported output
-// contract internal/match's matcher and catalogue consume. The existing
-// HasArrIdentifier test only observes a boolean, so it cannot see ids escaping
-// from the wrong arr arm. Usability is NOT re-checked here: canonicalize owns it
-// at both producers and again on insertion into the index, so the movie arm
-// returns the record's own already-canonical lists.
-func TestRecord_RoutedIDsRoutesToTheSelectedArrArm(t *testing.T) {
-	tests := []struct {
-		name        string
-		record      Record
-		wantTVDB    int
-		wantTMDB    []int
-		wantIMDbIDs []string
-	}{
-		{
-			name:        "movie returns its canonical id lists and ignores the series arm",
-			record:      Record{Type: "MOVIE", TvdbID: 100, TmdbMovies: []int{42}, IMDbIDs: []string{"tt1"}},
-			wantTMDB:    []int{42},
-			wantIMDbIDs: []string{"tt1"},
-		},
-		{
-			name:     "series returns only a positive TVDB id",
-			record:   Record{Type: "TV", TvdbID: 100, TmdbMovies: []int{42}, IMDbIDs: []string{"tt1"}},
-			wantTVDB: 100,
-		},
-		{
-			name:   "series drops a non-positive TVDB id",
-			record: Record{Type: "TV", TvdbID: -1},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotTVDB, gotTMDB, gotIMDbIDs := tt.record.RoutedIDs()
-			if gotTVDB != tt.wantTVDB || !slices.Equal(gotTMDB, tt.wantTMDB) || !slices.Equal(gotIMDbIDs, tt.wantIMDbIDs) {
-				t.Errorf("RoutedIDs() = (%d, %v, %v), want (%d, %v, %v)", gotTVDB, gotTMDB, gotIMDbIDs, tt.wantTVDB, tt.wantTMDB, tt.wantIMDbIDs)
-			}
-		})
-	}
-}
-
 // TestIndex_SiblingSeasons pins the per-tvdb summary the whole-series aggregate
 // consumes. "A SIBLING maps this season" has to be exact rather than "any record
 // maps it", which is why the accumulator counts holders: a record must not report
@@ -678,19 +618,19 @@ func TestRecord_RoutedIDsRoutesToTheSelectedArrArm(t *testing.T) {
 func TestIndex_SiblingSeasons(t *testing.T) {
 	idx := NewIndex(Source{Records: []Record{
 		// Gintama's shape: one seasonless entry plus season-scoped siblings.
-		{AniListID: 918, Type: "TV", TvdbID: 79895, SeasonKind: SeasonAbsent},
-		{AniListID: 100, Type: "TV", TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 5},
-		{AniListID: 101, Type: "TV", TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 6},
+		{AniListID: 918, TvdbID: 79895, SeasonKind: SeasonAbsent},
+		{AniListID: 100, TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 5},
+		{AniListID: 101, TvdbID: 79895, SeasonKind: SeasonPresent, SeasonTvdb: 6},
 		// A cour split: two entries on one season.
-		{AniListID: 200, Type: "TV", TvdbID: 12345, SeasonKind: SeasonPresent, SeasonTvdb: 3},
-		{AniListID: 201, Type: "TV", TvdbID: 12345, SeasonKind: SeasonPresent, SeasonTvdb: 3},
+		{AniListID: 200, TvdbID: 12345, SeasonKind: SeasonPresent, SeasonTvdb: 3},
+		{AniListID: 201, TvdbID: 12345, SeasonKind: SeasonPresent, SeasonTvdb: 3},
 		// A sole holder of its season, on its own tvdb id.
-		{AniListID: 300, Type: "TV", TvdbID: 6789, SeasonKind: SeasonPresent, SeasonTvdb: 1},
+		{AniListID: 300, TvdbID: 6789, SeasonKind: SeasonPresent, SeasonTvdb: 1},
 		// No tvdb id at all.
-		{AniListID: 400, Type: "MOVIE", TmdbMovies: []int{7}},
+		{AniListID: 400, TmdbMovies: []int{7}},
 		// Season-scoped records that carry no tvdb id: they share no series.
-		{AniListID: 500, Type: "TV", SeasonKind: SeasonPresent, SeasonTvdb: 1},
-		{AniListID: 501, Type: "TV", SeasonKind: SeasonPresent, SeasonTvdb: 2},
+		{AniListID: 500, SeasonKind: SeasonPresent, SeasonTvdb: 1},
+		{AniListID: 501, SeasonKind: SeasonPresent, SeasonTvdb: 2},
 	}})
 	tests := []struct {
 		name string
@@ -721,65 +661,17 @@ func TestIndex_SiblingSeasons(t *testing.T) {
 	}
 }
 
-// TestRecord_AllIDsDiffersFromRoutedIDsOnlyByTheTypeGate pins the whole type
-// gate: AllIDs and RoutedIDs differ EXACTLY on a MOVIE record's TVDB id and a
-// non-MOVIE record's movie/IMDb lists, and HasArrIdentifier is byte-identical
-// for every record, because widening the routed accessor would move the AniList
-// fallback's gate for 38 entries. The fixture is drawn from the live shapes: a
-// both-arr film, a season-scoped series, a seasonless OVA and an id-less row.
-func TestRecord_AllIDsDiffersFromRoutedIDsOnlyByTheTypeGate(t *testing.T) {
-	fixture := []Record{
-		{Type: "MOVIE", AniListID: 11577, TvdbID: 78964, SeasonTvdb: 0, TmdbMovies: []int{5528}, IMDbIDs: []string{"tt0169858"}},
-		{Type: "MOVIE", AniListID: 21519, TvdbID: 296666, IMDbIDs: []string{"tt5311514"}},
-		{Type: "TV", AniListID: 154587, TvdbID: 424536, SeasonTvdb: 1},
-		{Type: "OVA", AniListID: 820, TvdbID: 78964},
-		{Type: "TV", AniListID: 1, IMDbIDs: []string{"tt0000001"}},
-		{Type: "", AniListID: 2},
-	}
-	for i := range fixture {
-		rec := &fixture[i]
-		routedTVDB, routedTMDB, routedIMDb := rec.RoutedIDs()
-		allTVDB, allTMDB, allIMDb := rec.AllIDs()
-		wantTVDB, wantTMDB, wantIMDb := rec.TvdbID, rec.TmdbMovies, rec.IMDbIDs
-		if allTVDB != wantTVDB || !slices.Equal(allTMDB, wantTMDB) || !slices.Equal(allIMDb, wantIMDb) {
-			t.Errorf("record %d AllIDs() = (%d, %v, %v), want every id it carries (%d, %v, %v)",
-				rec.AniListID, allTVDB, allTMDB, allIMDb, wantTVDB, wantTMDB, wantIMDb)
-		}
-		if rec.IsMovie() {
-			if routedTVDB != 0 || allTVDB != rec.TvdbID {
-				t.Errorf("movie %d: RoutedIDs tvdb = %d (want 0, the discarded id), AllIDs tvdb = %d (want %d)",
-					rec.AniListID, routedTVDB, allTVDB, rec.TvdbID)
-			}
-			continue
-		}
-		if len(routedTMDB) != 0 || len(routedIMDb) != 0 {
-			t.Errorf("series %d: RoutedIDs returned movie ids (%v, %v), want none", rec.AniListID, routedTMDB, routedIMDb)
-		}
-	}
-	// The predicate five consumers share must not move: it is derived from
-	// RoutedIDs, which this step deliberately leaves alone.
-	want := []bool{true, true, true, true, false, false}
-	for i := range fixture {
-		if got := fixture[i].HasArrIdentifier(); got != want[i] {
-			t.Errorf("record %d HasArrIdentifier() = %v, want %v (AllIDs must not widen the routing predicate)",
-				fixture[i].AniListID, got, want[i])
-		}
-	}
-}
-
 // TestNewIndexCanonicalizesRecords pins the boundary that OWNS the id-usability
 // rule: the accessors do not filter on read, so a record reaching NewIndex
 // through plain encoding/json - the persisted-cache and stale-on-error paths -
 // must be canonicalized on insertion, which is what
-// makes RoutedIDs' presence check sound.
+// makes the route predicates' presence check sound.
 func TestNewIndexCanonicalizesRecords(t *testing.T) {
 	idx := NewIndex(Source{Records: []Record{{
 		AniListID:  7,
-		Type:       "movie",
 		TvdbID:     -3,
 		SeasonTvdb: -1,
 		TmdbMovies: []int{0, -1, 42},
-		IMDbIDs:    []string{"", "  ", " tt1 "},
 	}}})
 	rec, ok := idx.Lookup(7)
 	if !ok {
@@ -788,14 +680,11 @@ func TestNewIndexCanonicalizesRecords(t *testing.T) {
 	if !slices.Equal(rec.TmdbMovies, []int{42}) {
 		t.Errorf("TmdbMovies = %v, want [42] (canonicalized on insertion)", rec.TmdbMovies)
 	}
-	if !slices.Equal(rec.IMDbIDs, []string{"tt1"}) {
-		t.Errorf("IMDbIDs = %v, want [tt1] (canonicalized on insertion)", rec.IMDbIDs)
-	}
 	if rec.TvdbID != 0 || rec.SeasonTvdb != 0 {
 		t.Errorf("TvdbID/SeasonTvdb = %d/%d, want 0/0 (canonicalized on insertion)", rec.TvdbID, rec.SeasonTvdb)
 	}
-	if _, tmdb, imdb := rec.RoutedIDs(); !slices.Equal(tmdb, []int{42}) || !slices.Equal(imdb, []string{"tt1"}) {
-		t.Errorf("RoutedIDs() = (_, %v, %v), want ([42], [tt1]) over the canonical record", tmdb, imdb)
+	if !rec.RadarrRoute() || rec.SonarrRoute() {
+		t.Errorf("routes = Radarr %v, Sonarr %v, want Radarr only over the canonical record", rec.RadarrRoute(), rec.SonarrRoute())
 	}
 }
 
@@ -920,7 +809,7 @@ func TestRefresh_logsTheCandidateCensus(t *testing.T) {
 		entry{AniList: 11, Type: "movie", Movies: []int{5}},
 		entry{AniList: 12, Type: "ova", TVDB: 300, Lands: targets(at(2, 1))},
 		entry{AniList: 13},
-		entry{AniList: 14, Type: "tv", TVDB: 400, Lands: targets(at(0, 3))},
+		entry{AniList: 14, Type: "tv", TVDB: 400, Lands: targets(at(0, 3)), Movies: []int{6}},
 		entry{AniList: 15, Type: "tv", TVDB: 410, Lands: targets(at(0, 4))},
 	)), mapread.DefaultLimits())
 	if err != nil {
@@ -945,12 +834,11 @@ func TestRefresh_logsTheCandidateCensus(t *testing.T) {
 	for key, want := range map[string]string{
 		"tag":                    testTag,
 		"records":                "7",
-		"typed_records":          "6",
 		"season_scoped_records":  "1",
-		"special_records":        "1",
+		"special_records":        "3",
 		"routed_identifiers":     "6",
-		"movie_routed":           "1",
-		"series_routed":          "5",
+		"radarr_routed":          "2",
+		"sonarr_routed":          "5",
 		"season_range_records":   "1",
 		"placed_special_records": "2",
 		"placed_episode_records": "1",
@@ -964,5 +852,42 @@ func TestRefresh_logsTheCandidateCensus(t *testing.T) {
 		if got != want {
 			t.Errorf("refreshed log %s = %s, want %s", key, got, want)
 		}
+	}
+}
+
+// TestCensusOfCountsByRoute pins the census to the routes: a both-routes
+// record counts on each side and once in routed, and a special is a record
+// offered on season 0 of its series.
+func TestCensusOfCountsByRoute(t *testing.T) {
+	got := censusOf([]Record{
+		{AniListID: 1, TmdbMovies: []int{4}, SeasonKind: SeasonAbsent},
+		{AniListID: 2, TvdbID: 100, SeasonKind: SeasonPresent, SeasonTvdb: 2},
+		{AniListID: 3, TvdbID: 200, TmdbMovies: []int{5}, SeasonKind: SeasonPresent},
+		{AniListID: 4, SeasonKind: SeasonAbsent},
+	})
+	want := populations{radarrRouted: 2, sonarrRouted: 2, routed: 3, special: 1, positiveSeason: 1}
+	if got != want {
+		t.Errorf("censusOf = %+v, want %+v", got, want)
+	}
+}
+
+// TestValidateRefreshedRecordsAcceptsTheRecordsOfTheRetiredShape pins the
+// transition the user's cache makes: records persisted with a type and IMDb
+// ids decode into this build's Record and accept the same release's records.
+func TestValidateRefreshedRecordsAcceptsTheRecordsOfTheRetiredShape(t *testing.T) {
+	var previous []Record
+	data := `[{"type":"MOVIE","season_kind":"present","imdb_ids":["tt1"],"tmdb_movies":[42],"anilist_id":1,"tvdb_id":100},` +
+		`{"type":"TV","season_kind":"present","anilist_id":2,"tvdb_id":200,"season_tvdb":1},` +
+		`{"type":"MOVIE","season_kind":"absent","imdb_ids":["tt2"],"anilist_id":3}]`
+	if err := json.Unmarshal([]byte(data), &previous); err != nil {
+		t.Fatalf("decode retired-shape records: %v", err)
+	}
+	candidate := []Record{
+		{AniListID: 1, TvdbID: 100, TmdbMovies: []int{42}, SeasonKind: SeasonPresent},
+		{AniListID: 2, TvdbID: 200, SeasonKind: SeasonPresent, SeasonTvdb: 1},
+		{AniListID: 3, SeasonKind: SeasonAbsent},
+	}
+	if err := validateRefreshedRecords(previous, candidate); err != nil {
+		t.Errorf("validateRefreshedRecords(retired shape, same release) = %v, want accepted", err)
 	}
 }

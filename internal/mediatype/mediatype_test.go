@@ -24,9 +24,9 @@ func TestNormalize(t *testing.T) {
 }
 
 // TestKnownCoversEveryTokenAndNothingElse is the invariant the shared leaf
-// exists for (l-f87): the acceptance half (anilist's knownFormat) and the
-// classification half (mapping's Record.IsMovie/IsSpecial) must range over ONE
-// token set. Every exported token is accepted, and an unrecognized or
+// exists for: the acceptance half (anilist's knownFormat) and the
+// classification half (IsMovie, which picks the title fallback's arr) must
+// range over ONE token set. Every exported token is accepted, and an unrecognized or
 // non-canonical value is not - so a token added to the constants without being
 // added to the set fails here instead of silently desynchronizing the halves.
 func TestKnownCoversEveryTokenAndNothingElse(t *testing.T) {
@@ -45,33 +45,27 @@ func TestKnownCoversEveryTokenAndNothingElse(t *testing.T) {
 	}
 }
 
-// TestClassification pins the two predicates over the token set: exactly MOVIE
-// routes to Radarr, exactly the four short-form types are specials, and an
-// unknown or empty token is neither (the safe series default every consumer
-// relies on).
+// TestClassification pins the film predicate over the token set: exactly
+// MOVIE is a film, and an unknown or empty token is not.
 func TestClassification(t *testing.T) {
 	tests := []struct {
 		token string
-		movie,
-		special bool
+		movie bool
 	}{
-		{movie, true, false},
-		{tv, false, false},
-		{tvShort, false, false},
-		{ova, false, true},
-		{ona, false, true},
-		{special, false, true},
-		{music, false, true},
-		{"", false, false},
-		{"NOT_A_FORMAT", false, false},
-		{"movie", false, false}, // non-canonical: callers Normalize first
+		{movie, true},
+		{tv, false},
+		{tvShort, false},
+		{ova, false},
+		{ona, false},
+		{special, false},
+		{music, false},
+		{"", false},
+		{"NOT_A_FORMAT", false},
+		{"movie", false}, // non-canonical: callers Normalize first
 	}
 	for _, tt := range tests {
 		if got := IsMovie(tt.token); got != tt.movie {
 			t.Errorf("IsMovie(%q) = %v, want %v", tt.token, got, tt.movie)
-		}
-		if got := IsSpecial(tt.token); got != tt.special {
-			t.Errorf("IsSpecial(%q) = %v, want %v", tt.token, got, tt.special)
 		}
 	}
 }

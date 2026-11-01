@@ -1,5 +1,5 @@
 // Package mapping bridges AniList IDs (what SeaDex keys on) to the arr IDs
-// Sonarr and Radarr key on (TVDB, TMDB, IMDb), using the animap dataset plus a
+// Sonarr and Radarr key on (TVDB, TMDB), using the animap dataset plus a
 // local overrides file the operator can pin misses in.
 //
 // The latest animap release's animap.json is downloaded when its tag changes
@@ -29,7 +29,6 @@ import (
 	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
-	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 const (
@@ -69,10 +68,10 @@ type Loader struct {
 type SeasonKind string
 
 const (
-	// seasonUnknown is the zero value: a Record no upstream record produced (an
-	// override naming no season_kind, a format-only Record). The animap decoder
-	// sets the kind explicitly on both arms, so unknown never means "the
-	// upstream was odd".
+	// seasonUnknown is the zero value: a Record no upstream record produced
+	// (an override naming no season_kind, the title fallback's zero Record).
+	// The animap decoder sets the kind explicitly on both arms, so unknown
+	// never means "the upstream was odd".
 	seasonUnknown SeasonKind = ""
 	// SeasonPresent means the entry's TVDB placement names its season, so
 	// SeasonTvdb is it - zero for an entry landing only on season 0 or nowhere.
@@ -83,26 +82,22 @@ const (
 	SeasonAbsent SeasonKind = "absent"
 )
 
-// Record is the resolved mapping for one AniList entry: its media type and the
-// arr IDs it corresponds to.
+// Record is the resolved mapping for one AniList entry: its routes, which
+// decide the arr, and its season on its TVDB series.
 //
 // The json tags below are read by TWO decoders: the persisted Cache decodes
 // through encoding/json, while overrides.json is walked key-by-key by
-// decodeOverrideRecord, whose switch restates these eight names as literals.
+// decodeOverrideRecord, whose switch restates these six names as literals.
 // Adding, renaming or removing a field here REQUIRES the matching edit there.
 type Record struct {
-	Type       string     `json:"type"`
 	SeasonKind SeasonKind `json:"season_kind,omitempty"`
-	IMDbIDs    []string   `json:"imdb_ids,omitempty"`
-	// TmdbMovies is the TMDB movies of the work the entry is wholly, read
-	// for EVERY record type by the ID bridge regardless of the type label: a
-	// TMDB movie id is a Radarr id by construction. Deliberately NOT the IMDb
-	// list, since TVDB reuses a film's IMDb id on the parent series. Canonical
-	// form (positive ids only) is a Record invariant, so readers take the
-	// slice as-is.
+	// TmdbMovies is the TMDB movies of the work the entry is wholly, its
+	// Radarr route. Canonical form (positive ids only) is a Record invariant,
+	// so readers take the slice as-is.
 	TmdbMovies []int `json:"tmdb_movies,omitempty"`
 	AniListID  int   `json:"anilist_id"`
-	TvdbID     int   `json:"tvdb_id,omitempty"`
+	// TvdbID is the one TVDB series the entry lands on, its Sonarr route.
+	TvdbID int `json:"tvdb_id,omitempty"`
 	// AniDBID is the anime the entry is all the regular episodes of, the join
 	// key into that anime's facts (Cache.Mappings); 0 means absent. It routes
 	// nothing: an override naming it points at the anime's facts, it never
@@ -111,50 +106,22 @@ type Record struct {
 	SeasonTvdb int `json:"season_tvdb,omitempty"`
 }
 
-// IsMovie reports whether the entry maps to a Radarr movie (type MOVIE).
-// Every other type maps to a Sonarr series.
-func (r *Record) IsMovie() bool { return mediatype.IsMovie(r.Type) }
+// RadarrRoute reports whether the entry has a Radarr route: TMDB movies.
+func (r *Record) RadarrRoute() bool { return len(r.TmdbMovies) > 0 }
 
-// RoutedIDs returns the identifiers the record's routed arr consumes, per the
-// HasArrIdentifier routing decision: a MOVIE record yields its TMDB-movie and
-// IMDb ids (tvdb zero); every other type yields its TVDB id. The TYPE LABEL is
-// what routes here - a record's unambiguous movie TMDB ids stay separately
-// reachable as Record.TmdbMovies regardless of that label.
-func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
-	if r.IsMovie() {
-		return 0, r.TmdbMovies, r.IMDbIDs
-	}
-	// Zero out a non-usable TVDB id here so the usability rule has ONE home:
-	// callers do a presence check, never a policy check.
-	return max(r.TvdbID, 0), nil, nil
+// SonarrRoute reports whether the entry has a Sonarr route: a TVDB series.
+func (r *Record) SonarrRoute() bool { return r.TvdbID > 0 }
+
+// HasRoute reports whether the entry reaches either arr by its own ids.
+func (r *Record) HasRoute() bool { return r.RadarrRoute() || r.SonarrRoute() }
+
+// SonarrSpecial reports whether the entry's Sonarr copy is a special: on its
+// series it lands only on season 0, or nowhere. Invariant: it is true exactly
+// when align.RecordSeason offers a record with a TVDB id on season 0, so the
+// specials filter and the comparison scope cannot disagree.
+func (r *Record) SonarrSpecial() bool {
+	return r.SonarrRoute() && r.SeasonPresence() == SeasonPresent && r.SeasonTvdb == 0
 }
-
-// AllIDs returns every canonical identifier the record carries, with no type gate:
-// the TVDB id when positive, the movie TMDB ids, the IMDb ids. TVDB files anime
-// films under their parent series, so a MOVIE record's TVDB id is evidence.
-//
-// The licensed consumers are match.LibIndex's findMovie (FindByID's MOVIE arm),
-// otherCopy and filmCopy, which hold both arr indexes so the map miss is still
-// the arr gate. RoutedIDs must NOT widen: NewCatalogue has no index gate,
-// HasArrIdentifier has five consumers.
-func (r *Record) AllIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
-	return max(0, r.TvdbID), r.TmdbMovies, r.IMDbIDs
-}
-
-// HasArrIdentifier reports whether the record carries a USABLE identifier
-// consumed by the arr selected by its type: TMDB-movie/IMDb for movies, TVDB
-// for series. The canonical arr-routing predicate shared by the refresh
-// acceptance guard, the matcher and the report's reverse catalogue. Usability
-// is a Record INVARIANT (canonicalize), so this is a presence check.
-func (r *Record) HasArrIdentifier() bool {
-	tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-	return tvdb > 0 || len(tmdbMovies) > 0 || len(imdbIDs) > 0
-}
-
-// IsSpecial reports whether the entry is an OVA/ONA/special/music video rather
-// than a standard TV season or movie, so it can be excluded when the operator
-// turns specials off. A match with no type is treated as non-special.
-func (r *Record) IsSpecial() bool { return mediatype.IsSpecial(r.Type) }
 
 // HasMappedSeason reports whether the record carries a positive TVDB
 // season - the predicate season-exact comparison and the season floor key on.
@@ -183,8 +150,6 @@ func canonicalSeasonKind(k SeasonKind) SeasonKind {
 // arr-ID catalogue cannot see two differently-shaped Records for one anime.
 // Idempotent.
 func (r *Record) canonicalize() {
-	r.Type = mediatype.Normalize(r.Type)
-	r.IMDbIDs = trimmed(r.IMDbIDs)
 	r.TmdbMovies = positiveInts(r.TmdbMovies)
 	r.TvdbID = max(0, r.TvdbID)
 	r.AniDBID = max(0, r.AniDBID)
@@ -432,7 +397,7 @@ func (c *Cache) IndexedRecords() int {
 
 // cacheUsable reports whether a cached record set is usable as an effective
 // AniList-keyed mapping: after deduplication the effective set must be
-// non-empty and meet the same conservative 1% arr-identifier coverage floor a
+// non-empty and meet the same conservative 1% route coverage floor a
 // newly accepted refresh must meet, without the previous-relative type and
 // shrink checks. Every cache-state gate keys on this predicate, so "has cached
 // bytes" can never diverge from "has a mapping the consumers can use".
@@ -441,7 +406,7 @@ func cacheUsable(records []Record) bool {
 	if len(records) == 0 {
 		return false
 	}
-	return arrIdentifierCount(records) >= coverageFloor(len(records))
+	return routedCount(records) >= coverageFloor(len(records))
 }
 
 // coverageFloor returns the conservative 1% acceptance floor (ceiling division,
@@ -884,10 +849,9 @@ func (l *Loader) acceptRelease(ctx context.Context, prev *Cache, rel mapread.Rel
 		"tag", rel.Tag,
 		"records", len(records),
 		"previous_records", indexedRecordCount(prev.Records),
-		"routed_identifiers", pop.identifiers,
-		"movie_routed", pop.movieRouted,
-		"series_routed", pop.seriesRouted,
-		"typed_records", pop.typed,
+		"routed_identifiers", pop.routed,
+		"radarr_routed", pop.radarrRouted,
+		"sonarr_routed", pop.sonarrRouted,
 		"season_scoped_records", pop.positiveSeason,
 		"special_records", pop.special,
 		"season_range_records", countFacts(hasSeasonRanges, parsed.mappings, parsed.aniListMappings),
@@ -911,7 +875,7 @@ func (l *Loader) acceptRelease(ctx context.Context, prev *Cache, rel mapread.Rel
 }
 
 // validateRefreshedRecords is acceptRelease's acceptance invariant for a
-// fresh document: it rejects a refresh below the arr-identifier coverage
+// fresh document: it rejects a refresh below the route coverage
 // floor, and one whose routing populations collapse below half of the
 // previously accepted cache's (populationCollapsed) or vanish entirely
 // (populationExtinct). records MUST be one per entry of the document, so the
@@ -919,8 +883,8 @@ func (l *Loader) acceptRelease(ctx context.Context, prev *Cache, rel mapread.Rel
 func validateRefreshedRecords(previous, records []Record) error {
 	// No zero-record special case: coverageFloor is >= 1 for every input, so
 	// the floor refuses an empty candidate on its own.
-	if minimum, covered := coverageFloor(len(records)), arrIdentifierCount(records); covered < minimum {
-		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, len(records), minimum)
+	if minimum, covered := coverageFloor(len(records)), routedCount(records); covered < minimum {
+		return fmt.Errorf("route coverage %d/%d is below minimum %d", covered, len(records), minimum)
 	}
 	// An unusable previous cache must degrade like no cache here too: the loader
 	// refuses to serve it, so it must not anchor the loss-relative guards either -
@@ -938,44 +902,39 @@ func validateRefreshedRecords(previous, records []Record) error {
 	return validateRoutingCoverage(prevPop, pop, previousMinimum)
 }
 
-// populations is the per-refresh census of the six semantic populations the
+// populations is the per-refresh census of the semantic populations the
 // acceptance guards and the accepted-refresh log line are defined over, counted
 // in ONE pass. Both consumers read it: the routing guards compare candidate
 // against previous, and the log line reports the candidate's census, which is
 // what makes a loss below each guard's threshold visible.
 type populations struct {
-	typed          int
 	positiveSeason int
 	special        int
-	movieRouted    int
-	seriesRouted   int
-	identifiers    int
+	radarrRouted   int
+	sonarrRouted   int
+	routed         int
 }
 
-// censusOf counts every population in one pass over records. The routed
-// populations count only records that can actually RESOLVE in their arr
-// (HasArrIdentifier), so a candidate that keeps every type but loses one side's
-// usable ids reads as a collapse of that side. identifiers is their sum.
+// censusOf counts every population in one pass over records. A both-routes
+// record counts on each side and once in routed, so routed is not their sum.
 func censusOf(records []Record) populations {
 	var p populations
 	for i := range records {
 		r := &records[i]
-		if r.Type != "" {
-			p.typed++
-		}
 		if r.HasMappedSeason() {
 			p.positiveSeason++
 		}
-		if r.IsSpecial() {
+		if r.SonarrSpecial() {
 			p.special++
 		}
-		if r.HasArrIdentifier() {
-			p.identifiers++
-			if r.IsMovie() {
-				p.movieRouted++
-			} else {
-				p.seriesRouted++
-			}
+		if r.RadarrRoute() {
+			p.radarrRouted++
+		}
+		if r.SonarrRoute() {
+			p.sonarrRouted++
+		}
+		if r.HasRoute() {
+			p.routed++
 		}
 	}
 	return p
@@ -994,17 +953,15 @@ func validatePopulation(collapseNoun string, prevCount, count, previousMinimum i
 	return nil
 }
 
-// validateRoutingCoverage rejects a candidate refresh that collapsed a routing
-// population relative to the previously accepted cache. Routing recognizes only
-// MOVIE, so a wrong-but-string schema change (every movie renamed FILM) keeps
-// every record typed while routing an entire side of the catalogue to the wrong
-// arr. Guard the operational invariant instead: preservation of both routing
-// populations, so future non-movie labels stay legal.
+// validateRoutingCoverage rejects a candidate refresh that collapsed a route
+// population relative to the previously accepted cache: a document that drops
+// one side's ids keeps the other side's coverage while that whole side loses
+// its arr.
 func validateRoutingCoverage(previous, candidate populations, previousMinimum int) error {
-	if err := validatePopulation("movie-routed", previous.movieRouted, candidate.movieRouted, previousMinimum); err != nil {
+	if err := validatePopulation("Radarr-routed", previous.radarrRouted, candidate.radarrRouted, previousMinimum); err != nil {
 		return err
 	}
-	return validatePopulation("series-routed", previous.seriesRouted, candidate.seriesRouted, previousMinimum)
+	return validatePopulation("Sonarr-routed", previous.sonarrRouted, candidate.sonarrRouted, previousMinimum)
 }
 
 // factPopulations are the episode facts validateFacts guards, has naming a
@@ -1095,13 +1052,12 @@ func countFacts(has func(*Mapping) bool, fact ...map[int]Mapping) int {
 	return n
 }
 
-// arrIdentifierCount returns how many records retain an arr identifier the
-// lookup paths actually consume (per HasArrIdentifier). It backs
-// acceptRelease's acceptance guard: an entry with no id is still a record.
-func arrIdentifierCount(records []Record) int {
+// routedCount returns how many records have a route. It backs acceptRelease's
+// acceptance guard: an entry with no id is still a record.
+func routedCount(records []Record) int {
 	n := 0
 	for i := range records {
-		if records[i].HasArrIdentifier() {
+		if records[i].HasRoute() {
 			n++
 		}
 	}
@@ -1116,9 +1072,9 @@ const maxLoggedErrorBytes = 200
 // its effective records for NewIndex to overlay, keyed by AniList ID. A missing
 // file is not an error; an unreadable or malformed file is logged at ERROR and
 // ignored. The overlay is WHOLESALE, not a merge, so a record carrying no
-// identifier its routed arr consumes replaces a mapped upstream record with one
-// that resolves to nothing. That is left applied - an operator entry wins by
-// design - but it is reported, because a mistyped id key is otherwise invisible.
+// route replaces a mapped upstream record with one that resolves to nothing.
+// That is left applied - an operator entry wins by design - but it is
+// reported, because a mistyped id key is otherwise invisible.
 func (l *Loader) effectiveOverrides(ctx context.Context) []Record {
 	if l.overridesPath == "" {
 		return nil
@@ -1129,7 +1085,7 @@ func (l *Loader) effectiveOverrides(ctx context.Context) []Record {
 	}
 	unroutable := 0
 	for i := range set.records {
-		if !set.records[i].HasArrIdentifier() {
+		if !set.records[i].HasRoute() {
 			unroutable++
 		}
 	}
@@ -1137,7 +1093,7 @@ func (l *Loader) effectiveOverrides(ctx context.Context) []Record {
 		l.log.Warn("mapping: overrides with missing or invalid anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
 	}
 	if unroutable > 0 {
-		l.log.Warn("mapping: overrides carry no arr identifier and un-map their entry; check for a mistyped tvdb_id/tmdb_movies/imdb_ids key, and restate the ids when overriding only a type or season",
+		l.log.Warn("mapping: overrides carry no arr identifier and un-map their entry; check for a mistyped tvdb_id or tmdb_movies key, and restate the ids when overriding only a season",
 			"count", unroutable, "path", l.overridesPath)
 	}
 	if set.applied > 0 {
@@ -1185,7 +1141,17 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 		return overrideSet{}, false
 	}
 	set, err := parseOverrides(data)
-	if err != nil {
+	var unstated *unstatedScopeError
+	switch {
+	case errors.Is(err, errRetiredOverrideKey):
+		l.log.Error("mapping: overrides.json names imdb_ids, which seadex-scout no longer reads; pinned mappings not applied; name the film's tmdb_movies instead",
+			"path", l.overridesPath)
+		return overrideSet{}, false
+	case errors.As(err, &unstated):
+		l.log.Error("mapping: overrides.json names type with no usable season_kind, and type no longer sets a record's season; pinned mappings not applied; add season_kind to the record",
+			"path", l.overridesPath, "al_id", unstated.aniListID)
+		return overrideSet{}, false
+	case err != nil:
 		l.log.Error("mapping: overrides.json malformed, pinned mappings not applied; fix the file's JSON, or remove it", "path", l.overridesPath,
 			"error", errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)))
 		return overrideSet{}, false
@@ -1214,17 +1180,35 @@ type overrideSet struct {
 // malformed-file ERROR, refusing the whole overlay.
 const maxOverrideRecords = 1 << 16
 
+// errRetiredOverrideKey refuses an overrides file naming a key seadex-scout
+// no longer reads, so no override the operator believes in is dropped
+// silently.
+var errRetiredOverrideKey = errors.New("mapping: overrides key is no longer read")
+
+// unstatedScopeError refuses an override that names type and a tvdb_id but no
+// usable season_kind and no positive season_tvdb, whatever the type: its
+// author meant the type to pick the season, which it no longer does, and the
+// scope cannot be guessed, so the error names the key to add.
+type unstatedScopeError struct{ aniListID int }
+
+func (e *unstatedScopeError) Error() string {
+	return fmt.Sprintf("mapping: override names type and a tvdb_id but no usable season_kind (anilist_id %d)", e.aniListID)
+}
+
 // decodeOverrideRecord walks one override object off the token stream in a
-// single bounded pass: the eight canonical keys decode directly into the Record
+// single bounded pass: the six canonical keys decode directly into the Record
 // and an unknown key is counted and skipped. The literals restate Record's json
-// tags, which is the edit Record's own doc requires.
-func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record, err error) {
+// tags, which is the edit Record's own doc requires. typeNamed reports a type
+// key, which is counted as unknown.
+func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record, typeNamed bool, err error) {
 	err = dec.Object(func(key string) error {
 		switch {
 		case strings.EqualFold(key, "anilist_id"):
 			return dec.Decode(&record.AniListID)
 		case strings.EqualFold(key, "type"):
-			return dec.Decode(&record.Type)
+			typeNamed = true
+			set.unknown++
+			return dec.Skip()
 		case strings.EqualFold(key, "tvdb_id"):
 			return dec.Decode(&record.TvdbID)
 		case strings.EqualFold(key, "anidb_id"):
@@ -1239,20 +1223,20 @@ func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record
 		case strings.EqualFold(key, "tmdb_movies"):
 			return dec.Decode(&record.TmdbMovies)
 		case strings.EqualFold(key, "imdb_ids"):
-			return dec.Decode(&record.IMDbIDs)
+			return fmt.Errorf("%w: imdb_ids", errRetiredOverrideKey)
 		default:
 			set.unknown++
 			return dec.Skip()
 		}
 	})
-	return record, err
+	return record, typeNamed, err
 }
 
 // applyRecord decodes the next override record from the token stream and folds
 // it into the set, canonicalized: a zero-AniList-ID record counts as skipped,
 // and a duplicate ID replaces its earlier record.
 func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) error {
-	record, err := decodeOverrideRecord(dec, set)
+	record, typeNamed, err := decodeOverrideRecord(dec, set)
 	if err != nil {
 		return err
 	}
@@ -1262,6 +1246,9 @@ func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) 
 		// SeaDex lookup while still leaking into the reverse arr-ID catalogue.
 		set.skipped++
 		return nil
+	}
+	if typeNamed && record.SonarrRoute() && record.SeasonPresence() == seasonUnknown && !record.HasMappedSeason() {
+		return &unstatedScopeError{aniListID: record.AniListID}
 	}
 	set.applied++
 	if at, dup := position[record.AniListID]; dup {
@@ -1277,16 +1264,6 @@ func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) 
 	position[record.AniListID] = len(set.records)
 	set.records = append(set.records, record)
 	return nil
-}
-
-func trimmed(in []string) []string {
-	var out []string
-	for _, v := range in {
-		if v = strings.TrimSpace(v); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 // positiveInts returns in with non-positive entries dropped, matching the

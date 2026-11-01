@@ -106,19 +106,19 @@ func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 }
 
 // TestLoader_refreshCache_routingCollapseKeepsStale covers the
-// routing-distribution floor: a document that keeps every type valid but
-// collapses one routing population is refused in favour of the stale map,
-// both ways - every film losing its movie route (typed TV, so it routes to
-// Sonarr with no series) and every entry typed MOVIE.
+// routing-distribution floor: a document that keeps every entry routed but
+// collapses one route population is refused in favour of the stale map,
+// both ways - every film losing its TMDB movie, its published type kept, and
+// every series losing its TVDB id.
 func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 	for name, es := range map[string][]entry{
-		"films typed as series": {
-			{AniList: 1, Type: "tv", Movies: []int{42}},
-			{AniList: 2, Type: "tv", Movies: []int{43}},
+		"films without their TMDB movie": {
+			{AniList: 1, Type: "movie", TVDB: 100},
+			{AniList: 2, Type: "movie", TVDB: 101},
 			{AniList: 3, Type: "tv", TVDB: 300},
 			{AniList: 4, Type: "tv", TVDB: 400},
 		},
-		"every entry typed MOVIE": {
+		"series without their TVDB id": {
 			{AniList: 1, Type: "movie", Movies: []int{42}},
 			{AniList: 2, Type: "movie", Movies: []int{43}},
 			{AniList: 3, Type: "movie", Movies: []int{44}},
@@ -144,10 +144,10 @@ func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
 func routingFloorPrevCache() *Cache {
 	prev := staleCache("v2026.10.16")
 	prev.Records = []Record{
-		{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{42}},
-		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{43}},
-		{AniListID: 3, Type: "TV", TvdbID: 300},
-		{AniListID: 4, Type: "TV", TvdbID: 400},
+		{AniListID: 1, TmdbMovies: []int{42}},
+		{AniListID: 2, TmdbMovies: []int{43}},
+		{AniListID: 3, TvdbID: 300},
+		{AniListID: 4, TvdbID: 400},
 	}
 	return prev
 }
@@ -183,7 +183,7 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 	for i := 1; i <= 100; i++ {
 		r := Record{AniListID: i}
 		if i <= 10 {
-			r.Type, r.TvdbID = "TV", i
+			r.TvdbID = i
 		}
 		prev.Records = append(prev.Records, r)
 	}
@@ -225,7 +225,7 @@ func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
 	prev := staleCache("")
 	prev.Records = nil
 	for i := 1; i <= 8; i++ {
-		prev.Records = append(prev.Records, Record{AniListID: i, Type: "TV", TvdbID: i})
+		prev.Records = append(prev.Records, Record{AniListID: i, TvdbID: i})
 	}
 	prev.RejectedRefreshes = 3
 	next, err := refresh(t, prev, entriesBody(t, coverage(4, 4)...))

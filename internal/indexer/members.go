@@ -111,16 +111,16 @@ func (s passScope) name() string {
 type ownedRelease struct {
 	Key  string `json:"key,omitempty"`
 	Hash string `json:"hash,omitempty"`
-	// SonarrTitle is the film twin title THIS owner gives the release (twinTitle),
-	// "" when the owner gives it none. At rest for the same reason TvdbID is: the
-	// search render and a tick's unevaluated-owner carry both read it here.
-	// Re-derived every pass, so nothing accumulates.
+	// SonarrTitle is the title of the release's Sonarr item THIS owner gives
+	// it (twinTitle), "" when the owner gives it none. At rest for the same
+	// reason TvdbID is: the search render and a tick's unevaluated-owner carry
+	// both read it here. Re-derived every pass, so nothing accumulates.
 	SonarrTitle string `json:"sonarr_title,omitempty"`
-	// TwinSeries, URL, Size, TwinFirst and TwinLast are set beside SonarrTitle:
-	// the Sonarr series, the published page URL, the payload size and the
-	// season-0 run, which is what a special search is answered with from the
-	// curation alone (answerSpecial). Re-derived every pass, so nothing
-	// accumulates; decodeSnapshotOwners drops a set that cannot be served.
+	// TwinSeries, URL, Size, TwinFirst and TwinLast are set beside a special's
+	// SonarrTitle: the Sonarr series, the published page URL, the payload size
+	// and the season-0 run, which is what a special search is answered with
+	// from the curation alone (answerSpecial). Re-derived every pass, so
+	// nothing accumulates; decodeSnapshotOwners drops a set that cannot be served.
 	TwinSeries string `json:"twin_series,omitempty"`
 	URL        string `json:"url,omitempty"`
 	Size       int64  `json:"size,omitempty"`
@@ -220,7 +220,7 @@ func ownerAniListID(owner string) int {
 
 // foldOwnerIntoSignal folds one owner's stored contribution into the accumulated
 // verdict for one identity signal: best-wins on the vote and on not being a
-// film, holders-agree on the tvdb id and unanimity on the film twin title,
+// film, holders-agree on the tvdb id and unanimity on the Sonarr item title,
 // through the same folds the RSS render uses (tvdbVote, twinVote), so the two
 // render paths cannot disagree about a contested id or title.
 func foldOwnerIntoSignal(acc curatedSignal, r *ownedRelease) curatedSignal {

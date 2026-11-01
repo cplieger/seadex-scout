@@ -58,7 +58,7 @@ func tickDeps(logger *slog.Logger, sea *fakeSeaDex, feed FeedWriter, notifier *n
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       sea,
-		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notifier,
 		Feed:         feed,
@@ -610,6 +610,45 @@ func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 	}
 }
 
+// TestTickResolvesTheFindingOfACopyTheSpecialsSwitchHides pins the hidden half
+// of the tick's deletion authority. With specials off the matcher leaves out a
+// Sonarr copy on season 0, so the entry has no in-library match; its standing
+// row must still resolve on the tick that carries it, or the alert outlives the
+// switch until the next reconcile.
+func TestTickResolvesTheFindingOfACopyTheSpecialsSwitchHides(t *testing.T) {
+	const haikyuOVA = 107351
+	logger, recorder := capture.New()
+	notifier := notify.NewNotifier(logger, nil)
+	sea := &fakeSeaDex{
+		entries:       append(seadexFrierenEntry(), windowEntry(haikyuOVA, 601)),
+		windowEntries: []seadex.Entry{windowEntry(haikyuOVA, 601)},
+	}
+	deps, store := tickDeps(logger, sea, nil, notifier, 96)
+	store.st.Mapping.Records = append(store.st.Mapping.Records,
+		mapping.Record{AniListID: haikyuOVA, AniDBID: 8500, TvdbID: 278157, SeasonKind: mapping.SeasonPresent})
+	store.st.Mapping.Mappings = map[int]mapping.Mapping{8500: {Specials: []int{5}, SpecialsTvdb: 278157, SpecialsEpisodes: 1}}
+	deps.Library = arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{&fakeSonarr{series: []sonarr.Series{
+		{ID: 7, Title: "Frieren", IDs: sonarr.ExternalIDs{TVDB: 123}, Year: 2023},
+		{ID: 8, Title: "HAIKYU!!", IDs: sonarr.ExternalIDs{TVDB: 278157}, Year: 2014},
+	}}}, Logger: scoutTestLogger()})
+	deps.Matcher = match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger(), ExcludeSpecials: true})
+	s := New(deps)
+	if healthy := s.Cycle(t.Context()); !healthy {
+		t.Fatal("reconcile healthy=false, want true")
+	}
+	notifier.Report([]compare.Finding{tickFinding(haikyuOVA, 601)}, nil)
+
+	if healthy := s.Cycle(t.Context()); !healthy {
+		t.Fatal("tick healthy=false, want true")
+	}
+	if total, seen := lastSummaryCounter(t, recorder, "total"); !seen || total != 0 {
+		t.Errorf("finding set after the tick = %d rows (summary seen %v), want 0: the tick evaluated the hidden copy's entry", total, seen)
+	}
+	if carried, _ := lastSummaryCounter(t, recorder, "carried"); carried != 0 {
+		t.Errorf("carried = %d, want 0", carried)
+	}
+}
+
 // TestTickInterruptedDuringMatchingPublishesNothingAndPersists pins the tick's
 // post-match shutdown outcome. match.Matcher.Match returns early on a cancelled
 // context, so the set it hands back is TRUNCATED and evaluatedIDs derives
@@ -630,7 +669,7 @@ func TestTickInterruptedDuringMatchingPublishesNothingAndPersists(t *testing.T) 
 		windowEntries: []seadex.Entry{windowEntry(1003, 503)},
 	}
 	deps, store := tickDeps(logger, sea, nil, nil, 96)
-	deps.Matcher = match.New(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger())
+	deps.Matcher = match.New(match.Config{AniList: &ctxCancellingAniList{cancel: cancel}, Logger: scoutTestLogger()})
 	// An accepted mapping refresh on every load, so "did the interrupted tick
 	// persist what it learned" is observable at all: with an unchanged-release loader
 	// saveTick's own skip fires and the assertion could not tell a declined save
@@ -1110,7 +1149,7 @@ func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher:  match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Comparer: compare.New(compare.Config{}),
 		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
 	})
@@ -1381,7 +1420,7 @@ func TestMappingWorthPersisting(t *testing.T) {
 		return mapping.Cache{
 			FetchedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 			Tag:       "v2026.10.16",
-			Records:   []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+			Records:   []mapping.Record{{AniListID: 1, TvdbID: 100}},
 			Mappings:  map[int]mapping.Mapping{7: {Specials: []int{2}, SpecialsTvdb: 100, SpecialsEpisodes: 1}},
 		}
 	}

@@ -36,9 +36,9 @@ A film or special that TVDB files under a series' specials is compared on its ow
 
 An entry that is part of a regular season is compared on its own episodes too, when the map places it there and Sonarr lists more episodes in that season. One film of a season of seven films is judged on its episode alone, with a Scope cell such as `S01E01`. When the map places the entry on the whole season, or Sonarr's episode list could not be read, the entry is compared on the season.
 
-An entry can sit in both apps, such as a film Radarr holds and Sonarr holds as a special, an episode or a season of its series. seadex-scout looks for the second copy wherever the map places the entry. It finds a Radarr copy by the entry's TMDB movie ID. It uses the entry's IMDb ID only for a film or special filed under a series' specials, because TVDB gives a series the IMDb ID of one of its films. When the map places the entry in a series, seadex-scout finds the Sonarr copy by the entry's TVDB ID.
+An entry can sit in both apps, such as a film Radarr holds and Sonarr holds as a special, an episode or a season of its series. seadex-scout finds the Radarr copy by the entry's TMDB movie ID and the Sonarr copy by its TVDB ID. Beside a Radarr copy, a Sonarr series counts as a copy only when the map places the entry in it, so a film is never judged against the series' other files.
 
-Each copy holding a file for the entry gets its own row, judged as if alone. A Sonarr copy holds one when a file sits where the map places the entry: its special episodes, its episodes, its season or its own seasons of the series. When only one copy holds a file, only that copy gets a row. When neither does, the entry gets one row, from the app the map routes it to. A Sonarr copy in another episode order, or one Sonarr links to other AniList entries, gets its own `withheld` row, as it would alone.
+Each copy holding a file for the entry gets its own row, judged as if alone. A Sonarr copy holds one when a file sits where the map places the entry: its special episodes, its episodes, its season or its own seasons of the series. When only one copy holds a file, only that copy gets a row. When neither does, the entry gets one row: the Radarr copy's when it has one. With `filters.exclude_specials` on, a copy in Sonarr's season 0 is left out, and the Radarr copy is judged alone. A Sonarr copy in another episode order, or one Sonarr links to other AniList entries, gets its own `withheld` row, as it would alone.
 
 SeaDex entries sit in TheTVDB's aired seasons, and Sonarr's API gives no way to map another episode order onto them. So seadex-scout compares a Sonarr series only while it uses the aired order, the only order Sonarr 4 offers. A series you set to another order in Sonarr 5 gets a `withheld` row for each of its entries, raises no finding, and loses the findings it had at the next full pass. Each full pass and each report run also logs one info line per such series that `arr_tags` includes, as [Monitoring](monitoring.md#log-lines) describes.
 
@@ -60,11 +60,11 @@ When you run `report` as the container's own command instead of through `docker 
 
 ## Matching
 
-SeaDex keys everything on AniList IDs. Sonarr keys on TVDB IDs, and Radarr on TMDB and IMDb IDs. seadex-scout bridges them in four ways.
+SeaDex keys everything on AniList IDs. Sonarr keys on TVDB IDs, and Radarr on TMDB IDs. seadex-scout bridges them in four ways.
 
 ### ID mapping
 
-The [animap](https://github.com/cplieger/animap) file `animap.json` maps each `anilist_id` to a `type`, such as TV or movie, to the TVDB series its episodes land on, to the TMDB movie IDs of the film every one of its episodes is, and to IMDb IDs. The `type` decides which app is tried first. A movie is looked up by TMDB movie ID, then IMDb ID, in Radarr. Anything else is looked up by TVDB ID in Sonarr. A film you do not have in Radarr then falls back to its TVDB ID, which is the series TVDB files the film under, so it links in Sonarr instead of being lost. The other way round, when Sonarr does not have the series, an entry of another type that is one film, such as a special TVDB files under a series, is looked up in Radarr by its TMDB movie ID, and one whose special episodes the map lists, the first fact under Episode mapping, also by its IMDb ID. When Radarr has it, the indexer offers its releases as a film.
+The [animap](https://github.com/cplieger/animap) file `animap.json` maps each `anilist_id` to the TVDB series its episodes land on and to the TMDB movie IDs of the film every one of its episodes is. Those links decide where the entry goes. A TMDB movie ID links it to Radarr, a TVDB ID to Sonarr, and an entry with both is looked for in both apps, each copy judged on its own. The entry's type, such as TV or movie, decides nothing. An entry with neither link takes the [title fallback](#title-fallback).
 
 Every full pass and every quick check that downloads SeaDex changes asks GitHub which `animap.json` release is the latest, and downloads the file only when the release is new. The download is checked against the release's checksum file, and a file that does not match is refused. A quick check that downloads none does not ask, so seadex-scout picks up a new release within 24 hours at most. The last good copy is kept in `state.json`, so seadex-scout keeps matching through a GitHub outage. A new file that fails its safety checks, such as one that lost most of its records, is refused and the last good copy stays in use.
 
@@ -78,7 +78,7 @@ The second is the one TVDB special episode a film filed under a series is, when 
 
 The third is which TVDB seasons the entry's episodes fall in, as runs of episodes. A season holds two runs when an episode between them lands elsewhere, such as on a special. That lets a series' pack with no season in its file names carry its season, when the whole pack sits inside one run. It also lets the report judge a split show against its own seasons. An episode animap cannot place belongs to no run, so the report judges such an entry on the seasons its placed episodes fall in, and an entry with no placed episode on every season no other entry of the series claims.
 
-The fourth is which episodes of one regular TVDB season an entry is, when a written mapping puts every episode of the entry on that season. One cour of a split season is such an entry, and so is one film of a season of films. The report compares the entry on those episodes alone when Sonarr lists each of them and more besides.
+The fourth is which episodes of one regular TVDB season an entry is, when a written mapping puts every episode of the entry on that season. One cour of a split season is such an entry, and so is one film of a season of films. The report compares the entry on those episodes alone when Sonarr lists each of them and more besides. For a film, the indexer also names those episodes to Sonarr, such as `Initial D S03E01`.
 
 Otherwise the entry is compared on the whole season. That happens when it covers every episode Sonarr lists there, when Sonarr's episode list could not be read, or when the list lacks a placed episode.
 
@@ -89,21 +89,21 @@ To pin an entry the ID map misses or gets wrong, put a `/config/overrides.json` 
 | Field | Meaning |
 | --- | --- |
 | `anilist_id` | Required. The SeaDex entry the record maps. |
-| `type` | `movie` routes to Radarr. Anything else routes to Sonarr. |
 | `tvdb_id` | The TVDB series ID. |
 | `tmdb_movies` | An array of TMDB movie IDs, as numbers. |
-| `imdb_ids` | An array of IMDb IDs, as strings. |
 | `anidb_id` | The AniDB anime the entry is. The entry then uses animap's episode facts for that anime. |
 | `season_tvdb` | The TVDB season to compare against. |
 | `season_kind` | Whether upstream maps a TVDB season for the entry at all, `present` or `absent`. |
 
-With `season_kind: present`, a positive `season_tvdb` compares against that season. When animap places that anime's episodes on part of that season of the same `tvdb_id`, the entry is compared on those episodes, as [Episode mapping](#episode-mapping) describes. A `season_tvdb` of 0 means the entry lands in Sonarr's season 0. It is compared there only when animap says which special episodes that anime is, on the same `tvdb_id`. With `season_kind: absent`, the entry is judged against the whole series. Leave `season_kind` out and a positive `season_tvdb` still picks that season. Only an entry without one is routed by its `type`.
+A `type` key is read as an unknown key: ignored, with the unknown-keys warning. A record that names `type` and a `tvdb_id` but neither `season_kind` nor a `season_tvdb` above 0 refuses the whole file with an error naming `season_kind`, because its type used to decide its season. An `imdb_ids` key refuses the whole file with an error naming it, because seadex-scout no longer reads IMDb IDs; name the film's `tmdb_movies` instead.
 
-These are the only field names read. Other spellings, such as `imdb_id`, `themoviedb_id` and `season`, are ignored with a warning naming the key. An override replaces the whole mapping record for its `anilist_id`, with no field-by-field merge. When you correct an entry animap already has, restate every field the entry needs.
+With `season_kind: present`, a positive `season_tvdb` compares against that season. When animap places that anime's episodes on part of that season of the same `tvdb_id`, the entry is compared on those episodes, as [Episode mapping](#episode-mapping) describes. A `season_tvdb` of 0 means the entry lands in Sonarr's season 0. It is compared there only when animap says which special episodes that anime is, on the same `tvdb_id`. With `season_kind: absent`, the entry is judged against the whole series. Leave `season_kind` out and a positive `season_tvdb` still picks that season. Without one the entry is judged against the whole series, so write `"season_kind": "present"` with `season_tvdb` 0 for a film or special in Sonarr's specials.
+
+These are the only field names read. Other spellings, such as `imdb_id`, `themoviedb_id` and `season`, are ignored with a warning that counts them. An override replaces the whole mapping record for its `anilist_id`, with no field-by-field merge. When you correct an entry animap already has, restate every field the entry needs.
 
 ### Title fallback
 
-When an entry is not in the ID map, seadex-scout fetches its titles and format from AniList and tries a careful title-plus-year match against your library. The match must be exact and have a single candidate. An ambiguous match is skipped rather than guessed.
+When an entry is not in the ID map, seadex-scout fetches its titles and format from AniList and tries a careful title-plus-year match against your library. The format picks the app: a movie is searched in Radarr, any other format in Sonarr, where a match is compared on the whole series, and an entry AniList gives no format is searched in both. The match must be exact and have a single candidate. An ambiguous match is skipped rather than guessed.
 
 ## Release classification
 
@@ -125,7 +125,7 @@ When your newest revision is older than SeaDex's for every SeaDex best group you
 
 - `filters.exclude_remux`, `false` by default, stops releases classified as `remux` from counting as a recommendation. The default keeps them, because on SeaDex a remux is often the best release.
 - `filters.require_dual_audio`, `false` by default, drops releases that are not dual audio.
-- `filters.exclude_specials`, `false` by default, drops OVA, ONA and special entries from the findings and the report.
+- `filters.exclude_specials`, `false` by default, leaves out the Sonarr copy of entries that land only in a series' season 0, such as specials and films TVDB lists there, from the findings and the report. The Radarr copy of a film is never left out. Whole ONA and OVA series, and any entry on a regular season, are kept.
 - `animebytes`, `false` by default, is the one tracker switch. The public trackers SeaDex lists, Nyaa, AnimeTosho and RuTracker, always count. The private tracker AnimeBytes counts only when you turn this on. Then a finding carries every source, so a release on both Nyaa and AnimeBytes shows both links. An AnimeBytes link is the torrent page you open as a member, so seadex-scout needs no tracker credentials for it.
 - `arr_tags.include` and `arr_tags.exclude` check only items carrying an include tag, and never items carrying an exclude tag. An exclude wins when an item has both.
 
@@ -155,9 +155,9 @@ Requiring both flags matters because some trackers use real 25% and 75% freeleec
 
 ### Categories and titles
 
-Each item's category follows the entry's real media type. A series, OVA or special is `5070`, Anime, for Sonarr. A film is `2000`, Movies, for Radarr, whichever app holds it. Sonarr gets a film only as the series-titled item below.
+Each item's category follows the entry's links, not its type. An entry with a TMDB movie ID is `2000`, Movies, under the film's title. An entry with only a TVDB ID is `5070`, Anime, for Sonarr. An entry with neither link takes its category from its AniList format: a movie is `2000`, anything else `5070`. Sonarr gets a film only as the series-titled item below.
 
-A film or special that TVDB files under a series you have in Sonarr is also served as a second item under Anime. That item carries the series title and the special episodes, such as `Code Geass S00E04`, so Sonarr's parser can match it. A two-part special reads `Black Butler S00E09-E10`, which Sonarr grabs as both episodes. A film you also keep in Radarr gets this item too. A release gets none when it holds more than that entry, such as a season pack that carries the special, or when it holds one part of a multi-part special, such as one film of an entry that holds several. It gets none either when SeaDex lists the same release under another entry, when the special episodes are not consecutive, or when the map leaves some of the entry's episodes without one. A series Sonarr numbers in another episode order gets no such item, and its releases get no season label from the map, as [Torznab feed setup](torznab-indexer.md#series-in-another-episode-order) explains.
+A film or special that TVDB files under a series you have in Sonarr is also served as a second item under Anime. That item carries the series title and the special episodes, such as `Code Geass S00E04`, so Sonarr's parser can match it. A two-part special reads `Black Butler S00E09-E10`, which Sonarr grabs as both episodes. A film TVDB lists on episodes of a regular season gets the same second item, such as `Initial D S03E01`, when the map names those episodes. A film you also keep in Radarr gets this item too. A release gets none when it holds more than that entry, such as a season pack that carries the special, or when it holds one part of a multi-part special, such as one film of an entry that holds several. It gets none either when SeaDex lists the same release under another entry, when the episodes are not consecutive, or when the map leaves some of the entry's episodes without one. A film with no such item reaches Radarr only, and reaches Sonarr once animap places its episodes on TVDB. A one-file film in season 0 gets the item from the one special episode the map names for it, but a film on a regular season gets it only when the map names its episodes there, so a film a default places on a season waits for animap to name them. A series Sonarr numbers in another episode order gets no such item, and its releases get no season label from the map, as [Torznab feed setup](torznab-indexer.md#series-in-another-episode-order) explains.
 
 Sonarr and Radarr each get only their own item, told apart by the categories they ask for. A request for Anime or TV only gets the series-titled item in place of the film's or special's own. A request for Movies only gets the film under its own title. A request that names neither, such as Prowlarr's save test, gets both. A release with no series-titled item reaches Sonarr on RSS only when its title is not a film's, and in a search, where it keeps the tracker's title, only when some entry holding it is not a film. Sonarr could match it only by guessing one special episode from the film's title, and for a two-part special that guess grabs one part as the whole.
 

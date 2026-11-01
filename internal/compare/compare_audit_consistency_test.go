@@ -25,8 +25,8 @@ func TestCompareAuditConsistency(t *testing.T) {
 	nogrpBest := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{
 		{IsBest: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
 	}}
-	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
-	wholeRec := mapping.Record{Type: "TV"}
+	seasonRec := mapping.Record{SeasonTvdb: 1}
+	wholeRec := mapping.Record{}
 
 	tests := []struct {
 		name          string
@@ -167,7 +167,7 @@ func TestCompareAuditConsistency(t *testing.T) {
 			item := &library.Item{Title: "Same Story", Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Source: match.SourceID, Entry: tt.entry, Record: tt.record}
 
-			findings := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			findings := comparer(filter.Options{}).Compare([]match.Match{m})
 			if tt.wantStatus == "" {
 				if len(findings) != 0 {
 					t.Errorf("daemon must be silent, got %+v", findings)

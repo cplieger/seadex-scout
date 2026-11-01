@@ -284,7 +284,7 @@ func TestProjectCurationFoldsTheTwinTitlePerSignal(t *testing.T) {
 				{AniListID: 20, Torrents: []seadex.Torrent{torrent}},
 			}
 			set := projectCuration(ownershipOf(entries, func(alID int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, SpecialEpisodes: []int{tc.episodes[alID]}, SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TwinEpisodes: []int{tc.episodes[alID]}, SeriesTitle: "Minami-ke"}
 			}))
 			if got := set.byKey[key].twin.resolve(); got != tc.want {
 				t.Errorf("byKey[%q] twin = %q, want %q (%s)", key, got, tc.want, tc.desc)

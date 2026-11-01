@@ -49,7 +49,7 @@ func placedOVACache() mapping.Cache {
 	return mapping.Cache{
 		FetchedAt: time.Now(),
 		Records: []mapping.Record{{
-			AniListID: placedOVAID, AniDBID: 70, Type: "OVA", TvdbID: 500, SeasonKind: mapping.SeasonPresent,
+			AniListID: placedOVAID, AniDBID: 70, TvdbID: 500, SeasonKind: mapping.SeasonPresent,
 		}},
 		Mappings: map[int]mapping.Mapping{70: {Specials: []int{9}, SpecialsTvdb: 500}},
 	}
@@ -84,7 +84,7 @@ func placedOVADeps(logger *slog.Logger, fs *specialsSonarr, notifier *notify.Not
 		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{fs}, Logger: scoutTestLogger()}),
 		Mapping:      placedMapping{},
 		SeaDex:       sea,
-		Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+		Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 		Comparer:     compare.New(compare.Config{}),
 		Notifier:     notifier,
 		PollInterval: pollIntervalForEvery(every),

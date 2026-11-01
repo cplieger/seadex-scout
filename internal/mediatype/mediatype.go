@@ -1,13 +1,14 @@
-// Package mediatype owns the AniList/animap media-type token vocabulary: the
-// canonical comparison form, the set of tokens that name a real media type, and
-// the movie/special classification over them.
+// Package mediatype owns the AniList media-format token vocabulary: the
+// canonical comparison form, the set of tokens that name a real format, and
+// which of them is a film. Only the unmapped fallback and the feed's memo
+// typing read a format; a mapped entry routes by its links.
 package mediatype
 
 import "strings"
 
-// The AniList MediaFormat enum as it applies to anime; animap's `type`
-// vocabulary is a subset of it plus UNKNOWN. AniList's MANGA/NOVEL/ONE_SHOT members cannot appear on a
-// SeaDex entry and are deliberately absent.
+// The AniList MediaFormat enum as it applies to anime. AniList's
+// MANGA/NOVEL/ONE_SHOT members cannot appear on a SeaDex entry and are
+// deliberately absent.
 const (
 	movie   = "MOVIE"
 	tv      = "TV"
@@ -24,9 +25,8 @@ var known = map[string]struct{}{
 	ova: {}, ona: {}, music: {},
 }
 
-// Normalize canonicalizes a raw type/format token to the upper-cased, trimmed
-// form every predicate here compares in - the form a mapping Record.Type is
-// stored in, so an exact-key comparison against a stored type is sound.
+// Normalize canonicalizes a raw format token to the upper-cased, trimmed form
+// every predicate here compares in.
 func Normalize(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
 
 // Known reports whether s names a real media type. It compares in canonical
@@ -36,19 +36,5 @@ func Known(s string) bool {
 	return ok
 }
 
-// IsMovie reports whether a canonical token routes to Radarr (TMDB movie /
-// IMDb). Every other token - including an empty or unrecognized one - routes to
-// Sonarr (TVDB).
+// IsMovie reports whether a canonical AniList format token is a film.
 func IsMovie(s string) bool { return s == movie }
-
-// IsSpecial reports whether a canonical token is an OVA/ONA/special/music video
-// rather than a standard TV season or movie, so it can be excluded when the
-// operator turns specials off. An empty or unrecognized token is not special.
-func IsSpecial(s string) bool {
-	switch s {
-	case ova, ona, special, music:
-		return true
-	default:
-		return false
-	}
-}

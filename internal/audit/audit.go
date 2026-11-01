@@ -201,7 +201,9 @@ type Report struct {
 type Config struct {
 	// TagFilter is the operator's filters.exclude_tags policy, asked about the
 	// report surface. Its zero value excludes nothing.
-	TagFilter       tagfilter.Filter
+	TagFilter tagfilter.Filter
+	// ExcludeSpecials keeps a special record's TVDB id out of the not_on_seadex
+	// catalogue (match.NewCatalogue); the matcher already left its copy out.
 	ExcludeSpecials bool
 	AnimeBytes      bool
 }
@@ -222,11 +224,11 @@ func New(cfg Config) *Auditor {
 	}
 }
 
-// Audit produces the report: one row per in-library SeaDex match (specials
-// skipped when disabled), plus one not_on_seadex row per library item that is
-// recognized anime but has no SeaDex entry. snap and idx may be nil, in which
-// case the not_on_seadex section is empty. incompleteIDs carries the AniList ids
-// whose needed lookup failed transiently this run.
+// Audit produces the report: one row per in-library SeaDex match, plus one
+// not_on_seadex row per library item that is recognized anime but has no
+// SeaDex entry. snap and idx may be nil, in which case the not_on_seadex
+// section is empty. incompleteIDs carries the AniList ids whose needed lookup
+// failed transiently this run.
 func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index, incompleteIDs map[int]struct{}) Report {
 	rows := make([]reportRow, 0, len(matches))
 	covered := make(map[string]struct{})
@@ -236,17 +238,12 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		if !m.InLibrary() {
 			continue
 		}
-		// Coverage is a property of the COMPARISON, not of the link. The mark stays
-		// ABOVE the excludeSpecials continue, so an excluded special's coverage
-		// moves only by the comparability rule.
+		// Coverage is a property of the COMPARISON, not of the link.
 		if align.ClaimsCoverage(m.Item, &m.Record) {
 			covered[m.Item.Key()] = struct{}{}
 		}
 		if u := m.Uncompared; u != nil && align.ClaimsCoverage(u, &m.Record) {
 			covered[u.Key()] = struct{}{}
-		}
-		if a.excludeSpecials && m.Record.IsSpecial() {
-			continue
 		}
 		row := a.assess(m)
 		matched[m.Item.Key()] = matched[m.Item.Key()].with(row.Verdict)
@@ -329,12 +326,7 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 	if snap == nil {
 		return nil, nil
 	}
-	// audit contributes only its specials policy: with the filter on, a special
-	// record catalogues nothing, so a specials-only item cannot surface as
-	// not_on_seadex, while a mixed series stays catalogued through its siblings.
-	cat := match.NewCatalogue(idx, func(r mapping.Record) bool {
-		return !excludeSpecials || !r.IsSpecial()
-	})
+	cat := match.NewCatalogue(idx, excludeSpecials)
 	for i := range snap.Items {
 		it := &snap.Items[i]
 		if _, ok := covered[it.Key()]; ok {
@@ -372,7 +364,7 @@ func (a *Auditor) assess(m *match.Match) reportRow {
 		SeaDexURL:   seadex.EntryURL(m.Entry.AniListID),
 		MatchSource: string(m.Source),
 		AniListID:   m.Entry.AniListID,
-		Special:     m.Record.IsSpecial(),
+		Special:     m.Special(),
 		Incomplete:  m.Entry.Incomplete,
 	}
 	for i := range m.Entry.Torrents {

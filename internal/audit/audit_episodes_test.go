@@ -21,8 +21,8 @@ func placedOVAReport(t *testing.T, torrents ...seadex.Torrent) Report {
 		Specials:     map[int]library.ListedEpisode{4: {Group: "oz", HasFile: true}, 15: {Group: "g", HasFile: true}, 16: {}},
 	}
 	snap := &library.Snapshot{Items: []library.Item{item}}
-	rec := mapping.Record{AniListID: 5, Type: "OVA", TvdbID: 700, SeasonKind: mapping.SeasonPresent}
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{rec, {AniListID: 9, Type: "TV", TvdbID: 700}}})
+	rec := mapping.Record{AniListID: 5, TvdbID: 700, SeasonKind: mapping.SeasonPresent}
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{rec, {AniListID: 9, TvdbID: 700}}})
 	if len(torrents) == 0 {
 		torrents = []seadex.Torrent{{IsBest: true, ReleaseGroup: "G", Tracker: "Nyaa", URL: "https://nyaa.si/view/5"}}
 	}
@@ -73,11 +73,9 @@ func TestAuditPlacedSpecialOnAnAltKeepsItsSeriesOutOfAllBest(t *testing.T) {
 }
 
 func TestAuditPlacedCopyMatchDoesNotJudgeStillCovers(t *testing.T) {
-	film := mapping.Record{AniListID: 1, AniDBID: 70, Type: "MOVIE", TvdbID: 500, TmdbMovies: []int{42}, SeasonKind: mapping.SeasonPresent}
-	ova := film
-	ova.Type = "OVA"
+	film := mapping.Record{AniListID: 1, AniDBID: 70, TvdbID: 500, TmdbMovies: []int{42}, SeasonKind: mapping.SeasonPresent}
 	// A second AniList entry for the same film catalogues it in Radarr.
-	sameFilm := mapping.Record{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{42}}
+	sameFilm := mapping.Record{AniListID: 2, TmdbMovies: []int{42}}
 	held := library.ListedEpisode{Group: "mtbb", HasFile: true}
 	for _, tc := range []struct {
 		name          string
@@ -89,9 +87,9 @@ func TestAuditPlacedCopyMatchDoesNotJudgeStillCovers(t *testing.T) {
 		filmHolds     bool
 		wantUncovered bool
 	}{
-		{"a film whose special holds the file", []mapping.Record{film}, library.ArrSonarr, VerdictBest, held, align.ScopeEpisodes, false, false},
-		{"an OVA neither copy holds", []mapping.Record{ova, sameFilm}, library.ArrSonarr, VerdictNoFile, library.ListedEpisode{}, align.ScopeEpisodes, false, true},
-		{"an OVA only the film holds", []mapping.Record{ova}, library.ArrRadarr, VerdictBest, library.ListedEpisode{}, align.ScopeMovie, true, true},
+		{"a film whose special holds the file", []mapping.Record{film}, library.ArrSonarr, VerdictBest, held, align.ScopeEpisodes, false, true},
+		{"a film neither copy holds", []mapping.Record{film, sameFilm}, library.ArrRadarr, VerdictNoFile, library.ListedEpisode{}, align.ScopeMovie, false, true},
+		{"a film only Radarr holds", []mapping.Record{film}, library.ArrRadarr, VerdictBest, library.ListedEpisode{}, align.ScopeMovie, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			radarr := library.Item{Arr: library.ArrRadarr, ArrID: 3, Title: "Film", TmdbID: 42}
@@ -107,7 +105,7 @@ func TestAuditPlacedCopyMatchDoesNotJudgeStillCovers(t *testing.T) {
 			entry := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{
 				{IsBest: true, ReleaseGroup: "MTBB", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 			}}
-			res := match.New(nil, nil).Match(t.Context(), []seadex.Entry{entry}, snap, idx, match.Memo{})
+			res := match.New(match.Config{}).Match(t.Context(), []seadex.Entry{entry}, snap, idx, match.Memo{})
 			rep := New(Config{}).Audit(res.Matches, snap, idx, nil)
 			var compared []reportRow
 			seriesUncovered := false
@@ -132,15 +130,15 @@ func TestAuditPlacedCopyMatchDoesNotJudgeStillCovers(t *testing.T) {
 }
 
 func TestAuditFilmPlacedOnNoSeasonLeavesItsParentSeriesUncovered(t *testing.T) {
-	film := mapping.Record{AniListID: 1, AniDBID: 110, Type: "MOVIE", TvdbID: 900, TmdbMovies: []int{91}, SeasonKind: mapping.SeasonAbsent}
-	series := mapping.Record{AniListID: 9, AniDBID: 111, Type: "TV", TvdbID: 900, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
+	film := mapping.Record{AniListID: 1, AniDBID: 110, TvdbID: 900, TmdbMovies: []int{91}, SeasonKind: mapping.SeasonAbsent}
+	series := mapping.Record{AniListID: 9, AniDBID: 111, TvdbID: 900, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 3, Title: "Film", TmdbID: 91, HasFile: true, Groups: []string{"mtbb"}},
 		{Arr: library.ArrSonarr, ArrID: 7, Title: "Parent", TvdbID: 900, Groups: []string{"oz"}, HasFile: true, SeasonGroups: map[int][]string{1: {"oz"}, 2: {"oz"}}},
 	}}
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{film, series}})
 	entry := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{IsBest: true, ReleaseGroup: "MTBB", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}}
-	res := match.New(nil, nil).Match(t.Context(), []seadex.Entry{entry}, snap, idx, match.Memo{})
+	res := match.New(match.Config{}).Match(t.Context(), []seadex.Entry{entry}, snap, idx, match.Memo{})
 	rep := New(Config{}).Audit(res.Matches, snap, idx, nil)
 	var compared, uncovered []string
 	for _, row := range rep.Rows {

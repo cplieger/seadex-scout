@@ -11,22 +11,22 @@ import (
 )
 
 var seasonFilm = mapping.Record{
-	AniListID: 2, AniDBID: 80, Type: "MOVIE", TvdbID: 600, TmdbMovies: []int{43},
+	AniListID: 2, AniDBID: 80, TvdbID: 600, TmdbMovies: []int{43},
 	SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1,
 }
 
 var seasonOVA = mapping.Record{
-	AniListID: 3, AniDBID: 90, Type: "OVA", TvdbID: 700, TmdbMovies: []int{44},
+	AniListID: 3, AniDBID: 90, TvdbID: 700, TmdbMovies: []int{44},
 	SeasonKind: mapping.SeasonPresent, SeasonTvdb: 2,
 }
 
 var seriesFilm = mapping.Record{
-	AniListID: 4, AniDBID: 100, Type: "MOVIE", TvdbID: 800, TmdbMovies: []int{45},
+	AniListID: 4, AniDBID: 100, TvdbID: 800, TmdbMovies: []int{45},
 	SeasonKind: mapping.SeasonAbsent,
 }
 
 var unplacedFilm = mapping.Record{
-	AniListID: 5, AniDBID: 110, Type: "MOVIE", TvdbID: 900, TmdbMovies: []int{91},
+	AniListID: 5, AniDBID: 110, TvdbID: 900, TmdbMovies: []int{91},
 	SeasonKind: mapping.SeasonAbsent,
 }
 
@@ -58,13 +58,13 @@ func filmSeries(fileOnPlaced bool) library.Item {
 		groups = []string{"mtbb", "oz"}
 	}
 	return library.Item{
-		Arr: library.ArrSonarr, ArrID: 8, TvdbID: 600, ImdbID: "tt0000600",
+		Arr: library.ArrSonarr, ArrID: 8, TvdbID: 600,
 		SeasonGroups: map[int][]string{1: groups}, Listed: map[int]map[int]library.ListedEpisode{1: listed},
 	}
 }
 
 func ovaSeries(fileOnPlaced bool) library.Item {
-	it := library.Item{Arr: library.ArrSonarr, ArrID: 9, TvdbID: 700, ImdbID: "tt0000700", SeasonGroups: map[int][]string{1: {"oz"}}}
+	it := library.Item{Arr: library.ArrSonarr, ArrID: 9, TvdbID: 700, SeasonGroups: map[int][]string{1: {"oz"}}}
 	if fileOnPlaced {
 		it.SeasonGroups[2] = []string{"mtbb"}
 	}
@@ -87,15 +87,15 @@ type judged struct {
 func judgeCopies(t *testing.T, rec mapping.Record, items ...library.Item) []judged {
 	t.Helper()
 	snap := &library.Snapshot{Items: items}
-	res := New(&countingAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: rec.AniListID}}, snap, twinIndex(rec), Memo{})
-	if hits := res.Coverage.Hits[library.ArrRadarr] + res.Coverage.Hits[library.ArrSonarr]; hits != 1 {
-		t.Errorf("coverage hits = %v, want the entry counted once", res.Coverage.Hits)
+	res := New(Config{AniList: &countingAniList{}}).Match(t.Context(), []seadex.Entry{{AniListID: rec.AniListID}}, snap, twinIndex(rec), Memo{})
+	if res.Coverage.Hits[library.ArrRadarr] != b2i(rec.RadarrRoute()) || res.Coverage.Hits[library.ArrSonarr] != b2i(rec.SonarrRoute()) {
+		t.Errorf("coverage hits = %v, want one per route", res.Coverage.Hits)
 	}
 	out := make([]judged, 0, len(res.Matches))
 	for i := range res.Matches {
 		m := &res.Matches[i]
 		if !m.InLibrary() {
-			t.Fatalf("Match[%d] = %+v, want an in-library copy", i, m)
+			continue
 		}
 		if m.Arr != m.Item.Arr {
 			t.Errorf("Match[%d].Arr = %q, item arr %q; want them equal", i, m.Arr, m.Item.Arr)
@@ -107,6 +107,13 @@ func judgeCopies(t *testing.T, rec mapping.Record, items ...library.Item) []judg
 		out = append(out, j)
 	}
 	return out
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func TestMatchJudgesBothCopiesOfASeasonPlacedFilm(t *testing.T) {
@@ -132,7 +139,7 @@ func TestMatchJudgesBothCopiesOfASeasonPlacedFilm(t *testing.T) {
 
 func TestMatchJudgesTheSonarrCopyOnThePlacedEpisodes(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{movie(4, 43, true), filmSeries(true)}}
-	res := New(&countingAniList{}, nil).Match(t.Context(), []seadex.Entry{{AniListID: 2}}, snap, twinIndex(seasonFilm), Memo{})
+	res := New(Config{AniList: &countingAniList{}}).Match(t.Context(), []seadex.Entry{{AniListID: 2}}, snap, twinIndex(seasonFilm), Memo{})
 	if len(res.Matches) != 2 || res.Matches[1].Arr != library.ArrSonarr {
 		t.Fatalf("Match = %+v, want the Radarr film then the Sonarr series", res.Matches)
 	}
@@ -144,8 +151,8 @@ func TestMatchJudgesTheSonarrCopyOnThePlacedEpisodes(t *testing.T) {
 }
 
 func TestMatchJudgesBothCopiesOfASeasonPlacedSeries(t *testing.T) {
-	imdbOnly := seasonOVA
-	imdbOnly.TmdbMovies, imdbOnly.IMDbIDs = nil, []string{"tt0000044"}
+	seriesOnly := seasonOVA
+	seriesOnly.TmdbMovies = nil
 	excluded := ovaSeries(false)
 	excluded.AniListIDs = []int{999}
 	for _, tc := range []struct {
@@ -155,15 +162,14 @@ func TestMatchJudgesBothCopiesOfASeasonPlacedSeries(t *testing.T) {
 		want   []judged
 		film   bool
 	}{
-		{"both hold a file", seasonOVA, ovaSeries(true), []judged{{library.ArrSonarr, "", align.OutcomeAligned}, {library.ArrRadarr, "", align.OutcomeAligned}}, true},
+		{"both hold a file", seasonOVA, ovaSeries(true), []judged{{library.ArrRadarr, "", align.OutcomeAligned}, {library.ArrSonarr, "", align.OutcomeAligned}}, true},
 		{"only the Radarr film holds one", seasonOVA, ovaSeries(false), []judged{{library.ArrRadarr, library.ArrSonarr, align.OutcomeAligned}}, true},
 		{"only the Sonarr season holds one", seasonOVA, ovaSeries(true), []judged{{library.ArrSonarr, library.ArrRadarr, align.OutcomeAligned}}, false},
-		{"Sonarr's AniList ids exclude the entry", seasonOVA, excluded, []judged{{library.ArrSonarr, "", align.OutcomeWithheld}, {library.ArrRadarr, "", align.OutcomeAligned}}, true},
-		{"the film is known only by an IMDb id", imdbOnly, ovaSeries(true), []judged{{library.ArrSonarr, "", align.OutcomeAligned}}, true},
+		{"Sonarr's AniList ids exclude the entry", seasonOVA, excluded, []judged{{library.ArrRadarr, "", align.OutcomeAligned}, {library.ArrSonarr, "", align.OutcomeWithheld}}, true},
+		{"no TMDB movie id leaves the Sonarr copy alone", seriesOnly, ovaSeries(true), []judged{{library.ArrSonarr, "", align.OutcomeAligned}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			film := movie(5, 44, tc.film)
-			film.ImdbID = "tt0000044"
 			got := judgeCopies(t, tc.rec, tc.series, film)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("copies = %+v, want %+v", got, tc.want)
@@ -173,8 +179,6 @@ func TestMatchJudgesBothCopiesOfASeasonPlacedSeries(t *testing.T) {
 }
 
 func TestMatchWithholdsATwinInANonAiredOrder(t *testing.T) {
-	offeredOVA := placedFilm
-	offeredOVA.AniListID, offeredOVA.AniDBID, offeredOVA.Type = 7, 130, "OVA"
 	for _, tc := range []struct {
 		name   string
 		rec    mapping.Record
@@ -185,7 +189,6 @@ func TestMatchWithholdsATwinInANonAiredOrder(t *testing.T) {
 		{"the Radarr film holds a file", seasonFilm, movie(4, 43, true), filmSeries(false), []judged{{library.ArrRadarr, "", align.OutcomeAligned}, {library.ArrSonarr, "", align.OutcomeWithheld}}},
 		{"the Radarr film holds none", seasonFilm, movie(4, 43, false), filmSeries(false), []judged{{library.ArrSonarr, library.ArrRadarr, align.OutcomeWithheld}}},
 		{"a specials-placed film, no file on the placed special", placedFilm, radarrFilm(true), sonarrSeries(false), []judged{{library.ArrRadarr, "", align.OutcomeAligned}, {library.ArrSonarr, "", align.OutcomeWithheld}}},
-		{"an OVA offered on season 0, placed on no special", offeredOVA, radarrFilm(true), sonarrSeries(false), []judged{{library.ArrSonarr, "", align.OutcomeWithheld}, {library.ArrRadarr, "", align.OutcomeAligned}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			series := tc.series

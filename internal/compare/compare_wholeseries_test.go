@@ -15,7 +15,7 @@ func wholeSeriesMatch(seasons map[int][]string, entry seadex.Entry) match.Match 
 		Item:   &library.Item{Title: "Absolute Run", Arr: library.ArrSonarr, SeasonGroups: seasons},
 		Arr:    library.ArrSonarr,
 		Entry:  entry,
-		Record: mapping.Record{Type: "TV", SeasonTvdb: 0},
+		Record: mapping.Record{SeasonTvdb: 0},
 	}
 }
 
@@ -101,7 +101,7 @@ func TestCompareWholeSeries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := wholeSeriesMatch(tt.seasons, tt.entry)
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 			if len(got) != tt.wantCount {
 				t.Fatalf("finding count = %d, want %d: %+v", len(got), tt.wantCount, got)
 			}
@@ -125,12 +125,12 @@ func TestCompareWholeSeriesDropsSiblingMappedSeasons(t *testing.T) {
 
 	m := wholeSeriesMatch(seasons, entry)
 	m.SiblingSeasons = []int{5, 6, 7, 8, 10}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("findings = %+v, want none (every season of the entry's own carries its best group)", got)
 	}
 
 	contaminated := wholeSeriesMatch(seasons, entry)
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{contaminated}); len(got) != 1 {
+	if got := comparer(filter.Options{}).Compare([]match.Match{contaminated}); len(got) != 1 {
 		t.Fatalf("findings without the sibling summary = %+v, want 1 (the contaminated verdict this fix removes)", got)
 	}
 }

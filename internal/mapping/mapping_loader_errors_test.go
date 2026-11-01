@@ -66,7 +66,7 @@ func TestLoader_refreshCache_boundsUpstreamErrorText(t *testing.T) {
 func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 	dir := t.TempDir()
 	overrides := filepath.Join(dir, "overrides.json")
-	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie"}]`), 0o644); err != nil {
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"tvdb_id":555}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -80,8 +80,8 @@ func TestLoader_Load_canceledContextSkipsOverrides(t *testing.T) {
 	if !ok {
 		t.Fatal("canceled-context Load lost the cached record for id 1")
 	}
-	if rec.Type != "TV" {
-		t.Errorf("canceled-context Load applied the override: Type = %q, want TV", rec.Type)
+	if rec.TvdbID != 100 {
+		t.Errorf("canceled-context Load applied the override: TvdbID = %d, want 100", rec.TvdbID)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestLoader_Load_directoryOverridesIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load with directory overrides error: %v", err)
 	}
-	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" {
+	if rec, ok := idx.Lookup(1); !ok || rec.TvdbID != 100 {
 		t.Errorf("directory overrides changed the record: %+v ok=%v", rec, ok)
 	}
 }

@@ -52,7 +52,7 @@ func TestCompareTierOnBetterRelease(t *testing.T) {
 			entry := seadex.Entry{AniListID: 154587, Torrents: append([]seadex.Torrent{best}, tt.others...)}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-			got := comparer(tt.opts, false).Compare([]match.Match{m})
+			got := comparer(tt.opts).Compare([]match.Match{m})
 
 			if len(got) != 1 {
 				t.Fatalf("Compare(held %s) = %+v, want one finding", tt.held, got)
@@ -90,7 +90,7 @@ func TestCompareTierOnlyOnBetterRelease(t *testing.T) {
 			}}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			got := comparer(filter.Options{}).Compare([]match.Match{m})
 
 			if len(got) != 1 || got[0].Status != tt.wantStatus {
 				t.Fatalf("Compare(held %v, incomplete %v) = %+v, want one %s finding", tt.held, tt.incomplete, got, tt.wantStatus)
@@ -117,7 +117,7 @@ func TestCompareTierHidesAnimeBytesWhenOff(t *testing.T) {
 		c    *Comparer
 		want findingTier
 	}{
-		{c: comparer(filter.Options{}, false), want: tierUnlisted},
+		{c: comparer(filter.Options{}), want: tierUnlisted},
 		{c: abComparer(), want: TierAlt},
 	} {
 		got := tc.c.Compare([]match.Match{m})

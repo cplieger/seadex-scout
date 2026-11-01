@@ -32,7 +32,7 @@ func TestAniListExhaustionWarnsOnceWithAppContext(t *testing.T) {
 	logger, recorder := capture.New()
 	client := anilist.NewClient(srv.Client(), srv.URL, anilist.WithRate(100000), anilist.WithLogger(logger))
 
-	res := New(client, logger).Match(t.Context(),
+	res := New(Config{AniList: client, Logger: logger}).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, &library.Snapshot{}, mapping.NewIndex(mapping.Source{}), Memo{})
 
 	if !res.Degraded {

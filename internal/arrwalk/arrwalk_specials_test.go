@@ -213,7 +213,7 @@ func TestWalkSonarrFilelessSeriesListsItsEpisodes(t *testing.T) {
 	if item.HasFile || len(item.Listed[1]) != 7 {
 		t.Fatalf("Walk(fileless) HasFile %v, Listed %+v; want no file and season 1's seven episodes listed", item.HasFile, item.Listed)
 	}
-	rec := mapping.Record{Type: "MOVIE", TvdbID: 42, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
+	rec := mapping.Record{TvdbID: 42, TmdbMovies: []int{1}, SeasonKind: mapping.SeasonPresent, SeasonTvdb: 1}
 	d := align.Decide(&item, &align.Entry{Record: &rec, Episodes: []int{1}}, &align.Listing{Best: []string{"mtbb"}})
 	if d.Kind != align.ScopeEpisodes || d.Season != 1 || !slices.Equal(d.Episodes, []int{1}) || !slices.Equal(d.MissingEpisodes, []int{1}) {
 		t.Errorf("Decide(S01E01 of a fileless season) = %v season %d episodes %v missing %v; want episodes on season 1, E1 placed and missing", d.Kind, d.Season, d.Episodes, d.MissingEpisodes)

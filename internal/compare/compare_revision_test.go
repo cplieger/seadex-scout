@@ -47,7 +47,7 @@ func udfSeasonMatch(held release.Revision, entry seadex.Entry) match.Match {
 }
 
 func TestCompareOlderRevisionOfBestGroupIsNewerRevision(t *testing.T) {
-	got := comparer(filter.Options{}, false).Compare([]match.Match{udfSeasonMatch(revOriginal, udfEntry("v2"))})
+	got := comparer(filter.Options{}).Compare([]match.Match{udfSeasonMatch(revOriginal, udfEntry("v2"))})
 	if len(got) != 1 {
 		t.Fatalf("Compare(held UDF v1, listed UDF v2) = %d findings, want 1: %+v", len(got), got)
 	}
@@ -83,7 +83,7 @@ func TestCompareOlderRevisionOfDecoratedSeaDexLabel(t *testing.T) {
 		Files: []seadex.File{{Name: "[-ZR-] BLUE LOCK - S01E03v2 [1080p].mkv", Length: 1 << 30}},
 	}}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 || got[0].Status != StatusNewerRevision {
 		t.Fatalf("Compare(held ZR v1, SeaDex best -ZR- v2) = %+v, want one %q finding", got, StatusNewerRevision)
 	}
@@ -95,7 +95,7 @@ func TestCompareOlderRevisionOfDecoratedSeaDexLabel(t *testing.T) {
 func TestCompareOlderRevisionOnIncompleteEntryIsIncomplete(t *testing.T) {
 	entry := udfEntry("v2")
 	entry.Incomplete = true
-	got := comparer(filter.Options{}, false).Compare([]match.Match{udfSeasonMatch(revOriginal, entry)})
+	got := comparer(filter.Options{}).Compare([]match.Match{udfSeasonMatch(revOriginal, entry)})
 	if len(got) != 1 || got[0].Status != StatusIncomplete {
 		t.Fatalf("Compare(incomplete entry, held UDF v1, listed v2) = %+v, want one incomplete finding", got)
 	}
@@ -136,7 +136,7 @@ func TestCompareMixedPackReadsItsNewestFile(t *testing.T) {
 		{desc: "every held file unknown", held: release.Revision{}},
 	}
 	for _, tc := range tests {
-		got := comparer(filter.Options{}, false).Compare([]match.Match{udfSeasonMatch(tc.held, mixedUDFEntry())})
+		got := comparer(filter.Options{}).Compare([]match.Match{udfSeasonMatch(tc.held, mixedUDFEntry())})
 		var status Status
 		if len(got) == 1 {
 			status = got[0].Status
@@ -157,7 +157,7 @@ func TestCompareGroupListsNewestAcrossItsBestTorrents(t *testing.T) {
 		IsBest: true, ReleaseGroup: "UDF", Tracker: "Nyaa", URL: "https://nyaa.si/view/4",
 		Files: []seadex.File{{Name: "[UDF] 91 Days - 05v2 (BDRip 1080p x264 FLACx2).mkv", Length: 1 << 30}},
 	})
-	got := comparer(filter.Options{}, false).Compare([]match.Match{udfSeasonMatch(revOriginal, entry)})
+	got := comparer(filter.Options{}).Compare([]match.Match{udfSeasonMatch(revOriginal, entry)})
 	if len(got) != 1 || got[0].Status != StatusNewerRevision || got[0].RecommendedRevision != revV2 {
 		t.Fatalf("Compare(UDF v1 pack beside a UDF v2 single episode, held v1) = %+v, want one newer_revision at v2", got)
 	}
@@ -178,7 +178,7 @@ func TestCompareRevisionNeverClaimsWithoutProof(t *testing.T) {
 		{"held v1, listed unversioned", revOriginal, udfEntry("")},
 	}
 	for _, tc := range tests {
-		if got := comparer(filter.Options{}, false).Compare([]match.Match{udfSeasonMatch(tc.held, tc.entry)}); len(got) != 0 {
+		if got := comparer(filter.Options{}).Compare([]match.Match{udfSeasonMatch(tc.held, tc.entry)}); len(got) != 0 {
 			t.Errorf("Compare(%s) = %+v, want no finding", tc.desc, got)
 		}
 	}
@@ -188,7 +188,7 @@ func TestCompareUnobtainableNewerRevisionKeepsDivergence(t *testing.T) {
 	entry := udfEntry("v2")
 	entry.Torrents[0].Tracker = "AB"
 	entry.Torrents[0].URL = "/torrents.php?id=1&torrentid=2"
-	got := comparer(filter.Options{}, false).Compare([]match.Match{udfSeasonMatch(revOriginal, entry)})
+	got := comparer(filter.Options{}).Compare([]match.Match{udfSeasonMatch(revOriginal, entry)})
 	if len(got) != 1 || got[0].Status != StatusBetter || got[0].RecommendedGroup != "K" {
 		t.Fatalf("Compare(UDF v2 only on AnimeBytes, toggle off) = %+v, want one better_release toward K", got)
 	}
@@ -207,8 +207,8 @@ func TestCompareWholeSeriesOlderRevisionIsNewerRevision(t *testing.T) {
 			2: {"udf": revOriginal},
 		},
 	}
-	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: udfEntry("v2"), Record: mapping.Record{Type: "TV"}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: udfEntry("v2"), Record: mapping.Record{}}
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("Compare(seasonless entry, UDF v1 in seasons 1-2, listed v2) = %d findings, want 1: %+v", len(got), got)
 	}
@@ -237,8 +237,8 @@ func TestCompareMovieOlderRevisionIsNewerRevision(t *testing.T) {
 		IsBest: true, ReleaseGroup: "PTP", Tracker: "Nyaa", URL: "https://nyaa.si/view/3",
 		Files: []seadex.File{{Name: "Given.2020.REPACK.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC-PTP.mkv", Length: 1 << 30}},
 	}}}
-	m := match.Match{Item: item, Arr: library.ArrRadarr, Entry: entry, Record: mapping.Record{Type: "MOVIE"}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	m := match.Match{Item: item, Arr: library.ArrRadarr, Entry: entry, Record: mapping.Record{SeasonKind: mapping.SeasonPresent}}
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	want := release.Revision{Version: 2, Marker: release.RevisionRepack}
 	if len(got) != 1 || got[0].Status != StatusNewerRevision || got[0].RecommendedRevision != want {
 		t.Fatalf("Compare(movie held v1, listed REPACK) = %+v, want one newer_revision at %+v", got, want)
@@ -262,7 +262,7 @@ func TestCompareAuditAgreeOnRevision(t *testing.T) {
 	}
 	for _, tc := range tests {
 		m := udfSeasonMatch(tc.held, tc.entry)
-		findings := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		findings := comparer(filter.Options{}).Compare([]match.Match{m})
 		var status Status
 		if len(findings) == 1 {
 			status = findings[0].Status

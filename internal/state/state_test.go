@@ -3,6 +3,8 @@ package state
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,11 +12,13 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -109,7 +113,7 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 		Mapping: mapping.Cache{
 			FetchedAt:         now,
 			Tag:               "v2026.10.16",
-			Records:           []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
+			Records:           []mapping.Record{{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1}},
 			Mappings:          aniDBFacts,
 			AniListMappings:   aniListFacts,
 			RejectedRefreshes: 3,
@@ -166,7 +170,7 @@ func assertPersistedFactKeys(t *testing.T, path string) {
 		t.Fatalf("reading the saved state: %v", err)
 	}
 	var wire struct {
-		Mapping map[string]json.RawMessage `json:"animap_v5"`
+		Mapping map[string]json.RawMessage `json:"animap_v6"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatalf("decoding the saved state: %v", err)
@@ -175,11 +179,11 @@ func assertPersistedFactKeys(t *testing.T, path string) {
 	for key, id := range map[string]string{"anidb_facts": "9", "anilist_facts": "154587"} {
 		var facts map[string]map[string]json.RawMessage
 		if err := json.Unmarshal(wire.Mapping[key], &facts); err != nil || facts[id] == nil {
-			t.Errorf("saved animap_v5.%s = %s, want the facts of %s (err %v)", key, wire.Mapping[key], id, err)
+			t.Errorf("saved animap_v6.%s = %s, want the facts of %s (err %v)", key, wire.Mapping[key], id, err)
 			continue
 		}
 		if got := slices.Sorted(maps.Keys(facts[id])); !slices.Equal(got, wantFields) {
-			t.Errorf("saved animap_v5.%s[%s] keys = %v, want %v", key, id, got, wantFields)
+			t.Errorf("saved animap_v6.%s[%s] keys = %v, want %v", key, id, got, wantFields)
 		}
 	}
 }
@@ -726,7 +730,6 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 			Items: []library.Item{{
 				SeasonGroups: map[int][]string{1: {"g"}},
 				Arr:          "sonarr",
-				ImdbID:       "tt1",
 				Title:        "t",
 				ArrURL:       "http://sonarr.local/series/t",
 				// Every release fingerprint field is populated: they are all
@@ -789,7 +792,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	}
 	wantItemKeys := []string{
 		"alt_titles", "arr", "arr_id", "arr_url", "current", "failed", "groups",
-		"has_file", "imdb_id", "season_groups", "title", "tmdb_id", "tvdb_id", "year",
+		"has_file", "season_groups", "title", "tmdb_id", "tvdb_id", "year",
 	}
 	if keys := slices.Sorted(maps.Keys(items[0])); !slices.Equal(keys, wantItemKeys) {
 		t.Errorf("persisted library item keys = %v, want %v (a deliberate rename needs a currentSchemaVersion bump)", keys, wantItemKeys)
@@ -952,6 +955,7 @@ var (
 	legacyAnimapV2State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v2":{`, 1)
 	legacyAnimapV3State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v3":{`, 1)
 	legacyAnimapV4State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v4":{`, 1)
+	legacyAnimapV5State = strings.Replace(legacyMappingState, `"mapping":{`, `"animap_v5":{`, 1)
 )
 
 func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
@@ -961,6 +965,7 @@ func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 		{"animap_v2", legacyAnimapV2State},
 		{"animap_v3", legacyAnimapV3State},
 		{"animap_v4", legacyAnimapV4State},
+		{"animap_v5", legacyAnimapV5State},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
@@ -1011,27 +1016,92 @@ func TestStoreLoadIgnoresALegacyMappingCache(t *testing.T) {
 	}
 }
 
-// TestStoreLoadedV4CacheServesNoMappingOnATransientRefreshFailure pins
-// that the records of a version 1 projection never reach the loader: were
-// they loaded, a transient first refresh would serve them stale with none
-// of their facts.
-func TestStoreLoadedV4CacheServesNoMappingOnATransientRefreshFailure(t *testing.T) {
+// TestStoreLoadedLegacyCacheServesNoMappingOnATransientRefreshFailure pins
+// that the records of a retired projection never reach the loader: version
+// 1's would serve with none of their facts, and animap_v5's carry the type
+// and IMDb ids routing no longer reads.
+func TestStoreLoadedLegacyCacheServesNoMappingOnATransientRefreshFailure(t *testing.T) {
+	for key, body := range map[string]string{"animap_v4": legacyAnimapV4State, "animap_v5": legacyAnimapV5State} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatalf("write legacy state: %v", err)
+			}
+			got, err := NewStore(path, testLogger()).Load(t.Context())
+			if err != nil {
+				t.Fatalf("Load(%s state) error: %v", key, err)
+			}
+			outage := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("dial tcp: connection refused")
+			})}
+			l := mapping.NewLoader(outage, mapread.Source{Repo: mapping.DefaultRepo}, mapping.WithLogger(testLogger()))
+			_, idx, err := l.Load(t.Context(), &got.Mapping)
+			var stale *mapping.StaleMapError
+			if err == nil || errors.As(err, &stale) || idx.Len() != 0 {
+				t.Errorf("Load after a transient refresh failure = %d records, err %v, want no usable mapping", idx.Len(), err)
+			}
+		})
+	}
+}
+
+// TestStoreLoadedV5CacheIsReprojectedOnTheSameTag pins the upgrade: a state
+// file whose cache holds the latest release under animap_v5 is not reused,
+// so the loader downloads that release again and projects it with this
+// build's rules.
+func TestStoreLoadedV5CacheIsReprojectedOnTheSameTag(t *testing.T) {
+	const tag = "v2026.10.21"
+	body, err := mapread.Encode(&mapread.Document{
+		Version: mapread.Version, GeneratedAt: "2026-10-21T00:00:00Z",
+		Sources:     mapread.Sources{Mapping: mapread.MappingSource{Revision: "r"}, AniDB: mapread.AniDBSource{TitlesDump: "2026-10-21"}},
+		Attribution: mapread.Attribution{License: "ODbL-1.0", LicenseURL: "u", ContentsLicense: "DbCL-1.0", ContentsLicenseURL: "u", Notice: "n"},
+		Anime: []mapread.Anime{{AniDBID: 1, TVDBID: 100, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
+			{Kind: mapread.Regular, Start: 1, End: 1, TVDB: &[]mapread.Target{{Season: 0, Episode: 3}}, TMDBMovies: []int{42}},
+		}}},
+		Entries: []mapread.Entry{{AniListID: 7, Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Regular}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v5 := `{"animap_v5":{"fetched_at":"` + time.Now().UTC().Format(time.RFC3339) + `","tag":"` + tag + `",` +
+		`"records":[{"type":"MOVIE","season_kind":"present","imdb_ids":["tt1"],"anilist_id":7,"tvdb_id":100,"anidb_id":1}]},` +
+		`"library":{"taken_at":"0001-01-01T00:00:00Z"},"anilist_memo":{}}`
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(legacyAnimapV4State), 0o600); err != nil {
-		t.Fatalf("write legacy state: %v", err)
+	if err := os.WriteFile(path, []byte(v5), 0o600); err != nil {
+		t.Fatalf("write v5 state: %v", err)
 	}
 	got, err := NewStore(path, testLogger()).Load(t.Context())
 	if err != nil {
-		t.Fatalf("Load(animap_v4 state) error: %v", err)
+		t.Fatalf("Load(animap_v5 state) error: %v", err)
 	}
-	outage := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("dial tcp: connection refused")
-	})}
-	l := mapping.NewLoader(outage, mapread.Source{Repo: mapping.DefaultRepo}, mapping.WithLogger(testLogger()))
+	sum := sha256.Sum256(body)
+	prefix := "/" + mapping.DefaultRepo + "/releases/"
+	var downloads atomic.Int32
+	var ts *httptest.Server
+	ts = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case prefix + "latest":
+			w.Header().Set("Location", ts.URL+prefix+"tag/"+tag)
+			w.WriteHeader(http.StatusFound)
+		case prefix + "download/" + tag + "/animap.json.sha256":
+			_, _ = w.Write([]byte(hex.EncodeToString(sum[:]) + "  animap.json\n"))
+		case prefix + "download/" + tag + "/animap.json":
+			downloads.Add(1)
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	l := mapping.NewLoader(ts.Client(), mapread.Source{Repo: mapping.DefaultRepo, Base: ts.URL}, mapping.WithLogger(testLogger()))
 	_, idx, err := l.Load(t.Context(), &got.Mapping)
-	var stale *mapping.StaleMapError
-	if err == nil || errors.As(err, &stale) || idx.Len() != 0 {
-		t.Errorf("Load after a transient refresh failure = %d records, err %v, want no usable mapping", idx.Len(), err)
+	if err != nil {
+		t.Fatalf("Load over the same tag: %v", err)
+	}
+	if n := downloads.Load(); n != 1 {
+		t.Errorf("animap.json downloads = %d, want 1: an animap_v5 cache is never reused", n)
+	}
+	if rec, ok := idx.Lookup(7); !ok || !slices.Equal(rec.TmdbMovies, []int{42}) || rec.TvdbID != 100 {
+		t.Errorf("Lookup(7) = %+v ok=%v, want the release projected again with its TMDB movie", rec, ok)
 	}
 }
 
@@ -1268,7 +1338,7 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 
 func TestStoreLoadReadsPersistedTagAndPartialWalk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	body := `{"animap_v5":{"fetched_at":"2026-07-01T00:00:00Z","tag":"v2026.07.01","refused_tag":"v2026.07.02"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
+	body := `{"animap_v6":{"fetched_at":"2026-07-01T00:00:00Z","tag":"v2026.07.01","refused_tag":"v2026.07.02"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write state fixture: %v", err)
 	}

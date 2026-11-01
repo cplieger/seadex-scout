@@ -284,7 +284,7 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 	// The report REPLACES only the rows of the entries this window EVALUATED and
 	// preserves every row whose entry had incomplete evidence, which is what makes
 	// a partial pass safe here at all.
-	s.notifier.ReportScoped(findings, evaluatedIDs(result.Matches),
+	s.notifier.ReportScoped(findings, evaluatedIDs(&result),
 		preserved(failedItems, &result))
 	st.Memo = result.Memo
 	return s.tickComplete(ctx, len(entries), len(findings), &st, &mapCache)
@@ -322,19 +322,21 @@ func mappingWorthPersisting(prev, next *mapping.Cache) bool {
 }
 
 // evaluatedIDs is the tick's deletion-authority set: the AniList IDs this window
-// actually EVALUATED, which is not the same as the IDs it fetched. Deletion by
-// absence is only sound where absence is evidence: an entry can end without a
-// finding because it was compared and is aligned (absence means resolved), or
-// because the linkage to a library item was lost (absence proves nothing - every
-// such case is an unmapped match, which is NOT in IncompleteIDs). A match
-// linked to an item whose walk failed IS included, where preservation takes
-// precedence. Library removal is not a tick's authority: it walked nothing.
-func evaluatedIDs(matches []match.Match) map[int]struct{} {
-	ids := make(map[int]struct{}, len(matches))
-	for i := range matches {
-		if m := &matches[i]; m.InLibrary() {
+// EVALUATED, not the IDs it fetched. Absence is evidence only for an entry that
+// was compared and is aligned, never for one whose library link was lost (an
+// unmapped match, NOT in IncompleteIDs). A match on an item whose walk failed
+// IS included, where preservation takes precedence, and so is an entry whose
+// in-library copy the matcher left out (Result.HiddenIDs). Library removal is
+// not a tick's authority: it walked nothing.
+func evaluatedIDs(res *match.Result) map[int]struct{} {
+	ids := make(map[int]struct{}, len(res.Matches)+len(res.HiddenIDs))
+	for i := range res.Matches {
+		if m := &res.Matches[i]; m.InLibrary() {
 			ids[m.Entry.AniListID] = struct{}{}
 		}
+	}
+	for id := range res.HiddenIDs {
+		ids[id] = struct{}{}
 	}
 	return ids
 }

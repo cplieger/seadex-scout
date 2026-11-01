@@ -25,25 +25,25 @@ func TestScope(t *testing.T) {
 		{
 			name:       "movie scopes to the movie group",
 			item:       library.Item{Arr: library.ArrRadarr, Groups: []string{"arid"}, HasFile: true},
-			rec:        mapping.Record{Type: "MOVIE"},
+			rec:        mapping.Record{TmdbMovies: []int{1}},
 			wantGroups: []string{"arid"}, wantKind: ScopeMovie, wantFile: true,
 		},
 		{
 			name:       "radarr movie with a positive mapped season still scopes to the movie",
 			item:       library.Item{Arr: library.ArrRadarr, Groups: []string{"arid"}, HasFile: true, SeasonGroups: map[int][]string{2: {"seasongrp"}}},
-			rec:        mapping.Record{Type: "MOVIE", SeasonTvdb: 2},
+			rec:        mapping.Record{TmdbMovies: []int{1}, SeasonTvdb: 2},
 			wantGroups: []string{"arid"}, wantKind: ScopeMovie, wantFile: true,
 		},
 		{
 			name:       "series with a positive season scopes to that season (exact)",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}},
-			rec:        mapping.Record{Type: "TV", SeasonTvdb: 2},
+			rec:        mapping.Record{SeasonTvdb: 2},
 			wantGroups: []string{"sam"}, wantKind: ScopeSeason, wantFile: true,
 		},
 		{
 			name:       "series season mapped but not on disk has no file",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"sam"}}},
-			rec:        mapping.Record{Type: "TV", SeasonTvdb: 3},
+			rec:        mapping.Record{SeasonTvdb: 3},
 			wantGroups: nil, wantKind: ScopeSeason, wantFile: false,
 		},
 		{
@@ -52,42 +52,39 @@ func TestScope(t *testing.T) {
 			// "spans several groups".
 			name:       "offered with a single-group season 0 is still approximate",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}}},
-			rec:        mapping.Record{Type: "OVA"},
+			rec:        mapping.Record{SeasonKind: mapping.SeasonPresent},
 			wantGroups: []string{"legion"}, wantKind: ScopeOffered, wantFile: true, wantApprox: true,
 		},
 		{
 			name:       "offered with a multi-group season 0 is approximate",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}},
-			rec:        mapping.Record{Type: "SPECIAL"},
+			rec:        mapping.Record{SeasonKind: mapping.SeasonPresent},
 			wantGroups: []string{"cait-sidhe", "sallysubs"}, wantKind: ScopeOffered, wantFile: true, wantApprox: true,
 		},
 		{
 			name:       "offered with no season-0 files has no file and no approximation",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"x"}}},
-			rec:        mapping.Record{Type: "OVA"},
+			rec:        mapping.Record{SeasonKind: mapping.SeasonPresent},
 			wantGroups: nil, wantKind: ScopeOffered, wantFile: false,
 		},
 		{
-			name:       "seasonless non-special series is classified whole-series, not offered",
+			name:       "an unknown season kind with no positive season is whole-series, not offered",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}, 1: {"sam"}}},
-			rec:        mapping.Record{Type: "TV"},
+			rec:        mapping.Record{},
 			wantGroups: nil, wantKind: ScopeWholeSeries, wantFile: false,
 		},
 		{
-			// Heya Camp's shape: the mapping types it TV and maps it to season 0, so the
-			// type label would send it to a whole-series comparison against every
-			// real season while the season presence says offered.
-			name:       "a TV-typed mapped zero is offered, and reads the bucket",
+			name:       "a mapped zero is offered, and reads only the bucket",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"koala"}, 1: {"sam"}}},
-			rec:        mapping.Record{Type: "TV", SeasonKind: mapping.SeasonPresent},
+			rec:        mapping.Record{SeasonKind: mapping.SeasonPresent},
 			wantGroups: []string{"koala"}, wantKind: ScopeOffered, wantFile: true, wantApprox: true,
 		},
 		{
-			// LoGH's shape: an OVA-typed absolute-numbered run, whose comparison is
-			// against the real seasons it actually spans.
-			name:       "an OVA-typed absent season is whole-series",
+			// LoGH's shape: an absolute-numbered run, whose comparison is against
+			// the real seasons it actually spans.
+			name:       "an absent season is whole-series",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}, 1: {"koala"}}},
-			rec:        mapping.Record{Type: "OVA", SeasonKind: mapping.SeasonAbsent},
+			rec:        mapping.Record{SeasonKind: mapping.SeasonAbsent},
 			wantGroups: nil, wantKind: ScopeWholeSeries, wantFile: false,
 		},
 	}

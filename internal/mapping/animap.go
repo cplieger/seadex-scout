@@ -7,19 +7,11 @@ import (
 	"slices"
 
 	"github.com/cplieger/animap/mapread"
-	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // DefaultRepo is the repository whose dated releases carry animap.json, the
 // AniList-to-arr ID map.
 const DefaultRepo = "cplieger/animap"
-
-// RecordFromFormat builds the type-only Record a consumer uses to reuse the
-// arr/season routing decisions for an AniList format that has no mapping
-// record. Its season kind stays UNKNOWN rather than absent: no upstream said
-// anything about a season here, and absent would route a title-matched OVA to a
-// whole-series comparison against every real season.
-func RecordFromFormat(format string) Record { return Record{Type: mediatype.Normalize(format)} }
 
 // SeasonRange is entry episodes First to Last, all landing on TVDB season
 // Season.
@@ -154,10 +146,7 @@ func (p *projection) addEntry(x *mapread.Index, al int) {
 // the arrs key a series by one id.
 func entryFacts(x *mapread.Index, e mapread.Entry) (rec Record, m Mapping, stated bool) {
 	routes := x.Routes(e)
-	rec = Record{
-		Type: e.Type, SeasonKind: SeasonAbsent, AniListID: e.AniListID, AniDBID: wholeAnime(e),
-		TmdbMovies: routes.TMDBMovies, IMDbIDs: routes.IMDb,
-	}
+	rec = Record{SeasonKind: SeasonAbsent, AniListID: e.AniListID, AniDBID: wholeAnime(e), TmdbMovies: radarrRoute(routes)}
 	if len(routes.TVDB) == 1 {
 		rec.TvdbID = routes.TVDB[0]
 		v := readTVDB(x, e, rec.TvdbID)
@@ -167,6 +156,10 @@ func entryFacts(x *mapread.Index, e mapread.Entry) (rec Record, m Mapping, state
 	rec.canonicalize()
 	return rec, m, stated
 }
+
+// radarrRoute is the one home of an entry's Radarr route: the TMDB movies
+// every one of its episodes states, so the entry is wholly that film.
+func radarrRoute(routes mapread.Routes) []int { return routes.TMDBMovies }
 
 // wholeAnime is the AniDB anime e is all the regular episodes of, 0 when its
 // parts say anything else.

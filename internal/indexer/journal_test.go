@@ -578,12 +578,12 @@ func TestRenderJournalItemFoldsTheTwinPerHolderType(t *testing.T) {
 		wantTitle string
 	}{
 		"movie holder with a twin": {
-			info:      EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"},
+			info:      EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, TwinEpisodes: []int{4}, TwinEntryEpisodes: 1, SeriesTitle: "Code Geass"},
 			wantCats:  []int{catMovies},
 			wantTitle: "Code Geass S00E04 1080p [G]",
 		},
 		"ova holder with a twin keeps anime": {
-			info:      EntryInfo{Title: "Some OVA", TvdbID: 79525, SpecialEpisodes: []int{4}, SpecialsEpisodes: 1, SeriesTitle: "Code Geass"},
+			info:      EntryInfo{Title: "Some OVA", TvdbID: 79525, TwinEpisodes: []int{4}, TwinEntryEpisodes: 1, SeriesTitle: "Code Geass"},
 			wantCats:  []int{catAnime},
 			wantTitle: "Code Geass S00E04 1080p [G]",
 		},
@@ -636,7 +636,7 @@ func TestRenderJournalItemKeepsTheRadarrItemOfABothArrFilm(t *testing.T) {
 	}
 	plain := EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525}
 	mapped := plain
-	mapped.SpecialEpisodes, mapped.SpecialsEpisodes, mapped.SeriesTitle = []int{4}, 1, "Code Geass"
+	mapped.TwinEpisodes, mapped.TwinEntryEpisodes, mapped.SeriesTitle = []int{4}, 1, "Code Geass"
 
 	before, after := render(plain), render(mapped)
 	if after.SonarrTitle != "Code Geass S00E04 1080p [G]" || after.SonarrGUID != twinGUID(after.GUID) {
@@ -678,7 +678,7 @@ func TestRenderJournalItemFoldsTheTwinAcrossHolders(t *testing.T) {
 			}
 			episodes := map[int]int{14575: tc.first, 20221: tc.second}
 			infoFor := func(alID int) EntryInfo {
-				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TvdbID: 80000, SpecialEpisodes: []int{episodes[alID]}, SeriesTitle: "Minami-ke"}
+				return EntryInfo{Title: "Minami-ke Special", Kind: KindMovie, TvdbID: 80000, TwinEpisodes: []int{episodes[alID]}, SeriesTitle: "Minami-ke"}
 			}
 			w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
 			pass := &journalPass{w: w, ev: newEvidence(entries, tagfilter.New(nil), scopeCatalogue), publish: map[string]bool{}, infoFor: infoFor, js: &journalStats{}, now: time.Now()}
@@ -1258,7 +1258,7 @@ func TestRebuildCarriedTwinGUIDDerivesFromTheServedGUID(t *testing.T) {
 		}},
 	}}
 	info := func(int) EntryInfo {
-		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, SpecialEpisodes: []int{4}, SeriesTitle: "Code Geass"}
+		return EntryInfo{Title: "Lelouch of the Resurrection", Kind: KindMovie, TvdbID: 79525, TwinEpisodes: []int{4}, SeriesTitle: "Code Geass"}
 	}
 	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, FeedInfo{Entry: info}); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -2848,17 +2848,12 @@ func TestRebuildDropsACarriedItemNamingAnotherTrackerScope(t *testing.T) {
 }
 
 // TestRebuildStoredRenderUnderNonAiredOrder pins the carry of a stored render
-// for a series Sonarr numbers in a non-aired order: a title or
-// twin rendered before the order was known may hold a TheTVDB season Sonarr
-// reads in that order, and a stored render cannot be re-rendered. So a
-// de-curated or unrenderable item whose title is not a film's leaves the
-// journal, a film keeps its own title and loses only its Sonarr twin, and an
-// aired-order series keeps its stored render, twin included. An item stored
-// with no NonFilm reads as a film's title, so only the entry's current
-// KindSeries drops it; KindUnknown, which feedInfo returns once the record is
-// gone and no memo types the entry, keeps it as a film.
-// The series is the one the entry's current EntryInfo names or the one the
-// item's stored TVDB id names, since the entry's mapping may have gone or moved.
+// for a series in a non-aired order, whose TheTVDB season cannot be
+// re-rendered: a de-curated or unrenderable non-film item leaves the journal,
+// a film keeps its title and loses only its Sonarr item, and an aired-order
+// series keeps its render. An item with no NonFilm is a film unless the
+// entry's current kind is KindSeries (KindUnknown keeps it). The series is
+// the one the current EntryInfo names or the item's stored TVDB id names.
 func TestRebuildStoredRenderUnderNonAiredOrder(t *testing.T) {
 	const (
 		guid      = "https://nyaa.si/view/42"

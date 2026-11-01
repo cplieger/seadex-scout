@@ -166,7 +166,7 @@ func TestProject_derivesTheRecordFromWhereTheEpisodesLand(t *testing.T) {
 func TestProject_routesAndKeys(t *testing.T) {
 	anime := []mapread.Anime{
 		{
-			AniDBID: 1, Type: "MOVIE", TVDBID: 500, IMDbIDs: []string{"tt0000042"}, Last: mapread.Last{Regular: 1, Special: 2},
+			AniDBID: 1, Type: "MOVIE", TVDBID: 500, Last: mapread.Last{Regular: 1, Special: 2},
 			Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 1, TVDB: targets(at(0, 3)), TMDBMovies: []int{42}},
 				{Kind: mapread.Special, Start: 1, End: 2, TVDB: targets(at(0, 8))},
@@ -186,7 +186,7 @@ func TestProject_routesAndKeys(t *testing.T) {
 	p, got := projected(t, encode(t, document(anime, entries)))
 	t.Run("a whole film", func(t *testing.T) {
 		r := got[10].rec
-		if r.AniDBID != 1 || r.TvdbID != 500 || !slices.Equal(r.TmdbMovies, []int{42}) || !slices.Equal(r.IMDbIDs, []string{"tt0000042"}) ||
+		if r.AniDBID != 1 || r.TvdbID != 500 || !slices.Equal(r.TmdbMovies, []int{42}) ||
 			r.SeasonKind != SeasonPresent || r.SeasonTvdb != 0 {
 			t.Errorf("record = %+v, want AniDB 1, TVDB 500 season 0, its film ids", r)
 		}
@@ -196,7 +196,7 @@ func TestProject_routesAndKeys(t *testing.T) {
 	})
 	t.Run("a link to specials", func(t *testing.T) {
 		r := got[11].rec
-		if r.AniDBID != 0 || r.TvdbID != 500 || r.TmdbMovies != nil || r.IMDbIDs != nil {
+		if r.AniDBID != 0 || r.TvdbID != 500 || r.TmdbMovies != nil {
 			t.Errorf("record = %+v, want no AniDB id, TVDB 500 and none of its parent's film ids", r)
 		}
 		want := Mapping{Specials: []int{8, 9}, SpecialsTvdb: 500, SpecialsEpisodes: 2}
@@ -206,7 +206,7 @@ func TestProject_routesAndKeys(t *testing.T) {
 	})
 	t.Run("an entry on two TVDB series", func(t *testing.T) {
 		r := got[12].rec
-		if r.TvdbID != 0 || r.SeasonKind != SeasonAbsent || r.HasArrIdentifier() {
+		if r.TvdbID != 0 || r.SeasonKind != SeasonAbsent || r.HasRoute() {
 			t.Errorf("record = %+v, want no TVDB id and an absent season: the arrs key a series by one id", r)
 		}
 		if _, ok := p.aniListMappings[12]; ok {
@@ -215,13 +215,13 @@ func TestProject_routesAndKeys(t *testing.T) {
 	})
 	t.Run("a film with no series", func(t *testing.T) {
 		r := got[13].rec
-		if r.TvdbID != 0 || r.SeasonKind != SeasonAbsent || !slices.Equal(r.TmdbMovies, []int{77}) || !r.HasArrIdentifier() {
+		if r.TvdbID != 0 || r.SeasonKind != SeasonAbsent || !slices.Equal(r.TmdbMovies, []int{77}) || !r.HasRoute() {
 			t.Errorf("record = %+v, want the TMDB movie and no series", r)
 		}
 	})
 	t.Run("an ambiguous entry", func(t *testing.T) {
-		if r := got[14].rec; r.AniDBID != 0 || r.TvdbID != 0 || r.Type != "TV" || r.SeasonKind != SeasonAbsent {
-			t.Errorf("record = %+v, want a type and nothing else", r)
+		if r := got[14].rec; r.AniDBID != 0 || r.TvdbID != 0 || r.HasRoute() || r.SeasonKind != SeasonAbsent {
+			t.Errorf("record = %+v, want no route and an absent season", r)
 		}
 	})
 	t.Run("keys", func(t *testing.T) {
@@ -345,7 +345,7 @@ func TestProject_overrideOnAnAnimeNoEntryNamesKeepsItsSeasonRanges(t *testing.T)
 		{name: "on another series", series: 801},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			override := Record{AniListID: 31, Type: "TV", AniDBID: 20, TvdbID: tc.series, SeasonKind: SeasonAbsent}
+			override := Record{AniListID: 31, AniDBID: 20, TvdbID: tc.series, SeasonKind: SeasonAbsent}
 			idx := NewIndex(Source{Records: p.records, Mappings: p.mappings, AniListMappings: p.aniListMappings, Overrides: []Record{override}})
 			if got, _ := idx.MappingFor(&override); !slices.Equal(got.Seasons, tc.want) {
 				t.Errorf("MappingFor(override of AniDB 20 on TVDB %d).Seasons = %+v, want %+v", tc.series, got.Seasons, tc.want)

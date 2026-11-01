@@ -27,8 +27,8 @@ import (
 // degradation tests that need a second comparable series.
 func twoRecordMappingCache() mapping.Cache {
 	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
-		{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
-		{AniListID: 222, Type: "TV", TvdbID: 124, SeasonTvdb: 1},
+		{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1},
+		{AniListID: 222, TvdbID: 124, SeasonTvdb: 1},
 	}}
 }
 
@@ -89,7 +89,7 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 				Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: onePass{sonarr}, Logger: scoutTestLogger()}),
 				Mapping:      fakeMapping{},
 				SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry())},
-				Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+				Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 				Comparer:     compare.New(compare.Config{}),
 				Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
 				AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),
@@ -207,7 +207,7 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 			}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
-			Matcher:      match.New(notFoundAniList{}, scoutTestLogger()),
+			Matcher:      match.New(match.Config{AniList: notFoundAniList{}, Logger: scoutTestLogger()}),
 			Comparer:     compare.New(compare.Config{}),
 			Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", anilist.WithRate(1), anilist.WithLogger(scoutTestLogger()))),

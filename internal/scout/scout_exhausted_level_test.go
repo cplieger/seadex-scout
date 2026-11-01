@@ -30,7 +30,7 @@ func staleMappingState() state.State {
 	return state.State{
 		Mapping: mapping.Cache{
 			FetchedAt: time.Now().Add(-2 * time.Hour),
-			Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
+			Records:   []mapping.Record{{AniListID: 154587, TvdbID: 123, SeasonTvdb: 1}},
 		},
 	}
 }

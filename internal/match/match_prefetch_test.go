@@ -19,9 +19,9 @@ import (
 // defined in match_test.go.
 func TestPrefetchNegativelyMemoizesOnCompleteBatch(t *testing.T) {
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 77, Type: "MOVIE"}}})
+	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{{AniListID: 77}}})
 	fake := &batchCountingAniList{media: map[int]anilist.Media{}}
-	m := New(fake, nil)
+	m := New(Config{AniList: fake})
 
 	res := m.Match(t.Context(), []seadex.Entry{{AniListID: 77}}, snap, idx, Memo{})
 
@@ -56,7 +56,7 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}
 
-	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+	res := New(Config{AniList: fake}).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1 (a no-record entry must ride the batch prefetch)", fake.batchCalls)
@@ -105,7 +105,7 @@ func TestPrefetchEmptyRecordLocalBatchFallsBackPerID(t *testing.T) {
 		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
 	}}}
 
-	res := New(fake, nil).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+	res := New(Config{AniList: fake}).Match(t.Context(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
 
 	if fake.batchCalls != 1 {
 		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
@@ -154,13 +154,13 @@ func (s *scopedBatchRecordAniList) FetchMany(_ context.Context, _ []int) (anilis
 // set into rate-limited per-id fetches.
 func TestPrefetchScopesNegativeMemoToVerifiedChunks(t *testing.T) {
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"}, // id-less: pending, answered by the batch
-		{AniListID: 22, Type: "MOVIE"}, // id-less: pending, its chunk is unverified
-		{AniListID: 33, Type: "MOVIE"}, // id-less: pending, absent from a CLEAN chunk
+		{AniListID: 11}, // id-less: pending, answered by the batch
+		{AniListID: 22}, // id-less: pending, its chunk is unverified
+		{AniListID: 33}, // id-less: pending, absent from a CLEAN chunk
 	}})
 	fake := &scopedBatchRecordAniList{}
 
-	res := New(fake, nil).Match(t.Context(),
+	res := New(Config{AniList: fake}).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 
@@ -237,9 +237,9 @@ func (a *abortingBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 // request per remaining id, the storm batching exists to remove.
 func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"}, // id-less: answered by the first pass
-		{AniListID: 22, Type: "MOVIE"}, // id-less: abandoned, must be re-batched
-		{AniListID: 33, Type: "MOVIE"}, // id-less: abandoned, must be re-batched
+		{AniListID: 11}, // id-less: answered by the first pass
+		{AniListID: 22}, // id-less: abandoned, must be re-batched
+		{AniListID: 33}, // id-less: abandoned, must be re-batched
 	}})
 	fake := &abortingBatchAniList{
 		media: map[int]anilist.Media{
@@ -250,7 +250,7 @@ func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 		abandoned: []int{22, 33},
 	}
 
-	res := New(fake, nil).Match(t.Context(),
+	res := New(Config{AniList: fake}).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 
@@ -282,9 +282,9 @@ func TestPrefetchReBatchesUnrequestedIDs(t *testing.T) {
 // covered by the per-id path's own failure breaker.
 func TestPrefetchDoesNotReBatchAWholeAbandonedWorklist(t *testing.T) {
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"},
-		{AniListID: 22, Type: "MOVIE"},
-		{AniListID: 33, Type: "MOVIE"},
+		{AniListID: 11},
+		{AniListID: 22},
+		{AniListID: 33},
 	}})
 	fake := &abortingBatchAniList{
 		media: map[int]anilist.Media{
@@ -296,7 +296,7 @@ func TestPrefetchDoesNotReBatchAWholeAbandonedWorklist(t *testing.T) {
 		abandoned: []int{11, 22, 33},
 	}
 
-	New(fake, nil).Match(t.Context(),
+	New(Config{AniList: fake}).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 
@@ -315,13 +315,13 @@ func TestPrefetchDoesNotReBatchAWholeAbandonedWorklist(t *testing.T) {
 // unrequested tail.
 func TestPrefetchDoesNotReBatchRecordLocalIDs(t *testing.T) {
 	idx := mapping.NewIndex(mapping.Source{Records: []mapping.Record{
-		{AniListID: 11, Type: "MOVIE"},
-		{AniListID: 22, Type: "MOVIE"},
-		{AniListID: 33, Type: "MOVIE"},
+		{AniListID: 11},
+		{AniListID: 22},
+		{AniListID: 33},
 	}})
 	fake := &scopedBatchRecordAniList{}
 
-	New(fake, nil).Match(t.Context(),
+	New(Config{AniList: fake}).Match(t.Context(),
 		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
 		&library.Snapshot{}, idx, Memo{})
 

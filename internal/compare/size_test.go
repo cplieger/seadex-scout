@@ -119,7 +119,7 @@ func bytesOf(item *library.Item, ids ...int) int64 {
 func sizeOne(t *testing.T, item *library.Item, rec mapping.Record, torrents []seadex.Torrent, siblings ...int) Finding {
 	t.Helper()
 	m := match.Match{Item: item, Arr: item.Arr, Entry: seadex.Entry{AniListID: 1, Torrents: torrents}, Record: rec, SiblingSeasons: siblings}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("Compare = %d findings, want 1: %+v", len(got), got)
 	}
@@ -328,7 +328,7 @@ func TestSizeMovieReplacesItsOneFile(t *testing.T) {
 		IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/9", InfoHash: hash(9),
 		Files: []seadex.File{{Name: "[SubsPlease] Film (1080p).mkv", Length: 40 * gib}},
 	}
-	f := sizeOne(t, item, mapping.Record{Type: "MOVIE"}, []seadex.Torrent{movie})
+	f := sizeOne(t, item, mapping.Record{SeasonKind: mapping.SeasonPresent}, []seadex.Torrent{movie})
 	if f.ReleaseBytes != 40*gib || f.CurrentBytes != 30*gib {
 		t.Errorf("ReleaseBytes, CurrentBytes = %d, %d, want %d, %d", f.ReleaseBytes, f.CurrentBytes, 40*gib, 30*gib)
 	}
@@ -345,7 +345,7 @@ func TestSizeOnlyUpgradesCarrySizes(t *testing.T) {
 		t.Errorf("mixed-group finding: status %q, ReleaseBytes %d, CurrentBytes %d, want %q and no size", f.Status, f.ReleaseBytes, f.CurrentBytes, StatusMixedGroup)
 	}
 	m := match.Match{Item: sizedSeries(), Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 1, Incomplete: true, Torrents: singles(1, 2)}, Record: mapping.Record{SeasonTvdb: 1}}
-	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	got := comparer(filter.Options{}).Compare([]match.Match{m})
 	if len(got) != 1 || got[0].Status != StatusIncomplete || got[0].ReleaseBytes != 0 || got[0].CurrentBytes != 0 {
 		t.Errorf("incomplete entry: %+v, want one incomplete finding with no size", got)
 	}
@@ -386,7 +386,7 @@ func TestSizeOfANewerRevisionIsTheNewerRelease(t *testing.T) {
 		IsBest: true, ReleaseGroup: "MTBB", Tracker: "Nyaa", URL: "https://nyaa.si/view/2", InfoHash: hash(2),
 		Files: []seadex.File{{Name: "[MTBB] Show OVA [v2] (1080p).mkv", Length: newBytes + gib}},
 	}
-	rec := mapping.Record{Type: "MOVIE"}
+	rec := mapping.Record{SeasonKind: mapping.SeasonPresent}
 
 	f := sizeOne(t, film, rec, []seadex.Torrent{original, reissue})
 	if f.Status != StatusNewerRevision {
@@ -423,7 +423,7 @@ func TestSizeOfAFilmOrSpecialInSeasonZero(t *testing.T) {
 			{Name: "[MTBB] Show - S00E10 (1080p).mkv", Length: newBytes},
 		},
 	}
-	rec := mapping.Record{Type: "OVA", TvdbID: 1, SeasonKind: mapping.SeasonPresent}
+	rec := mapping.Record{TvdbID: 1, SeasonKind: mapping.SeasonPresent}
 	series := &library.Item{
 		Title: "Show", Arr: library.ArrSonarr, ArrID: 7, HasFile: true,
 		Groups: []string{"oz"}, SeasonGroups: map[int][]string{0: {"oz"}},
@@ -437,7 +437,7 @@ func TestSizeOfAFilmOrSpecialInSeasonZero(t *testing.T) {
 	}
 	compareAll := func(it *library.Item, specials []int) []Finding {
 		m := match.Match{Item: it, Arr: it.Arr, Entry: seadex.Entry{AniListID: 960, Torrents: []seadex.Torrent{special}}, Record: rec, Specials: specials}
-		return comparer(filter.Options{}, false).Compare([]match.Match{m})
+		return comparer(filter.Options{}).Compare([]match.Match{m})
 	}
 	compareOne := func(it *library.Item, specials []int) Finding {
 		t.Helper()

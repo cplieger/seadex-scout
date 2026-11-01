@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 // standing alert condition) would go undetected.
 func TestLoader_Load_cleanOverridesEmitNoDiagnostics(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":2,"type":"movie","tmdb_movies":[4]}]`), 0o644); err != nil {
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":2,"tmdb_movies":[4]}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
 	logger, logs := capture.New()
@@ -198,20 +199,20 @@ func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
 
 // unroutableOverrideMessage is effectiveOverrides' un-mapped-entry warning.
 const unroutableOverrideMessage = "mapping: overrides carry no arr identifier and un-map their entry; " +
-	"check for a mistyped tvdb_id/tmdb_movies/imdb_ids key, and restate the ids when overriding only a type or season"
+	"check for a mistyped tvdb_id or tmdb_movies key, and restate the ids when overriding only a season"
 
 // TestLoader_Load_logsUnroutableOverrideCount pins the count on effectiveOverrides'
 // un-mapped-entry warning. The overlay is wholesale, so an override carrying no
-// identifier its routed arr consumes REPLACES a mapped upstream record with one
-// that resolves to nothing - left applied by design, which makes this warning
-// the only thing standing between a mistyped id key and an entry that silently
-// stops matching. Both shapes count: an entry with no identifiers at all, and a
-// MOVIE entry carrying only a TVDB id, which the movie arm never consumes.
+// route REPLACES a mapped upstream record with one that resolves to nothing -
+// left applied by design, which makes this warning the only thing standing
+// between a mistyped id key and an entry that silently stops matching. Both
+// shapes count: an entry with no identifiers at all, and one naming only the
+// AniDB anime, which routes nothing.
 func TestLoader_Load_logsUnroutableOverrideCount(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	data := []byte(`[{"anilist_id":2,"type":"tv"},` +
-		`{"anilist_id":3,"type":"movie","tvdb_id":9},` +
-		`{"anilist_id":4,"type":"tv","tvdb_id":7}]`)
+	data := []byte(`[{"anilist_id":2},` +
+		`{"anilist_id":3,"anidb_id":9},` +
+		`{"anilist_id":4,"tvdb_id":7,"season_kind":"absent"}]`)
 	if err := os.WriteFile(overrides, data, 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
@@ -228,6 +229,125 @@ func TestLoader_Load_logsUnroutableOverrideCount(t *testing.T) {
 		t.Fatalf("unroutable-overrides warning carries no count attribute; logs = %v", logs.Messages())
 	}
 	if got != "2" {
-		t.Errorf("unroutable-overrides count = %s, want 2 (the typeless entry and the movie carrying only a TVDB id)", got)
+		t.Errorf("unroutable-overrides count = %s, want 2 (the id-less entry and the one naming only its AniDB anime)", got)
+	}
+}
+
+// loadWithOverrides loads freshCache's record (AniList 1, TVDB 100) under an
+// overrides file holding data, returning the index and the captured logs.
+func loadWithOverrides(t *testing.T, data string) (*Index, *capture.Recorder) {
+	t.Helper()
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	if err := os.WriteFile(overrides, []byte(data), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	l := NewLoader(nil, mapread.Source{Repo: DefaultRepo}, WithOverridesPath(overrides), WithRefresh(time.Hour), WithLogger(logger))
+	_, idx, err := l.Load(t.Context(), freshCache())
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	return idx, logs
+}
+
+const (
+	imdbRefusedMessage = "mapping: overrides.json names imdb_ids, which seadex-scout no longer reads; " +
+		"pinned mappings not applied; name the film's tmdb_movies instead"
+	unstatedScopeMessage = "mapping: overrides.json names type with no usable season_kind, and type no longer sets a record's season; " +
+		"pinned mappings not applied; add season_kind to the record"
+)
+
+// TestLoader_Load_refusesAnOverridesFileNamingIMDb pins the retired key: a
+// file naming imdb_ids anywhere applies no record, a sibling without the key
+// included, and says once which key to replace.
+func TestLoader_Load_refusesAnOverridesFileNamingIMDb(t *testing.T) {
+	idx, logs := loadWithOverrides(t, `[{"anilist_id":1,"tvdb_id":555},{"anilist_id":2,"imdb_ids":["tt1"]}]`)
+	if n := logs.CountExact(imdbRefusedMessage); n != 1 {
+		t.Errorf("imdb_ids refusals = %d, want 1; logs = %v", n, logs.Messages())
+	}
+	if rec, ok := idx.Lookup(1); !ok || rec.TvdbID != 100 {
+		t.Errorf("Lookup(1) = %+v ok=%v, want the cached record: no override applies", rec, ok)
+	}
+	if _, ok := idx.Lookup(2); ok {
+		t.Error("Lookup(2) found the refused file's record")
+	}
+}
+
+// TestLoader_Load_refusesATypeThatWasTheScope pins the one override whose
+// meaning ignoring type would change: type and a tvdb_id with no season_kind
+// and no positive season_tvdb used to be offered on season 0 by its type, and
+// now has no scope it states, so the whole file is refused naming the record.
+func TestLoader_Load_refusesATypeThatWasTheScope(t *testing.T) {
+	for name, data := range map[string]string{
+		"a film with both links": `[{"anilist_id":1,"tvdb_id":555,"season_kind":"absent"},{"anilist_id":9135,"type":"MOVIE","tvdb_id":85249,"tmdb_movies":[80518]}]`,
+		"an OVA":                 `[{"anilist_id":1,"tvdb_id":555,"season_kind":"absent"},{"anilist_id":9135,"type":"OVA","tvdb_id":85249}]`,
+		"an unrecognized season": `[{"anilist_id":1,"tvdb_id":555,"season_kind":"absent"},{"anilist_id":9135,"type":"OVA","tvdb_id":85249,"season_kind":"bogus"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			idx, logs := loadWithOverrides(t, data)
+			if n := logs.CountExact(unstatedScopeMessage); n != 1 {
+				t.Fatalf("type refusals = %d, want 1; logs = %v", n, logs.Messages())
+			}
+			if !logs.HasAttr(unstatedScopeMessage, "al_id", "9135") {
+				t.Errorf("refusal logs = %v, want al_id 9135", logs.Messages())
+			}
+			if rec, ok := idx.Lookup(1); !ok || rec.TvdbID != 100 {
+				t.Errorf("Lookup(1) = %+v ok=%v, want the cached record: the sibling override is not applied", rec, ok)
+			}
+		})
+	}
+}
+
+// TestLoader_Load_appliesATypeBesideAStatedScope pins every other override
+// naming type: it applies as if the key were absent, counted as unknown.
+func TestLoader_Load_appliesATypeBesideAStatedScope(t *testing.T) {
+	for name, tc := range map[string]struct {
+		data string
+		want Record
+	}{
+		"season 0 stated": {
+			data: `[{"anilist_id":1,"type":"MOVIE","tvdb_id":85249,"tmdb_movies":[80518],"season_kind":"present","season_tvdb":0}]`,
+			want: Record{AniListID: 1, TvdbID: 85249, TmdbMovies: []int{80518}, SeasonKind: SeasonPresent},
+		},
+		"a positive season, no kind": {
+			data: `[{"anilist_id":1,"type":"OVA","tvdb_id":85249,"season_tvdb":2}]`,
+			want: Record{AniListID: 1, TvdbID: 85249, SeasonTvdb: 2},
+		},
+		"the whole series": {
+			data: `[{"anilist_id":1,"type":"TV","tvdb_id":85249,"season_kind":"absent"}]`,
+			want: Record{AniListID: 1, TvdbID: 85249, SeasonKind: SeasonAbsent},
+		},
+		"no tvdb_id": {
+			data: `[{"anilist_id":1,"type":"MOVIE","tmdb_movies":[80518]}]`,
+			want: Record{AniListID: 1, TmdbMovies: []int{80518}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			idx, logs := loadWithOverrides(t, tc.data)
+			rec, ok := idx.Lookup(1)
+			if !ok || rec.TvdbID != tc.want.TvdbID || rec.SeasonKind != tc.want.SeasonKind || rec.SeasonTvdb != tc.want.SeasonTvdb ||
+				!slices.Equal(rec.TmdbMovies, tc.want.TmdbMovies) {
+				t.Errorf("Lookup(1) = %+v ok=%v, want %+v", rec, ok, tc.want)
+			}
+			if !logs.HasAttr("mapping: overrides contain unknown keys, ignored", "unknown_key_count", "1") {
+				t.Errorf("logs = %v, want the unknown-keys warning counting type once", logs.Messages())
+			}
+		})
+	}
+	idx, _ := loadWithOverrides(t, `[{"anilist_id":1,"type":"MOVIE","tvdb_id":85249,"tmdb_movies":[80518],"season_kind":"present","season_tvdb":0}]`)
+	if rec, _ := idx.Lookup(1); !rec.RadarrRoute() || !rec.SonarrRoute() || !rec.SonarrSpecial() {
+		t.Errorf("a MOVIE override in season 0 = %+v, want both routes and a special Sonarr copy", rec)
+	}
+}
+
+// TestLoader_Load_appliesAnUntypedOverrideWithNoSeason pins the shape the
+// type refusal leaves alone: without type nothing about the record changed.
+func TestLoader_Load_appliesAnUntypedOverrideWithNoSeason(t *testing.T) {
+	idx, logs := loadWithOverrides(t, `[{"anilist_id":9135,"tvdb_id":85249,"tmdb_movies":[80518]}]`)
+	if rec, ok := idx.Lookup(9135); !ok || rec.TvdbID != 85249 || rec.SeasonPresence() != seasonUnknown {
+		t.Errorf("Lookup(9135) = %+v ok=%v, want the override applied with no stated season", rec, ok)
+	}
+	if n := logs.CountExact(unstatedScopeMessage); n != 0 {
+		t.Errorf("type refusals = %d, want 0", n)
 	}
 }
