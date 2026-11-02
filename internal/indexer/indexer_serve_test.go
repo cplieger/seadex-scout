@@ -1,8 +1,10 @@
 package indexer
 
 import (
+	"compress/gzip"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -805,6 +807,153 @@ func TestServeThrottlesFailedAuth(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if w.Code != http.StatusOK {
 		t.Errorf("good-key request during throttle status = %d, want %d (correct callers are never throttled)", w.Code, http.StatusOK)
+	}
+}
+
+// nyaaFeedIndexer warms an indexer whose snapshot journals n Nyaa items.
+func nyaaFeedIndexer(t *testing.T, n int, log *slog.Logger) *Indexer {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "feed.json")
+	feed := make([]journalItem, n)
+	now := time.Now().UTC()
+	for i := range feed {
+		id := strconv.Itoa(i + 1)
+		feed[i] = journalItem{
+			Title: "[Group] Show - " + id + " [1080p]", GUID: "https://nyaa.si/view/" + id, PubDate: now,
+			Key: "nyaa:" + id, FirstSeen: now,
+		}
+	}
+	writeSnapshotFile(t, path, &snapshot{Owners: owns(), Published: map[string]bool{}, NyaaFeed: feed})
+	return warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, NyaaTorznabURL: "http://prowlarr/1/api"}, log, nil)
+}
+
+// TestServeGzipsTheFeedForAGzipClient pins content coding on the served chain
+// (RFC 9110 sections 8.4 and 12.5.3): an arr offering gzip gets the RSS feed
+// gzip-coded with Vary: Accept-Encoding, and one offering nothing gets it as
+// identity; both decode to the same items.
+func TestServeGzipsTheFeedForAGzipClient(t *testing.T) {
+	const items = 20
+	h := nyaaFeedIndexer(t, items, nil).chain()
+
+	t.Run("gzip offered", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if got := rr.Header().Get("Content-Encoding"); got != "gzip" {
+			t.Fatalf("Content-Encoding = %q, want gzip", got)
+		}
+		if got := rr.Header().Get("Vary"); got != "Accept-Encoding" {
+			t.Errorf("Vary = %q, want Accept-Encoding", got)
+		}
+		zr, err := gzip.NewReader(rr.Body)
+		if err != nil {
+			t.Fatalf("gzip.NewReader: %v", err)
+		}
+		body, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("decompress: %v", err)
+		}
+		got, err := parseTorznab(body)
+		if err != nil {
+			t.Fatalf("decompressed body is not parseable Torznab: %v", err)
+		}
+		if len(got) != items {
+			t.Errorf("decompressed items = %d, want %d", len(got), items)
+		}
+	})
+
+	t.Run("nothing offered", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
+		if got := rr.Header().Get("Content-Encoding"); got != "" {
+			t.Errorf("Content-Encoding = %q, want identity", got)
+		}
+		got, err := parseTorznab(rr.Body.Bytes())
+		if err != nil {
+			t.Fatalf("identity body is not parseable Torznab: %v", err)
+		}
+		if len(got) != items {
+			t.Errorf("identity items = %d, want %d", len(got), items)
+		}
+	})
+
+	// net/http sets Content-Length only for a handler that returns unflushed with
+	// under 2 KiB written; a flush on the identity path would send it chunked.
+	t.Run("small identity feed keeps Content-Length", func(t *testing.T) {
+		srv := httptest.NewServer(nyaaFeedIndexer(t, 1, nil).chain())
+		t.Cleanup(srv.Close)
+		client := &http.Client{Transport: &http.Transport{DisableCompression: true}, Timeout: 10 * time.Second}
+		t.Cleanup(client.CloseIdleConnections)
+		resp, err := client.Get(srv.URL + "/nyaa?apikey=k")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if got := resp.Header.Get("Content-Encoding"); got != "" {
+			t.Fatalf("Content-Encoding = %q, want identity", got)
+		}
+		if resp.ContentLength != int64(len(body)) {
+			t.Errorf("ContentLength = %d, want %d (TransferEncoding %v)", resp.ContentLength, len(body), resp.TransferEncoding)
+		}
+	})
+}
+
+// deadlineFlushWriter accepts every byte and fails every flush with an expired
+// write deadline, the error net/http returns once WriteTimeout passes.
+type deadlineFlushWriter struct{ *httptest.ResponseRecorder }
+
+func (deadlineFlushWriter) FlushError() error { return os.ErrDeadlineExceeded }
+
+// TestServeWarnsWhenTheGzipTailMissesTheDeadline pins that a deadline hit while
+// Gzip flushes the feed's last deflate block still logs the partial-feed WARN on
+// the served chain: Gzip drops errors from what it writes after the handler
+// returns, and Logging's recorder sits between it and the connection.
+func TestServeWarnsWhenTheGzipTailMissesTheDeadline(t *testing.T) {
+	log, rec := capture.New()
+	h := nyaaFeedIndexer(t, 20, log).chain()
+
+	w := deadlineFlushWriter{httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip (the tail flush under test is the compressor's)", got)
+	}
+	const msg = "indexer feed write deadline expired mid-body; the arr received a partial feed"
+	if got := rec.CountExact(msg); got != 1 {
+		t.Errorf("deadline WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// unflushableWriter hides httptest.ResponseRecorder's Flush, so a flush through
+// it answers http.ErrNotSupported.
+type unflushableWriter struct{ http.ResponseWriter }
+
+// TestServeTreatsAnUnflushableWriterAsDelivered pins that a writer with nothing
+// to flush is not a partial feed: Write already accepted every byte.
+func TestServeTreatsAnUnflushableWriterAsDelivered(t *testing.T) {
+	log, rec := capture.New()
+	h := nyaaFeedIndexer(t, 20, log).chain()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	h.ServeHTTP(unflushableWriter{rr}, req)
+	if got := rr.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip (only the compressed path flushes)", got)
+	}
+	for _, msg := range []string{
+		"indexer feed write failed; client received a partial feed",
+		"indexer feed write deadline expired mid-body; the arr received a partial feed",
+	} {
+		if n := rec.CountExact(msg); n != 0 {
+			t.Errorf("an unflushable writer logged %q %d times, want 0:\n%s", msg, n, strings.Join(rec.Messages(), "\n"))
+		}
 	}
 }
 

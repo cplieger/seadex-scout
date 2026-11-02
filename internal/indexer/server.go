@@ -14,7 +14,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/seadex-scout/internal/secretref"
-	"github.com/cplieger/webhttp/v3"
+	"github.com/cplieger/webhttp/v4"
 )
 
 const (
@@ -172,6 +172,8 @@ func (ix *Indexer) chain() http.Handler {
 			webhttp.WithRecoverLogger(ix.log),
 			webhttp.WithRecoverResponder(torznabErrorResponder),
 		),
+		// The feed renders up to maxRenderedFeedBytes of RSS; "+xml" covers rss+xml.
+		webhttp.Gzip(webhttp.WithGzipTypes("application/xml", "+xml")),
 	)
 }
 
@@ -292,7 +294,18 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	}
 	doc, rendered := renderFeed(items)
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	if _, err := io.WriteString(w, doc); err != nil {
+	_, err := io.WriteString(w, doc)
+	if err == nil && w.Header().Get("Content-Encoding") == "gzip" {
+		// Gzip writes its held deflate block after the handler returns and drops that
+		// error; flushing here reports a deadline that fires on the tail. Only the
+		// compressed path flushes: a flush drops net/http's own Content-Length.
+		err = http.NewResponseController(w).Flush()
+		if errors.Is(err, http.ErrNotSupported) {
+			// Write already accepted the bytes; no writer below buffers them.
+			err = nil
+		}
+	}
+	if err != nil {
 		// The client went away or the write deadline fired mid-body: the request log's
 		// `returned` count describes what was RENDERED, not what the arr received.
 		if errors.Is(err, os.ErrDeadlineExceeded) {
