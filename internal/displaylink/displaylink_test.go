@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/go/urlform"
 )
 
 // TestVouch pins the structural legs every display-publish gate in the app

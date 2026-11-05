@@ -6,13 +6,13 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/go/jsonx"
 )
 
 // FuzzDecodePage is a differential fuzz target for the schema-aware bounded page
 // decoder: for any body, decodePage must match the json.Unmarshal oracle it
 // documents parity with. An accepted body must decode to a deeply-equal pbList
-// or be rejected for exactly one reason, a jsoncap cardinality cap or element
+// or be rejected for exactly one reason, a jsonx cardinality cap or element
 // budget, the one deliberate divergence from stdlib; a body stdlib rejects must
 // be rejected too. That covers the whole parity surface at once: case-insensitive
 // keys, null-into-container no-ops, duplicate-key order, trailing data, scalar
@@ -72,7 +72,7 @@ func FuzzDecodePage(f *testing.F) {
 		var want pbList
 		wantErr := json.Unmarshal(body, &want)
 		if gotErr != nil {
-			boundsCap := errors.Is(gotErr, jsoncap.ErrArrayCap) || errors.Is(gotErr, jsoncap.ErrElementBudget)
+			boundsCap := errors.Is(gotErr, jsonx.ErrArrayCap) || errors.Is(gotErr, jsonx.ErrElementBudget)
 			if wantErr == nil && !boundsCap {
 				t.Errorf("decodePage(%q) = error %v, but json.Unmarshal accepts it (only cardinality caps and the element budget may diverge)", body, gotErr)
 			}

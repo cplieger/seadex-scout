@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
@@ -441,7 +441,7 @@ const attrError = "error"
 // carry no request URL) plus a bounded `arr` attribute naming the failed side. The
 // side must come from the ORIGINAL error: the reduction can discard arrwalk's wrapper.
 func walkFailureAttrs(walkErr error) []any {
-	attrs := []any{attrError, httpx.LogSafeError(walkErr)}
+	attrs := []any{attrError, httpclient.LogSafeError(walkErr)}
 	if arr := arrwalk.WalkErrArr(walkErr); arr != "" {
 		attrs = append(attrs, "arr", arr)
 	}
@@ -462,7 +462,7 @@ func logSafeUpstreamError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
+	return errors.New(textsafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
 }
 
 // loadMapping refreshes the mapping from the persisted cache, logging a
@@ -1149,7 +1149,7 @@ func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap *library
 
 // saveGrace bounds the detached shutdown retry, measured from the cancellation
 // that triggered it - the SIGTERM at which the container stop grace itself
-// starts. It stays inside Docker's default 10s stop grace. atomicfile's
+// starts. It stays inside Docker's default 10s stop grace. filesafe's
 // temp+rename means a SIGKILL mid-write cannot corrupt state; the only cost of a
 // missed save is the AniList memo, which self-heals over one cold cycle.
 const saveGrace = 5 * time.Second

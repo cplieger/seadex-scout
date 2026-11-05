@@ -6,18 +6,18 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // TestAniListExhaustionWarnsOnceWithAppContext pins the OTHER half of the AniList door's
-// terminal-level demotion across the real client: the generic httpx verdict is absent from
+// terminal-level demotion across the real client: the generic httpclient verdict is absent from
 // WARN and the contextual matcher record is still published. It is the cross-layer
 // assertion the package-local tests cannot make - the siblings here pin the matcher's
-// records against fakes with no httpx in the stack, and internal/anilist's
+// records against fakes with no httpclient in the stack, and internal/anilist's
 // TestRequestExhaustedTerminalRecordIsDemoted pins the level with no matcher above it. A
 // total batch outage is the shape one permanently-failing upstream reaches, and the per-id
 // fallback is skipped in that case, which is what makes this ONE warning.
@@ -39,13 +39,13 @@ func TestAniListExhaustionWarnsOnceWithAppContext(t *testing.T) {
 		t.Error("Degraded = false, want true on a total AniList outage")
 	}
 	if n := recorder.CountLevel(slog.LevelWarn, "retries exhausted"); n != 0 {
-		t.Errorf("httpx generic terminal line logged at WARN %d times, want 0 (the app's record is the one that warns): %v", n, recorder.Messages())
+		t.Errorf("httpclient generic terminal line logged at WARN %d times, want 0 (the app's record is the one that warns): %v", n, recorder.Messages())
 	}
 	if n := recorder.CountExact("anilist batch prefetch failed; skipping per-id fallback for pending ids"); n != 1 {
 		t.Errorf("contextual total-outage WARN count = %d, want 1: %v", n, recorder.Messages())
 	}
 	// Demoted, not suppressed: the diagnosis stays available at Debug.
 	if !recorder.Contains("retries exhausted") {
-		t.Errorf("httpx terminal line missing entirely, want it kept at Debug: %v", recorder.Messages())
+		t.Errorf("httpclient terminal line missing entirely, want it kept at Debug: %v", recorder.Messages())
 	}
 }

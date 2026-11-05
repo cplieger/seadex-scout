@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -48,9 +48,9 @@ func (r *Reporter) reportSnapshot(ctx context.Context) (library.Snapshot, error)
 		// When it fires, the reduction drops arrwalk.Walk's wrapper, so name the
 		// failed side from the typed walk-side error.
 		if arr := arrwalk.WalkErrArr(err); arr != "" {
-			return library.Snapshot{}, fmt.Errorf("library walk (%s): %w", arr, httpx.LogSafeError(err))
+			return library.Snapshot{}, fmt.Errorf("library walk (%s): %w", arr, httpclient.LogSafeError(err))
 		}
-		return library.Snapshot{}, fmt.Errorf("library walk: %w", httpx.LogSafeError(err))
+		return library.Snapshot{}, fmt.Errorf("library walk: %w", httpclient.LogSafeError(err))
 	}
 	if snap.Partial {
 		// The walk skipped series after episode-fetch failures - fail instead,

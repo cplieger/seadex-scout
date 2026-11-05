@@ -13,8 +13,8 @@ import (
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/radarr"
 	"github.com/cplieger/arrapi/v3/sonarr"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/library"
-	"github.com/cplieger/slogx/capture"
 )
 
 func withFile(season, episode, absolute, file int) sonarr.Episode {

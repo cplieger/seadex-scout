@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/cplieger/slogx"
+	"github.com/cplieger/go/slogx"
 )
 
 // installLogger installs the initial JSON handler on stdout before config is

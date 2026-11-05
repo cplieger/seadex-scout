@@ -16,6 +16,7 @@ import (
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/radarr"
 	"github.com/cplieger/arrapi/v3/sonarr"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -27,7 +28,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
-	"github.com/cplieger/slogx/capture"
 )
 
 type fakeSonarr struct {
@@ -494,7 +494,7 @@ func recordsContainString(recorder *capture.Recorder, sub string) bool {
 // userinfo (a *url.Error, which the arr client does not return today):
 // neither the cycle's walk-failure log sites nor Report's returned error
 // (logged at ERROR by main) may carry the embedded credentials, so
-// httpx.LogSafeError must reduce the *url.Error to its cause first.
+// httpclient.LogSafeError must reduce the *url.Error to its cause first.
 func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	const userinfoSentinel = "hunter2pass"
 	const querySentinel = "sekrettoken"
@@ -612,7 +612,7 @@ func recordAttr(recorder *capture.Recorder, msg, key string) (string, bool) {
 
 // TestWalkFailureLogsCarryArrIdentity pins the `arr` attribute on every
 // walk-failure log line (the ERROR, the alert-only completion line and the
-// feed's library-gate completion line): httpx.LogSafeError reduces a
+// feed's library-gate completion line): httpclient.LogSafeError reduces a
 // *url.Error-shaped error to its cause and drops library.Walk's "walking
 // sonarr/radarr" wrapper, so with both arrs on, the error alone cannot name
 // the failed one; the attribute comes from the typed walk-side error.

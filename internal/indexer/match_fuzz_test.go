@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/go/urlform"
 )
 
 // boundedTrackerID reports whether id is a non-empty, width-bounded run of ASCII

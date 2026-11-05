@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/jsonx"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
@@ -135,7 +135,7 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 	// therefore bounded at 2*maxSnapshotFeedItems by a budget named for the
 	// feeds rather than at maxSnapshotMapEntries, while the owner KEYS charge
 	// nothing against it and chargeSnapshotEntry is their only bound.
-	d := jsoncap.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
+	d := jsonx.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
 	err := d.Object(func(key string) error {
 		member := snapshotField(key)
 		if member == "" {
@@ -214,11 +214,11 @@ func claimSnapshotField(claimed map[snapshotMember]struct{}, member snapshotMemb
 // shared entry budget. BOTH dimensions are charged - owner keys and every release
 // inside them - because a million owners with one release each and one owner with
 // a million releases cost the same heap. ONE counter across both is also why this
-// walks the object with jsoncap's token primitives rather than d.Map, whose
+// walks the object with jsonx's token primitives rather than d.Map, whose
 // per-container cap plus d.Array's bounds each dimension independently and their
 // product not at all. A JSON null KEEPS the caller's map; decodeSnapshotMap
 // carries why that is safe at both sites.
-func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
+func decodeSnapshotOwners(d *jsonx.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
 	const what = string(memberOwners)
 	open, err := d.Open('{')
 	if err != nil || !open {
@@ -230,7 +230,7 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 	perMap := 0
 	for d.More() {
 		// The charge lands before the KEY is read, the ordering
-		// jsoncap.(*Decoder).Map states for the same walk: the key is itself an
+		// jsonx.(*Decoder).Map states for the same walk: the key is itself an
 		// unbounded allocation from the wire.
 		if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
 			return dst, chargeErr
@@ -250,7 +250,7 @@ func decodeSnapshotOwners(d *jsoncap.Decoder, dst map[string][]ownedRelease, ent
 	return dst, d.Close()
 }
 
-func decodeOwnedRelease(d *jsoncap.Decoder, r *ownedRelease, perMap, entries *int) error {
+func decodeOwnedRelease(d *jsonx.Decoder, r *ownedRelease, perMap, entries *int) error {
 	if err := chargeSnapshotEntry(string(memberOwners), perMap, entries); err != nil {
 		return err
 	}
@@ -266,7 +266,7 @@ func decodeOwnedRelease(d *jsoncap.Decoder, r *ownedRelease, perMap, entries *in
 // allocated. Each item still decodes through encoding/json for
 // stdlib-identical field handling; per-item validity (validPersistedItem,
 // validJournalRecord) is decodeSnapshot's separate prune.
-func decodeSnapshotFeed(d *jsoncap.Decoder, dst *[]journalItem, what string) error {
+func decodeSnapshotFeed(d *jsonx.Decoder, dst *[]journalItem, what string) error {
 	feed, err := d.Array(*dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
 		// The per-array cap bounds how many ITEMS decode, not what ONE item
 		// allocates: an item's own Categories array is decoded by
@@ -294,12 +294,12 @@ func decodeSnapshotFeed(d *jsoncap.Decoder, dst *[]journalItem, what string) err
 // decodeSnapshotMap decodes one persisted map field entry by entry under the
 // shared entry budget - bounding cardinality, which json.Unmarshal cannot - and
 // RETURNS the map for the caller to store back. A JSON null KEEPS the caller's
-// map, the OPPOSITE of Unmarshal and of jsoncap.Map; that is unobservable only
+// map, the OPPOSITE of Unmarshal and of jsonx.Map; that is unobservable only
 // because claimSnapshotField refuses a repeated top-level member, so the prior is
 // always nil - re-check before lifting this shape where it can be non-nil. An
 // empty object allocates: a nil map is the structural sentinel both consumers
 // read. Per-value LENGTH stays loadPrevious's ingress prune (retainValidTitles).
-func decodeSnapshotMap[V bool | string](d *jsoncap.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
+func decodeSnapshotMap[V bool | string](d *jsonx.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
 	open, err := d.Open('{')
 	if err != nil || !open {
 		return dst, err
@@ -546,11 +546,11 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 		w.log.Warn("indexer feed snapshot approaching the size limit; a rebuild that exceeds it is refused and the served feed freezes",
 			"path", w.path, "bytes", len(data), "limit", maxFeedBytes)
 	}
-	if _, err := atomicfile.WriteFile(ctx, w.path, data,
-		atomicfile.WithLogger(w.log),
-		atomicfile.WithMkdirMode(feedDirMode), atomicfile.WithMode(feedFileMode),
-		atomicfile.WithMaxBytes(maxFeedBytes)); err != nil {
-		if errors.Is(err, atomicfile.ErrFileTooLarge) {
+	if _, err := filesafe.WriteFile(ctx, w.path, data,
+		filesafe.WithLogger(w.log),
+		filesafe.WithMkdirMode(feedDirMode), filesafe.WithMode(feedFileMode),
+		filesafe.WithMaxBytes(maxFeedBytes)); err != nil {
+		if errors.Is(err, filesafe.ErrFileTooLarge) {
 			return fmt.Errorf("indexer: feed snapshot %d bytes exceeds max %d; keeping previous feed: %w", len(data), maxFeedBytes, err)
 		}
 		return fmt.Errorf("indexer: write feed snapshot %s: %w", w.path, err)
@@ -707,7 +707,7 @@ func (w *FeedWriter) readPrevious(ctx context.Context) ([]byte, error) {
 				"dir", dir, "error", clErr)
 		}
 	}()
-	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(w.path), maxFeedBytes)
+	return filesafe.ReadBoundedInRoot(ctx, root, filepath.Base(w.path), maxFeedBytes)
 }
 
 // classifyPreviousReadError is loadPrevious's transient-versus-baseline decision for a
@@ -716,7 +716,7 @@ func (w *FeedWriter) classifyPreviousReadError(err error) (feedState, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
 		return feedState{baseline: true, reason: "fresh-install"}, nil
-	case errors.Is(err, atomicfile.ErrFileTooLarge):
+	case errors.Is(err, filesafe.ErrFileTooLarge):
 		w.log.Warn("previous feed snapshot exceeds size cap; re-baselining the feed journal",
 			"path", w.path, "max_bytes", int64(maxFeedBytes), "error", err)
 		return feedState{baseline: true, reason: "oversized"}, nil

@@ -8,11 +8,11 @@ import (
 
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/sonarr"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/release"
-	"github.com/cplieger/slogx/capture"
 )
 
 func specialEp(number, fileID int) sonarr.Episode {

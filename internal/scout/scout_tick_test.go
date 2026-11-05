@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi/v3/sonarr"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -17,7 +18,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
-	"github.com/cplieger/slogx/capture"
 )
 
 // pollIntervalForEvery is the Deps.PollInterval that makes reconcileEvery()

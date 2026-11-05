@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
 )
 
 const (
@@ -47,7 +47,7 @@ func MakeDir(dir string) error {
 }
 
 // enforceDirMode pins the mode of the report directory THIS call created and
-// proves the filesystem stored it, returning atomicfile's ErrModeNotStored
+// proves the filesystem stored it, returning filesafe's ErrModeNotStored
 // (naming both modes) when it kept something else.
 func enforceDirMode(dir string) error {
 	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -55,6 +55,6 @@ func enforceDirMode(dir string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	_, err = atomicfile.EnforceMode(f, dirMode)
+	_, err = filesafe.EnforceMode(f, dirMode)
 	return err
 }

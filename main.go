@@ -25,8 +25,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/health"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/health"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/pathredact"
@@ -200,9 +200,9 @@ func writeStarterConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := atomicfile.WriteFile(context.Background(), path, starter,
-		atomicfile.WithMkdirMode(starterDirMode),
-		atomicfile.WithMode(starterFileMode)); err != nil {
+	if _, err := filesafe.WriteFile(context.Background(), path, starter,
+		filesafe.WithMkdirMode(starterDirMode),
+		filesafe.WithMode(starterFileMode)); err != nil {
 		return fmt.Errorf("write starter config: %w", err)
 	}
 	return nil
@@ -285,15 +285,15 @@ func checkReportDir(dir string) error {
 	return nil
 }
 
-// probeWritable is atomicfile.ProbeWritable behind a package variable: running as
+// probeWritable is filesafe.ProbeWritable behind a package variable: running as
 // root, no permission bit can make the probe fail in a test.
-var probeWritable = atomicfile.ProbeWritable
+var probeWritable = filesafe.ProbeWritable
 
 // probeReportDir proves report.dir takes an owner-only write the way the report
 // pair's writes do, so a read-only, full or ACL-widening mount fails before the
 // ~25m walk rather than at the final write. Field-name-only, like checkReportDir.
 func probeReportDir(ctx context.Context, dir string) error {
-	res, err := probeWritable(ctx, dir, atomicfile.WithMode(reportfs.FileMode))
+	res, err := probeWritable(ctx, dir, filesafe.WithMode(reportfs.FileMode))
 	if err != nil {
 		return pathredact.Err(dir, err)
 	}
@@ -301,7 +301,7 @@ func probeReportDir(ctx context.Context, dir string) error {
 		return nil
 	}
 	cause := pathredact.Err(dir, res.Err)
-	if errors.Is(res.Err, atomicfile.ErrModeNotStored) {
+	if errors.Is(res.Err, filesafe.ErrModeNotStored) {
 		return fmt.Errorf("report.dir does not keep files owner-only at mode %#o, usually "+
 			"because of an inherited ACL on the mount. Remove the ACL or point report.dir at "+
 			"a directory without one: %w", reportfs.FileMode, cause)

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // panicCycler is a Cycler whose cycle always panics, exercising the daemon

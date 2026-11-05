@@ -26,9 +26,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsoncap/v2"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/jsonx"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/mediatype"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
@@ -52,8 +52,8 @@ const (
 	// with no upstream evidence the client sits out a whole window.
 	defaultRetryAfter = time.Minute
 	// maxRetryAfter is the PER-ATTEMPT ceiling: the longest one lookup's retry
-	// loop will wait for a rate-limit hint, passed to httpx.WithRateLimitRetry so
-	// a pathological header cannot stall a single request. httpx enforces it
+	// loop will wait for a rate-limit hint, passed to httpclient.WithRateLimitRetry so
+	// a pathological header cannot stall a single request. httpclient enforces it
 	maxRetryAfter = time.Minute
 	// maxThrottlePenalty is the POLITENESS ceiling: the longest the shared
 	// process-wide throttle will sit out an upstream-stated window, applied in backOff
@@ -81,7 +81,7 @@ var errBatchRecord = errors.New("anilist: batch response")
 // --- upstream failure classification ---
 
 // retryableUpstreamStatus reports whether an upstream status is a self-healing
-// server-side failure worth another attempt: httpx.IsRetryableStatus, narrowed twice.
+// server-side failure worth another attempt: httpclient.IsRetryableStatus, narrowed twice.
 // 429 is excluded because this client gives a rate limit its own dedicated path (which
 // penalizes the shared throttle), and a status of 600 or more is excluded because this
 // predicate also reads e.Status out of the untrusted GraphQL errors[] envelope.
@@ -89,7 +89,7 @@ func retryableUpstreamStatus(code int) bool {
 	if code == http.StatusTooManyRequests || code >= 600 {
 		return false
 	}
-	return httpx.IsRetryableStatus(code)
+	return httpclient.IsRetryableStatus(code)
 }
 
 // envelopeErrors decodes the untrusted GraphQL errors[] list, the one shape both
@@ -107,13 +107,13 @@ func envelopeErrors(raw []byte) gqlErrors {
 
 // transientEnvelopeError classifies a GraphQL envelope that arrived with a successful
 // HTTP status but reports a SERVER-side failure in its errors[] list. AniList answers
-// such faults as 200, so httpx.Do has already declared the attempt successful and no
+// such faults as 200, so httpclient.Do has already declared the attempt successful and no
 // retry ever happens; returning a transient error here puts that class back inside the
 // budget. Only retryable statuses qualify - a 404 envelope is a genuine not-found.
 func transientEnvelopeError(raw []byte) error {
 	for _, e := range envelopeErrors(raw) {
 		if retryableUpstreamStatus(e.Status) {
-			return httpx.MarkTransient(fmt.Errorf("anilist: upstream reported status %d: %s",
+			return httpclient.MarkTransient(fmt.Errorf("anilist: upstream reported status %d: %s",
 				e.Status, sanitizeUpstreamMessage(e.Message)))
 		}
 	}
@@ -268,7 +268,7 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("anilist: marshal request: %w", err)
 	}
-	return httpx.Do(ctx,
+	return httpclient.Do(ctx,
 		func(ctx context.Context) ([]byte, error) {
 			if err := c.throttle.wait(ctx); err != nil {
 				return nil, err
@@ -278,23 +278,23 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 				return nil, err
 			}
 			// Classify a server-side failure delivered inside a successful envelope
-			// here, at the retry boundary: past this point httpx has recorded the
+			// here, at the retry boundary: past this point httpclient has recorded the
 			// attempt as a success and the class can never be retried.
 			if transientErr := transientEnvelopeError(raw); transientErr != nil {
 				return nil, transientErr
 			}
 			return raw, nil
 		},
-		httpx.WithMaxAttempts(maxAttempts),
-		httpx.WithBaseDelay(baseDelay),
-		httpx.WithLabel("anilist"),
-		httpx.WithLogger(c.log),
-		httpx.WithRateLimitRetry(maxRetryAfter),
-		// Demote httpx's terminal "http retries exhausted" line to Debug: every
+		httpclient.WithMaxAttempts(maxAttempts),
+		httpclient.WithBaseDelay(baseDelay),
+		httpclient.WithLabel("anilist"),
+		httpclient.WithLogger(c.log),
+		httpclient.WithRateLimitRetry(maxRetryAfter),
+		// Demote httpclient's terminal "http retries exhausted" line to Debug: every
 		// exhausted request is republished by the matcher with strictly more context,
 		// so leaving both at Warn reports one AniList outage twice. Demoting rather
 		// than dropping the logger keeps the per-attempt retry diagnostics.
-		httpx.WithExhaustedLevel(slog.LevelDebug))
+		httpclient.WithExhaustedLevel(slog.LevelDebug))
 }
 
 // Fetch returns the AniList media for the given ID, or ErrNotFound when AniList has no
@@ -420,7 +420,7 @@ func retainRequested(page map[int]Media, chunk []int) error {
 	return first
 }
 
-// do performs one GraphQL POST attempt, translating a 429 into a *httpx.RateLimitError
+// do performs one GraphQL POST attempt, translating a 429 into a 429 *httpclient.StatusError
 // carrying a capped Retry-After hint and reading the rate headers on every response
 // that is not itself a rate limit, to pre-empt the next 429.
 func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
@@ -439,7 +439,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		httpx.DrainClose(resp.Body)
+		httpclient.DrainClose(resp.Body)
 		return nil, c.rateLimitError(resp)
 	}
 	// The budget headers are read on EVERY response that is not itself a rate limit,
@@ -449,20 +449,20 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	// envelope, so that body passes through to the parser for Fetch's ErrNotFound.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		c.observeRateHeaders(resp)
-		httpx.DrainClose(resp.Body)
-		statusErr := httpx.CheckHTTPStatus(resp)
+		httpclient.DrainClose(resp.Body)
+		statusErr := httpclient.CheckStatus(resp)
 		if statusErr == nil {
 			statusErr = fmt.Errorf("anilist: unexpected status %d", resp.StatusCode)
 		}
 		if retryableUpstreamStatus(resp.StatusCode) {
-			return nil, httpx.MarkTransient(statusErr)
+			return nil, httpclient.MarkTransient(statusErr)
 		}
 		return nil, statusErr
 	}
 
 	// ReadLimitedBody closes the body and fails loud with a distinct error on an
 	// over-cap body, so an oversized response is not a silently truncated payload.
-	respBody, err := httpx.ReadLimitedBody(resp.Body, maxBodyBytes)
+	respBody, err := httpclient.ReadLimitedBody(resp.Body, maxBodyBytes)
 	if err != nil {
 		c.observeRateHeaders(resp)
 		return nil, fmt.Errorf("anilist: read response: %w", err)
@@ -505,12 +505,12 @@ func resetWait(resp *http.Response) time.Duration {
 
 // rateLimitError handles a 429 response: it derives a capped wait from Retry-After (or
 // X-RateLimit-Reset, or the default), penalizes the throttle, and returns the
-// *httpx.RateLimitError carrying that wait as its retry hint.
+// 429 *httpclient.StatusError carrying that wait as its RetryAfter.
 func (c *Client) rateLimitError(resp *http.Response) error {
 	// ParseRetryAfterResponse, not ParseRetryAfter: the latter caps at 60s INSIDE the
 	// library, so a longer stated window could never reach the politeness ceiling and
 	// the two 429 shapes would disagree for no reason the upstream expressed.
-	wait := httpx.ParseRetryAfterResponse(resp)
+	wait := httpclient.ParseRetryAfterResponse(resp)
 	if wait <= 0 {
 		// A 429 without a usable Retry-After often still carries the window end in
 		// X-RateLimit-Reset, which keeps the bounded attempts out of one rate window.
@@ -524,13 +524,13 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 	c.log.Warn("anilist rate limited (429); backing off",
 		"retry_after", wait.Round(time.Second),
 		"upstream_retry_after", upstream.Round(time.Second))
-	return &httpx.RateLimitError{Msg: "anilist: rate limited (429)", RetryAfter: wait}
+	return fmt.Errorf("anilist: rate limited: %w", &httpclient.StatusError{Code: http.StatusTooManyRequests, RetryAfter: wait})
 }
 
 // backOff caps an upstream-supplied wait at the POLITENESS ceiling
 // (maxThrottlePenalty), counts it, and penalizes the shared throttle, returning the
 // capped value the caller logs. It is deliberately NOT maxRetryAfter, the per-attempt
-// ceiling httpx enforces itself. An absurd value is clamped like any other but also
+// ceiling httpclient enforces itself. An absurd value is clamped like any other but also
 // warned, since silently rendering a 24h header as minutes leaves no trace.
 func (c *Client) backOff(wait time.Duration) time.Duration {
 	if wait >= implausibleWindow {
@@ -652,7 +652,7 @@ func knownFormat(format string) string {
 // U+FFFD, controls, line separators or bidi controls; titlekey.Normalize would strip
 // those runes into a forged match key, and a title outlives the request in state.json.
 func unsafeWireText(s string) bool {
-	return strings.ContainsRune(s, utf8.RuneError) || runesafe.SanitizeSingleLine(s) != s
+	return strings.ContainsRune(s, utf8.RuneError) || textsafe.SanitizeSingleLine(s) != s
 }
 
 // gqlError is the GraphQL error object shared by both response envelopes.
@@ -677,7 +677,7 @@ type gqlErrors []gqlError
 // no pre-check here, since a nil slice is exactly this field's null contract.
 func (l *gqlErrors) UnmarshalJSON(data []byte) error {
 	*l = nil
-	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
+	dec := jsonx.NewDecoder(bytes.NewReader(data), 0)
 	records, err := dec.Array(nil, maxEnvelopeErrors, "errors",
 		func(e *gqlError) error { return dec.Decode(e) })
 	if err != nil {
@@ -700,11 +700,11 @@ type gqlResponse struct {
 // sanitizeUpstreamMessage bounds and cleans an untrusted upstream error message before
 // it is wrapped into an error that reaches the logs: the strict single-line policy
 // (controls, line separators and bidi controls become spaces) plus a 200-byte cap on a
-// rune boundary. The composition lives in runesafe.SanitizeSingleLineBounded, so a fix
+// rune boundary. The composition lives in textsafe.SanitizeSingleLineBounded, so a fix
 // to the preset belongs there rather than in either app-side wrapper.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
-	return runesafe.SanitizeSingleLineBounded(s, maxLen)
+	return textsafe.SanitizeSingleLineBounded(s, maxLen)
 }
 
 // mediaQueryError wraps an upstream GraphQL error into the plain
@@ -736,14 +736,14 @@ func classifyNullMedia(errs []gqlError) error {
 // UTF-8: json.Unmarshal replaces malformed UTF-8 inside JSON strings with U+FFFD
 // instead of failing, so a wire title with invalid bytes could lossily normalize to a
 // legitimate title key, be title-matched, and be memoized. That half stays app-side
-// because it is a CONTENT policy. Structure: jsoncap.Preflight owns the rest, because
+// because it is a CONTENT policy. Structure: jsonx.Preflight owns the rest, because
 // encoding/json applies the LAST duplicate object key and discards the earlier value
 // unseen, erasing the evidence every downstream invariant relies on.
 func validateResponse(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errors.New("anilist: response is not valid UTF-8")
 	}
-	if err := jsoncap.Preflight(bytes.NewReader(raw)); err != nil {
+	if err := jsonx.Preflight(bytes.NewReader(raw)); err != nil {
 		return fmt.Errorf("anilist: ambiguous response JSON: %w", err)
 	}
 	return nil
@@ -835,7 +835,7 @@ func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
-	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
+	dec := jsonx.NewDecoder(bytes.NewReader(data), 0)
 	records, err := dec.Array(nil, batchSize, "media",
 		func(m *json.RawMessage) error { return dec.Decode(m) })
 	if err != nil {
@@ -1010,7 +1010,7 @@ type throttle struct {
 func (t *throttle) wait(ctx context.Context) error {
 	slot := t.reserveSlot()
 	for {
-		if err := httpx.SleepCtx(ctx, time.Until(slot)); err != nil {
+		if err := httpclient.SleepCtx(ctx, time.Until(slot)); err != nil {
 			return err
 		}
 		t.mu.Lock()

@@ -10,7 +10,7 @@ import (
 )
 
 // TestAttrJoinerRecapsAfterSanitizeGrowth pins logattr.Joiner.Write's
-// post-sanitize re-cap: runesafe.Sanitize grows each invalid UTF-8 byte into the
+// post-sanitize re-cap: textsafe.Sanitize grows each invalid UTF-8 byte into the
 // three-byte U+FFFD, so the pre-sanitize cap alone lets an all-invalid hostile
 // SeaDex value emit ~3x the per-attribute budget. The emitted attribute must
 // stay within the budget plus the "..." marker AND stay valid UTF-8: the re-cap

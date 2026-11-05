@@ -13,8 +13,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // keysetRecords renders count entries records numbered from start, each
@@ -392,7 +392,7 @@ func TestFetchEntriesHTTPStatusErrorAborts(t *testing.T) {
 
 // flakyStatusTransport answers the first failures requests with status, then
 // serves a one-record catalogue page. It keeps the retry hermetic inside a
-// synctest bubble, where httpx's backoff sleeps advance in virtual time.
+// synctest bubble, where httpclient's backoff sleeps advance in virtual time.
 type flakyStatusTransport struct {
 	status   int
 	failures int
@@ -418,7 +418,7 @@ func (tr *flakyStatusTransport) RoundTrip(req *http.Request) (*http.Response, er
 }
 
 // TestFetchEntriesRetriesTransientStatus pins the per-page retry budget the
-// client hands httpx: a Cloudflare-fronted community service answers 503 under
+// client hands httpclient: a Cloudflare-fronted community service answers 503 under
 // load, and SeaDex is the one upstream whose failure degrades the cycle while
 // PRESERVING stale findings for a whole poll_interval. A regression that drops
 // WithMaxAttempts turns a single transient blip into that degradation, and no

@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/go/jsonx"
 )
 
 func TestParseMedia(t *testing.T) {
@@ -276,7 +276,7 @@ func TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective(t *testing.T) {
 
 // TestParseMediaDropsUnsafeTitleTextKeepingSiblings pins the title single-line guard on
 // its own: each payload carries ONE unsafe title field plus a safe sibling, so the only
-// thing that can produce the expected result is the runesafe.SanitizeSingleLine check in
+// thing that can produce the expected result is the textsafe.SanitizeSingleLine check in
 // toMedia running and dropping exactly that member. Rejection could be produced by any
 // record-wide failure, while "the unsafe member is absent AND the safe member is present"
 // can only be produced by the per-title guard, so dropping the guard fails here.
@@ -766,9 +766,9 @@ func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
 }
 
 // TestValidateResponseBoundsThePreflightWalk is the cross-library acceptance test for
-// jsoncap.Preflight. The depth ceiling is the JSON TOKENIZER's, not the library's:
+// jsonx.Preflight. The depth ceiling is the JSON TOKENIZER's, not the library's:
 // json.Decoder.Token enforces jsontext's 10000-container limit at exactly
-// jsoncap.MaxDepth, one call BELOW the library's depth check, so jsoncap.ErrMaxDepth is
+// jsonx.MaxDepth, one call BELOW the library's depth check, so jsonx.ErrMaxDepth is
 // unreachable through Preflight and the refusal arrives as *json.SyntaxError. Both
 // boundary levels are pinned because parity with json.Unmarshal's depth acceptance IS
 // the claim; the error TEXT is not, since jsontext exports no depth sentinel and
@@ -777,21 +777,21 @@ func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
 	// A WELL-FORMED body one level over the ceiling, so the refusal is depth and
 	// nothing else - an all-opens body is also truncated, which muddies the
 	// diagnosis.
-	overDeep := []byte(strings.Repeat("[", jsoncap.MaxDepth+1) + strings.Repeat("]", jsoncap.MaxDepth+1))
+	overDeep := []byte(strings.Repeat("[", jsonx.MaxDepth+1) + strings.Repeat("]", jsonx.MaxDepth+1))
 	var syntaxErr *json.SyntaxError
 	if err := validateResponse(overDeep); !errors.As(err, &syntaxErr) {
-		t.Fatalf("validateResponse(%d nested arrays) = %v (%T), want the tokenizer's *json.SyntaxError", jsoncap.MaxDepth+1, err, err)
+		t.Fatalf("validateResponse(%d nested arrays) = %v (%T), want the tokenizer's *json.SyntaxError", jsonx.MaxDepth+1, err, err)
 	}
 	var sink any
 	if json.Unmarshal(overDeep, &sink) == nil {
-		t.Errorf("json.Unmarshal accepted %d nested arrays; the preflight is now stricter on depth than the decoder it guards", jsoncap.MaxDepth+1)
+		t.Errorf("json.Unmarshal accepted %d nested arrays; the preflight is now stricter on depth than the decoder it guards", jsonx.MaxDepth+1)
 	}
 
 	// At the ceiling exactly both accept, so the preflight adds no depth
 	// strictness of its own.
-	atCeiling := []byte(strings.Repeat("[", jsoncap.MaxDepth) + strings.Repeat("]", jsoncap.MaxDepth))
+	atCeiling := []byte(strings.Repeat("[", jsonx.MaxDepth) + strings.Repeat("]", jsonx.MaxDepth))
 	if err := validateResponse(atCeiling); err != nil {
-		t.Errorf("validateResponse(%d nested arrays) = %v, want it accepted (json.Unmarshal accepts it)", jsoncap.MaxDepth, err)
+		t.Errorf("validateResponse(%d nested arrays) = %v, want it accepted (json.Unmarshal accepts it)", jsonx.MaxDepth, err)
 	}
 
 	// The original hostile shape: 1 MiB of nothing but '['. Still refused, and
@@ -906,8 +906,8 @@ func TestGqlErrorsBoundsEnvelopeCardinality(t *testing.T) {
 
 	var over gqlErrors
 	err := over.UnmarshalJSON(array(maxEnvelopeErrors + 1))
-	if !errors.Is(err, jsoncap.ErrArrayCap) {
-		t.Fatalf("UnmarshalJSON over the cap = %v, want jsoncap.ErrArrayCap", err)
+	if !errors.Is(err, jsonx.ErrArrayCap) {
+		t.Fatalf("UnmarshalJSON over the cap = %v, want jsonx.ErrArrayCap", err)
 	}
 	if over != nil {
 		t.Errorf("list = %v after a failed decode, want nil", over)

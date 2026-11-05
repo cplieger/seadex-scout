@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // TestReloadWarnsOnceOnMissingSnapshotAndRecovers pins the disappeared-snapshot
@@ -1144,7 +1144,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 			{Title: "stale", GUID: "stale", DownloadURL: "stale"},
 		},
 	}
-	ix.cache.snapID = atomicfile.Identify(newerInfo)
+	ix.cache.snapID = filesafe.Identify(newerInfo)
 	ix.cache.mu.Unlock()
 
 	// Reloading against the older-mtime on-disk file must install it: the

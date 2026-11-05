@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // sampleFeed is a representative Prowlarr per-indexer Torznab response (one Nyaa
@@ -827,8 +827,8 @@ func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	client := httpx.NewClient(upstreamAttemptTimeout)
-	client.CheckRedirect = httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true))
+	client := httpclient.New(upstreamAttemptTimeout)
+	client.CheckRedirect = httpclient.RedirectPolicyFunc(httpclient.WithSameOrigin(true))
 	ups := wireUpstreams(client, nil, UpstreamConfig{
 		NyaaTorznabURL: redirector.URL,
 		ProwlarrAPIKey: "prowlarr-key",
@@ -1185,7 +1185,7 @@ func TestUpstreamForScope(t *testing.T) {
 }
 
 // TestScopeFromHost pins the Host-fallback routing table. Since the gate reads
-// webhttp.CanonicalHost (the shared strict authority parser) rather than
+// httpserver.CanonicalHost (the shared strict authority parser) rather than
 // splitting the raw Host on its first dot, a bare tracker host carrying
 // a port routes correctly and malformed authorities no longer route at all.
 func TestScopeFromHost(t *testing.T) {
@@ -1944,9 +1944,9 @@ func TestNewCopiesConfig(t *testing.T) {
 
 // TestRejectionLinesNameTheClientIP pins the Loki-visible contract of the two
 // request-rejection lines: the caller is identified by the `client_ip`
-// attribute (every webhttp consumer's spelling, so one shared query over
-// every webhttp app's security lines includes this one), resolved through
-// webhttp.ClientIP - which strips the port, so the value is an address the
+// attribute (every httpserver consumer's spelling, so one shared query over
+// every httpserver app's security lines includes this one), resolved through
+// httpserver.ClientIP - which strips the port, so the value is an address the
 // operator can match against a firewall or DHCP lease rather than an
 // ephemeral-port socket string.
 func TestRejectionLinesNameTheClientIP(t *testing.T) {
@@ -1983,7 +1983,7 @@ func TestRejectionLinesNameTheClientIP(t *testing.T) {
 		})
 		gotIPs = append(gotIPs, ip)
 	}
-	// Host only, no port: webhttp.ClientIP strips it, so the value matches a
+	// Host only, no port: httpserver.ClientIP strips it, so the value matches a
 	// firewall rule or a DHCP lease instead of an ephemeral socket string.
 	want := []string{"192.0.2.10", "192.0.2.11"}
 	if !slices.Equal(gotIPs, want) {

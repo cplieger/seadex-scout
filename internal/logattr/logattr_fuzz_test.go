@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // FuzzCapBoundsAndPreservesHonestValues fuzzes the volume primitive every
@@ -41,7 +41,7 @@ func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 		// derived from the INPUT. Cap truncates on exactly two conditions: the raw
 		// value exceeds the budget, or its sanitized form does (each invalid byte
 		// grows to a three-byte U+FFFD).
-		want := runesafe.Sanitize(raw)
+		want := textsafe.Sanitize(raw)
 		truncated := len(raw) > MaxBytes || len(want) > MaxBytes
 		if !truncated {
 			if got != want {

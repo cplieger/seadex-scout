@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
-	"github.com/cplieger/urlform"
 )
 
 // snapshotCache owns the served snapshot's lifecycle: taking it from the in-process
@@ -23,7 +23,7 @@ import (
 type snapshotCache struct {
 	// snapID identifies the successfully loaded snapshot file, installed together with
 	// snap (guarded by mu).
-	snapID atomicfile.FileIdentity
+	snapID filesafe.FileIdentity
 	// loader owns the reload clock and the reload-only state (see
 	// snapshotLoader). Set once by newSnapshotCache and never rewritten.
 	loader *snapshotLoader
@@ -83,7 +83,7 @@ type snapshotLoader struct {
 	// deterministically: malformed JSON, a structurally invalid document, or a file
 	// over the shared maxFeedBytes cap (persist enforces the same cap, so an oversized
 	// snapshot is external corruption that never shrinks on its own).
-	failedID atomicfile.FileIdentity
+	failedID filesafe.FileIdentity
 	// path is the cache's own snapshot path, copied once at construction and
 	// read without a lock, never written afterwards.
 	path string
@@ -260,19 +260,19 @@ func (c *snapshotCache) feed(scope string) []journalItem {
 // openSnapshot opens the snapshot file ONCE and applies refresh's missing/unreadable
 // policy, returning the open descriptor, its info, and whether reload should proceed.
 func (l *snapshotLoader) openSnapshot() (*os.File, os.FileInfo, bool) {
-	// atomicfile.OpenRegular is the library's own form of this sequence and it owns the
+	// filesafe.OpenRegular is the library's own form of this sequence and it owns the
 	// three non-obvious details its godoc says every hand-rolling consumer re-derives:
 	// O_NOFOLLOW so the KERNEL refuses a final-component symlink (reported as
 	// ErrSymlinkTarget, the writer's own vocabulary), O_NONBLOCK so a planted FIFO is
 	// an immediate rejection rather than an uninterruptible open, and a stat of the
 	// OPEN HANDLE so the returned FileInfo describes the very inode whose bytes
 	// readSnapshot reads and whose FileIdentity is recorded.
-	f, info, err := atomicfile.OpenRegular(l.path)
+	f, info, err := filesafe.OpenRegular(l.path)
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			l.noteSnapshotAbsent()
-		case errors.Is(err, atomicfile.ErrNotRegular):
+		case errors.Is(err, filesafe.ErrNotRegular):
 			// A directory, FIFO, socket, or device node left at the snapshot
 			// path; the error names the actual mode type.
 			l.noteStatFault("indexer feed snapshot path is not a regular file; refusing to load it", "error", err)
@@ -373,7 +373,7 @@ func (l *snapshotLoader) refresh(ctx context.Context) {
 		l.recordSnapshotFailure(info, memoize)
 		return
 	}
-	l.failedID = atomicfile.FileIdentity{}
+	l.failedID = filesafe.FileIdentity{}
 	if l.reloadDegraded {
 		l.reloadDegraded = false
 		l.log.Info("indexer feed snapshot reload recovered", "path", l.path)
@@ -408,15 +408,15 @@ func (l *snapshotLoader) skipMemoizedMalformed(info os.FileInfo) bool {
 
 // recordSnapshotFailure applies refresh's failed-read memo policy.
 func (l *snapshotLoader) recordSnapshotFailure(info os.FileInfo, memoize bool) {
-	l.failedID = atomicfile.FileIdentity{}
+	l.failedID = filesafe.FileIdentity{}
 	if memoize {
-		l.failedID = atomicfile.Identify(info)
+		l.failedID = filesafe.Identify(info)
 	}
 }
 
 // loadedSnapshotUnchanged reports whether the stat'ed snapshot file is the
 // already-loaded snapshot, unchanged. The comparison is
-// atomicfile.FileIdentity's (see the snapID field): any mtime CHANGE -
+// filesafe.FileIdentity's (see the snapID field): any mtime CHANGE -
 // including an older one - reloads, and a preserved-timestamp replacement on a
 // different inode reloads too.
 func (c *snapshotCache) loadedSnapshotUnchanged(info os.FileInfo) bool {
@@ -448,7 +448,7 @@ func (c *snapshotCache) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 	}
 	c.snap = *snap
 	c.cur = projectCuration(snap.Owners)
-	c.snapID = atomicfile.Identify(info)
+	c.snapID = filesafe.Identify(info)
 	c.installed = true
 	c.installSeq++
 	// A successful install ends any startup snapshot-unavailable state and
@@ -553,7 +553,7 @@ func (c *snapshotCache) clearSnapshotFailed() {
 // ones the recorded FileIdentity describes - and decodes the persisted feed snapshot,
 // reporting ok=false on any failure so the caller keeps the current feed.
 func (l *snapshotLoader) readSnapshot(ctx context.Context, f *os.File) (snapshot, bool, bool) {
-	data, err := atomicfile.ReadBoundedFile(ctx, f, maxFeedBytes)
+	data, err := filesafe.ReadBoundedFile(ctx, f, maxFeedBytes)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			// A shutdown cancellation is silent and never marks the
@@ -569,7 +569,7 @@ func (l *snapshotLoader) readSnapshot(ctx context.Context, f *os.File) (snapshot
 		// for an unchanged inode, so it memoizes like malformed JSON: without
 		// that, sustained requests reopen and size-check the same oversized
 		// file on every reload attempt while it remains unchanged.
-		return snapshot{}, false, errors.Is(err, atomicfile.ErrFileTooLarge)
+		return snapshot{}, false, errors.Is(err, filesafe.ErrFileTooLarge)
 	}
 	snap, scrub, reason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {

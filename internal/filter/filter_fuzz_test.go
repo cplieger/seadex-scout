@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/seadex-scout/internal/trackerlink"
-	"github.com/cplieger/urlform"
 )
 
 // abLabel shapes fuzz input into a guaranteed-valid DNS label (letters and

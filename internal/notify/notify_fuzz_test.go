@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 )
@@ -17,7 +17,7 @@ import (
 // exceed a downstream log-pipeline line limit and suppress the warn line the
 // better-release alert keys on; valid UTF-8 with no unsafe rune (no C1
 // introducer, bidi override, or partial rune from a naive re-cap); and honest
-// passthrough, byte-identical to runesafe.Sanitize with no spurious marker.
+// passthrough, byte-identical to textsafe.Sanitize with no spurious marker.
 func FuzzCapAttrBoundedAndSanitized(f *testing.F) {
 	f.Add("")
 	f.Add("Frieren")
@@ -37,11 +37,11 @@ func FuzzCapAttrBoundedAndSanitized(f *testing.F) {
 			t.Errorf("capAttr(%q) = %q, want valid UTF-8", raw, got)
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafeMultiLine(r) {
+			if textsafe.IsUnsafeMultiLine(r) {
 				t.Errorf("capAttr(%q) emits unsafe rune %U", raw, r)
 			}
 		}
-		clean := runesafe.Sanitize(raw)
+		clean := textsafe.Sanitize(raw)
 		if len(raw) <= logattr.MaxBytes && len(clean) <= logattr.MaxBytes && got != clean {
 			t.Errorf("capAttr(%q) = %q, want the byte-identical sanitized form %q", raw, got, clean)
 		}
@@ -78,7 +78,7 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 			t.Errorf("joinLinksAttr(%d links) = %q, want valid UTF-8", count, got)
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafeMultiLine(r) {
+			if textsafe.IsUnsafeMultiLine(r) {
 				t.Errorf("joinLinksAttr(%d links) emits unsafe rune %U", count, r)
 			}
 		}
@@ -122,7 +122,7 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 			}
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafeMultiLine(r) {
+			if textsafe.IsUnsafeMultiLine(r) {
 				t.Errorf("capAlertTextAttr(%d bytes) emits unsafe rune %U", len(raw), r)
 			}
 		}
@@ -158,7 +158,7 @@ func FuzzCapURLAttrBoundedAndInertDestination(f *testing.F) {
 			t.Errorf("capURLAttr(%d bytes) leaves destination-breaking byte %q at offset %d", len(raw), got[i], i)
 		}
 		for _, r := range got {
-			if runesafe.IsUnsafeMultiLine(r) {
+			if textsafe.IsUnsafeMultiLine(r) {
 				t.Errorf("capURLAttr(%d bytes) emits unsafe rune %U", len(raw), r)
 			}
 		}

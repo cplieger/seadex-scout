@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/httpserver"
 	"github.com/cplieger/seadex-scout/internal/secretref"
-	"github.com/cplieger/webhttp/v4"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
 	// maxHeaderBytes bounds the request line plus headers, the pre-auth allocation gate
-	// this endpoint's shape allows and webhttp leaves to the app.
+	// this endpoint's shape allows and httpserver leaves to the app.
 	maxHeaderBytes = 16 << 10
 )
 
@@ -33,7 +33,7 @@ const (
 // render margin, derived from the budget's own constants so it stays valid if
 // the retry policy changes. A var so a test can shorten it.
 var writeTimeout = upstreamMaxAttempts*upstreamAttemptTimeout +
-	(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
+	(upstreamMaxAttempts-1)*httpclient.RetryAfterCap + time.Minute
 
 // listenAddr is the fixed LAN bind address for the Torznab feed server. The port
 // is an internal detail (the compose port mapping publishes it), not an
@@ -94,31 +94,31 @@ func (ix *Indexer) run(ctx context.Context) error {
 		return fmt.Errorf("indexer listen on %s: %w", listenAddr, err)
 	}
 
-	// The HTTP surface rides the shared webhttp plumbing: bootstrap plus graceful
+	// The HTTP surface rides the shared httpserver plumbing: bootstrap plus graceful
 	// shutdown here, the middleware stack in chain.
-	srv := webhttp.NewServer(ix.chain(),
-		webhttp.WithReadHeaderTimeout(readHeaderTimeout),
-		webhttp.WithReadTimeout(readTimeout),
-		webhttp.WithIdleTimeout(idleTimeout),
-		webhttp.WithWriteTimeout(writeTimeout),
-		webhttp.WithMaxHeaderBytes(maxHeaderBytes),
+	srv := httpserver.New(ix.chain(),
+		httpserver.WithReadHeaderTimeout(readHeaderTimeout),
+		httpserver.WithReadTimeout(readTimeout),
+		httpserver.WithIdleTimeout(idleTimeout),
+		httpserver.WithWriteTimeout(writeTimeout),
+		httpserver.WithMaxHeaderBytes(maxHeaderBytes),
 	)
 
 	ix.log.Info("seadex-scout indexer listening",
 		"addr", listenAddr, "upstreams", len(ix.upstreams))
 
-	if err := webhttp.Run(ctx, srv, ln, nil, webhttp.WithShutdownGrace(shutdownGrace)); err != nil {
+	if err := httpserver.Run(ctx, srv, ln, nil, httpserver.WithShutdownGrace(shutdownGrace)); err != nil {
 		return fmt.Errorf("indexer server: %w", err)
 	}
 	ix.log.Info("indexer shutdown complete", "cause", context.Cause(ctx))
 	return nil
 }
 
-// torznabErrorResponder is the webhttp Recoverer ErrorResponder for the Torznab
+// torznabErrorResponder is the httpserver Recoverer ErrorResponder for the Torznab
 // feed: it renders a recovered panic's 500 as a Torznab <error> document on the XML
 // content type the arrs expect. Recoverer already logged the panic and only calls
 // this when the response has not been committed.
-func torznabErrorResponder(w http.ResponseWriter, _ *http.Request, status int, _ webhttp.ErrorCode, msg string) {
+func torznabErrorResponder(w http.ResponseWriter, _ *http.Request, status int, _ httpserver.ErrorCode, msg string) {
 	noCacheHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(status)
@@ -161,29 +161,29 @@ func (ix *Indexer) handler() http.Handler {
 // deliberately OUTERMOST so every response carries it, including a recovered
 // panic's 500 and authFailureLimiter's short-circuiting 429.
 func (ix *Indexer) chain() http.Handler {
-	return webhttp.Chain(ix.handler(),
+	return httpserver.Chain(ix.handler(),
 		// default-src 'none' is the whole policy this endpoint needs: every response is
 		// a self-contained document with no subresources, so an inert document is the
 		// correct browser reading of the credential-bearing /ab feed.
-		webhttp.SecurityHeaders(webhttp.WithCSP("default-src 'none'")),
+		httpserver.SecurityHeaders(httpserver.WithCSP("default-src 'none'")),
 		ix.authFailureLimiter(),
-		webhttp.Logging(webhttp.WithLogger(ix.log), webhttp.WithClientIP()),
-		webhttp.Recoverer(
-			webhttp.WithRecoverLogger(ix.log),
-			webhttp.WithRecoverResponder(torznabErrorResponder),
+		httpserver.Logging(httpserver.WithLogger(ix.log), httpserver.WithClientIP()),
+		httpserver.Recoverer(
+			httpserver.WithRecoverLogger(ix.log),
+			httpserver.WithRecoverResponder(torznabErrorResponder),
 		),
 		// The feed renders up to maxRenderedFeedBytes of RSS; "+xml" covers rss+xml.
-		webhttp.Gzip(webhttp.WithGzipTypes("application/xml", "+xml")),
+		httpserver.Gzip(httpserver.WithGzipTypes("application/xml", "+xml")),
 	)
 }
 
-// authFailureLimiter rate-limits bad-apikey requests through webhttp's failed-auth
+// authFailureLimiter rate-limits bad-apikey requests through httpserver's failed-auth
 // preset, which owns the tuning: a shared token bucket of burst 10 with one token
 // every 6s, and a 429 envelope of code "too_many_auth_failures". Those numbers used
 // to be local constants hand-copied by sibling services. The human message stays
 // caller-owned, because naming the credential is what makes the refusal legible.
-func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
-	return webhttp.FailedAuthRateLimit(func(r *http.Request) bool {
+func (ix *Indexer) authFailureLimiter() httpserver.Middleware {
+	return httpserver.FailedAuthRateLimit(func(r *http.Request) bool {
 		return !ix.keyUnusable && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
 	}, "too many failed apikey attempts")
 }
@@ -233,7 +233,7 @@ func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q ur
 	if !ix.verifyKey.Verify(q.Get("apikey")) {
 		// Volume is bounded upstream: authFailureLimiter 429s over-budget bad-key
 		// requests before the access logger, so this line is capped at its rate.
-		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "client_ip", webhttp.ClientIP(r))
+		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "client_ip", httpserver.ClientIP(r))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
@@ -245,7 +245,7 @@ func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q ur
 func (ix *Indexer) requireScope(w http.ResponseWriter, r *http.Request) (string, bool) {
 	scope := scopeFor(r.Host, r.URL.Path)
 	if scope == "" {
-		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host), "client_ip", webhttp.ClientIP(r))
+		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host), "client_ip", httpserver.ClientIP(r))
 		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
 		return "", false
 	}
@@ -369,7 +369,7 @@ func scopeFromPath(p string) string { return scopeFromToken(firstSegment(p)) }
 // reverse proxy route per-tracker subdomains to the one port with no path rewrite;
 // the Host must reach the app unmodified.
 func scopeFromHost(host string) string {
-	canonical := webhttp.CanonicalHost(host)
+	canonical := httpserver.CanonicalHost(host)
 	if canonical == "" {
 		return ""
 	}

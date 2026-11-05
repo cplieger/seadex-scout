@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logattr"
@@ -275,7 +275,7 @@ func capAttr(s string) string { return logattr.Cap(s) }
 // grown, cutting on a rune boundary and marking the cut. An in-budget value
 // passes through unchanged, so an honest value stays byte-identical.
 func reboundTo(s string, budget int) string {
-	text, _ := runesafe.SanitizeCapped(s, budget, attrTruncMarker)
+	text, _ := textsafe.SanitizeCapped(s, budget, attrTruncMarker)
 	return text
 }
 

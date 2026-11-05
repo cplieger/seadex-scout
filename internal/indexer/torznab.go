@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe/v3"
-	"github.com/cplieger/xmlx"
+	"github.com/cplieger/go/textsafe"
+	"github.com/cplieger/go/xmlx"
 )
 
 // Torznab category ids. SeaDex is anime, so series map to the Anime subcategory
@@ -226,7 +226,7 @@ func writeAttr(b *strings.Builder, name, value string) {
 // field: XML escaping can expand an ampersand-heavy value ~5x, and those temporary
 // copies were one leg of the snapshot memory-amplification path.
 func escTo(b *strings.Builder, s string) {
-	_ = xml.EscapeText(b, []byte(runesafe.Sanitize(s)))
+	_ = xml.EscapeText(b, []byte(textsafe.Sanitize(s)))
 }
 
 // esc escapes a string for XML text or attribute values, returning a new string.
@@ -431,12 +431,12 @@ func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 // child-element vocabulary and decodeEnclosure/decodeAttr the attribute one, so a
 // field added here decodes nothing until it is wired into one of those.
 type itemXML struct {
-	// Title is the tracker-controlled release title, tagged runesafe.Untrusted at this
+	// Title is the tracker-controlled release title, tagged textsafe.Untrusted at this
 	// decode boundary - the one place Prowlarr titles enter the program - so any
 	// emission of the wire form is sanitized automatically.
 	budget    *xmlx.Budget
 	Attrs     []attrXML
-	Title     runesafe.Untrusted
+	Title     textsafe.Untrusted
 	GUID      string
 	Comments  string
 	Link      string
@@ -601,12 +601,12 @@ func (x *itemXML) decodeField(d *xml.Decoder, dst *string) error {
 // decodeUntrustedField decodes one text element into an Untrusted-tagged
 // destination: the same accounting as decodeField, with the provenance tag applied
 // at the decode boundary and the raw bytes preserved.
-func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) error {
+func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *textsafe.Untrusted) error {
 	var s string
 	if err := x.decodeField(d, &s); err != nil {
 		return err
 	}
-	*dst = runesafe.NewUntrusted(s)
+	*dst = textsafe.NewUntrusted(s)
 	return nil
 }
 
@@ -716,10 +716,10 @@ func (e *upstreamDocError) Error() string {
 }
 
 // capLogText bounds and cleans an untrusted string before it reaches a log line,
-// delegating to runesafe.SanitizeSingleLineBounded. It is the shared emit-boundary
+// delegating to textsafe.SanitizeSingleLineBounded. It is the shared emit-boundary
 // policy behind sanitizeUpstreamText and logParam.
 func capLogText(s string, maxLen int) string {
-	return runesafe.SanitizeSingleLineBounded(s, maxLen)
+	return textsafe.SanitizeSingleLineBounded(s, maxLen)
 }
 
 // upstreamTextMaxBytes bounds one untrusted upstream text value on its way to a log
@@ -780,7 +780,7 @@ func (x *itemXML) toItem() item {
 	seeders, leechers := itemPeers(attrs)
 
 	return item{
-		// Raw() by design: item rides journalItem into feed.json, and runesafe's
+		// Raw() by design: item rides journalItem into feed.json, and textsafe's
 		// machine-read persistence rule stores raw bytes in plain fields. The emit
 		// boundaries own the policy: escTo for the render, capLogText for logs.
 		Title:       strings.TrimSpace(x.Title.Raw()),

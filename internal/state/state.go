@@ -21,8 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/jsonx"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -142,7 +142,7 @@ const staleTempMaxAge = time.Hour
 // contract treats as the legacy pre-version shape (see currentSchemaVersion) -
 // and any wire-level failure.
 func schemaVersion(data []byte) (version int, err error) {
-	dec := jsoncap.NewDecoder(bytes.NewReader(data), 0)
+	dec := jsonx.NewDecoder(bytes.NewReader(data), 0)
 	err = dec.Object(func(key string) error {
 		if !strings.EqualFold(key, "version") {
 			return dec.Skip()
@@ -196,7 +196,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	if err == nil && !s.readOnly {
 		// Unlike the ambient variant this reports counts instead of logging its
 		// own Info summary, so Load narrates the reclaim itself.
-		sweep, cleanErr := atomicfile.CleanupStaleTempsInRoot(ctx, root, staleTempMaxAge, atomicfile.WithLogger(s.log))
+		sweep, cleanErr := filesafe.CleanupStaleTempsInRoot(ctx, root, staleTempMaxAge, filesafe.WithLogger(s.log))
 		if cleanErr != nil {
 			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
 		}
@@ -248,7 +248,7 @@ func (s *Store) classifyReadFailure(root *os.Root, err error) error {
 		s.log.Info("no state file, starting cold", "path", s.path)
 		return nil
 	}
-	if errors.Is(err, atomicfile.ErrFileTooLarge) || errors.Is(err, atomicfile.ErrNotRegular) {
+	if errors.Is(err, filesafe.ErrFileTooLarge) || errors.Is(err, filesafe.ErrNotRegular) {
 		// Save enforces maxStateBytes and only ever writes a regular file, so an
 		// oversized or non-regular file can only be foreign or corrupt; preserve it.
 		s.maybeQuarantine(root)
@@ -271,11 +271,11 @@ func (s *Store) classifyReadFailure(root *os.Root, err error) error {
 // whole read/classify/preserve decision: the open is symlink-confined and
 // O_NONBLOCK, so a redirected or blocking special file at the state path is an
 // error Load can classify rather than an uninterruptible open
-// (atomicfile.ReadBounded uses os.Open, which follows a symlink and blocks on
+// (filesafe.ReadBounded uses os.Open, which follows a symlink and blocks on
 // a FIFO with no writer past both of its context checks). The caller owns the
 // root's lifetime.
 func (s *Store) readState(ctx context.Context, root *os.Root) ([]byte, error) {
-	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(s.path), maxStateBytes)
+	return filesafe.ReadBoundedInRoot(ctx, root, filepath.Base(s.path), maxStateBytes)
 }
 
 // foreignInode reports whether the state path holds an inode the confined
@@ -434,13 +434,13 @@ func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 // writeState owns Save's persistence phase: the pending-file lifecycle,
 // encoding under the size bound, the atomic commit, and durability reporting.
 func (s *Store) writeState(ctx context.Context, st *State) error {
-	pf, err := atomicfile.NewPendingFile(ctx, s.path,
-		atomicfile.WithLogger(s.log),
-		atomicfile.WithMkdirMode(dirMode),
-		atomicfile.WithMode(fileMode),
+	pf, err := filesafe.NewPendingFile(ctx, s.path,
+		filesafe.WithLogger(s.log),
+		filesafe.WithMkdirMode(dirMode),
+		filesafe.WithMode(fileMode),
 		// One byte beyond maxStateBytes for json.Encoder's trailing
 		// newline, truncated away in encodeState (see its doc).
-		atomicfile.WithMaxBytes(maxStateBytes+1))
+		filesafe.WithMaxBytes(maxStateBytes+1))
 	if err != nil {
 		return fmt.Errorf("state: write %s: %w", s.path, err)
 	}
@@ -471,9 +471,9 @@ func (s *Store) writeState(ctx context.Context, st *State) error {
 
 // encodeState serializes st into the pending temp file under Load's size
 // bound and drops the encoder's trailing newline.
-func encodeState(pf *atomicfile.PendingFile, st *State, path string) error {
+func encodeState(pf *filesafe.PendingFile, st *State, path string) error {
 	if encErr := json.NewEncoder(pf).Encode(st); encErr != nil {
-		if errors.Is(encErr, atomicfile.ErrFileTooLarge) {
+		if errors.Is(encErr, filesafe.ErrFileTooLarge) {
 			return fmt.Errorf("state: encode %s: encoded state exceeds the %d-byte load limit (%w); keeping previous state file", path, maxStateBytes, encErr)
 		}
 		return fmt.Errorf("state: encode %s: %w", path, encErr)

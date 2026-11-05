@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/slogx/capture"
 )
 
 // emittedAttrsByTitle returns the string-valued attributes of every emitted

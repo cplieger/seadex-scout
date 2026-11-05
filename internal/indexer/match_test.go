@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/go/urlform"
 )
 
 // TestTrackerScope pins the two documented contracts of trackerScope that the

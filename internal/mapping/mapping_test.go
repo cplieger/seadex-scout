@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/cplieger/animap/mapread"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // TestRecord_routes pins the user's rule on the record: a TMDB movie id is a

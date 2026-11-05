@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/textsafe"
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -23,7 +24,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/reportfs"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/urlform"
 )
 
 const (
@@ -576,13 +576,13 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	if err := interrupted(ctx, "report write"); err != nil {
 		return err
 	}
-	// Reap stale atomicfile temps first: a crash between temp create and rename
+	// Reap stale filesafe temps first: a crash between temp create and rename
 	// orphans a .atomicfile-<digits>.tmp in the report dir forever otherwise. The
 	// caller holds report.lock, so no concurrent writer owns an in-flight temp, and
 	// a missing dir is not an error. Failed is surfaced because report.dir's mode
 	// and ownership are the operator's and no louder failure here implies it; a
 	// flat sweep never increments Unreadable.
-	sweep, cleanErr := atomicfile.CleanupStaleTemps(ctx, dir, time.Hour, atomicfile.WithLogger(log))
+	sweep, cleanErr := filesafe.CleanupStaleTemps(ctx, dir, time.Hour, filesafe.WithLogger(log))
 	if cleanErr != nil {
 		// No dir attribute: the redacting logger would mask it anyway.
 		log.Warn("stale report temp cleanup failed", "error", cleanErr)
@@ -618,7 +618,7 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// which runs on a detached budget, so nothing expensive may be left for it.
 	markdown := []byte(renderMarkdown(safe))
 	// The pair ordering only holds when the JSON half's directory entry is
-	// crash-durable: atomicfile reports a rename whose parent-dir fsync failed as
+	// crash-durable: filesafe reports a rename whose parent-dir fsync failed as
 	// Durable=false with a NIL error, so stop with the JSON half only - as a
 	// degradation, not a failure, since the bytes and the next action are the same.
 	jsonDurable, err := writeReportHalf(ctx, "json", dir, jsonPath, data, log)
@@ -722,32 +722,32 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 	}
 }
 
-// atomicWriteFile is atomicfile.WriteFile behind a package variable so the
+// atomicWriteFile is filesafe.WriteFile behind a package variable so the
 // durability gates in WriteFiles can be exercised with a Durable=false result;
 // a parent-directory fsync failure cannot be induced on a test filesystem.
-var atomicWriteFile = atomicfile.WriteFile
+var atomicWriteFile = filesafe.WriteFile
 
 // writeAtomic writes data to path atomically under the report pair's fixed
-// option set and returns atomicfile's whole Result rather than just an error,
+// option set and returns filesafe's whole Result rather than just an error,
 // because the caller gates the pair ORDERING on Result.Durable.
 //
 // Reports enumerate the operator's library and can carry private-tracker page
 // links, so the directory and every written half are owner-only (CWE-732).
-func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
+func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (filesafe.Result, error) {
 	// The directory's privacy rule has one home (internal/reportfs): WithMkdirMode
 	// goes through MkdirAll's perm argument, which a umask or default ACL filters.
 	if err := reportfs.MakeDir(filepath.Dir(path)); err != nil {
-		return atomicfile.Result{}, err
+		return filesafe.Result{}, err
 	}
 	return atomicWriteFile(ctx, path, data,
-		atomicfile.WithLogger(log),
-		atomicfile.WithMode(reportfs.FileMode))
+		filesafe.WithLogger(log),
+		filesafe.WithMode(reportfs.FileMode))
 }
 
 // writeReportHalf persists one report half and applies the two policies both
 // halves share: a hard write failure is wrapped with the stage and the basename
 // only (the cause is redacted) and returned as an error, while a rename whose
-// parent-directory fsync failed - atomicfile's Durable=false with a NIL error -
+// parent-directory fsync failed - filesafe's Durable=false with a NIL error -
 // is reported through the durable return value, NOT as an error. A non-durable
 // write SUCCEEDED, so there is nothing for the operator to do; it still matters
 // for ORDERING, which is why the flag is returned rather than swallowed.
@@ -765,14 +765,14 @@ func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, 
 // with internal/notify's alert attributes; on top of it this percent-encodes the
 // above-ASCII policy runes url.Parse accepts but a terminal or Markdown viewer
 // must never receive raw (C1 controls, the Bidi_Control set, U+2028/U+2029),
-// classified by runesafe.IsUnsafeNonASCII. Percent-encoding is semantically
+// classified by textsafe.IsUnsafeNonASCII. Percent-encoding is semantically
 // transparent, so an ordinary destination is unchanged.
 func escapeLinkURL(u string) string {
 	u = logattr.EscapeLinkDestination(u)
 	var b strings.Builder
 	for _, r := range u {
 		switch {
-		case runesafe.IsUnsafeNonASCII(r):
+		case textsafe.IsUnsafeNonASCII(r):
 			for _, byt := range []byte(string(r)) {
 				fmt.Fprintf(&b, "%%%02X", byt)
 			}
@@ -825,10 +825,10 @@ func escapeBestGroup(group string) string {
 
 // sanitizeDisplayText makes an untrusted string safe for the machine-readable
 // outputs (the JSON report file and slog attributes): the unsafe-rune set is the
-// shared runesafe policy, each replaced with a space. Markdown output has its own
+// shared textsafe policy, each replaced with a space. Markdown output has its own
 // context-aware sanitizers (escapeCell, escapeLinkURL).
 func sanitizeDisplayText(s string) string {
-	return runesafe.Sanitize(s)
+	return textsafe.Sanitize(s)
 }
 
 // capDisplayText is sanitizeDisplayText plus a volume cap: an honest value passes
@@ -1007,10 +1007,10 @@ func sanitizedIncomplete(inc []incompleteEntry) []incompleteEntry {
 // and encodes the table/link delimiters (| [ ]) and the backslash itself.
 // strings.NewReplacer makes one non-overlapping left-to-right pass and never
 // re-scans its output, so encoding & first does not double-encode. A
-// runesafe.SanitizeSingleLine pre-pass removes the control and bidi runes AND
+// textsafe.SanitizeSingleLine pre-pass removes the control and bidi runes AND
 // CR/LF, which a single-line sink cannot carry.
 func escapeCell(s string) string {
-	return cellEscaper.Replace(runesafe.SanitizeSingleLine(s))
+	return cellEscaper.Replace(textsafe.SanitizeSingleLine(s))
 }
 
 // orEmpty returns the empty-cell marker for a blank string.

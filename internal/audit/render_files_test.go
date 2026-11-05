@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/reportfs"
-	"github.com/cplieger/slogx/capture"
 )
 
 type writtenReport struct {
@@ -63,7 +63,7 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 
 // TestWriteFilesReportPairIsOwnerOnly pins the report pair's least-privilege file
 // mode: a report enumerates the operator's whole library and carries private-tracker
-// page links, and atomicfile's DEFAULT mode is 0o644, so a dropped
+// page links, and filesafe's DEFAULT mode is 0o644, so a dropped
 // WithMode(reportfs.FileMode) would publish every report to any local account able to
 // traverse the bind-mounted /config tree with nothing failing. Only the FILE mode is
 // asserted: a default ACL on the parent (containers, group-writable bind mounts) can
@@ -236,7 +236,7 @@ func TestWriteFilesSurfacesProbePathError(t *testing.T) {
 // cannot be committed, the Markdown half is never attempted, so a failed run
 // cannot leave a dangling .md without its machine-readable pair. A dangling
 // JSON symlink is a root-safe deterministic failure: os.Stat treats the
-// missing target as free during reportPairStem, then atomicfile refuses the
+// missing target as free during reportPairStem, then filesafe refuses the
 // symlink target — so this also runs in root-run containers where a chmod
 // 0555 dir would not produce EACCES.
 func TestWriteFilesJSONFailureSkipsMarkdown(t *testing.T) {
@@ -405,7 +405,7 @@ func TestReportPairStemSkipsMultipleOccupiedSuffixes(t *testing.T) {
 
 // pathExistsCancelCtx is a context whose Err flips to context.Canceled once
 // the watched path exists, deterministically landing a cancellation right
-// after the JSON half commits (atomicfile's own ctx polls all happen before
+// after the JSON half commits (filesafe's own ctx polls all happen before
 // the final rename, so the JSON write itself succeeds). The checkpoints poll
 // Err via interrupted and never select on Done; context.Cause falls back to
 // Err for a non-cancelCtx context.
@@ -492,7 +492,7 @@ func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 }
 
 // TestWriteFilesNonDurableJSONSkipsMarkdown pins the JSON half's durability ORDERING
-// effect without treating it as a failure. atomicfile reports a rename whose parent-dir
+// effect without treating it as a failure. filesafe reports a rename whose parent-dir
 // fsync failed as Result{Durable:false} with a NIL error: the bytes reached their final
 // path and a re-run cannot fix an fsync, so WriteFiles returns nil. It must still skip
 // the Markdown half (a recovered .md without its machine-readable pair is the state the
@@ -507,7 +507,7 @@ func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
 	orig := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = orig })
 	calls := 0
-	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...atomicfile.Option) (atomicfile.Result, error) {
+	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...filesafe.Option) (filesafe.Result, error) {
 		calls++
 		res, err := orig(ctx, path, data, opts...)
 		res.Durable = false
@@ -559,7 +559,7 @@ func TestWriteFilesNonDurableMarkdownStillReportsWritten(t *testing.T) {
 	orig := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = orig })
 	calls := 0
-	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...atomicfile.Option) (atomicfile.Result, error) {
+	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...filesafe.Option) (filesafe.Result, error) {
 		calls++
 		res, err := orig(ctx, path, data, opts...)
 		if calls == 2 {
@@ -622,7 +622,7 @@ func TestWriteFilesSurfacesJSONEncodeError(t *testing.T) {
 // .atomicfile-<digits>.tmp orphaned in the report dir by a SIGKILL/OOM between
 // temp create and rename is removed, while an in-flight temp (fresh mtime) and
 // an operator's existing report file are left alone. Dropping the
-// CleanupStaleTemps call, or passing it a non-positive maxAge (atomicfile then
+// CleanupStaleTemps call, or passing it a non-positive maxAge (filesafe then
 // warns and skips), leaks orphans into /config forever with nothing failing.
 func TestWriteFilesReapsStaleTempsKeepsReportFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -646,7 +646,7 @@ func TestWriteFilesReapsStaleTempsKeepsReportFiles(t *testing.T) {
 	}
 
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("stale atomicfile temp stat = %v, want removed", err)
+		t.Errorf("stale filesafe temp stat = %v, want removed", err)
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("in-flight temp must survive the reap: %v", err)

@@ -8,7 +8,7 @@ import (
 	"github.com/cplieger/animap/mapread"
 )
 
-// errTransport fails every request with a plain error httpx does not retry,
+// errTransport fails every request with a plain error httpclient does not retry,
 // so a refresh returns after the first attempt without sleeping.
 type errTransport struct{}
 

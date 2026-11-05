@@ -7,7 +7,7 @@ package logattr
 import (
 	"strings"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // MaxBytes is the per-attribute volume budget every untrusted value is rendered
@@ -45,17 +45,17 @@ func EscapeLinkDestination(s string) string { return linkDestEscaper.Replace(s) 
 // Joiner renders a multi-source attribute under Cap's byte budget WITHOUT first
 // materializing the untrusted aggregate: the joined-then-capped shape allocated
 // the full aggregate, a plausible OOM kill of the container. Honest values stay
-// byte-identical to that form, because runesafe.Sanitize is a per-rune map.
+// byte-identical to that form, because textsafe.Sanitize is a per-rune map.
 type Joiner struct {
-	b *runesafe.Budget
+	b *textsafe.Budget
 	// dropped records a unit WritePair refused whole. Nothing was written, so
-	// runesafe.Budget's own cut stays unlatched and cannot carry the fact.
+	// textsafe.Budget's own cut stays unlatched and cannot carry the fact.
 	dropped bool
 }
 
 // NewJoiner returns a joiner with the full per-attribute budget. The marker is
 // charged OUTSIDE the budget (see String), which is this package's own contract.
-func NewJoiner() *Joiner { return &Joiner{b: runesafe.NewBudget(MaxBytes, "")} }
+func NewJoiner() *Joiner { return &Joiner{b: textsafe.NewBudget(MaxBytes, "")} }
 
 // Write appends the sanitized prefix of raw that still fits the budget and reports
 // whether the joiner can still accept more. The cap runs first, so the sanitizer
@@ -76,8 +76,8 @@ func (j *Joiner) WriteSep(sep string) bool { return j.Write(sep) }
 // raw-byte estimate would admit a pair the growth Write documents then cuts.
 func (j *Joiner) WritePair(left, sep, right string) bool {
 	room := j.remaining()
-	cleanLeft, leftCut := runesafe.SanitizeBudgeted(left, room, "")
-	cleanRight, rightCut := runesafe.SanitizeBudgeted(right, room, "")
+	cleanLeft, leftCut := textsafe.SanitizeBudgeted(left, room, "")
+	cleanRight, rightCut := textsafe.SanitizeBudgeted(right, room, "")
 	if leftCut || rightCut || len(cleanLeft)+len(sep)+len(cleanRight) > room {
 		j.dropped = true
 		return false
@@ -104,7 +104,7 @@ func (j *Joiner) String() string {
 		return text + TruncMarker
 	}
 	if j.dropped {
-		return runesafe.CapBytes(text, max(0, MaxBytes-len(TruncMarker))) + TruncMarker
+		return textsafe.CapBytes(text, max(0, MaxBytes-len(TruncMarker))) + TruncMarker
 	}
 	return text
 }

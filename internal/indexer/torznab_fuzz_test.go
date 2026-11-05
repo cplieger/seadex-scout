@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // FuzzParseTorznab exercises the Prowlarr Torznab XML parser on arbitrary bytes.
@@ -95,17 +95,17 @@ func FuzzParseTorznab(f *testing.F) {
 
 func normalizedRenderedItem(it item) item {
 	it.GUID = it.guid()
-	// escTo sanitizes every rendered text field (runesafe.Sanitize maps
+	// escTo sanitizes every rendered text field (textsafe.Sanitize maps
 	// C1/bidi/U+2028-class runes and DEL to spaces, invalid UTF-8 to
 	// U+FFFD) and toItem re-trims on re-parse; and pubDate renders at
 	// RFC1123Z second precision while parsePubDate's RFC3339 layout
 	// accepts fractional seconds on input. Mirror both, or a valid XML
 	// input carrying such runes (or a fractional pubDate) fails the
 	// round trip spuriously.
-	it.Title = strings.TrimSpace(runesafe.Sanitize(it.Title))
-	it.GUID = strings.TrimSpace(runesafe.Sanitize(it.GUID))
-	it.InfoURL = strings.TrimSpace(runesafe.Sanitize(it.InfoURL))
-	it.DownloadURL = strings.TrimSpace(runesafe.Sanitize(it.DownloadURL))
+	it.Title = strings.TrimSpace(textsafe.Sanitize(it.Title))
+	it.GUID = strings.TrimSpace(textsafe.Sanitize(it.GUID))
+	it.InfoURL = strings.TrimSpace(textsafe.Sanitize(it.InfoURL))
+	it.DownloadURL = strings.TrimSpace(textsafe.Sanitize(it.DownloadURL))
 	// writeItem renders the epoch for an unknown date, so the re-parse
 	// returns the epoch rather than the zero time.
 	if it.PubDate.IsZero() {

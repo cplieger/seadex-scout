@@ -24,13 +24,13 @@ import (
 	"time"
 
 	"github.com/cplieger/animap/mapread"
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/slogx/capture"
 )
 
 func testLogger() *slog.Logger {
@@ -65,8 +65,8 @@ func TestStoreLoadDoesNotBlockOnFifoStatePath(t *testing.T) {
 	// blocking one; against the real code Load returns immediately.
 	select {
 	case err := <-loaded:
-		if !errors.Is(err, atomicfile.ErrNotRegular) {
-			t.Errorf("Load of a FIFO state path error = %v, want atomicfile.ErrNotRegular", err)
+		if !errors.Is(err, filesafe.ErrNotRegular) {
+			t.Errorf("Load of a FIFO state path error = %v, want filesafe.ErrNotRegular", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Load blocked on a FIFO state path, want the O_NONBLOCK open to fail it immediately")
@@ -383,7 +383,7 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 		t.Fatalf("close oversized state: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	// A canceled read is an UNCLASSIFIED failure (atomicfile rejects on ctx
+	// A canceled read is an UNCLASSIFIED failure (filesafe rejects on ctx
 	// before it stats the file), so it arms the preservation block. The
 	// over-cap read below positively classifies the same file, so it must
 	// CLEAR that block: quarantining the evidence and then still refusing
@@ -415,7 +415,7 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 // TestStoreLoadNonRegularPathIsClassifiedCorruption pins the DETERMINISTIC
 // half of the loader's self-heal-versus-preserve taxonomy for a non-regular
 // inode at the state path (a directory here; a FIFO, device or socket reaches
-// the same atomicfile.ErrNotRegular). No retry can turn such a path into valid
+// the same filesafe.ErrNotRegular). No retry can turn such a path into valid
 // state, so treating it as an unclassified read fault would arm the Save block
 // forever and freeze the library snapshot, mapping cache, AniList memo and
 // finding dedupe until an operator intervened.
@@ -431,8 +431,8 @@ func TestStoreLoadNonRegularPathIsClassifiedCorruption(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load of a non-regular state path returned nil error, want the corruption reported")
 	}
-	if !errors.Is(err, atomicfile.ErrNotRegular) {
-		t.Errorf("error = %v, want it to match atomicfile.ErrNotRegular", err)
+	if !errors.Is(err, filesafe.ErrNotRegular) {
+		t.Errorf("error = %v, want it to match filesafe.ErrNotRegular", err)
 	}
 	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
 		t.Errorf("non-regular state path was not quarantined (stat err = %v), want %s.corrupt preserved", statErr, path)
@@ -1309,7 +1309,7 @@ func TestStoreSaveCanceledFailsFastWithoutWriting(t *testing.T) {
 // when the atomic rename cannot land (the target path is occupied by a
 // directory, a root-safe injection), Save must return a wrapped "state: write"
 // error naming the path, and the failed Commit must leave no orphaned temp in
-// the parent directory (atomicfile removes its temp on a failed Commit).
+// the parent directory (filesafe removes its temp on a failed Commit).
 func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "state.json")
@@ -1420,7 +1420,7 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 // TestStoreSaveOverCapErrorReportsSizes pins the over-cap error's numbers:
 // the app wrap names the limit Load actually enforces (maxStateBytes, NOT
 // the internal +1 the encoder's newline rides on), and the wrapped
-// atomicfile rejection quotes the staged size the encoder attempted - the
+// filesafe rejection quotes the staged size the encoder attempted - the
 // JSON size plus that trailing newline - so an operator can read both the
 // contract and the overshoot from one line.
 func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
@@ -1437,8 +1437,8 @@ func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	if saveErr == nil {
 		t.Fatal("Save returned nil error, want over-cap rejection")
 	}
-	if !errors.Is(saveErr, atomicfile.ErrFileTooLarge) {
-		t.Errorf("error = %v, want it to match atomicfile.ErrFileTooLarge", saveErr)
+	if !errors.Is(saveErr, filesafe.ErrFileTooLarge) {
+		t.Errorf("error = %v, want it to match filesafe.ErrFileTooLarge", saveErr)
 	}
 	wantLimit := fmt.Sprintf("exceeds the %d-byte load limit", maxStateBytes)
 	if !strings.Contains(saveErr.Error(), wantLimit) {
@@ -1557,7 +1557,7 @@ func TestStoreLoadNonDirectoryStateDirSurfacesAsReadError(t *testing.T) {
 // "state: encode <path>", distinct from the over-cap rejection message.
 func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	pf, err := atomicfile.NewPendingFile(t.Context(), path)
+	pf, err := filesafe.NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -1571,7 +1571,7 @@ func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 	if !strings.Contains(encErr.Error(), "state: encode") {
 		t.Errorf("error = %q, want the generic 'state: encode' wrap", encErr.Error())
 	}
-	if errors.Is(encErr, atomicfile.ErrFileTooLarge) {
+	if errors.Is(encErr, filesafe.ErrFileTooLarge) {
 		t.Errorf("error = %v classified as the over-cap rejection, want the generic I/O wrap", encErr)
 	}
 }

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/go/urlform"
 )
 
 // FuzzLookupByRelativeURL fuzzes the structural relative-URL tracker resolver over

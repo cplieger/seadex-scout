@@ -4,8 +4,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/urlform"
 )
 
 // Match keys a Prowlarr result to a SeaDex release by the numeric id in the

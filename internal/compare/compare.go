@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/keyenc"
+	"github.com/cplieger/go/keyenc"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/filter"

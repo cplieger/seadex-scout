@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/keyenc"
+	"github.com/cplieger/go/keyenc"
 )
 
 const (

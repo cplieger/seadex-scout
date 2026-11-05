@@ -11,7 +11,7 @@ import (
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/radarr"
 	"github.com/cplieger/arrapi/v3/sonarr"
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
@@ -88,9 +88,9 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 		return scoutCore{}, err
 	}
 
-	seadexHTTP := httpx.NewClient(seadexTimeout)
-	mappingHTTP := httpx.NewClient(mappingTimeout)
-	anilistHTTP := httpx.NewClient(anilistTimeout)
+	seadexHTTP := httpclient.New(seadexTimeout)
+	mappingHTTP := httpclient.New(mappingTimeout)
+	anilistHTTP := httpclient.New(anilistTimeout)
 	reportArrs(ctx, sc, rc)
 
 	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL,
@@ -224,10 +224,10 @@ func indexerLogger(log *slog.Logger) *slog.Logger {
 }
 
 // Keep X-Api-Key on the configured origin: net/http forwards this custom header
-// on followed redirects, and httpx's same-host default admits another port.
+// on followed redirects, and httpclient's same-host default admits another port.
 func newProwlarrClient() *http.Client {
-	c := httpx.NewClient(prowlarrTimeout)
-	c.CheckRedirect = httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true))
+	c := httpclient.New(prowlarrTimeout)
+	c.CheckRedirect = httpclient.RedirectPolicyFunc(httpclient.WithSameOrigin(true))
 	return c
 }
 
@@ -343,7 +343,7 @@ func sonarrReachableAttrs(info *sonarr.Info) []any {
 // without an operator; anything else may be transient (Warn). arrapi's errors
 // carry no request URL; LogSafeError is defence in depth.
 func logArrStartupFailure(arr string, err error) {
-	safeErr := httpx.LogSafeError(err)
+	safeErr := httpclient.LogSafeError(err)
 	if errors.Is(err, context.Canceled) {
 		slog.Debug(arr+" startup ping cancelled by shutdown", "error", safeErr)
 		return

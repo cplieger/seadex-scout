@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/go/urlform"
 )
 
 // Canonical tracker names: the Tracker.Name values of the table entries.

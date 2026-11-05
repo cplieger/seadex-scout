@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cplieger/keyenc"
+	"github.com/cplieger/go/keyenc"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cplieger/animap/mapread"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // TestLoader_Load_logsSkippedOverrideCount pins the operator-visible skipped

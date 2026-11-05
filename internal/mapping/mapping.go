@@ -23,10 +23,10 @@ import (
 	"time"
 
 	"github.com/cplieger/animap/mapread"
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsoncap/v2"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/jsonx"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 )
@@ -691,7 +691,7 @@ func degradeRefresh(prev *Cache, class refreshFailureClass, staleMsg string, cau
 // discarding its wrap chain, so isPersistentRefreshFailure can still recognize
 // a sentinel class on the value the caller passes it.
 func logSafeCause(err error) error {
-	return &sanitizedError{err: err, text: runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)}
+	return &sanitizedError{err: err, text: textsafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)}
 }
 
 // sanitizedError renders pre-sanitized log-safe text while preserving the
@@ -757,26 +757,26 @@ func (l *Loader) reuseCachedRecords(prev *Cache) Cache {
 	return refreshed
 }
 
-// retried runs one mapread request under httpx.Do's retry policy. mapread
+// retried runs one mapread request under httpclient.Do's retry policy. mapread
 // returns a come-back-later status as a plain *mapread.StatusError, which
-// httpx cannot classify, so one whose code httpx retries is marked
-// transient; a transport failure is httpx's own call.
+// httpclient cannot classify, so one whose code httpclient retries is marked
+// transient; a transport failure is httpclient's own call.
 func retried[T any](ctx context.Context, l *Loader, fn func(context.Context) (T, error)) (T, error) {
-	return httpx.Do(ctx,
+	return httpclient.Do(ctx,
 		func(ctx context.Context) (T, error) {
 			v, err := fn(ctx)
-			if se, ok := errors.AsType[*mapread.StatusError](err); ok && refusal(err) == "" && httpx.IsRetryableStatus(se.Code) {
-				err = httpx.MarkTransient(err)
+			if se, ok := errors.AsType[*mapread.StatusError](err); ok && refusal(err) == "" && httpclient.IsRetryableStatus(se.Code) {
+				err = httpclient.MarkTransient(err)
 			}
 			return v, err
 		},
-		httpx.WithMaxAttempts(maxAttempts),
-		httpx.WithBaseDelay(baseDelay),
-		httpx.WithLabel("mapping"),
-		httpx.WithLogger(l.log),
+		httpclient.WithMaxAttempts(maxAttempts),
+		httpclient.WithBaseDelay(baseDelay),
+		httpclient.WithLabel("mapping"),
+		httpclient.WithLogger(l.log),
 		// Demoted to Debug: a refresh whose retries ran out surfaces again from the
 		// caller with more context, and demoting keeps the per-attempt diagnostics.
-		httpx.WithExhaustedLevel(slog.LevelDebug))
+		httpclient.WithExhaustedLevel(slog.LevelDebug))
 }
 
 // degradeFetch degrades a failed check, download or projection, naming its fixed
@@ -1104,7 +1104,7 @@ func (l *Loader) effectiveOverrides(ctx context.Context) []Record {
 
 // readOverridesFile reads the overrides file through an os.Root over its own
 // directory, so the read can neither be redirected out of /config nor block:
-// atomicfile.ReadBoundedInRoot opens with O_NONBLOCK and refuses a non-regular
+// filesafe.ReadBoundedInRoot opens with O_NONBLOCK and refuses a non-regular
 // inode, where a plain os.Open follows a symlink and blocks indefinitely on a
 // writer-less FIFO, past its only context check. A missing file still surfaces
 // as fs.ErrNotExist.
@@ -1119,7 +1119,7 @@ func (l *Loader) readOverridesFile(ctx context.Context) ([]byte, error) {
 			l.log.Warn("mapping: could not close overrides directory handle", "dir", dir, "error", clErr)
 		}
 	}()
-	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(l.overridesPath), maxOverrideBytes)
+	return filesafe.ReadBoundedInRoot(ctx, root, filepath.Base(l.overridesPath), maxOverrideBytes)
 }
 
 // readOverrides reads and parses the overrides file, returning ok=false for
@@ -1153,7 +1153,7 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 		return overrideSet{}, false
 	case err != nil:
 		l.log.Error("mapping: overrides.json malformed, pinned mappings not applied; fix the file's JSON, or remove it", "path", l.overridesPath,
-			"error", errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)))
+			"error", errors.New(textsafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)))
 		return overrideSet{}, false
 	}
 	if set.unknown > 0 {
@@ -1200,7 +1200,7 @@ func (e *unstatedScopeError) Error() string {
 // and an unknown key is counted and skipped. The literals restate Record's json
 // tags, which is the edit Record's own doc requires. typeNamed reports a type
 // key, which is counted as unknown.
-func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record, typeNamed bool, err error) {
+func decodeOverrideRecord(dec *jsonx.Decoder, set *overrideSet) (record Record, typeNamed bool, err error) {
 	err = dec.Object(func(key string) error {
 		switch {
 		case strings.EqualFold(key, "anilist_id"):
@@ -1235,7 +1235,7 @@ func decodeOverrideRecord(dec *jsoncap.Decoder, set *overrideSet) (record Record
 // applyRecord decodes the next override record from the token stream and folds
 // it into the set, canonicalized: a zero-AniList-ID record counts as skipped,
 // and a duplicate ID replaces its earlier record.
-func (set *overrideSet) applyRecord(dec *jsoncap.Decoder, position map[int]int) error {
+func (set *overrideSet) applyRecord(dec *jsonx.Decoder, position map[int]int) error {
 	record, typeNamed, err := decodeOverrideRecord(dec, set)
 	if err != nil {
 		return err
@@ -1292,7 +1292,7 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	if len(trimmedData) == 0 || trimmedData[0] != '[' {
 		return overrideSet{}, errors.New("mapping: overrides must be a JSON array")
 	}
-	dec := jsoncap.NewDecoder(bytes.NewReader(trimmedData), 0)
+	dec := jsonx.NewDecoder(bytes.NewReader(trimmedData), 0)
 	if _, err := dec.Open('['); err != nil { // the '['-first-byte guard above rules out null
 		return overrideSet{}, err
 	}
