@@ -131,7 +131,7 @@ func TestAdvanceCursor(t *testing.T) {
 // the rejection arms: the cursor values they quote are untrusted upstream text
 // bounded only by maxPageBytes, and internal/scout logs the resulting error
 // verbatim as a slog attribute, so an oversized value must reach the log capped
-// and marked rather than balloon one Loki record (the app-wide runesafe policy).
+// and marked rather than balloon one Loki record (the app-wide textsafe policy).
 func TestAdvanceCursorBoundsRejectedValueInDiagnostic(t *testing.T) {
 	huge := strings.Repeat("x", 64<<10)
 	tests := []struct {

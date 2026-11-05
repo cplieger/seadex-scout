@@ -3,8 +3,8 @@ package indexer
 import (
 	"net/url"
 
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/urlform"
 )
 
 // downloadURLForScope resolves a grabbable .torrent download URL for one curated

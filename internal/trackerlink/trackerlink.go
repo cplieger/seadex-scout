@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/urlform"
 )
 
 // Publish returns a link a human can follow for a torrent on tracker, or "" when

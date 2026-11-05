@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // advanceFixture is the seed snapshot the Advance tests start from: a current-schema

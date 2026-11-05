@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
-	"github.com/cplieger/slogx"
-	"github.com/cplieger/slogx/capture"
 )
 
 // The string-level expansion mechanics (braced-only matching, keep-literal on
 // unknown/unset, bare-dollar safety) are yamlenv's contract, tested in
-// github.com/cplieger/envx/yamlenv/v2. Here the app tests its own allowlist
+// github.com/cplieger/go/yamlenv. Here the app tests its own allowlist
 // policy plus the Load-level wiring (expansion, the unresolved-refs warning,
 // keys-stay-literal, and the secret-redaction posture).
 
@@ -1588,7 +1588,7 @@ func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
 }
 
 // TestSanitizeYAMLErrorFallbacks and TestIsLinePrefix moved with the
-// sanitizer to github.com/cplieger/envx/yamlenv/v2 (SanitizeDecodeError's
+// sanitizer to github.com/cplieger/go/yamlenv (SanitizeDecodeError's
 // fallback, collision-guard, and line-prefix tables live there); the
 // Load-level tests above and below pin the app-visible posture end to end,
 // including the WithUnknownKeyEcho policy (TestLoadRejectsUnknownKeys).
@@ -2020,7 +2020,7 @@ func TestValidateIndexerEmptyABPasskeyWarning(t *testing.T) {
 }
 
 // TestValidateWarnsOnRelativeReportDir pins the relative-report.dir
-// diagnostic: atomicfile's path gate rejects a non-absolute path, so a
+// diagnostic: filesafe's path gate rejects a non-absolute path, so a
 // relative report.dir validates cleanly and then loses both halves of the
 // report pair at the end of a report run. Warn-only at config time (a daemon
 // that never reports is unaffected), and the warning is field-name-only -

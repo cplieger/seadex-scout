@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // TestUpstreamSearchPreservesExistingQuery pins the URL-join logic of the
@@ -259,7 +259,7 @@ func TestFetchAndParseClassifiesTorznabErrorDoc(t *testing.T) {
 			if err == nil {
 				t.Fatal("fetchAndParse on an undecodable feed returned nil error")
 			}
-			var transient httpx.Transient
+			var transient httpclient.Transient
 			gotTransient := errors.As(err, &transient) && transient.IsTransient()
 			if gotTransient != tc.wantTransient {
 				t.Errorf("transient = %v, want %v (err = %v)", gotTransient, tc.wantTransient, err)
@@ -349,7 +349,7 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 // the parse boundary: a syntactically valid Torznab <error> document's
 // code/description are attacker-influenced text, and the request that produced them
 // carried the Prowlarr API key, so both the terminal and the retryable document paths
-// must scrub the key before the error reaches httpx.Do's retry logger or a caller WARN
+// must scrub the key before the error reaches httpclient.Do's retry logger or a caller WARN
 // (CWE-532). "The key" is every credential the request TRANSMITS: config accepts (with
 // a WARN) one embedded in the feed URL, and there the header key is typically EMPTY,
 // so a header-key-only redaction was inert - hence the two feed-URL cases below.
@@ -489,7 +489,7 @@ func TestUpstreamSearchRedactsReflectedBasicAuthorization(t *testing.T) {
 // on the GENERIC 2xx decode-failure path (sibling of the <error>-document path above):
 // encoding/xml returns the raw strconv error quoting the FULL unparsed <size> value,
 // so a hostile 2xx body can pack a reflection of the Prowlarr API key into the search
-// error that httpx.Do's retry logger and fetchRaw's WARN expand into the log stream.
+// error that httpclient.Do's retry logger and fetchRaw's WARN expand into the log stream.
 // The error must be redacted FIRST and then bounded (a 200-byte cap plus the marker,
 // under the 259-byte ceiling) and must keep the malformedBody marker. The second case
 // covers the feed-URL credential shape, where a header-key-only redaction is inert.
@@ -551,7 +551,7 @@ func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 
 // TestUpstreamSearchRedactsAcrossTheSanitizer pins that redaction matches the
 // credential in the sanitized text too, not only in the raw text.
-// runesafe normalizes every unsafe rune to U+0020, and four of this upstream's needles
+// textsafe normalizes every unsafe rune to U+0020, and four of this upstream's needles
 // carry a U+0020 (userinfo decoded from user%20name; a query credential whose '+'
 // decodes to a space, which base64 passkeys hit routinely), so an upstream that splits
 // the credential with an unsafe rune defeats the byte-exact needle and lets the
@@ -592,7 +592,7 @@ func TestUpstreamSearchRedactsAcrossTheSanitizer(t *testing.T) {
 		},
 		// CR and LF are unsafe only under the single-line policy (keepCRLF=false),
 		// which is the policy this site's sanitizer applies - so these two rows pin
-		// that the composition reads the strict preset and not runesafe.Sanitize.
+		// that the composition reads the strict preset and not textsafe.Sanitize.
 		"userinfo password reassembled from CR": {
 			username:    "alice",
 			password:    "correct horse battery",
@@ -699,11 +699,9 @@ func TestUpstreamSearchRedactsQuotedCredential(t *testing.T) {
 }
 
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
-// single-attempt fetch: a 429 response's Retry-After survives as a positive
-// RetryAfterHint on the returned transient error (asserted directly, no
-// sleeping), so the enclosing Do honors the upstream-requested
-// delay instead of its jittered backoff. The httpx sentinel chain is
-// preserved for the caller's errors.Is classification.
+// single-attempt fetch: a 429 comes back as the *StatusError search's
+// rate-limit option reads, its Retry-After intact and not marked transient,
+// with the httpclient sentinel chain preserved for the caller's errors.Is.
 func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "7")
@@ -716,24 +714,20 @@ func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("fetchAndParse on a 429 returned nil error")
 	}
-	if !errors.Is(err, httpx.ErrRateLimited) {
-		t.Errorf("errors.Is(err, httpx.ErrRateLimited) = false (err = %v), want the sentinel preserved", err)
+	if !errors.Is(err, httpclient.ErrRateLimited) {
+		t.Errorf("errors.Is(err, httpclient.ErrRateLimited) = false (err = %v), want the sentinel preserved", err)
 	}
-	var transient httpx.Transient
-	if !errors.As(err, &transient) || !transient.IsTransient() {
-		t.Errorf("429 error is not transient (err = %v), want retryable", err)
+	if httpclient.IsTransient(err) {
+		t.Errorf("429 error is transient (err = %v), want it left to the rate-limit option", err)
 	}
-	var hint httpx.RetryAfterHint
-	if !errors.As(err, &hint) {
-		t.Fatalf("429 error carries no RetryAfterHint (err = %v)", err)
-	}
-	if got := hint.RetryAfterHint(); got != 7*time.Second {
-		t.Errorf("RetryAfterHint() = %v, want 7s from the upstream Retry-After header", got)
+	statusErr, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || statusErr.Code != http.StatusTooManyRequests || statusErr.RetryAfter != 7*time.Second {
+		t.Fatalf("429 error = %v, want a 429 *httpclient.StatusError with RetryAfter 7s", err)
 	}
 }
 
 // TestUpstreamSearchRetriesRetryableStatuses pins the retry taxonomy the app owns
-// while httpx.GetBytes performs the single fetch under WithMaxAttempts(1). GetBytes
+// while httpclient.GetBytes performs the single fetch under WithMaxAttempts(1). GetBytes
 // deliberately does NOT mark its exhaustion error Transient - after a one-attempt
 // budget the retry decision belongs to the caller - so without attemptError
 // re-classifying the *StatusError, every self-healing upstream status fails the search
@@ -808,14 +802,14 @@ func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
 			if err == nil {
 				t.Fatalf("search against an HTTP %d returned nil error", status)
 			}
-			statusErr, ok := errors.AsType[*httpx.StatusError](err)
+			statusErr, ok := errors.AsType[*httpclient.StatusError](err)
 			if !ok {
-				t.Fatalf("error = %T (%v), want *httpx.StatusError", err, err)
+				t.Fatalf("error = %T (%v), want *httpclient.StatusError", err, err)
 			}
 			if statusErr.Code != status {
 				t.Errorf("StatusError.Code = %d, want %d", statusErr.Code, status)
 			}
-			var transient httpx.Transient
+			var transient httpclient.Transient
 			if errors.As(err, &transient) && transient.IsTransient() {
 				t.Errorf("HTTP %d classified transient; a config fault must not be retried", status)
 			}
@@ -828,11 +822,11 @@ func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
 
 // TestUpstreamSearchRedactsUserinfoAcrossRetryLogging is the retry-path half of
 // TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery: a retryable status is logged
-// once per attempt by BOTH httpx.GetBytes (which sees the raw request URL) and the
-// enclosing httpx.Do, so an endpoint carrying a username-only userinfo token and an
+// once per attempt by BOTH httpclient.GetBytes (which sees the raw request URL) and the
+// enclosing httpclient.Do, so an endpoint carrying a username-only userinfo token and an
 // apikey query value gets three chances per search to leak them (CWE-532). The app
 // passes the unscrubbed URL to GetBytes deliberately - only the actual request needs
-// the credentials - which makes httpx's redaction the sole guard across the whole
+// the credentials - which makes httpclient's redaction the sole guard across the whole
 // retry tree.
 func TestUpstreamSearchRedactsUserinfoAcrossRetryLogging(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -862,7 +856,7 @@ func TestUpstreamSearchRedactsUserinfoAcrossRetryLogging(t *testing.T) {
 
 // TestUpstreamSearchRejectsOversizedResponse pins the bounded-read guard on the
 // untrusted Torznab response: a 200 body past upstreamMaxBytes fails the search
-// with httpx's *ResponseTooLargeError naming the cap, and the deterministic
+// with httpclient's *ResponseTooLargeError naming the cap, and the deterministic
 // failure is terminal - it must not burn the remaining retry attempts.
 func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 	var (
@@ -886,11 +880,11 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
 	_, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err == nil {
-		t.Fatal("search with an oversized upstream body returned nil, want *httpx.ResponseTooLargeError")
+		t.Fatal("search with an oversized upstream body returned nil, want *httpclient.ResponseTooLargeError")
 	}
-	var tooLarge *httpx.ResponseTooLargeError
+	var tooLarge *httpclient.ResponseTooLargeError
 	if !errors.As(err, &tooLarge) {
-		t.Fatalf("error = %v, want *httpx.ResponseTooLargeError", err)
+		t.Fatalf("error = %v, want *httpclient.ResponseTooLargeError", err)
 	}
 	if tooLarge.Limit != upstreamMaxBytes {
 		t.Errorf("ResponseTooLargeError.Limit = %d, want %d", tooLarge.Limit, int64(upstreamMaxBytes))
@@ -935,9 +929,9 @@ func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
 // sanitization of the Prowlarr proxy: a configured Torznab endpoint may carry a
 // username-only userinfo token (which validateHTTPURL accepts) and an apikey query
 // value, and both must be absent from the error the search returns and from every line
-// the retry logger emits (CWE-532). The scrub is httpx's - redactURL drops the whole
+// the retry logger emits (CWE-532). The scrub is httpclient's - redactURL drops the whole
 // userinfo component and REDACTs every query value, so *StatusError renders safely on
-// its own. This is the cross-library acceptance test: it fails if httpx regresses to
+// its own. This is the cross-library acceptance test: it fails if httpclient regresses to
 // url.Redacted() semantics, which mask only the password and keep the username.
 func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -960,9 +954,9 @@ func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 			t.Errorf("log records leak %q: %v", secret, rec.Records())
 		}
 	}
-	var statusErr *httpx.StatusError
+	var statusErr *httpclient.StatusError
 	if !errors.As(err, &statusErr) {
-		t.Fatalf("error = %T (%v), want *httpx.StatusError", err, err)
+		t.Fatalf("error = %T (%v), want *httpclient.StatusError", err, err)
 	}
 	if statusErr.Code != http.StatusNotFound {
 		t.Errorf("StatusError.Code = %d, want 404", statusErr.Code)
@@ -1341,7 +1335,7 @@ func TestSearchBoundsAttemptWithoutClientTimeout(t *testing.T) {
 // package's own attempt deadline, or a client-level http.Client.Timeout backstop -
 // this test drives the latter, the cheaper timer to shorten) participates in the
 // bounded retry budget instead of ending the search after one attempt. The timer's
-// error matches context.DeadlineExceeded, which httpx.IsTransient treats as terminal,
+// error matches context.DeadlineExceeded, which httpclient.IsTransient treats as terminal,
 // so an unnormalized attempt timeout would fail an interactive search immediately and
 // latch the harvest's tracker scope for the whole rebuild.
 func TestSearchRetriesAttemptTimeoutAwaitingHeaders(t *testing.T) {
@@ -1365,7 +1359,7 @@ func TestSearchRetriesAttemptTimeoutAwaitingHeaders(t *testing.T) {
 
 // TestSearchRetriesAttemptTimeoutReadingBody pins the sibling exit: the same
 // per-attempt timer can fire while the body of an already-200 response stalls,
-// which surfaces from httpx.ReadLimitedBody rather than from client.Do. That
+// which surfaces from httpclient.ReadLimitedBody rather than from client.Do. That
 // exit must be normalized identically, or a stalled body ends the search after
 // one attempt.
 func TestSearchRetriesAttemptTimeoutReadingBody(t *testing.T) {
@@ -1631,6 +1625,45 @@ func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
 			if rec.Contains("upstream query failed") {
 				t.Errorf("a credential rejection also logged the generic upstream WARN; the classes must stay distinct; log output:\n%s",
 					strings.Join(rec.Messages(), "\n"))
+			}
+		})
+	}
+}
+
+// TestUpstreamSearchCapsTheRateLimitWait pins upstreamRateLimitWait: a 429 is
+// retried after the cap, whether its Retry-After is longer or absent.
+func TestUpstreamSearchCapsTheRateLimitWait(t *testing.T) {
+	prev := upstreamRateLimitWait
+	upstreamRateLimitWait = 50 * time.Millisecond
+	t.Cleanup(func() { upstreamRateLimitWait = prev })
+	for _, retryAfter := range []string{"3600", ""} {
+		t.Run("Retry-After="+retryAfter, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls []time.Time
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls = append(calls, time.Now())
+				n := len(calls)
+				mu.Unlock()
+				if n == 1 {
+					if retryAfter != "" {
+						w.Header().Set("Retry-After", retryAfter)
+					}
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+			}))
+			t.Cleanup(srv.Close)
+			u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+			if _, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}}); err != nil {
+				t.Fatalf("search after one 429: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(calls) != 2 || calls[1].Sub(calls[0]) > time.Second {
+				t.Errorf("%d calls, the retry after %v, want two within 1s", len(calls), calls[len(calls)-1].Sub(calls[0]))
 			}
 		})
 	}

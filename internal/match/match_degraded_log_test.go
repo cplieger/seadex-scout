@@ -5,11 +5,11 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // partialOutageAniList models a PARTIAL AniList incident: FetchMany returns

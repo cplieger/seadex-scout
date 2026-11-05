@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/keyenc"
+	"github.com/cplieger/go/keyenc"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -15,7 +16,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/slogx/capture"
 )
 
 // TestCandidateStableKeyBoundsOversizedComponents pins the size bound on the

@@ -1,6 +1,6 @@
 package tracker
 
-import "github.com/cplieger/urlform"
+import "github.com/cplieger/go/urlform"
 
 // hostFromRawURL extracts normalized host evidence from a release's raw
 // upstream URL. The boolean is false when malformed or ambiguous input must be

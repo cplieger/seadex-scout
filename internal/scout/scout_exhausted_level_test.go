@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/state"
-	"github.com/cplieger/slogx/capture"
 )
 
 // exhaustingMapLoader returns a mapping loader whose upstream answers 503 to every
 // attempt, so the refresh runs the retry budget to exhaustion (as opposed to
 // unreachableMapLoader's transport refusal, which is terminal on the first
-// attempt and never reaches httpx's exhausted verdict).
+// attempt and never reaches httpclient's exhausted verdict).
 func exhaustingMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
 	t.Helper()
 	client, src := animapRelease(t, http.StatusServiceUnavailable, nil)
@@ -36,7 +36,7 @@ func staleMappingState() state.State {
 }
 
 // TestMappingExhaustionWarnsOnceWithAppContext pins the other half of the mapping
-// door's terminal-level demotion: the generic httpx verdict is gone from WARN, and
+// door's terminal-level demotion: the generic httpclient verdict is gone from WARN, and
 // the contextual caller record that replaces it is still there. Both log sites are
 // covered because the demotion is on the shared request option and so affects the
 // daemon and the one-shot report alike. The assertion is the absence at WARN
@@ -81,7 +81,7 @@ func TestMappingExhaustionWarnsOnceWithAppContext(t *testing.T) {
 			tc.load(t, logger, exhaustingMapLoader(t, logger), &st)
 
 			if n := recorder.CountLevel(slog.LevelWarn, "retries exhausted"); n != 0 {
-				t.Errorf("httpx generic terminal line logged at WARN %d times, want 0 (the app's record is the one that warns): %v", n, recorder.Messages())
+				t.Errorf("httpclient generic terminal line logged at WARN %d times, want 0 (the app's record is the one that warns): %v", n, recorder.Messages())
 			}
 			if n := recorder.CountExact(tc.wantMsg); n != 1 {
 				t.Errorf("%q count = %d, want 1 (the contextual record must still be published): %v", tc.wantMsg, n, recorder.Messages())

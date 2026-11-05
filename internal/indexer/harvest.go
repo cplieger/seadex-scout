@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
@@ -38,7 +38,7 @@ const harvestTimeBudget = 10 * time.Minute
 // harvestWait blocks between paced queries; a package var so the test suite
 // can replace the real sleep (pacing gaps are wall-clock politeness, not
 // logic under test) and the pacer tests can advance a fake clock instead.
-var harvestWait = httpx.SleepCtx
+var harvestWait = httpclient.SleepCtx
 
 // harvestPacer enforces the politeness rate and the per-rebuild time slice:
 // next gates every query, blocking for the pacing gap first (except before
@@ -402,7 +402,7 @@ func permanentUpstreamCredentialError(err error) bool {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		return docErr.codeNum >= 100 && docErr.codeNum < 200
 	}
-	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
+	if statusErr, ok := errors.AsType[*httpclient.StatusError](err); ok {
 		switch statusErr.Code {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return true
@@ -421,7 +421,7 @@ func requestScopedHarvestError(err error) bool {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		return docErr.codeNum >= 200 && docErr.codeNum < 300
 	}
-	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
+	if statusErr, ok := errors.AsType[*httpclient.StatusError](err); ok {
 		switch statusErr.Code {
 		case http.StatusBadRequest, http.StatusRequestURITooLong, http.StatusUnprocessableEntity:
 			return true

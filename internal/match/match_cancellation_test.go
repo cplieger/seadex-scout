@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // cancelledAniList fails every lookup with context.Canceled, modelling a

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logcontract"
-	"github.com/cplieger/slogx/capture"
 )
 
 func sizedFinding(key, title string, releaseBytes, currentBytes int64) compare.Finding {

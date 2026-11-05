@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
-	"github.com/cplieger/slogx/capture"
 )
 
 // Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
@@ -2208,7 +2208,7 @@ func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 // diagnostic: a title whose season-pack verdict contradicts the release's file
 // census warns at most once per rebuild (the rest log at Debug), carrying the
 // journal key and both verdicts but never the raw title, untrusted tracker text
-// the decode tags runesafe.Untrusted. The class pinned here is the one the audit
+// the decode tags textsafe.Untrusted. The class pinned here is the one the audit
 // does NOT correct (the title names one episode, the census proves a pack): it
 // warns with corrected=false and the harvested title still wins verbatim.
 func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/slogx/capture"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/logattr"
-	"github.com/cplieger/slogx/capture"
 )
 
 func newCapturedNotifier() (*Notifier, *capture.Recorder) {
@@ -547,7 +547,7 @@ func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 // slog-path pin (TestReportLogSanitizesControlAndBidiRunes) against the
 // daemon finding emitter: slog's JSONHandler escapes C0 controls but emits C1
 // controls and bidi controls raw, so every untrusted attribute emitted by
-// emit must ride through runesafe.Sanitize first. A finding whose
+// emit must ride through textsafe.Sanitize first. A finding whose
 // upstream-derived fields embed a C1 CSI (U+009B), an RLO bidi override
 // (U+202E), and a C0 escape introducer must log spaces in their place.
 func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
@@ -722,7 +722,7 @@ func TestFindingLineCarriesJoinedAltGroups(t *testing.T) {
 // record would exceed downstream log-pipeline line limits — silently dropping
 // the very warn line the better-release alert keys on. A hostile oversized
 // attribute must emit truncated with the "..." marker; a normal-length value
-// must pass byte-identical to its runesafe.Sanitize form.
+// must pass byte-identical to its textsafe.Sanitize form.
 func TestFindingAttrVolumeIsBounded(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	huge := strings.Repeat("u", 4<<20) // 4 MB, well past the cap
@@ -743,7 +743,7 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 		t.Errorf("release_url length = %d, want <= %d", len(gotURL), logattr.MaxBytes+len("..."))
 	}
 	gotTitle, _ := recorder.AttrValue("better release available", "title")
-	if want := runesafe.Sanitize(normal); gotTitle != want {
+	if want := textsafe.Sanitize(normal); gotTitle != want {
 		t.Errorf("normal-length title = %q, want byte-identical sanitized form %q", gotTitle, want)
 	}
 }

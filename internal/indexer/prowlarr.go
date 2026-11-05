@@ -12,12 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/textsafe"
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
-	"github.com/cplieger/urlform"
 )
 
 const (
@@ -32,7 +32,7 @@ const (
 )
 
 // upstreamAttemptTimeout bounds ONE Prowlarr Torznab attempt: search passes it to the
-// retry loop (httpx.WithAttemptTimeout), so the package enforces its own retry
+// retry loop (httpclient.WithAttemptTimeout), so the package enforces its own retry
 // arithmetic instead of relying on the composition root to wire an http.Client.Timeout
 // that matches.
 var upstreamAttemptTimeout = 60 * time.Second
@@ -43,6 +43,13 @@ var upstreamAttemptTimeout = 60 * time.Second
 // (TestMain shortens it, exactly as it does the harvest's politeness gap).
 // Production reads the unchanged one-second value.
 var upstreamBaseDelay = time.Second
+
+// upstreamRateLimitWait bounds the wait before a 429 is retried, a Retry-After
+// included: on the request path an arr's search timeout is running, and the
+// harvest shares the cap because Prowlarr answers its 429s itself and an
+// exhausted one latches the scope. A var for the same reason upstreamBaseDelay
+// is one.
+var upstreamRateLimitWait = 5 * time.Second
 
 // upstream is one Prowlarr per-indexer Torznab endpoint (Nyaa or AnimeBytes).
 // The feed proxies these to source real release data (title, seeders, size,
@@ -81,7 +88,7 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 	if err != nil {
 		// Deliberately NOT wrapped: a *url.Error echoes the raw configured URL, which
 		// may carry a username-only userinfo token (validateHTTPURL accepts one), and
-		// this error reaches httpx.Do's retry logger - the same redaction stance the
+		// this error reaches httpclient.Do's retry logger - the same redaction stance the
 		// StatusError path below applies (CWE-532).
 		return nil, 0, errors.New("invalid upstream feed URL")
 	}
@@ -96,31 +103,35 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 	}
 	reqURL := parsed.String()
 
-	items, err := httpx.Do(ctx,
+	items, err := httpclient.Do(ctx,
 		func(ctx context.Context) ([]item, error) {
 			return u.fetchAndParse(ctx, reqURL)
 		},
-		httpx.WithMaxAttempts(upstreamMaxAttempts),
-		httpx.WithBaseDelay(upstreamBaseDelay),
-		httpx.WithLabel("torznab "+u.name),
+		httpclient.WithMaxAttempts(upstreamMaxAttempts),
+		httpclient.WithBaseDelay(upstreamBaseDelay),
+		httpclient.WithLabel("torznab "+u.name),
 		// Route the retry loop's own Debug lines through the upstream's
 		// component logger so they carry component=indexer instead of
 		// falling through to slog.Default().
-		httpx.WithLogger(u.log),
-		// Demote httpx's terminal "retries exhausted" line to Debug. BOTH callers of
+		httpclient.WithLogger(u.log),
+		// Demote httpclient's terminal "retries exhausted" line to Debug. BOTH callers of
 		// search publish their own WARN for the same failed query with strictly more
 		// context - the harvest names the show, the query shape and the page and drives
 		// its latch state (classifyHarvestError), the request path names the upstream
-		// (query.go's fetchRaw) - so leaving httpx's verdict at Warn produced two
+		// (query.go's fetchRaw) - so leaving httpclient's verdict at Warn produced two
 		// terminal WARNs per failure, six per three-show homogeneous malformed run, and
 		// doubled the Loki volume of exactly the incident the once-per-onset cadence
 		// exists to keep readable.
-		httpx.WithExhaustedLevel(slog.LevelDebug),
+		httpclient.WithExhaustedLevel(slog.LevelDebug),
 		// The per-attempt bound is the loop's, not a context this callback derives:
 		// WithAttemptTimeout installs it AND marks its expiry retryable
-		// (httpx.AttemptTimeout), which IsTransient consults ahead of its
+		// (httpclient.AttemptTimeout), which IsTransient consults ahead of its
 		// caller-context rejection.
-		httpx.WithAttemptTimeout(upstreamAttemptTimeout))
+		httpclient.WithAttemptTimeout(upstreamAttemptTimeout),
+		// httpclient.IsTransient never retries a 429, whatever wraps it, so a
+		// rate limit is retried here. The wait is capped well below
+		// RetryAfterCap because an arr's Torznab search is waiting on this call.
+		httpclient.WithRateLimitRetry(upstreamRateLimitWait))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -133,11 +144,11 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	// GetBytes owns the one-attempt HTTP mechanics: request construction, header
 	// injection, transport-error reduction, non-2xx drain + *StatusError, the
 	// Retry-After parse, and the bounded body read.
-	body, err := httpx.GetBytes(ctx, u.http, reqURL,
-		httpx.WithMaxAttempts(1),
-		httpx.WithHeaders(u.setHeaders),
-		httpx.WithMaxBodyBytes(upstreamMaxBytes),
-		httpx.WithLogger(u.log))
+	body, err := httpclient.GetBytes(ctx, u.http, reqURL,
+		httpclient.WithMaxAttempts(1),
+		httpclient.WithHeaders(u.setHeaders),
+		httpclient.WithMaxBodyBytes(upstreamMaxBytes),
+		httpclient.WithLogger(u.log))
 	if err != nil {
 		return nil, attemptError(err)
 	}
@@ -150,15 +161,18 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 
 // attemptError maps a GetBytes failure onto the retry taxonomy the enclosing
 // Do reads. GetBytes runs with WithMaxAttempts(1), so its every failure exit
-// arrives here and this function alone decides whether the search spends
-// another of its upstreamMaxAttempts.
+// arrives here and this function decides whether the search spends another of
+// its upstreamMaxAttempts, except for a 429, which search's rate-limit option
+// retries.
 func attemptError(err error) error {
-	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
-		// httpx.IsRetryableStatus is the SAME rule GetBytes's own attempt
+	if statusErr, ok := errors.AsType[*httpclient.StatusError](err); ok {
+		// httpclient.IsRetryableStatus is the SAME rule GetBytes's own attempt
 		// function applies, not a restatement of it, so this caller's verdict
 		// and the door's cannot disagree - which is why the library exports it
 		// for exactly this WithMaxAttempts(1)-under-an-outer-Do composition.
-		if !httpx.IsRetryableStatus(statusErr.Code) {
+		// A 429 is search's rate-limit option's to retry; IsTransient never
+		// retries one.
+		if statusErr.Code == http.StatusTooManyRequests || !httpclient.IsRetryableStatus(statusErr.Code) {
 			return statusErr
 		}
 		// Unwrap to the status itself: GetBytes's "retries exhausted after 0s"
@@ -168,16 +182,16 @@ func attemptError(err error) error {
 	// A per-attempt deadline is NOT classified here: the enclosing Do installed the
 	// bound (WithAttemptTimeout) and marks its expiry, which is the only place that can
 	// tell the attempt's deadline from the caller's.
-	return httpx.LogSafeError(err)
+	return httpclient.LogSafeError(err)
 }
 
 // retryAfterHint returns the capped Retry-After an upstream asked for, or zero
 // when it named none. The hint rides the error chain as an
-// httpx.RetryAfterHint implementer (GetBytes attaches it to the exhaustion
-// error), and it is already bounded by httpx.RetryAfterCap at the parse, so it
+// httpclient.RetryAfterHint implementer (GetBytes attaches it to the exhaustion
+// error), and it is already bounded by httpclient.RetryAfterCap at the parse, so it
 // satisfies the interface's pre-capped contract on the way back out.
 func retryAfterHint(err error) time.Duration {
-	if h, ok := errors.AsType[httpx.RetryAfterHint](err); ok {
+	if h, ok := errors.AsType[httpclient.RetryAfterHint](err); ok {
 		return h.RetryAfterHint()
 	}
 	return 0
@@ -269,11 +283,11 @@ func (u *upstream) classifyParseError(err error) error {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		// The document's code/description are attacker-influenced text and the request
 		// carried the Prowlarr API key: a compromised upstream could reflect the key
-		// into the error message, which httpx.Do's retry logger and the harvest WARN
+		// into the error message, which httpclient.Do's retry logger and the harvest WARN
 		// would then expand into the log stream (CWE-532).
 		terminal := terminalTorznabCode(docErr.codeNum)
-		docErr.code, _ = runesafe.RedactSingleLineCapped(docErr.code, upstreamTextMaxBytes, "...", secrets...)
-		docErr.description, _ = runesafe.RedactSingleLineCapped(docErr.description, upstreamTextMaxBytes, "...", secrets...)
+		docErr.code, _ = textsafe.RedactSingleLineCapped(docErr.code, upstreamTextMaxBytes, "...", secrets...)
+		docErr.description, _ = textsafe.RedactSingleLineCapped(docErr.description, upstreamTextMaxBytes, "...", secrets...)
 		if terminal {
 			return docErr
 		}
@@ -286,10 +300,10 @@ func (u *upstream) classifyParseError(err error) error {
 	// A generic decode failure can echo attacker-controlled body text verbatim
 	// (encoding/xml returns raw strconv errors quoting the full unparsed <size>/length
 	// value, up to the wire cap upstreamMaxBytes), and the request carried the Prowlarr
-	// API key: redact any reflection of the key before the error reaches httpx.Do's
+	// API key: redact any reflection of the key before the error reaches httpclient.Do's
 	// retry logger or fetchRaw's WARN - the same emit-boundary policy the
 	// upstreamDocError path applies.
-	msg, _ := runesafe.RedactSingleLineCapped(err.Error(), upstreamTextMaxBytes, "...", secrets...)
+	msg, _ := textsafe.RedactSingleLineCapped(err.Error(), upstreamTextMaxBytes, "...", secrets...)
 	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 
@@ -304,11 +318,11 @@ func terminalTorznabCode(n int) bool {
 }
 
 // transientUpstreamError marks an upstream failure retryable for
-// httpx.Do (via the httpx.Transient interface): a retryable
+// httpclient.Do (via the httpclient.Transient interface): a retryable
 // status or a malformed successful body, neither of which IsTransient
 // classifies on its own. retryAfter, when positive, is the upstream's parsed
-// and capped Retry-After (httpx parses it, so it can never exceed
-// httpx.RetryAfterCap), exposed through RetryAfterHint so Do
+// and capped Retry-After (httpclient parses it, so it can never exceed
+// httpclient.RetryAfterCap), exposed through RetryAfterHint so Do
 // waits the upstream-requested delay instead of its jittered backoff.
 type transientUpstreamError struct {
 	err           error
@@ -322,8 +336,8 @@ func (*transientUpstreamError) IsTransient() bool               { return true }
 func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retryAfter }
 
 var (
-	_ httpx.Transient      = (*transientUpstreamError)(nil)
-	_ httpx.RetryAfterHint = (*transientUpstreamError)(nil)
+	_ httpclient.Transient      = (*transientUpstreamError)(nil)
+	_ httpclient.RetryAfterHint = (*transientUpstreamError)(nil)
 )
 
 // malformedUpstreamBody reports whether err is (or wraps) the decode failure
@@ -341,7 +355,7 @@ func malformedUpstreamBody(err error) bool {
 	// over-cap body is by construction the read failure of a SUCCESSFUL response - the
 	// same class as a garbled or over-cardinality one, and scoped to the one result set
 	// that came back too large rather than to the upstream's availability.
-	_, tooLarge := errors.AsType[*httpx.ResponseTooLargeError](err)
+	_, tooLarge := errors.AsType[*httpclient.ResponseTooLargeError](err)
 	return tooLarge
 }
 

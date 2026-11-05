@@ -16,8 +16,8 @@ import (
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/radarr"
 	"github.com/cplieger/arrapi/v3/sonarr"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/library"
-	"github.com/cplieger/slogx/capture"
 )
 
 // Test-local aliases for the internal/library model the walker produces. The
@@ -1284,7 +1284,7 @@ func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
 
 // TestWalkSonarrEpisodeFailureSanitizesTitle pins the log-injection boundary
 // of the same warning: the upstream Sonarr series title passes through
-// runesafe.Sanitize before landing in the series attribute, so terminal
+// textsafe.Sanitize before landing in the series attribute, so terminal
 // escapes and bidi overrides cannot forge log content.
 func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
 	const rawTitle = "Frieren\x1b[2J \u202egpj.exe"
@@ -1314,7 +1314,7 @@ func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
 // exact "walking <arr>: <cause>" text (report-mode CLI output reads it
 // unchanged), keeps the cause reachable through the chain, and carries the
 // failed side as a bounded value WalkErrArr recovers - the identity rides the
-// type because httpx.LogSafeError discards textual wrappers at the scout's
+// type because httpclient.LogSafeError discards textual wrappers at the scout's
 // production log boundaries.
 func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 	cause := errors.New("connect: connection refused")

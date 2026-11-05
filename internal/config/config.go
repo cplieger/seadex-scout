@@ -23,15 +23,15 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/envx/yamlenv/v2"
-	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx"
+	"github.com/cplieger/go/urlform"
+	"github.com/cplieger/go/yamlenv"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/secretref"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
-	"github.com/cplieger/slogx"
-	"github.com/cplieger/urlform"
 )
 
 // defaultConfigDir is the single container mount every seadex-scout file lives
@@ -363,14 +363,14 @@ func readConfigFile(path string) (raw []byte, err error) {
 				"field", "config dir", "error", clErr)
 		}
 	}()
-	f, _, err := atomicfile.OpenRegularInRoot(root, filepath.Base(path))
+	f, _, err := filesafe.OpenRegularInRoot(root, filepath.Base(path))
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	// Config load is a synchronous startup step with no cancellation point,
 	// so it passes context.Background(), matching writeStarterConfig.
-	raw, err = atomicfile.ReadBoundedFile(context.Background(), f, maxConfigBytes)
+	raw, err = filesafe.ReadBoundedFile(context.Background(), f, maxConfigBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -651,10 +651,10 @@ func (c *Config) warnPublicURLProblems() {
 // of a report run. Warn-only (a daemon that never reports is unaffected) and
 // field-name-only, since report.dir is secret-capable.
 func (c *Config) warnRelativeReportDir() {
-	// The predicate is atomicfile.ValidatePath, not filepath.IsAbs: it is the exported
+	// The predicate is filesafe.ValidatePath, not filepath.IsAbs: it is the exported
 	// face of the rule the report write applies later, and IsAbs admits an embedded NUL
 	// byte. Error text is not echoed: report.dir is secret-capable.
-	if c.ReportDir != "" && atomicfile.ValidatePath(c.ReportDir) != nil {
+	if c.ReportDir != "" && filesafe.ValidatePath(c.ReportDir) != nil {
 		slog.Warn("report.dir is not a usable absolute path; report writes are rejected "+
 			"at the end of a report run and neither report file is written - use an "+
 			"absolute path under the /config mount", "field", "report.dir")

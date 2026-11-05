@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
-	"github.com/cplieger/slogx/capture"
 )
 
 // TestFindByTitleBoundsAmbiguousTitleLog is the cross-package acceptance test for the

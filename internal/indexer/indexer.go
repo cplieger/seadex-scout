@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync/atomic"
 
-	"github.com/cplieger/webhttp/v4"
+	"github.com/cplieger/go/httpserver"
 )
 
 const (
@@ -150,7 +150,7 @@ type Indexer struct {
 	upstreams []*upstream
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value. Immutable.
-	verifyKey webhttp.StaticTokenVerifier
+	verifyKey httpserver.StaticTokenVerifier
 	// keyUnusable is the precomputed answer to the only question the serving path
 	// asks about indexer.feed_api_key - is the gate usable at all - decided once in
 	// New. The plaintext key is deliberately NOT retained: verification goes
@@ -172,7 +172,7 @@ func New(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 	ix := &Indexer{
 		log:              log,
 		enablement:       cfg.enablementOnly(),
-		verifyKey:        webhttp.NewStaticTokenVerifier(cfg.APIKey),
+		verifyKey:        httpserver.NewStaticTokenVerifier(cfg.APIKey),
 		keyUnusable:      unusableFeedKey(cfg.APIKey),
 		cache:            newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
 		upstreams:        wireUpstreams(client, log, cfg.UpstreamConfig),

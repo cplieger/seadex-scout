@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/jsoncap/v2"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/jsonx"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -313,7 +313,7 @@ func filterSafe(v string) bool {
 // logCursor bounds and cleans one untrusted cursor value for a log attribute; the single
 // application of maxLoggedCursorBytes.
 func logCursor(v string) string {
-	return runesafe.SanitizeSingleLineBounded(v, maxLoggedCursorBytes)
+	return textsafe.SanitizeSingleLineBounded(v, maxLoggedCursorBytes)
 }
 
 // recordCursor reads one record's (created, id) keyset pair, trimmed, and fails when
@@ -420,13 +420,13 @@ func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) 
 		"fields":  {"id"},
 		"filter":  {windowFilter(since)},
 	}
-	body, err := httpx.GetBytes(ctx, c.http, c.baseURL+entriesPath+"?"+q.Encode(),
-		httpx.WithMaxAttempts(maxAttempts),
-		httpx.WithBaseDelay(baseDelay),
-		httpx.WithMaxBodyBytes(maxProbeBytes),
-		httpx.WithHeaders(setHeaders),
-		httpx.WithLogger(c.log),
-		httpx.WithExhaustedLevel(slog.LevelDebug),
+	body, err := httpclient.GetBytes(ctx, c.http, c.baseURL+entriesPath+"?"+q.Encode(),
+		httpclient.WithMaxAttempts(maxAttempts),
+		httpclient.WithBaseDelay(baseDelay),
+		httpclient.WithMaxBodyBytes(maxProbeBytes),
+		httpclient.WithHeaders(setHeaders),
+		httpclient.WithLogger(c.log),
+		httpclient.WithExhaustedLevel(slog.LevelDebug),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("seadex: count window: %w", err)
@@ -462,7 +462,7 @@ func (c *Client) FetchEntries(ctx context.Context, opts Options) ([]seadex.Entry
 	var cur cursor
 	for page := 1; page <= maxPages; page++ {
 		if page > 1 {
-			if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
+			if err := httpclient.SleepCtx(ctx, c.pageDelay); err != nil {
 				return nil, walkBudgetError(parent, ctx,
 					fmt.Errorf("seadex: interrupted between pages: %w", err), page, len(all))
 			}
@@ -761,18 +761,18 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 	q.Set("filter", joinFilters(cur, opts))
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 
-	body, err := httpx.GetBytes(ctx, c.http, reqURL,
-		httpx.WithMaxAttempts(maxAttempts),
-		httpx.WithBaseDelay(baseDelay),
-		httpx.WithMaxBodyBytes(wireLimit),
-		httpx.WithHeaders(setHeaders),
-		httpx.WithLogger(c.log),
+	body, err := httpclient.GetBytes(ctx, c.http, reqURL,
+		httpclient.WithMaxAttempts(maxAttempts),
+		httpclient.WithBaseDelay(baseDelay),
+		httpclient.WithMaxBodyBytes(wireLimit),
+		httpclient.WithHeaders(setHeaders),
+		httpclient.WithLogger(c.log),
 		// Demoted to Debug: a page whose retries ran out aborts the WHOLE walk and the
 		// caller republishes that failure with the streak, so Warn here reports it twice.
-		httpx.WithExhaustedLevel(slog.LevelDebug),
+		httpclient.WithExhaustedLevel(slog.LevelDebug),
 	)
 	if err != nil {
-		if tooLarge, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok && tooLarge.Limit < maxPageBytes {
+		if tooLarge, ok := errors.AsType[*httpclient.ResponseTooLargeError](err); ok && tooLarge.Limit < maxPageBytes {
 			return pbList{}, 0, 0, errCumulativeBytes
 		}
 		return pbList{}, 0, 0, err
@@ -780,7 +780,7 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 
 	list, elems, err = decodePage(body, elemLimit)
 	if err != nil {
-		if errors.Is(err, jsoncap.ErrElementBudget) && elemLimit < maxPageElements {
+		if errors.Is(err, jsonx.ErrElementBudget) && elemLimit < maxPageElements {
 			return pbList{}, 0, 0, errCumulativeElements
 		}
 		return pbList{}, 0, 0, boundDecodeError("decode page", err)
@@ -803,12 +803,12 @@ func (e *boundedDecodeError) Unwrap() error { return e.cause }
 func boundDecodeError(prefix string, err error) error {
 	return &boundedDecodeError{
 		cause: err,
-		msg:   prefix + ": " + runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes),
+		msg:   prefix + ": " + textsafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes),
 	}
 }
 
 // decodePage and the decode* functions below are a schema-aware bounded decoder for one
-// pbList page, built on jsoncap: the token walk enforces every cardinality cap BEFORE
+// pbList page, built on jsonx: the token walk enforces every cardinality cap BEFORE
 // appending each element, where json.Unmarshal materializes the whole value first.
 
 // decodePage decodes one page body under the bounded-decoder caps, rejecting trailing
@@ -816,7 +816,7 @@ func boundDecodeError(prefix string, err error) error {
 // this page's aggregate element budget; the decoded count is returned so the caller can
 // charge the fetch-wide budget.
 func decodePage(body []byte, elemLimit int) (pbList, int, error) {
-	d := jsoncap.NewDecoder(bytes.NewReader(body), elemLimit)
+	d := jsonx.NewDecoder(bytes.NewReader(body), elemLimit)
 	list, err := decodeList(d)
 	if err != nil {
 		return pbList{}, 0, err
@@ -830,7 +830,7 @@ func decodePage(body []byte, elemLimit int) (pbList, int, error) {
 // decodeList decodes the pbList envelope. The items array is capped at
 // perPage: the request asks for perPage records, so a page stuffing more is
 // upstream misbehavior and is rejected before the excess is decoded.
-func decodeList(d *jsoncap.Decoder) (pbList, error) {
+func decodeList(d *jsonx.Decoder) (pbList, error) {
 	var list pbList
 	err := d.Object(func(k string) error {
 		switch {
@@ -853,11 +853,11 @@ func decodeList(d *jsoncap.Decoder) (pbList, error) {
 // decodeEntry decodes one entries record field-wise into e; the Object walk gives
 // json.Unmarshal's duplicate-key semantics (a null element is a no-op, and an object
 // only overwrites the fields it carries).
-func decodeEntry(d *jsoncap.Decoder, e *pbEntry) error {
+func decodeEntry(d *jsonx.Decoder, e *pbEntry) error {
 	return d.Object(func(k string) error { return decodeEntryField(d, e, k) })
 }
 
-func decodeEntryField(d *jsoncap.Decoder, e *pbEntry, key string) error {
+func decodeEntryField(d *jsonx.Decoder, e *pbEntry, key string) error {
 	switch {
 	case strings.EqualFold(key, "notes"):
 		return d.Decode(&e.Notes)
@@ -883,7 +883,7 @@ func decodeEntryField(d *jsoncap.Decoder, e *pbEntry, key string) error {
 // decodeExpand decodes the expand relation envelope field-wise into ex. The trs
 // relation is capped at maxTorrentsPerEntry; a repeated "trs" decodes INTO the existing
 // slice, matching json.Unmarshal's duplicate-key slice semantics.
-func decodeExpand(d *jsoncap.Decoder, ex *pbExpand) error {
+func decodeExpand(d *jsonx.Decoder, ex *pbExpand) error {
 	return d.Object(func(k string) error {
 		if strings.EqualFold(k, "trs") {
 			var err error
@@ -897,13 +897,13 @@ func decodeExpand(d *jsoncap.Decoder, ex *pbExpand) error {
 
 // decodeTorrent decodes one torrent record field-wise into t; duplicate-key semantics as
 // decodeEntry.
-func decodeTorrent(d *jsoncap.Decoder, t *seadex.Torrent) error {
+func decodeTorrent(d *jsonx.Decoder, t *seadex.Torrent) error {
 	return d.Object(func(k string) error { return decodeTorrentField(d, t, k) })
 }
 
 // decodeTorrentField decodes one torrent-record field. A File is flat, so per-element
 // decoding cannot amplify beyond the already-capped raw bytes.
-func decodeTorrentField(d *jsoncap.Decoder, t *seadex.Torrent, key string) error {
+func decodeTorrentField(d *jsonx.Decoder, t *seadex.Torrent, key string) error {
 	switch {
 	case strings.EqualFold(key, "releaseGroup"):
 		return d.Decode(&t.ReleaseGroup)

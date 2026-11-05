@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/go/jsonx"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -104,28 +104,28 @@ func TestFetchEntriesDecodeCardinalityCapsError(t *testing.T) {
 			page: `{"totalPages":1,"items":[` +
 				repeatJSON(`{"alID":1,"expand":{"trs":[]}}`, perPage+1) + `]}`,
 			label: "page items",
-			want:  jsoncap.ErrArrayCap,
+			want:  jsonx.ErrArrayCap,
 		},
 		{
 			name: "oversized torrents array in one item",
 			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[` +
 				repeatJSON(`{}`, maxTorrentsPerEntry+1) + `]}}]}`,
 			label: "torrents per entry",
-			want:  jsoncap.ErrArrayCap,
+			want:  jsonx.ErrArrayCap,
 		},
 		{
 			name: "oversized nested files array in one torrent",
 			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[{"files":[` +
 				repeatJSON(`{}`, maxFilesPerTorrent+1) + `]}]}}]}`,
 			label: "files per torrent",
-			want:  jsoncap.ErrArrayCap,
+			want:  jsonx.ErrArrayCap,
 		},
 		{
 			name: "oversized tags array in one torrent",
 			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[{"tags":[` +
 				repeatJSON(`""`, maxTagsPerTorrent+1) + `]}]}}]}`,
 			label: "tags per torrent",
-			want:  jsoncap.ErrArrayCap,
+			want:  jsonx.ErrArrayCap,
 		},
 	}
 	for _, tc := range tests {
@@ -152,8 +152,8 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("decodePage returned nil error, want element-budget error")
 	}
-	if !errors.Is(err, jsoncap.ErrElementBudget) {
-		t.Errorf("error = %v, want errors.Is %v", err, jsoncap.ErrElementBudget)
+	if !errors.Is(err, jsonx.ErrElementBudget) {
+		t.Errorf("error = %v, want errors.Is %v", err, jsonx.ErrElementBudget)
 	}
 }
 
@@ -335,8 +335,8 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "fetch page 1") {
 		t.Errorf("error = %q, want it to name the failed page 1", err.Error())
 	}
-	if !errors.Is(err, jsoncap.ErrElementBudget) {
-		t.Errorf("error = %v, want errors.Is %v", err, jsoncap.ErrElementBudget)
+	if !errors.Is(err, jsonx.ErrElementBudget) {
+		t.Errorf("error = %v, want errors.Is %v", err, jsonx.ErrElementBudget)
 	}
 }
 

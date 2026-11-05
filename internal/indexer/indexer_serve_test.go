@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // TestServeRejectsUnscopedRequest pins the no-combined-feed contract at the
@@ -117,9 +117,9 @@ func TestServeFailsClosedWithUnresolvedAPIKey(t *testing.T) {
 }
 
 // TestTorznabErrorResponder pins the panic-recovery wire shape: the responder
-// webhttp's Recoverer calls must render the status plus a Torznab <error>
+// httpserver's Recoverer calls must render the status plus a Torznab <error>
 // document (code 900, XML-escaped message) on the XML content type - not
-// webhttp's default JSON envelope - so a recovered panic still reads as a
+// httpserver's default JSON envelope - so a recovered panic still reads as a
 // Torznab error to the arrs.
 func TestTorznabErrorResponder(t *testing.T) {
 	rec := httptest.NewRecorder()
@@ -1102,7 +1102,7 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 // secret into Loki, durable and readable by anyone with log access. Every request kind
 // that logs is exercised (authorized caps, authorized RSS, unscoped 404, bad-key 401)
 // through the SERVED chain, and the wrong-key value embeds the real key. The property
-// rests on webhttp's RequestLogger recording r.URL.Path only, and webhttp is bumped.
+// rests on httpserver's RequestLogger recording r.URL.Path only, and httpserver is bumped.
 func TestServeNeverLogsTheFeedAPIKey(t *testing.T) {
 	const feedKey = "feed-key-not-a-secret"
 	log, rec := capture.New()

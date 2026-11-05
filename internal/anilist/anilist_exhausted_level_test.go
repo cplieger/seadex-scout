@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // TestRequestExhaustedTerminalRecordIsDemoted pins the AniList door's terminal log level
@@ -40,11 +40,11 @@ func TestRequestExhaustedTerminalRecordIsDemoted(t *testing.T) {
 			// The library's generic terminal verdict must not be a WARN:
 			// exactly one layer warns, and it is the one with the app context.
 			if n := rec.CountLevel(slog.LevelWarn, "retries exhausted"); n != 0 {
-				t.Errorf("httpx terminal line logged at WARN %d times, want 0 (demoted to Debug): %v", n, rec.Messages())
+				t.Errorf("httpclient terminal line logged at WARN %d times, want 0 (demoted to Debug): %v", n, rec.Messages())
 			}
 			// Demoted, not suppressed: the diagnosis stays available at Debug.
 			if !rec.Contains("retries exhausted") {
-				t.Errorf("httpx terminal line missing entirely, want it kept at Debug: %v", rec.Messages())
+				t.Errorf("httpclient terminal line missing entirely, want it kept at Debug: %v", rec.Messages())
 			}
 			// Regression guard for the reason the logger is kept: the
 			// per-attempt retry diagnostics must survive the demotion.

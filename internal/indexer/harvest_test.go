@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // harvestMock is an httptest Prowlarr Torznab endpoint for harvest tests: it
@@ -1496,17 +1496,17 @@ func TestRequestScopedHarvestError(t *testing.T) {
 		{"empty code stays scope-wide", newUpstreamDocError("", ""), false},
 		{"non-document error stays scope-wide", fmt.Errorf("connection refused"), false},
 		{"wrapped document error still classifies", fmt.Errorf("search %q: %w", "Show", newUpstreamDocError("201", "")), true},
-		{"HTTP 400 bad request is request-scoped", &httpx.StatusError{Code: http.StatusBadRequest}, true},
-		{"HTTP 414 URI too long is request-scoped", &httpx.StatusError{Code: http.StatusRequestURITooLong}, true},
-		{"HTTP 422 unprocessable entity is request-scoped", &httpx.StatusError{Code: http.StatusUnprocessableEntity}, true},
-		{"HTTP 401 unauthorized stays scope-wide", &httpx.StatusError{Code: http.StatusUnauthorized}, false},
-		{"HTTP 403 forbidden stays scope-wide", &httpx.StatusError{Code: http.StatusForbidden}, false},
-		{"HTTP 404 not found stays scope-wide", &httpx.StatusError{Code: http.StatusNotFound}, false},
-		{"HTTP 408 request timeout stays scope-wide", &httpx.StatusError{Code: http.StatusRequestTimeout}, false},
-		{"HTTP 429 rate limit stays scope-wide", &httpx.StatusError{Code: http.StatusTooManyRequests}, false},
-		{"HTTP 500 server error stays scope-wide", &httpx.StatusError{Code: http.StatusInternalServerError}, false},
-		{"HTTP 503 unavailable stays scope-wide", &httpx.StatusError{Code: http.StatusServiceUnavailable}, false},
-		{"wrapped status error still classifies", fmt.Errorf("search %q: %w", "Show", &httpx.StatusError{Code: http.StatusBadRequest}), true},
+		{"HTTP 400 bad request is request-scoped", &httpclient.StatusError{Code: http.StatusBadRequest}, true},
+		{"HTTP 414 URI too long is request-scoped", &httpclient.StatusError{Code: http.StatusRequestURITooLong}, true},
+		{"HTTP 422 unprocessable entity is request-scoped", &httpclient.StatusError{Code: http.StatusUnprocessableEntity}, true},
+		{"HTTP 401 unauthorized stays scope-wide", &httpclient.StatusError{Code: http.StatusUnauthorized}, false},
+		{"HTTP 403 forbidden stays scope-wide", &httpclient.StatusError{Code: http.StatusForbidden}, false},
+		{"HTTP 404 not found stays scope-wide", &httpclient.StatusError{Code: http.StatusNotFound}, false},
+		{"HTTP 408 request timeout stays scope-wide", &httpclient.StatusError{Code: http.StatusRequestTimeout}, false},
+		{"HTTP 429 rate limit stays scope-wide", &httpclient.StatusError{Code: http.StatusTooManyRequests}, false},
+		{"HTTP 500 server error stays scope-wide", &httpclient.StatusError{Code: http.StatusInternalServerError}, false},
+		{"HTTP 503 unavailable stays scope-wide", &httpclient.StatusError{Code: http.StatusServiceUnavailable}, false},
+		{"wrapped status error still classifies", fmt.Errorf("search %q: %w", "Show", &httpclient.StatusError{Code: http.StatusBadRequest}), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2166,12 +2166,12 @@ func TestUpdateHarvestScopeStateLatchesContradictedSuccesses(t *testing.T) {
 }
 
 // TestUpstreamFailureWarnsOnce pins the once-per-failure cadence on both callers
-// of upstream.search. httpx's retry loop publishes its own terminal "retries
+// of upstream.search. httpclient's retry loop publishes its own terminal "retries
 // exhausted" line, and this app publishes a WARN for the same failed query with
 // strictly more context (the show, the query shape and the page on the harvest
 // path; the scope on the request path). Leaving both at Warn doubles the log volume
 // of exactly the incident the once-per-onset latch exists to keep readable, so
-// httpx's verdict is demoted to Debug. The per-attempt retry diagnostics are
+// httpclient's verdict is demoted to Debug. The per-attempt retry diagnostics are
 // deliberately kept, which is why the logger is demoted rather than dropped.
 func TestUpstreamFailureWarnsOnce(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -2195,11 +2195,11 @@ func TestUpstreamFailureWarnsOnce(t *testing.T) {
 	// The library's terminal verdict must not be a WARN: exactly one layer
 	// warns, and it is the one with the app context.
 	if n := rec.CountLevel(slog.LevelWarn, "retries exhausted"); n != 0 {
-		t.Errorf("httpx terminal line logged at WARN %d times, want 0 (demoted to Debug): %v", n, rec.Messages())
+		t.Errorf("httpclient terminal line logged at WARN %d times, want 0 (demoted to Debug): %v", n, rec.Messages())
 	}
 	// It is demoted, not suppressed: the diagnosis is still available.
 	if !rec.Contains("retries exhausted") {
-		t.Errorf("httpx terminal line missing entirely, want it kept at Debug: %v", rec.Messages())
+		t.Errorf("httpclient terminal line missing entirely, want it kept at Debug: %v", rec.Messages())
 	}
 }
 

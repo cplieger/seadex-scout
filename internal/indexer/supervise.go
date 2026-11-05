@@ -62,7 +62,7 @@ func supervise(ctx context.Context, done chan struct{}, run func(context.Context
 // logStop classifies the feed's run error for the shared slog stream, through the
 // feed's own logger so the terminal record carries component=indexer. Both
 // shutdown-path cases are routine on a redeploy (WARN, kept off the cycle-error
-// alert) but carry distinct messages: webhttp.Run returns DeadlineExceeded when
+// alert) but carry distinct messages: httpserver.Run returns DeadlineExceeded when
 // its graceful-shutdown budget expired, meaning in-flight requests were cut off.
 func logStop(ctx context.Context, log *slog.Logger, err error) {
 	switch {

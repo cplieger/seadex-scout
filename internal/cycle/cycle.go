@@ -15,8 +15,8 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // TestWatchdogLease pins the daemon's freshness lease: external mode arms no watchdog, an

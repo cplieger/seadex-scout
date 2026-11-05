@@ -19,7 +19,7 @@ import (
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/radarr"
 	"github.com/cplieger/arrapi/v3/sonarr"
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
@@ -505,7 +505,7 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, pass SonarrPass, s *sonarr
 		}
 		// arrapi's errors carry no request URL; LogSafeError is defence in depth,
 		// as at the walk-level boundary.
-		w.log.Warn("sonarr episode fetch failed; series kept as failed placeholder", "series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+		w.log.Warn("sonarr episode fetch failed; series kept as failed placeholder", "series", logattr.Cap(s.Title), "id", s.ID, "error", httpclient.LogSafeError(err))
 		// seriesItem with no files yields the identity fields and no file
 		// data - exactly the Failed placeholder shape.
 		item := w.seriesItem(s, nil)
@@ -540,11 +540,11 @@ func (w *Walker) addEpisodes(ctx context.Context, pass SonarrPass, s *sonarr.Ser
 		return
 	case err != nil && holdsSpecials:
 		w.log.Warn("sonarr episode list read failed; this series' upgrade sizes and episode listing are unknown and its films and specials stay uncompared",
-			"series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+			"series", logattr.Cap(s.Title), "id", s.ID, "error", httpclient.LogSafeError(err))
 		return
 	case err != nil:
 		w.log.Warn("sonarr episode list read failed; this series' upgrade sizes and episode listing are unknown",
-			"series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+			"series", logattr.Cap(s.Title), "id", s.ID, "error", httpclient.LogSafeError(err))
 		return
 	}
 	byID := filesByID(files)

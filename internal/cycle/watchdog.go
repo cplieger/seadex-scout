@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cplieger/health"
+	"github.com/cplieger/go/health"
 )
 
 // healthLeaseFactor is how many poll intervals of silence the health marker

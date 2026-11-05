@@ -5,7 +5,7 @@
 // applies before it looks at the host at all.
 package displaylink
 
-import "github.com/cplieger/urlform"
+import "github.com/cplieger/go/urlform"
 
 // VouchForm is Vouch over an already-classified form: an absolute http(s) URL,
 // free of a userinfo authority and of the smuggling shapes a browser reads

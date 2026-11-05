@@ -48,7 +48,7 @@ func TestMakeDirEnforcesTheModeOfTheDirectoryItCreated(t *testing.T) {
 }
 
 // TestMakeDirLeavesAWiderPreExistingDirectoryAlone pins the deliberate asymmetry
-// atomicfile.EnsurePrivateDir would break: /config/reports may be operator-created
+// filesafe.EnsurePrivateDir would break: /config/reports may be operator-created
 // or bind-mounted, group-readable on purpose so another container can ship the
 // reports, so MakeDir accepts it AS IS and enforces only what it created.
 func TestMakeDirLeavesAWiderPreExistingDirectoryAlone(t *testing.T) {

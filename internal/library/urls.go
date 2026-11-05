@@ -3,8 +3,8 @@ package library
 import (
 	"net/url"
 
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
-	"github.com/cplieger/urlform"
 )
 
 // SafeLogURL returns a copy of rawURL safe to emit across the logging trust

@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/go/urlform"
 )
 
 // TestLookupByHostFailClosed pins the fail-closed guards of the URL-host tracker resolver

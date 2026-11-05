@@ -23,14 +23,14 @@ import (
 	"github.com/cplieger/arrapi/v3"
 	"github.com/cplieger/arrapi/v3/radarr"
 	"github.com/cplieger/arrapi/v3/sonarr"
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/slogx"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/logcontract"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
-	"github.com/cplieger/slogx"
-	"github.com/cplieger/slogx/capture"
 	yaml "go.yaml.in/yaml/v3"
 )
 
@@ -568,7 +568,7 @@ func flakyArr(t *testing.T, routes map[string]arrRoute, path string, fails int32
 
 // TestNewArrClientsPassRetryTuning pins the retry policy newArrClients gives both
 // clients, observed on a transient 503 to a data read. The base delay: arrapi
-// draws the first backoff from [base/2, base] (httpx.JitteredBackoff), so a 5 s
+// draws the first backoff from [base/2, base] (httpclient.JitteredBackoff), so a 5 s
 // base cannot retry inside a 2 s deadline, where arrapi's default 1 s base would
 // and would read the 200. The attempt bound: a persistent 503 is sent exactly
 // three times; Retry-After: 1 replaces the backoff to keep the case short. Three
@@ -767,7 +767,7 @@ func TestProwlarrClientRefusesAnotherOrigin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sinkKey, _, err := prowlarrRedirect(t, tt.target)
-			if refused, ok := errors.AsType[*httpx.RedirectRefusedError](err); !ok || refused.Reason != httpx.RedirectOtherOrigin {
+			if refused, ok := errors.AsType[*httpclient.RedirectRefusedError](err); !ok || refused.Reason != httpclient.RedirectOtherOrigin {
 				t.Errorf("redirect error = %v, want a RedirectOtherOrigin refusal", err)
 			}
 			if sinkKey != "" {
@@ -790,7 +790,7 @@ func TestProwlarrClientFollowsItsOrigin(t *testing.T) {
 }
 
 // RFC 4007 section 11.2 leaves zone-ID representation implementation-defined, so
-// httpx compares it byte-for-byte and treats a case change as another origin.
+// httpclient compares it byte-for-byte and treats a case change as another origin.
 func TestProwlarrClientComparesIPv6ZonesExactly(t *testing.T) {
 	via, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://[fe80::1%25eth0]:9696/api", http.NoBody)
 	if err != nil {
@@ -801,7 +801,7 @@ func TestProwlarrClientComparesIPv6ZonesExactly(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = newProwlarrClient().CheckRedirect(req, []*http.Request{via})
-	if refused, ok := errors.AsType[*httpx.RedirectRefusedError](err); !ok || refused.Reason != httpx.RedirectOtherOrigin {
+	if refused, ok := errors.AsType[*httpclient.RedirectRefusedError](err); !ok || refused.Reason != httpclient.RedirectOtherOrigin {
 		t.Errorf("redirect to a zone differing only in case: %v, want a RedirectOtherOrigin refusal", err)
 	}
 }
@@ -1367,21 +1367,21 @@ func TestRunReportRejectsRelativeReportDir(t *testing.T) {
 func TestRunReportProbesReportDirBeforeTheWalk(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	probed := false
-	probeWritable = func(_ context.Context, d string, _ ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+	probeWritable = func(_ context.Context, d string, _ ...filesafe.Option) (filesafe.ProbeResult, error) {
 		probed = true
-		return atomicfile.ProbeResult{
+		return filesafe.ProbeResult{
 			Dir:   d,
-			Stage: atomicfile.ProbeStageCreate,
-			Err:   fmt.Errorf("%w: %s/.atomicfile-1.tmp: asked 0600, stored 0670", atomicfile.ErrModeNotStored, d),
+			Stage: filesafe.ProbeStageCreate,
+			Err:   fmt.Errorf("%w: %s/.atomicfile-1.tmp: asked 0600, stored 0670", filesafe.ErrModeNotStored, d),
 		}, nil
 	}
-	t.Cleanup(func() { probeWritable = atomicfile.ProbeWritable })
+	t.Cleanup(func() { probeWritable = filesafe.ProbeWritable })
 
 	err := runReport(&config.Config{ReportDir: dir})
 	if !probed {
 		t.Fatalf("runReport(%q) never probed report.dir; err = %v", dir, err)
 	}
-	if !errors.Is(err, atomicfile.ErrModeNotStored) {
+	if !errors.Is(err, filesafe.ErrModeNotStored) {
 		t.Fatalf("runReport(%q) = %v, want the probe's ErrModeNotStored", dir, err)
 	}
 	for _, want := range []string{"report.dir", "ACL"} {
@@ -1399,18 +1399,18 @@ func TestRunReportProbesReportDirBeforeTheWalk(t *testing.T) {
 // real write and the file it leaves is what they mean. Serial (swaps
 // probeWritable).
 func TestProbeReportDirAsksForOwnerOnlyMode(t *testing.T) {
-	var got []atomicfile.Option
-	probeWritable = func(_ context.Context, d string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+	var got []filesafe.Option
+	probeWritable = func(_ context.Context, d string, opts ...filesafe.Option) (filesafe.ProbeResult, error) {
 		got = opts
-		return atomicfile.ProbeResult{Dir: d}, nil
+		return filesafe.ProbeResult{Dir: d}, nil
 	}
-	t.Cleanup(func() { probeWritable = atomicfile.ProbeWritable })
+	t.Cleanup(func() { probeWritable = filesafe.ProbeWritable })
 
 	if err := probeReportDir(t.Context(), t.TempDir()); err != nil {
 		t.Fatalf("probeReportDir() = %v, want nil", err)
 	}
 	replay := filepath.Join(t.TempDir(), "replay")
-	if _, err := atomicfile.WriteFile(t.Context(), replay, []byte("x"), got...); err != nil {
+	if _, err := filesafe.WriteFile(t.Context(), replay, []byte("x"), got...); err != nil {
 		t.Fatalf("Setup: WriteFile(replay) with the probe's options: %v", err)
 	}
 	info, err := os.Stat(replay)
@@ -1585,7 +1585,7 @@ func TestNewArrClientsRadarrErrorClosesSonarr(t *testing.T) {
 // TestWriteStarterConfigOwnerOnlyMode pins the documented owner-only mode of
 // the generated starter config (starterFileMode): the file is where the
 // operator may paste arr API keys and the AB passkey, so it must be created
-// 0600. atomicfile applies the mode via Chmod (umask-independent), so the
+// 0600. filesafe applies the mode via Chmod (umask-independent), so the
 // assertion is deterministic.
 func TestWriteStarterConfigOwnerOnlyMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")

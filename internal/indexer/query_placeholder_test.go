@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
-	"github.com/cplieger/slogx/capture"
 )
 
 // The arrs' own add/test requests (servarr's NewznabRequestGenerator for Sonarr

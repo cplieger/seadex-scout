@@ -7,12 +7,12 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // TestLogStopClassifiesShutdownAndFault pins the feed's stop log contract:
 // during a shutdown, an expired graceful-shutdown budget (DeadlineExceeded from
-// webhttp.Run, meaning in-flight Torznab requests were cut off) gets its own
+// httpserver.Run, meaning in-flight Torznab requests were cut off) gets its own
 // WARN message distinct from the routine clean-shutdown WARN, and any error
 // outside a shutdown stays the ERROR fault line.
 func TestLogStopClassifiesShutdownAndFault(t *testing.T) {

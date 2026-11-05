@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
-	"github.com/cplieger/slogx/capture"
 )
 
 // verdictName renders a Verdict for a failure message; a bare uint8 tells the
@@ -36,10 +36,10 @@ func verdictName(v Verdict) string {
 }
 
 // TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological server-supplied
-// Retry-After cannot stall the client: the 429 becomes a *httpx.RateLimitError whose hint
+// Retry-After cannot stall the client: the 429 becomes a 429 *httpclient.StatusError whose hint
 // is clamped, and the shared throttle is penalized so subsequent lookups wait the clamped
 // window too. The ceiling is maxThrottlePenalty, the POLITENESS one. The assertion goes
-// vacuous under httpx.ParseRetryAfter, which caps at 60s inside the library: a hostile
+// vacuous under httpclient.ParseRetryAfter, which caps at 60s inside the library: a hostile
 // header would never reach the app's own ceiling, and the two 429 shapes (Retry-After
 // here, X-RateLimit-Reset in TestDo429WithHostileResetHeaderIsCapped) would disagree by
 // 5x on the same stated window.
@@ -54,9 +54,9 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
-	var rle *httpx.RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
+	rle, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || rle.Code != http.StatusTooManyRequests {
+		t.Fatalf("do() err = %v, want a 429 *httpclient.StatusError", err)
 	}
 	if rle.RetryAfter != maxThrottlePenalty {
 		t.Errorf("RetryAfter = %v, want clamped at %v", rle.RetryAfter, maxThrottlePenalty)
@@ -111,14 +111,14 @@ func TestDo429WithoutRetryAfterUsesDefault(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
-	var rle *httpx.RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
+	rle, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || rle.Code != http.StatusTooManyRequests {
+		t.Fatalf("do() err = %v, want a 429 *httpclient.StatusError", err)
 	}
 	if rle.RetryAfter != defaultRetryAfter {
 		t.Errorf("RetryAfter = %v, want the %v default", rle.RetryAfter, defaultRetryAfter)
 	}
-	if got, want := rle.Error(), "anilist: rate limited (429)"; got != want {
+	if got, want := err.Error(), "anilist: rate limited: HTTP 429"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
@@ -137,9 +137,9 @@ func TestDoHonorsValidRetryAfterHeader(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
-	var rle *httpx.RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
+	rle, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || rle.Code != http.StatusTooManyRequests {
+		t.Fatalf("do() err = %v, want a 429 *httpclient.StatusError", err)
 	}
 	if got := rle.RetryAfter; got != 17*time.Second {
 		t.Errorf("RetryAfter = %v, want 17s from Retry-After", got)
@@ -161,9 +161,9 @@ func TestDo429WithoutRetryAfterUsesResetHeader(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
-	var rle *httpx.RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
+	rle, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || rle.Code != http.StatusTooManyRequests {
+		t.Fatalf("do() err = %v, want a 429 *httpclient.StatusError", err)
 	}
 	hint := rle.RetryAfter
 	if hint < 25*time.Second || hint > 31*time.Second {
@@ -184,9 +184,9 @@ func TestDo429WithPastResetFallsBackToDefault(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
-	var rle *httpx.RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
+	rle, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || rle.Code != http.StatusTooManyRequests {
+		t.Fatalf("do() err = %v, want a 429 *httpclient.StatusError", err)
 	}
 	if rle.RetryAfter != defaultRetryAfter {
 		t.Errorf("RetryAfter = %v, want the %v default for a past reset", rle.RetryAfter, defaultRetryAfter)
@@ -568,8 +568,8 @@ func TestFetchCountsEveryHTTPAttempt(t *testing.T) {
 }
 
 // TestDoBoundsOversizedResponse pins the untrusted-response size boundary: a
-// body larger than maxBodyBytes fails loud as httpx.ReadLimitedBody's distinct
-// *httpx.ResponseTooLargeError (with no bytes returned), so a hostile or
+// body larger than maxBodyBytes fails loud as httpclient.ReadLimitedBody's distinct
+// *httpclient.ResponseTooLargeError (with no bytes returned), so a hostile or
 // broken upstream cannot balloon memory and an over-cap response is never a
 // silently truncated payload that only fails later as a confusing JSON decode
 // error.
@@ -581,9 +581,9 @@ func TestDoBoundsOversizedResponse(t *testing.T) {
 
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	got, err := c.do(t.Context(), []byte(`{}`))
-	var tooLarge *httpx.ResponseTooLargeError
+	var tooLarge *httpclient.ResponseTooLargeError
 	if !errors.As(err, &tooLarge) {
-		t.Fatalf("do() err = %v, want *httpx.ResponseTooLargeError for an over-cap body", err)
+		t.Fatalf("do() err = %v, want *httpclient.ResponseTooLargeError for an over-cap body", err)
 	}
 	if tooLarge.Limit != maxBodyBytes {
 		t.Errorf("ResponseTooLargeError.Limit = %d, want %d", tooLarge.Limit, maxBodyBytes)
@@ -657,11 +657,11 @@ func TestFetchNotFound404ReturnsErrNotFound(t *testing.T) {
 
 // TestFetchErrorStatusClassification pins the non-429 error-status path: a
 // 4xx or 5xx (other than the AniList 404 not-found form) surfaces as the
-// typed httpx error and is never ErrNotFound. It also pins the retry split:
+// typed httpclient error and is never ErrNotFound. It also pins the retry split:
 // a self-healing server-side status (5xx, and 408) is retried inside the
-// bounded budget, while a client-side fault is attempted exactly once. httpx's
+// bounded budget, while a client-side fault is attempted exactly once. httpclient's
 // own HTTPStatusError policy is transient for 502/503/504 only, so a plain 500
-// is retryable here because THIS client classifies it, not httpx.
+// is retryable here because THIS client classifies it, not httpclient.
 func TestFetchErrorStatusClassification(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -697,14 +697,14 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 					t.Errorf("Fetch() on 204 error = %q, want %q", err.Error(), want)
 				}
 			case tt.wantAuth:
-				if _, ok := errors.AsType[*httpx.AuthError](err); !ok {
-					t.Errorf("Fetch() on 401 error = %v, want *httpx.AuthError", err)
+				if !errors.Is(err, httpclient.ErrUnauthorized) {
+					t.Errorf("Fetch() on 401 error = %v, want httpclient.ErrUnauthorized", err)
 				}
 			default:
-				if statusErr, ok := errors.AsType[*httpx.HTTPStatusError](err); !ok {
-					t.Errorf("Fetch() on status %d error = %v, want *httpx.HTTPStatusError", tt.status, err)
+				if statusErr, ok := errors.AsType[*httpclient.StatusError](err); !ok {
+					t.Errorf("Fetch() on status %d error = %v, want *httpclient.StatusError", tt.status, err)
 				} else if statusErr.Code != tt.status {
-					t.Errorf("HTTPStatusError.Code = %d, want %d", statusErr.Code, tt.status)
+					t.Errorf("StatusError.Code = %d, want %d", statusErr.Code, tt.status)
 				}
 			}
 			if got := c.Stats().Calls; got != int64(tt.wantCalls) {
@@ -733,9 +733,9 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, WithRate(60))
 	_, err := c.do(t.Context(), []byte(`{}`))
 
-	var rle *httpx.RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
+	rle, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || rle.Code != http.StatusTooManyRequests {
+		t.Fatalf("do() err = %v, want a 429 *httpclient.StatusError", err)
 	}
 	if rle.RetryAfter != maxThrottlePenalty {
 		t.Errorf("RetryAfter = %v, want the clamped %v", rle.RetryAfter, maxThrottlePenalty)
@@ -743,7 +743,7 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	if wait := c.throttle.reserve(); wait > maxThrottlePenalty {
 		t.Errorf("throttle wait after the 429 = %v, want capped at the politeness ceiling %v", wait, maxThrottlePenalty)
 	}
-	// httpx enforces the per-attempt ceiling itself (it waits min(hint, maxWait)),
+	// httpclient enforces the per-attempt ceiling itself (it waits min(hint, maxWait)),
 	// so a hint above maxRetryAfter cannot stall one attempt regardless.
 	if maxRetryAfter >= maxThrottlePenalty {
 		t.Errorf("maxRetryAfter (%v) must stay BELOW maxThrottlePenalty (%v), or the two ceilings have collapsed back into one",
@@ -886,7 +886,7 @@ func TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty(t *testing.T) {
 // TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial pins the
 // request-layer side of the completion contract: an HTTP-level failure (a
 // non-transient 400) on a later chunk after an earlier chunk completed must
-// return the merged partial result beside the typed httpx status error --
+// return the merged partial result beside the typed httpclient status error --
 // the same partial-result shape the parse-layer tests pin, on the other
 // error path.
 func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) {
@@ -914,8 +914,8 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's HTTP failure")
 	}
-	if _, ok := errors.AsType[*httpx.HTTPStatusError](err); !ok {
-		t.Errorf("error = %v, want *httpx.HTTPStatusError from the failed chunk", err)
+	if _, ok := errors.AsType[*httpclient.StatusError](err); !ok {
+		t.Errorf("error = %v, want *httpclient.StatusError from the failed chunk", err)
 	}
 	// The abort path's own contract: the aborting chunk and every chunk after it
 	// are UNREQUESTED, while the completed chunk's absences stay memoizable
@@ -1079,7 +1079,7 @@ func TestDoSendsRequiredHeaders(t *testing.T) {
 	}
 }
 
-// TestTransientEnvelopeStatusRetries pins the class httpx cannot see: AniList
+// TestTransientEnvelopeStatusRetries pins the class httpclient cannot see: AniList
 // answers a server-side fault as HTTP 200 carrying {"errors":[{"status":500}]},
 // so by the time the parser reaches it the attempt has already been recorded as
 // a success and no retry can ever happen. Classifying it at the retry boundary

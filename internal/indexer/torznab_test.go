@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/xmlx"
+	"github.com/cplieger/go/xmlx"
 )
 
 // TestRenderFeed_usesStableGUIDFallback pins the documented GUID fallback
@@ -500,7 +500,7 @@ func TestParseTorznabSkipsUnknownItemChildren(t *testing.T) {
 }
 
 // TestRenderFeedSanitizesUnsafeRunes pins the emit-boundary rune policy (escTo composes
-// runesafe.Sanitize under the XML escaper): xml.EscapeText alone passes C1 controls, bidi
+// textsafe.Sanitize under the XML escaper): xml.EscapeText alone passes C1 controls, bidi
 // controls and U+2028/U+2029 through raw, and every text value here is
 // upstream-controlled (tracker titles via Prowlarr, SeaDex file names synthesized into
 // titles) headed for arr web UIs and operator terminals. The rendered document must never
@@ -548,9 +548,9 @@ func TestRenderFeedTruncatesOversizedDocument(t *testing.T) {
 
 // TestItemXMLTitleProvenance pins the wire-boundary design for
 // tracker-controlled titles: the decode struct tags Title as
-// runesafe.Untrusted, so any emission of the WIRE form (a bare slog attr,
+// textsafe.Untrusted, so any emission of the WIRE form (a bare slog attr,
 // an fmt.Errorf) is sanitized automatically, while toItem unwraps via Raw()
-// into the plain persisted/compute form — runesafe's machine-read
+// into the plain persisted/compute form — textsafe's machine-read
 // persistence rule (feed.json must round-trip raw bytes; the XML render's
 // escTo belt and capLogText own the emit-side policy there).
 func TestItemXMLTitleProvenance(t *testing.T) {

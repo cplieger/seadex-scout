@@ -5,8 +5,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/cplieger/keyenc"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/keyenc"
+	"github.com/cplieger/go/textsafe"
 )
 
 // TestMaxBytesMirrorsKeyencBudget is what keeps a change to keyenc from silently
@@ -110,11 +110,11 @@ func TestJoinerHonestAggregateMatchesJoinThenCap(t *testing.T) {
 // must be byte-identical under either order, the half a regression breaks silently.
 func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
 	sanitizeThenCap := func(raw string) string {
-		clean := runesafe.Sanitize(raw)
+		clean := textsafe.Sanitize(raw)
 		if len(clean) <= MaxBytes {
 			return clean
 		}
-		return runesafe.CapBytes(clean, MaxBytes) + TruncMarker
+		return textsafe.CapBytes(clean, MaxBytes) + TruncMarker
 	}
 
 	t.Run("honest values are identical under either order", func(t *testing.T) {
@@ -140,7 +140,7 @@ func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
 		if len(raw) <= MaxBytes {
 			t.Fatalf("fixture is %d bytes, want it over the %d-byte budget", len(raw), MaxBytes)
 		}
-		if n := len(runesafe.Sanitize(raw)); n > MaxBytes {
+		if n := len(textsafe.Sanitize(raw)); n > MaxBytes {
 			t.Fatalf("sanitized fixture is %d bytes, want it UNDER the budget so the two orders diverge", n)
 		}
 		if other := sanitizeThenCap(raw); strings.HasSuffix(other, TruncMarker) {

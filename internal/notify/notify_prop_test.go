@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/tracker"
-	"github.com/cplieger/urlform"
 	"pgregory.net/rapid"
 )
 

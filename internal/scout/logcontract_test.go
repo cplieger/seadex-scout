@@ -3,8 +3,8 @@ package scout
 import (
 	"testing"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/logcontract"
-	"github.com/cplieger/slogx/capture"
 )
 
 // assertContractAttrs fails when the first msg line lacks an attribute

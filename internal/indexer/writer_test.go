@@ -18,11 +18,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/jsoncap/v2"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/jsonx"
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
-	"github.com/cplieger/slogx/capture"
 )
 
 // Abort vs report in this file: a t.Fatal* that reports a VALUE MISMATCH is a
@@ -1686,7 +1686,7 @@ func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 }
 
 // TestDecodeSnapshotStructuralGateIsBounded pins the three structural properties
-// of the snapshot decode's own ingress. A whole-document jsoncap.Preflight holds
+// of the snapshot decode's own ingress. A whole-document jsonx.Preflight holds
 // one key set per traversed object - unbounded in exactly the dimension this
 // decode exists to bound, and paid on every load by both consumers - so the
 // allocation arm is the point: a key-dense document must cost a small multiple of
@@ -1728,7 +1728,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 		// Depth is still bounded without the preflight, by encoding/json's own
 		// scanner ceiling: an unknown field is consumed through Decode, never a
 		// token walk that would grow a container stack per open bracket.
-		const depth = jsoncap.MaxDepth + 1
+		const depth = jsonx.MaxDepth + 1
 		doc := `{"version":2,"owners":{},"published":{},"unknown":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + `}`
 		if _, _, _, err := decodeSnapshot([]byte(doc)); err == nil {
 			t.Errorf("decodeSnapshot accepted an unknown field nested %d deep, want the scanner's depth ceiling to refuse it", depth)
@@ -1811,7 +1811,7 @@ func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
 }
 
 // TestDecodeSnapshotChargesEntryBeforeReadingItsKey pins the ordering
-// jsoncap.(*Decoder).Map states for the walk both map decoders reproduce by
+// jsonx.(*Decoder).Map states for the walk both map decoders reproduce by
 // hand: the entry charge lands BEFORE the key is read, because the key is
 // itself an unbounded allocation from the wire. A map at exactly the cap
 // followed by one more entry whose key is not even a JSON string must
@@ -2072,8 +2072,8 @@ func TestLoadPreviousRefusesANonRegularSnapshot(t *testing.T) {
 		if err == nil {
 			t.Fatal("Rebuild over a FIFO snapshot returned nil; a non-regular snapshot must fail the pass, never be accepted")
 		}
-		if !errors.Is(err, atomicfile.ErrNotRegular) {
-			t.Errorf("error = %v, want it to wrap atomicfile.ErrNotRegular so the refusal is the inode-type gate rather than an incidental decode failure", err)
+		if !errors.Is(err, filesafe.ErrNotRegular) {
+			t.Errorf("error = %v, want it to wrap filesafe.ErrNotRegular so the refusal is the inode-type gate rather than an incidental decode failure", err)
 		}
 		if !strings.Contains(err.Error(), path) {
 			t.Errorf("error = %q, want it to name the snapshot path %q", err, path)
