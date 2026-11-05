@@ -16,8 +16,10 @@ require (
 	github.com/cplieger/go/textsafe v1.0.0-dev.1
 	github.com/cplieger/go/urlform v1.0.0-dev.1
 	github.com/cplieger/go/xmlx v1.0.0-dev.2
-	github.com/cplieger/go/yamlenv v1.0.0-dev.1
+	github.com/cplieger/go/yamlenv v1.0.0-dev.2
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/text v0.43.0
 	pgregory.net/rapid v1.3.0
 )
+
+require go.yaml.in/yaml/v4 v4.0.0 // indirect

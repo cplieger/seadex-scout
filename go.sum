@@ -24,10 +24,12 @@ github.com/cplieger/go/urlform v1.0.0-dev.1 h1:tJo35Y4xIwM2IzGxK7DXcbVGb3y9lF8l7
 github.com/cplieger/go/urlform v1.0.0-dev.1/go.mod h1:za2vxWNMT4+X50qgurZEDBsrxhMlkntfh6XJnfxzYH8=
 github.com/cplieger/go/xmlx v1.0.0-dev.2 h1:5KZgCyZfbB73q0rxXQj/AwByLLmBir3Hi30C2vlp3ns=
 github.com/cplieger/go/xmlx v1.0.0-dev.2/go.mod h1:trImI1H9TuogwyGZHYJt1f1fskANBuZSR3A+LPdEdVY=
-github.com/cplieger/go/yamlenv v1.0.0-dev.1 h1:KA0t52zn3GJRWu4RnUaTx64QzSwsJjRsTnB6floeJCM=
-github.com/cplieger/go/yamlenv v1.0.0-dev.1/go.mod h1:rpijBJ7LqjTnmwWZpxX2O/htMilzJZOnMc6o1z7fOlc=
+github.com/cplieger/go/yamlenv v1.0.0-dev.2 h1:YZriaF+FfG6ulLQx7fAyPZI7QvgsuML7KkB7lFwxEQ8=
+github.com/cplieger/go/yamlenv v1.0.0-dev.2/go.mod h1:bYTrNFzQ0qSpy0u51Bouc9yTNXuj0FfGppio02PiJBw=
 go.yaml.in/yaml/v3 v3.0.6 h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM=
 go.yaml.in/yaml/v3 v3.0.6/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+go.yaml.in/yaml/v4 v4.0.0 h1:/LG1pNO84Z4l603j/xMn69CcS5OYhMQ/f7l2LoQUGuw=
+go.yaml.in/yaml/v4 v4.0.0/go.mod h1:aZqd9kCMsGL7AuUv/m/PvWLdg5sjJsZ4oHDEnfPPfY0=
 golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
 golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
