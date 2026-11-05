@@ -699,11 +699,9 @@ func TestUpstreamSearchRedactsQuotedCredential(t *testing.T) {
 }
 
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
-// single-attempt fetch: a 429 response's Retry-After survives as a positive
-// RetryAfterHint on the returned transient error (asserted directly, no
-// sleeping), so the enclosing Do honors the upstream-requested
-// delay instead of its jittered backoff. The httpclient sentinel chain is
-// preserved for the caller's errors.Is classification.
+// single-attempt fetch: a 429 comes back as the *StatusError search's
+// rate-limit option reads, its Retry-After intact and not marked transient,
+// with the httpclient sentinel chain preserved for the caller's errors.Is.
 func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "7")
@@ -719,16 +717,12 @@ func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	if !errors.Is(err, httpclient.ErrRateLimited) {
 		t.Errorf("errors.Is(err, httpclient.ErrRateLimited) = false (err = %v), want the sentinel preserved", err)
 	}
-	var transient httpclient.Transient
-	if !errors.As(err, &transient) || !transient.IsTransient() {
-		t.Errorf("429 error is not transient (err = %v), want retryable", err)
+	if httpclient.IsTransient(err) {
+		t.Errorf("429 error is transient (err = %v), want it left to the rate-limit option", err)
 	}
-	var hint httpclient.RetryAfterHint
-	if !errors.As(err, &hint) {
-		t.Fatalf("429 error carries no RetryAfterHint (err = %v)", err)
-	}
-	if got := hint.RetryAfterHint(); got != 7*time.Second {
-		t.Errorf("RetryAfterHint() = %v, want 7s from the upstream Retry-After header", got)
+	statusErr, ok := errors.AsType[*httpclient.StatusError](err)
+	if !ok || statusErr.Code != http.StatusTooManyRequests || statusErr.RetryAfter != 7*time.Second {
+		t.Fatalf("429 error = %v, want a 429 *httpclient.StatusError with RetryAfter 7s", err)
 	}
 }
 
@@ -1631,6 +1625,45 @@ func TestSearchCredentialRejectionLogsAtErrorNamingTheRemedy(t *testing.T) {
 			if rec.Contains("upstream query failed") {
 				t.Errorf("a credential rejection also logged the generic upstream WARN; the classes must stay distinct; log output:\n%s",
 					strings.Join(rec.Messages(), "\n"))
+			}
+		})
+	}
+}
+
+// TestUpstreamSearchCapsTheRateLimitWait pins upstreamRateLimitWait: a 429 is
+// retried after the cap, whether its Retry-After is longer or absent.
+func TestUpstreamSearchCapsTheRateLimitWait(t *testing.T) {
+	prev := upstreamRateLimitWait
+	upstreamRateLimitWait = 50 * time.Millisecond
+	t.Cleanup(func() { upstreamRateLimitWait = prev })
+	for _, retryAfter := range []string{"3600", ""} {
+		t.Run("Retry-After="+retryAfter, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls []time.Time
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls = append(calls, time.Now())
+				n := len(calls)
+				mu.Unlock()
+				if n == 1 {
+					if retryAfter != "" {
+						w.Header().Set("Retry-After", retryAfter)
+					}
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+			}))
+			t.Cleanup(srv.Close)
+			u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+			if _, _, err := u.search(t.Context(), url.Values{"t": {"search"}, "q": {"Frieren"}}); err != nil {
+				t.Fatalf("search after one 429: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(calls) != 2 || calls[1].Sub(calls[0]) > time.Second {
+				t.Errorf("%d calls, the retry after %v, want two within 1s", len(calls), calls[len(calls)-1].Sub(calls[0]))
 			}
 		})
 	}

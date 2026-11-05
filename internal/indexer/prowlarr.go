@@ -45,8 +45,11 @@ var upstreamAttemptTimeout = 60 * time.Second
 var upstreamBaseDelay = time.Second
 
 // upstreamRateLimitWait bounds the wait before a 429 is retried, a Retry-After
-// included: the arr's own search timeout is running.
-const upstreamRateLimitWait = 5 * time.Second
+// included: on the request path an arr's search timeout is running, and the
+// harvest shares the cap because Prowlarr answers its 429s itself and an
+// exhausted one latches the scope. A var for the same reason upstreamBaseDelay
+// is one.
+var upstreamRateLimitWait = 5 * time.Second
 
 // upstream is one Prowlarr per-indexer Torznab endpoint (Nyaa or AnimeBytes).
 // The feed proxies these to source real release data (title, seeders, size,
@@ -167,7 +170,9 @@ func attemptError(err error) error {
 		// function applies, not a restatement of it, so this caller's verdict
 		// and the door's cannot disagree - which is why the library exports it
 		// for exactly this WithMaxAttempts(1)-under-an-outer-Do composition.
-		if !httpclient.IsRetryableStatus(statusErr.Code) {
+		// A 429 is search's rate-limit option's to retry; IsTransient never
+		// retries one.
+		if statusErr.Code == http.StatusTooManyRequests || !httpclient.IsRetryableStatus(statusErr.Code) {
 			return statusErr
 		}
 		// Unwrap to the status itself: GetBytes's "retries exhausted after 0s"
