@@ -44,6 +44,10 @@ var upstreamAttemptTimeout = 60 * time.Second
 // Production reads the unchanged one-second value.
 var upstreamBaseDelay = time.Second
 
+// upstreamRateLimitWait bounds the wait before a 429 is retried, a Retry-After
+// included: the arr's own search timeout is running.
+const upstreamRateLimitWait = 5 * time.Second
+
 // upstream is one Prowlarr per-indexer Torznab endpoint (Nyaa or AnimeBytes).
 // The feed proxies these to source real release data (title, seeders, size,
 // Prowlarr-proxied download URL) and never talks to the trackers directly.
@@ -122,8 +126,9 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 		// caller-context rejection.
 		httpclient.WithAttemptTimeout(upstreamAttemptTimeout),
 		// httpclient.IsTransient never retries a 429, whatever wraps it, so a
-		// rate limit is retried here, waiting its capped Retry-After.
-		httpclient.WithRateLimitRetry(httpclient.RetryAfterCap))
+		// rate limit is retried here. The wait is capped well below
+		// RetryAfterCap because an arr's Torznab search is waiting on this call.
+		httpclient.WithRateLimitRetry(upstreamRateLimitWait))
 	if err != nil {
 		return nil, 0, err
 	}
