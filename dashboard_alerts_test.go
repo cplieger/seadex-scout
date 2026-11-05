@@ -10,7 +10,7 @@ import (
 	"testing"
 	"text/template"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // alertTiles maps each Overview tile that shows only while seadex-scout needs a

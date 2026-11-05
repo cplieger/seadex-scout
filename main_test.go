@@ -31,7 +31,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/logcontract"
 	"github.com/cplieger/seadex-scout/internal/shutdown"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // TestResolveMode covers the subcommand-vs-config mode resolution: no argument
