@@ -326,7 +326,7 @@ func TestValidateHTTPURLErrorOmitsCredentials(t *testing.T) {
 
 // TestLoadTypeErrorOmitsScalarExcerpt pins the field-name-only posture of
 // Load's strict pre-decode rejection: a literal scalar placed in a bool field
-// is rejected by the raw-document check before expansion, and yaml.v3's
+// is rejected by the raw-document check before expansion, and go-yaml's
 // type-mismatch error embeds a quoted excerpt of that scalar — which can be a
 // pasted secret. The error must keep line/type info but never any fragment of
 // the rejected value.
@@ -345,13 +345,13 @@ func TestLoadTypeErrorOmitsScalarExcerpt(t *testing.T) {
 	if strings.Contains(err.Error(), scalar) || strings.Contains(err.Error(), "super-s") {
 		t.Errorf("Load() error = %q, leaks the rejected scalar", err)
 	}
-	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {
+	if !strings.Contains(err.Error(), "line 2, column 12: cannot construct !!str <redacted> into bool") {
 		t.Errorf("Load() error = %q, want the redacted wrong-type entry shape", err)
 	}
 }
 
 // TestLoadTypeErrorOmitsBacktickScalar pins the value-independent redaction:
-// yaml.v3 embeds the scalar excerpt with any backtick in the value unchanged,
+// go-yaml embeds the scalar excerpt with any backtick in the value unchanged,
 // so a rejected scalar containing a backtick defeats backtick-pair matching
 // and would leak a prefix. No fragment of the rejected value may survive
 // yamlenv.SanitizeDecodeError.
@@ -372,7 +372,7 @@ func TestLoadTypeErrorOmitsBacktickScalar(t *testing.T) {
 			t.Errorf("Load() error leaks scalar fragment %q: %q", fragment, err)
 		}
 	}
-	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {
+	if !strings.Contains(err.Error(), "line 2, column 12: cannot construct !!str <redacted> into bool") {
 		t.Errorf("Load() error = %q, want the redacted wrong-type entry shape", err)
 	}
 }
@@ -1327,12 +1327,12 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 		{
 			name:    "misspelled top-level key",
 			content: arr + "anime_bytes: true\n",
-			wants:   []string{`line 5: unknown configuration key "anime_bytes"`},
+			wants:   []string{`line 5, column 1: unknown configuration key "anime_bytes"`},
 		},
 		{
 			name:    "misplaced nested key",
 			content: arr + "filters:\n  animebytes: true\n",
-			wants:   []string{`line 6: unknown configuration key "animebytes"`},
+			wants:   []string{`line 6, column 3: unknown configuration key "animebytes"`},
 		},
 		{
 			name:    "reproduced double miss reports both keys",
@@ -1389,8 +1389,8 @@ func TestLoadRejectsMistypedKeys(t *testing.T) {
 }
 
 // TestLoadRejectsMultiDocumentConfig pins the single-document contract of Load:
-// yaml.Unmarshal and the strict unknown-key pre-decode both consume only the first YAML
-// document, so a stray "---" separator would silently drop every section below it. Load
+// a single-document decode and the strict unknown-key pre-decode both read only the first
+// YAML document, so a stray "---" separator would silently drop every section below it. Load
 // rejects a multi-document file loudly, the empty trailing document a stray end-of-file
 // separator produces included, while trailing whitespace/comments and a leading
 // document-start marker keep loading. The check is yamlenv.CheckSingleDocument; this pins
@@ -1560,8 +1560,8 @@ func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
 }
 
 // TestLoadParseErrorOmitsSecretAlias pins the fail-closed posture of Load's
-// FIRST yaml.Unmarshal error: a literal secret pasted unquoted where a
-// string was expected can be read as a YAML alias, and yaml.v3's parse error
+// parse error: a literal secret pasted unquoted where a
+// string was expected can be read as a YAML alias, and go-yaml's parse error
 // ("unknown anchor 'X' referenced") embeds it verbatim. main logs Load's error
 // at startup, so neither the returned error nor the captured log corpus may
 // carry any fragment of the secret; the parse error must route through
@@ -1611,7 +1611,7 @@ func TestLoadDuplicateKeyErrorKeepsLineNumbers(t *testing.T) {
 		t.Fatal("Load() = nil error, want duplicate-key error")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "line 3: mapping key <redacted> already defined at line 1") {
+	if !strings.Contains(msg, "line 3, column 1: mapping key <redacted> already defined at line 1") {
 		t.Errorf("Load() error = %q, want redacted duplicate-key entry keeping both line numbers", msg)
 	}
 	if strings.Contains(msg, "sonarr") {
@@ -1783,9 +1783,8 @@ func TestValidateArrURLCredentialPosture(t *testing.T) {
 // carries no YAML document (empty, or comments only): the load succeeds on the pure defaults
 // baseline and the failure surfaces at Validate with the no-arr error, so a touched but
 // never-filled config fails loudly with an actionable message instead of a parse error or a
-// silent half-boot. It is the one Load path where the yaml document node is the zero Node
-// (Decoder.Decode returns io.EOF), exercising yamlenv.CheckSingleDocument's
-// first-decode-error branch.
+// silent half-boot. Such a file is zero documents, which yamlenv loads as "keep the
+// defaults".
 func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
 	tests := map[string]string{
 		"empty file":        "",
@@ -2580,6 +2579,14 @@ func TestLoadIgnoreFromFile(t *testing.T) {
 	t.Run("string ignore rejected", func(t *testing.T) {
 		if _, err := Load(write(t, "typed.yaml", arrs+"filters:\n  ignore: \"154587\"\n")); err == nil {
 			t.Error("Load() of a string filters.ignore = nil error, want the strict decode rejection")
+		}
+	})
+
+	// A fractional ID is refused rather than truncated to a show the operator never named.
+	t.Run("fractional ignore rejected", func(t *testing.T) {
+		_, err := Load(write(t, "fraction.yaml", arrs+"filters:\n  ignore: [154587.9]\n"))
+		if err == nil || !strings.Contains(err.Error(), "cannot construct !!float <redacted> into int") || strings.Contains(err.Error(), "154587") {
+			t.Errorf("Load() of a fractional filters.ignore = %v, want the redacted float-into-int refusal", err)
 		}
 	})
 }

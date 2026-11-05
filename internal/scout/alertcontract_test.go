@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/config"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // The standing-condition rules in the shipped alerts/logql.yaml are the consumer
