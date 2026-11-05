@@ -324,12 +324,10 @@ func TestValidateHTTPURLErrorOmitsCredentials(t *testing.T) {
 	}
 }
 
-// TestLoadTypeErrorOmitsScalarExcerpt pins the field-name-only posture of
-// Load's strict pre-decode rejection: a literal scalar placed in a bool field
-// is rejected by the raw-document check before expansion, and go-yaml's
-// type-mismatch error embeds a quoted excerpt of that scalar — which can be a
-// pasted secret. The error must keep line/type info but never any fragment of
-// the rejected value.
+// TestLoadTypeErrorOmitsScalarExcerpt pins the field-name-only posture of Load's
+// wrong-type rejection: go-yaml's type-mismatch error embeds a quoted excerpt of
+// the scalar, which can be a pasted secret. The error keeps line, column and type
+// but no fragment of the value.
 func TestLoadTypeErrorOmitsScalarExcerpt(t *testing.T) {
 	const scalar = "super-secret-api-key-sentinel"
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1787,8 +1785,9 @@ func TestValidateArrURLCredentialPosture(t *testing.T) {
 // defaults".
 func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
 	tests := map[string]string{
-		"empty file":        "",
-		"comment-only file": "# fill me in\n\n# see config.example.yaml\n",
+		"empty file":               "",
+		"comment-only file":        "# fill me in\n\n# see config.example.yaml\n",
+		"document-end marker only": "...\n",
 	}
 	for name, content := range tests {
 		t.Run(name, func(t *testing.T) {
