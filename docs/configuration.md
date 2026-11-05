@@ -46,7 +46,7 @@ Defaults are the values the starter file ships.
 | `filters.require_dual_audio` | `false` | Leave out releases that are not dual audio. |
 | `filters.exclude_specials` | `false` | Leave out the Sonarr copy of entries that land only in a series' season 0, such as specials and films TVDB lists there. Their Radarr copy stays. |
 | `filters.exclude_tags` | `{}` | SeaDex tags to drop, each listing the places to drop it from, out of `findings`, `report` and `feed`. |
-| `filters.ignore` | `[]` | AniList IDs of shows to stop warning about. They still appear in the report and the indexer. |
+| `filters.ignore` | `[]` | AniList IDs of shows to stop warning about, as whole numbers. They still appear in the report and the indexer. |
 | `arr_tags.include` | `[]` | Check only items with one of these Sonarr or Radarr tags. `[]` checks everything. |
 | `arr_tags.exclude` | `[]` | Never check items with one of these tags. An exclude wins over an include. |
 | `report.dir` | `/config/reports` | Where each report pair is written. |
