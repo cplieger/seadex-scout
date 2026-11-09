@@ -18,6 +18,6 @@ require (
 	github.com/cplieger/go/xmlx v1.0.0
 	github.com/cplieger/go/yamlenv v1.0.0
 	go.yaml.in/yaml/v4 v4.0.0
-	golang.org/x/text v0.43.0
+	golang.org/x/text v0.44.0
 	pgregory.net/rapid v1.3.0
 )
