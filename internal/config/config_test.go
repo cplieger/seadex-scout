@@ -1617,7 +1617,7 @@ func TestLoadDuplicateKeyErrorKeepsLineNumbers(t *testing.T) {
 	}
 }
 
-// TestLoadLeavesMappingKeysLiteral pins the documented yamlenv.Expand contract
+// TestLoadLeavesMappingKeysLiteral pins the documented yamlenv.ExpandWith contract
 // that ${VAR} expansion touches only string VALUES: a mapping key carrying an
 // allowlisted reference stays byte-for-byte literal, so an environment value
 // can never rewrite the document structure the operator wrote. With strict

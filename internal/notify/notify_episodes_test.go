@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
@@ -48,10 +49,10 @@ func TestFindingLineNamesThePlacedEpisodes(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	notifier.Report([]compare.Finding{special, film, season}, nil)
 	msg := message(compare.StatusBetter)
-	if !recorder.HasAttr(msg, "episodes", "S00E09-E10, S00E12") {
+	if !recorder.HasAttr(capture.Message(msg), "episodes", "S00E09-E10, S00E12") {
 		t.Errorf("finding lines = %q, want one with episodes=S00E09-E10, S00E12", recorder.Messages())
 	}
-	if !recorder.HasAttr(msg, "episodes", "") {
+	if !recorder.HasAttr(capture.Message(msg), "episodes", "") {
 		t.Errorf("finding lines = %q, want the season's line with an empty episodes", recorder.Messages())
 	}
 	lines := 0

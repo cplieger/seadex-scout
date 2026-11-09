@@ -46,7 +46,7 @@ func TestLoader_refreshCache_acceptedRefreshLogsEndedRejectionStreak(t *testing.
 		t.Fatalf("refreshCache logs = %v, want one refreshed message", logs.Messages())
 	}
 	for key, want := range map[string]string{"ended_rejection_streak": "3", "records": "1", "tag": testTag} {
-		if !logs.HasAttr("", key, want) {
+		if !logs.HasAttr("", capture.AttrName(key), want) {
 			t.Errorf("refreshCache logs = %v, want %s=%s", logs.Messages(), key, want)
 		}
 	}

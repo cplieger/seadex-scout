@@ -297,7 +297,7 @@ func TestCycleShrunkSideEscalatesThenAcceptsAtThreshold(t *testing.T) {
 				t.Error("shrink line does not name the arr, want arr=radarr on every arm")
 			}
 			for key, want := range map[string]string{"items": "0", "prior_items": "2"} {
-				if got, ok := recorder.AttrValue("library walk", key); !ok || got != want {
+				if got, ok := recorder.AttrValue("library walk", capture.AttrName(key)); !ok || got != want {
 					t.Errorf("shrink line %s = %q (found=%t), want %q (both counts belong on every arm)", key, got, ok, want)
 				}
 			}

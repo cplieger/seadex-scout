@@ -67,7 +67,7 @@ func TestReconcileLogsTheLibraryOnACleanWalk(t *testing.T) {
 		"rows": "2", "have_unlisted": "1", "no_file": "1", "anime_items": "1",
 		"items_with_entry": "1", "items_all_best": "0", "items_all_best_or_alt": "0",
 	} {
-		if got, _ := rec.AttrValue("library summary", key); got != want {
+		if got, _ := rec.AttrValue("library summary", capture.AttrName(key)); got != want {
 			t.Errorf("library summary %s = %q, want %q", key, got, want)
 		}
 	}

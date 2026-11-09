@@ -96,18 +96,17 @@ func (ix *Indexer) run(ctx context.Context) error {
 
 	// The HTTP surface rides the shared httpserver plumbing: bootstrap plus graceful
 	// shutdown here, the middleware stack in chain.
-	srv := httpserver.New(ix.chain(),
-		httpserver.WithReadHeaderTimeout(readHeaderTimeout),
-		httpserver.WithReadTimeout(readTimeout),
-		httpserver.WithIdleTimeout(idleTimeout),
-		httpserver.WithWriteTimeout(writeTimeout),
-		httpserver.WithMaxHeaderBytes(maxHeaderBytes),
-	)
+	srv := httpserver.New(ix.chain())
+	srv.ReadHeaderTimeout = readHeaderTimeout
+	srv.ReadTimeout = readTimeout
+	srv.IdleTimeout = idleTimeout
+	srv.WriteTimeout = writeTimeout
+	srv.MaxHeaderBytes = maxHeaderBytes
 
 	ix.log.Info("seadex-scout indexer listening",
 		"addr", listenAddr, "upstreams", len(ix.upstreams))
 
-	if err := httpserver.Run(ctx, srv, ln, nil, httpserver.WithShutdownGrace(shutdownGrace)); err != nil {
+	if err := httpserver.Run(ctx, srv, ln, httpserver.WithShutdownGrace(shutdownGrace)); err != nil {
 		return fmt.Errorf("indexer server: %w", err)
 	}
 	ix.log.Info("indexer shutdown complete", "cause", context.Cause(ctx))

@@ -1291,7 +1291,7 @@ func TestCompareAniListExcludedEntryEmitsNothing(t *testing.T) {
 		t.Fatalf("Debug records %q = %d, want 1", msg, n)
 	}
 	for key, want := range map[string]string{"anilist_id": "20", "series": "Code Geass", "series_anilist_ids": "[1575 2904]"} {
-		if v, _ := rec.AttrValueExact(msg, key); v != want {
+		if v, _ := rec.AttrValueExact(msg, capture.AttrName(key)); v != want {
 			t.Errorf("%s = %q, want %q", key, v, want)
 		}
 	}

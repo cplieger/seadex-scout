@@ -828,7 +828,7 @@ func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	defer redirector.Close()
 
 	client := httpclient.New(upstreamAttemptTimeout)
-	client.CheckRedirect = httpclient.RedirectPolicyFunc(httpclient.WithSameOrigin(true))
+	client.CheckRedirect = httpclient.RedirectPolicy(httpclient.WithSameOrigin(true))
 	ups := wireUpstreams(client, nil, UpstreamConfig{
 		NyaaTorznabURL: redirector.URL,
 		ProwlarrAPIKey: "prowlarr-key",

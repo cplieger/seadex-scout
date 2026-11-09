@@ -1124,7 +1124,7 @@ func TestReportArrsLogsAPIAndFeatures(t *testing.T) {
 				t.Fatalf("sonarr reachable lines = %d, want 1; messages = %q", n, rec.Messages())
 			}
 			for key, want := range tc.want {
-				if got, _ := rec.AttrValueExact("sonarr reachable", key); got != want {
+				if got, _ := rec.AttrValueExact("sonarr reachable", capture.AttrName(key)); got != want {
 					t.Errorf("sonarr reachable %s = %q, want %q", key, got, want)
 				}
 			}
@@ -1144,7 +1144,7 @@ func TestReportArrsLogsAPIAndFeatures(t *testing.T) {
 			t.Fatalf("radarr reachable lines = %d, want 1; messages = %q", n, rec.Messages())
 		}
 		for key, want := range map[string]string{"version": "6.4.4.10685", "api": "v3", "deprecated": "false"} {
-			if got, _ := rec.AttrValueExact("radarr reachable", key); got != want {
+			if got, _ := rec.AttrValueExact("radarr reachable", capture.AttrName(key)); got != want {
 				t.Errorf("radarr reachable %s = %q, want %q", key, got, want)
 			}
 		}
@@ -1268,7 +1268,7 @@ func TestReportArrsUnsupportedAPIIsOneError(t *testing.T) {
 			if n := rec.CountLevel(slog.LevelError, msg); n != 1 {
 				t.Fatalf("%q ERROR lines = %d, want 1; messages = %q", msg, n, rec.Messages())
 			}
-			if got, _ := rec.AttrValueExact(msg, "error"); got != err.Error() || strings.ContainsAny(got, "\r\n") {
+			if got, _ := rec.AttrValueExact(capture.Message(msg), "error"); got != err.Error() || strings.ContainsAny(got, "\r\n") {
 				t.Errorf("error attr = %q, want the error's one-line text %q", got, err.Error())
 			}
 			if rec.Contains(tc.arr+" reachable") || rec.Contains(tc.arr+" ping failed at startup") {
@@ -1367,11 +1367,11 @@ func TestRunReportRejectsRelativeReportDir(t *testing.T) {
 func TestRunReportProbesReportDirBeforeTheWalk(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
 	probed := false
-	probeWritable = func(_ context.Context, d string, _ ...filesafe.Option) (filesafe.ProbeResult, error) {
+	probeWritable = func(_ context.Context, d string, _ ...filesafe.WriteOption) (filesafe.ProbeResult, error) {
 		probed = true
 		return filesafe.ProbeResult{
 			Dir:   d,
-			Stage: filesafe.ProbeStageCreate,
+			Phase: filesafe.ProbePhaseCreate,
 			Err:   fmt.Errorf("%w: %s/.atomicfile-1.tmp: asked 0600, stored 0670", filesafe.ErrModeNotStored, d),
 		}, nil
 	}
@@ -1394,13 +1394,13 @@ func TestRunReportProbesReportDirBeforeTheWalk(t *testing.T) {
 	}
 }
 
-// TestProbeReportDirAsksForOwnerOnlyMode pins the probe's mode intent. An
-// Option is opaque, so the options the probe receives are replayed through a
+// TestProbeReportDirAsksForOwnerOnlyMode pins the probe's mode intent. A
+// WriteOption is opaque, so the options the probe receives are replayed through a
 // real write and the file it leaves is what they mean. Serial (swaps
 // probeWritable).
 func TestProbeReportDirAsksForOwnerOnlyMode(t *testing.T) {
-	var got []filesafe.Option
-	probeWritable = func(_ context.Context, d string, opts ...filesafe.Option) (filesafe.ProbeResult, error) {
+	var got []filesafe.WriteOption
+	probeWritable = func(_ context.Context, d string, opts ...filesafe.WriteOption) (filesafe.ProbeResult, error) {
 		got = opts
 		return filesafe.ProbeResult{Dir: d}, nil
 	}

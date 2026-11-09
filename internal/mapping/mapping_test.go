@@ -844,7 +844,7 @@ func TestRefresh_logsTheCandidateCensus(t *testing.T) {
 		"placed_episode_records": "1",
 		"single_special_records": "1",
 	} {
-		got, ok := rec.AttrValueExact("mapping: refreshed", key)
+		got, ok := rec.AttrValueExact("mapping: refreshed", capture.AttrName(key))
 		if !ok {
 			t.Errorf("refreshed log carries no %s attribute; logs = %v", key, rec.Messages())
 			continue

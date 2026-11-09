@@ -227,7 +227,7 @@ func indexerLogger(log *slog.Logger) *slog.Logger {
 // on followed redirects, and httpclient's same-host default admits another port.
 func newProwlarrClient() *http.Client {
 	c := httpclient.New(prowlarrTimeout)
-	c.CheckRedirect = httpclient.RedirectPolicyFunc(httpclient.WithSameOrigin(true))
+	c.CheckRedirect = httpclient.RedirectPolicy(httpclient.WithSameOrigin(true))
 	return c
 }
 

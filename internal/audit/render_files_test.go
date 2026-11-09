@@ -507,7 +507,7 @@ func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
 	orig := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = orig })
 	calls := 0
-	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...filesafe.Option) (filesafe.Result, error) {
+	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...filesafe.WriteOption) (filesafe.Result, error) {
 		calls++
 		res, err := orig(ctx, path, data, opts...)
 		res.Durable = false
@@ -559,7 +559,7 @@ func TestWriteFilesNonDurableMarkdownStillReportsWritten(t *testing.T) {
 	orig := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = orig })
 	calls := 0
-	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...filesafe.Option) (filesafe.Result, error) {
+	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...filesafe.WriteOption) (filesafe.Result, error) {
 		calls++
 		res, err := orig(ctx, path, data, opts...)
 		if calls == 2 {

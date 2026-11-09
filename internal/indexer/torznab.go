@@ -329,7 +329,7 @@ func preflightTorznab(body []byte) error {
 // per-field cap and the response-wide cumulative cap, shared by the feed item
 // decoders and the <error>-document decoder so the policy cannot drift.
 func newUpstreamBudget() *xmlx.Budget {
-	b, err := xmlx.NewBudget(maxUpstreamFieldBytes, maxUpstreamTextBytes)
+	b, err := xmlx.NewBudget(xmlx.BudgetLimits{MaxFieldBytes: maxUpstreamFieldBytes, MaxTotalBytes: maxUpstreamTextBytes})
 	if err != nil {
 		// Unreachable: both caps are positive constants. A panic here would be a
 		// build-time mistake, so fail loudly rather than serving unbounded.

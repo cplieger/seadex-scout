@@ -170,7 +170,7 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 		{msgSub: "cycle degraded", what: "the degraded completion line"},
 	}
 	for _, site := range sites {
-		got, ok := recorder.AttrValue(site.msgSub, attrError)
+		got, ok := recorder.AttrValue(capture.Message(site.msgSub), attrError)
 		if !ok {
 			t.Errorf("%s carries no %q attr, want the sanitized upstream error", site.what, attrError)
 			continue

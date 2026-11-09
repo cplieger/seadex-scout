@@ -224,7 +224,7 @@ func LookupByHost(host string) (Tracker, bool) {
 	var best Tracker
 	bestLen := 0
 	for canonical, t := range byHost {
-		if len(canonical) > bestLen && urlform.HostMatchesDomain(host, canonical) {
+		if len(canonical) > bestLen && urlform.Domain(canonical).Matches(host) {
 			best, bestLen = t, len(canonical)
 		}
 	}

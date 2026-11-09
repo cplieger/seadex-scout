@@ -854,7 +854,7 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 		t.Fatalf("no snapshot log line; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 	for _, key := range []string{"scope", "nyaa_feed", "ab_feed", "ab_releases_skipped", "journal_new"} {
-		if _, ok := rec.AttrValue("indexer feed snapshot written", key); !ok {
+		if _, ok := rec.AttrValue("indexer feed snapshot written", capture.AttrName(key)); !ok {
 			t.Errorf("snapshot line lacks %q, which the log contract declares stable", key)
 		}
 	}
@@ -2242,7 +2242,7 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 		t.Errorf("disagreement lines at Debug = %d, want 1 (nyaa:2, past the latch)", got)
 	}
 	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "false", "files_pack": "true", "corrected": "false"} {
-		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
+		if got, ok := rec.AttrValue(msg, capture.AttrName(key)); !ok || got != want {
 			t.Errorf("warning attr %s = %q (found=%v), want %q", key, got, ok, want)
 		}
 	}
@@ -2570,7 +2570,7 @@ func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
 		t.Errorf("corrected disagreements at WARN = %d, want 0", got)
 	}
 	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "true", "files_pack": "false", "corrected": "true"} {
-		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
+		if got, ok := rec.AttrValue(msg, capture.AttrName(key)); !ok || got != want {
 			t.Errorf("warning attr %s = %q (found=%v), want %q", key, got, ok, want)
 		}
 	}
@@ -3017,7 +3017,7 @@ func TestRebuildStoredRenderUnderNonAiredOrder(t *testing.T) {
 			if got.SonarrTitle != tc.wantTwin || got.SonarrGUID != wantGUID {
 				t.Errorf("twin = (%q, %q), want (%q, %q)", got.SonarrTitle, got.SonarrGUID, tc.wantTwin, wantGUID)
 			}
-			if v, ok := rec.AttrValue("indexer feed snapshot written", tc.wantCount); !ok || v != "1" {
+			if v, ok := rec.AttrValue("indexer feed snapshot written", capture.AttrName(tc.wantCount)); !ok || v != "1" {
 				t.Errorf("%s = %q (found=%v), want 1", tc.wantCount, v, ok)
 			}
 		})

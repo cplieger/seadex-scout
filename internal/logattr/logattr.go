@@ -76,8 +76,8 @@ func (j *Joiner) WriteSep(sep string) bool { return j.Write(sep) }
 // raw-byte estimate would admit a pair the growth Write documents then cuts.
 func (j *Joiner) WritePair(left, sep, right string) bool {
 	room := j.remaining()
-	cleanLeft, leftCut := textsafe.SanitizeBudgeted(left, room, "")
-	cleanRight, rightCut := textsafe.SanitizeBudgeted(right, room, "")
+	cleanLeft, leftCut := textsafe.SanitizeCapped(left, room, "")
+	cleanRight, rightCut := textsafe.SanitizeCapped(right, room, "")
 	if leftCut || rightCut || len(cleanLeft)+len(sep)+len(cleanRight) > room {
 		j.dropped = true
 		return false
