@@ -562,8 +562,8 @@ func TestServeSummaryLineReportsThePlaceholder(t *testing.T) {
 			seedJournal(t, ix, upstreamNyaa, tc.journal...)
 			serveFeed(t, ix, "/nyaa", sonarrTestQuery)
 			for key, want := range tc.want {
-				if !rec.HasAttr("indexer request", key, want) {
-					got, _ := rec.AttrValue("indexer request", key)
+				if !rec.HasAttr("indexer request", capture.AttrName(key), want) {
+					got, _ := rec.AttrValue("indexer request", capture.AttrName(key))
 					t.Errorf("request summary %s = %q, want %q", key, got, want)
 				}
 			}

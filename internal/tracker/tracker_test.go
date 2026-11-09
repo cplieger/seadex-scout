@@ -131,7 +131,7 @@ func TestTableBaseURLsAreHTTPS(t *testing.T) {
 // homograph preservation and IsASCIIHost's byte boundary): a fold-laundering homograph
 // host classified by urlform.Classify must be preserved as non-ASCII evidence AND
 // rejected by LookupByHost's ASCII gate. Without the gate both planted subdomains pass
-// HostMatchesDomain (strings.ToLower folds U+0130 to ASCII 'i' and U+212A to 'k'), so
+// urlform.Domain.Matches (strings.ToLower folds U+0130 to ASCII 'i' and U+212A to 'k'), so
 // this fails if either side launders or accepts a homograph.
 func TestLookupByHostRejectsClassifiedHomographs(t *testing.T) {
 	tests := []string{

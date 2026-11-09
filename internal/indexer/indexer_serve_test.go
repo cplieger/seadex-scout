@@ -1102,7 +1102,7 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 // secret into Loki, durable and readable by anyone with log access. Every request kind
 // that logs is exercised (authorized caps, authorized RSS, unscoped 404, bad-key 401)
 // through the SERVED chain, and the wrong-key value embeds the real key. The property
-// rests on httpserver's RequestLogger recording r.URL.Path only, and httpserver is bumped.
+// rests on httpserver.Logging recording r.URL.Path only, and httpserver is bumped.
 func TestServeNeverLogsTheFeedAPIKey(t *testing.T) {
 	const feedKey = "feed-key-not-a-secret"
 	log, rec := capture.New()
@@ -1217,8 +1217,8 @@ func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
 		{"identity_conflicts", "0"},
 		{"returned", "0"},
 	} {
-		if !rec.HasAttr("indexer request", want.key, want.value) {
-			got, _ := rec.AttrValue("indexer request", want.key)
+		if !rec.HasAttr("indexer request", capture.AttrName(want.key), want.value) {
+			got, _ := rec.AttrValue("indexer request", capture.AttrName(want.key))
 			t.Errorf("request summary %s = %q, want %q", want.key, got, want.value)
 		}
 	}

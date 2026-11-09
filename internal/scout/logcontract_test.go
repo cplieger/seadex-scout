@@ -21,7 +21,7 @@ func assertContractAttrs(t *testing.T, recorder *capture.Recorder, msg string) {
 		t.Fatalf("the log contract declares no attributes on %q", msg)
 	}
 	for _, key := range want {
-		if _, ok := recorder.AttrValue(msg, key); !ok {
+		if _, ok := recorder.AttrValue(capture.Message(msg), capture.AttrName(key)); !ok {
 			t.Errorf("%q line lacks %q, which the log contract declares stable", msg, key)
 		}
 	}

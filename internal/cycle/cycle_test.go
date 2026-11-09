@@ -259,7 +259,7 @@ func TestRunOnceBusyLockPreCancelled(t *testing.T) {
 func TestRunOnceGatedRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	ex := scheduler.NewExclusive(t.TempDir(), slog.Default(),
+	ex := scheduler.NewExclusive(t.TempDir(), scheduler.WithLogger(slog.Default()),
 		scheduler.WithGate(func() bool {
 			cancel() // shutdown arrives exactly as the gate is consulted
 			return ctx.Err() == nil

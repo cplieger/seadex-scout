@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/cplieger/go/filesafe"
-	"github.com/cplieger/go/jsonx"
 	"github.com/cplieger/go/slogx/capture"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
@@ -1728,7 +1727,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 		// Depth is still bounded without the preflight, by encoding/json's own
 		// scanner ceiling: an unknown field is consumed through Decode, never a
 		// token walk that would grow a container stack per open bracket.
-		const depth = jsonx.MaxDepth + 1
+		const depth = 10000 + 1 // jsontext's container nesting limit, plus one
 		doc := `{"version":2,"owners":{},"published":{},"unknown":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + `}`
 		if _, _, _, err := decodeSnapshot([]byte(doc)); err == nil {
 			t.Errorf("decodeSnapshot accepted an unknown field nested %d deep, want the scanner's depth ceiling to refuse it", depth)

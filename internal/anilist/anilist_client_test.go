@@ -660,7 +660,7 @@ func TestFetchNotFound404ReturnsErrNotFound(t *testing.T) {
 // typed httpclient error and is never ErrNotFound. It also pins the retry split:
 // a self-healing server-side status (5xx, and 408) is retried inside the
 // bounded budget, while a client-side fault is attempted exactly once. httpclient's
-// own HTTPStatusError policy is transient for 502/503/504 only, so a plain 500
+// own StatusError policy is transient for 502/503/504 only, so a plain 500
 // is retryable here because THIS client classifies it, not httpclient.
 func TestFetchErrorStatusClassification(t *testing.T) {
 	tests := []struct {

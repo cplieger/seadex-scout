@@ -41,7 +41,7 @@ func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error)
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("create cycle lock dir %s: %w", dir, err)
 	}
-	return scheduler.NewExclusive(dir, slog.Default(),
+	return scheduler.NewExclusive(dir, scheduler.WithLogger(slog.Default()),
 		scheduler.WithGate(func() bool { return ctx.Err() == nil })), nil
 }
 

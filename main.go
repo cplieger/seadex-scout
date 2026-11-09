@@ -308,7 +308,7 @@ func probeReportDir(ctx context.Context, dir string) error {
 	}
 	return fmt.Errorf("report.dir is not writable because the %s step failed. Check that "+
 		"the mount is read-write, has free space and is writable by the container user: %w",
-		res.Stage, cause)
+		res.Phase, cause)
 }
 
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).

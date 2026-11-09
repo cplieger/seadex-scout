@@ -645,7 +645,7 @@ func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 		"info_hash":             clean,
 	}
 	for key, expected := range want {
-		got, ok := recorder.AttrValue("better release available", key)
+		got, ok := recorder.AttrValue("better release available", capture.AttrName(key))
 		if !ok {
 			t.Errorf("finding line carries no %s attribute", key)
 			continue
@@ -706,7 +706,7 @@ func TestFindingLineCarriesJoinedAltGroups(t *testing.T) {
 
 			notifier.Report([]compare.Finding{f}, nil)
 
-			got, seen := recorder.AttrValue(message(status), "alt_groups")
+			got, seen := recorder.AttrValue(capture.Message(message(status)), "alt_groups")
 			if !seen {
 				t.Fatalf("%q line carries no alt_groups attribute", message(status))
 			}
@@ -771,7 +771,7 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 	notifier.Report([]compare.Finding{f}, nil)
 
 	for _, key := range []string{"release_urls", "recommended_groups", "alt_groups"} {
-		got, ok := recorder.AttrValue("better release available", key)
+		got, ok := recorder.AttrValue("better release available", capture.AttrName(key))
 		if !ok {
 			t.Fatalf("finding line carries no %s attribute", key)
 		}

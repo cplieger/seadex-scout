@@ -767,36 +767,36 @@ func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
 
 // TestValidateResponseBoundsThePreflightWalk is the cross-library acceptance test for
 // jsonx.Preflight. The depth ceiling is the JSON TOKENIZER's, not the library's:
-// json.Decoder.Token enforces jsontext's 10000-container limit at exactly
-// jsonx.MaxDepth, one call BELOW the library's depth check, so jsonx.ErrMaxDepth is
-// unreachable through Preflight and the refusal arrives as *json.SyntaxError. Both
-// boundary levels are pinned because parity with json.Unmarshal's depth acceptance IS
-// the claim; the error TEXT is not, since jsontext exports no depth sentinel and
-// documents its syntactic-error contents as unstable.
+// json.Decoder.Token enforces jsontext's 10000-container limit (maxDepth below), so
+// the refusal arrives as *json.SyntaxError. Both boundary levels are pinned because
+// parity with json.Unmarshal's depth acceptance IS the claim; the error TEXT is not,
+// since jsontext exports no depth sentinel and documents its syntactic-error contents
+// as unstable.
 func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
+	const maxDepth = 10000
 	// A WELL-FORMED body one level over the ceiling, so the refusal is depth and
 	// nothing else - an all-opens body is also truncated, which muddies the
 	// diagnosis.
-	overDeep := []byte(strings.Repeat("[", jsonx.MaxDepth+1) + strings.Repeat("]", jsonx.MaxDepth+1))
+	overDeep := []byte(strings.Repeat("[", maxDepth+1) + strings.Repeat("]", maxDepth+1))
 	var syntaxErr *json.SyntaxError
 	if err := validateResponse(overDeep); !errors.As(err, &syntaxErr) {
-		t.Fatalf("validateResponse(%d nested arrays) = %v (%T), want the tokenizer's *json.SyntaxError", jsonx.MaxDepth+1, err, err)
+		t.Fatalf("validateResponse(%d nested arrays) = %v (%T), want the tokenizer's *json.SyntaxError", maxDepth+1, err, err)
 	}
 	var sink any
 	if json.Unmarshal(overDeep, &sink) == nil {
-		t.Errorf("json.Unmarshal accepted %d nested arrays; the preflight is now stricter on depth than the decoder it guards", jsonx.MaxDepth+1)
+		t.Errorf("json.Unmarshal accepted %d nested arrays; the preflight is now stricter on depth than the decoder it guards", maxDepth+1)
 	}
 
 	// At the ceiling exactly both accept, so the preflight adds no depth
 	// strictness of its own.
-	atCeiling := []byte(strings.Repeat("[", jsonx.MaxDepth) + strings.Repeat("]", jsonx.MaxDepth))
+	atCeiling := []byte(strings.Repeat("[", maxDepth) + strings.Repeat("]", maxDepth))
 	if err := validateResponse(atCeiling); err != nil {
-		t.Errorf("validateResponse(%d nested arrays) = %v, want it accepted (json.Unmarshal accepts it)", jsonx.MaxDepth, err)
+		t.Errorf("validateResponse(%d nested arrays) = %v, want it accepted (json.Unmarshal accepts it)", maxDepth, err)
 	}
 
 	// The original hostile shape: 1 MiB of nothing but '['. Still refused, and
 	// refused by the ceiling rather than by walking the body, which is what keeps
-	// the cost bounded by MaxDepth instead of by the input length.
+	// the cost bounded by maxDepth instead of by the input length.
 	if err := validateResponse([]byte(strings.Repeat("[", 1<<20))); err == nil {
 		t.Error("validateResponse(1 MiB of open brackets) = nil, want it rejected")
 	}

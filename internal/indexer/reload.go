@@ -260,14 +260,14 @@ func (c *snapshotCache) feed(scope string) []journalItem {
 // openSnapshot opens the snapshot file ONCE and applies refresh's missing/unreadable
 // policy, returning the open descriptor, its info, and whether reload should proceed.
 func (l *snapshotLoader) openSnapshot() (*os.File, os.FileInfo, bool) {
-	// filesafe.OpenRegular is the library's own form of this sequence and it owns the
+	// filesafe.OpenRegularNoFollow is the library's own form of this sequence and it owns the
 	// three non-obvious details its godoc says every hand-rolling consumer re-derives:
 	// O_NOFOLLOW so the KERNEL refuses a final-component symlink (reported as
 	// ErrSymlinkTarget, the writer's own vocabulary), O_NONBLOCK so a planted FIFO is
 	// an immediate rejection rather than an uninterruptible open, and a stat of the
 	// OPEN HANDLE so the returned FileInfo describes the very inode whose bytes
 	// readSnapshot reads and whose FileIdentity is recorded.
-	f, info, err := filesafe.OpenRegular(l.path)
+	f, info, err := filesafe.OpenRegularNoFollow(l.path)
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
