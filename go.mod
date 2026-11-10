@@ -1,6 +1,6 @@
 module github.com/cplieger/seadex-scout
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/cplieger/animap/mapread v0.3.2
