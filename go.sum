@@ -4,8 +4,8 @@ github.com/cplieger/arrapi/v3 v3.2.0-dev.15 h1:2HMXGQd6D5RalZYBGRmy5UbZcmUfU+zu3
 github.com/cplieger/arrapi/v3 v3.2.0-dev.15/go.mod h1:X+QtrG4Wnmohg6sfc2rOR02Q3wi3sG/nT0sLagnhnAg=
 github.com/cplieger/go/filesafe v1.1.0-dev.1 h1:Bq3CWSGT0LgHqQhqYwdkFBpLruQmIFk5+nWbgvuGoy8=
 github.com/cplieger/go/filesafe v1.1.0-dev.1/go.mod h1:ji4TnJD8S8kgKelJlCQxlHyX0UXQGTW1ylSBqH5xqhI=
-github.com/cplieger/go/health v1.1.0-dev.1 h1:7aW+kchOEbQmj/q6EX8kfWeNHt1VkFirzK6FKAs75jw=
-github.com/cplieger/go/health v1.1.0-dev.1/go.mod h1:7eOprE7L510iSRZBJabPD4V06TftKymjdtLnLTZPTiY=
+github.com/cplieger/go/health v1.1.0-dev.2 h1:UleKMyzQqGiDcCYqwFcnkCgZlgYgg6VaBmvHbjhu0Ws=
+github.com/cplieger/go/health v1.1.0-dev.2/go.mod h1:7eOprE7L510iSRZBJabPD4V06TftKymjdtLnLTZPTiY=
 github.com/cplieger/go/httpclient v1.2.0-dev.1 h1:4fjNLUM6A2yKu+yhWB/EibppR95uK5X5eXOo4NN+jKk=
 github.com/cplieger/go/httpclient v1.2.0-dev.1/go.mod h1:couTQSCNdgNwOotbaQREGcM4CjUKZJ4Bdb7FSkNwL8U=
 github.com/cplieger/go/httpserver v1.2.0-dev.1 h1:Blo6rOE1kMRSHZ6iPJKm5lFfa/sJy2aVnLJEywCYatI=
