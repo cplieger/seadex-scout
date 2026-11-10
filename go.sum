@@ -1,7 +1,7 @@
 github.com/cplieger/animap/mapread v0.3.2 h1:oBS2esAwE3WSMWb9ypUGw2vAAV/lHWDKlObYZ8AWUQQ=
 github.com/cplieger/animap/mapread v0.3.2/go.mod h1:/KLtoKslemgqFHUACjfaCz7F78WQpd3FDjQJ4oY8lic=
-github.com/cplieger/arrapi/v3 v3.2.0-dev.11 h1:shuSJrABBZK8t7+IH9m4mBpOk1T40vyK/NC9qn+q64M=
-github.com/cplieger/arrapi/v3 v3.2.0-dev.11/go.mod h1:odIj/2YKkPZX6QhIkOTj2hhUe8newScnQPEJoZS0k6s=
+github.com/cplieger/arrapi/v3 v3.2.0-dev.12 h1:TnKLYHeyev3SGyTWCO7qznBxXkWGGCfLKHR4avTddOg=
+github.com/cplieger/arrapi/v3 v3.2.0-dev.12/go.mod h1:/+VI13sfAQc1Fid0yYoePCLAW+ZAxmUyN19YbJsoU8U=
 github.com/cplieger/go/filesafe v1.0.0 h1:V63mC2Kc1PlbAKhiCXMA5WiellXJtWPtNJwTG2Q37us=
 github.com/cplieger/go/filesafe v1.0.0/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
 github.com/cplieger/go/health v1.0.0 h1:MK3skKEoRhmsrt64O/OSbpbL9Dib0drAeWLQLLhjmPU=
