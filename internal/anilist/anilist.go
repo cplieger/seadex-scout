@@ -83,8 +83,7 @@ var errBatchRecord = errors.New("anilist: batch response")
 // retryableUpstreamStatus reports whether a status the untrusted GraphQL errors[]
 // envelope reports is a self-healing server-side failure worth another attempt:
 // httpclient.IsRetryableStatus less 429, which this client sends down its own rate-limit
-// path (which penalizes the shared throttle). The rule already refuses a status of 600 or
-// more, which only the envelope can carry.
+// path (which penalizes the shared throttle).
 func retryableUpstreamStatus(code int) bool {
 	return code != http.StatusTooManyRequests && httpclient.IsRetryableStatus(code)
 }

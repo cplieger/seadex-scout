@@ -40,3 +40,20 @@ func TestRefreshExhaustedTerminalRecordIsDemoted(t *testing.T) {
 		t.Errorf("latest-release requests = %d, want %d: a 503 is retried", got, maxAttempts)
 	}
 }
+
+// TestRefreshLeavesA429ToTheNextRefresh pins the mapping door to httpclient's
+// rule for a status error: a 429 is not retried on the plain backoff, which
+// carries no Retry-After and would spend the rate limit again; the next
+// scheduled refresh asks again.
+func TestRefreshLeavesA429ToTheNextRefresh(t *testing.T) {
+	rel := newRelease(t, testTag, nil)
+	rel.edit(func(r *release) {
+		r.latest = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTooManyRequests) }
+	})
+	if _, err := rel.loader(WithRefresh(time.Hour)).refreshCache(t.Context(), &Cache{}); err == nil {
+		t.Fatal("refreshCache against a 429 upstream = nil error, want the refresh failure")
+	}
+	if got := len(rel.paths()); got != 1 {
+		t.Errorf("latest-release requests = %d, want 1: a 429 is left to the next refresh", got)
+	}
+}

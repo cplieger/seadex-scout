@@ -166,13 +166,9 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // retries.
 func attemptError(err error) error {
 	if statusErr, ok := errors.AsType[*httpclient.StatusError](err); ok {
-		// httpclient.IsRetryableStatus is the SAME rule GetBytes's own attempt
-		// function applies, not a restatement of it, so this caller's verdict
-		// and the door's cannot disagree - which is why the library exports it
-		// for exactly this WithMaxAttempts(1)-under-an-outer-Do composition.
-		// A 429 is search's rate-limit option's to retry; IsTransient never
-		// retries one.
-		if statusErr.Code == http.StatusTooManyRequests || !httpclient.IsRetryableStatus(statusErr.Code) {
+		// StatusError.IsTransient is GetBytes's own verdict less 429, which
+		// search's rate-limit option retries.
+		if !statusErr.IsTransient() {
 			return statusErr
 		}
 		// Unwrap to the status itself: GetBytes's "retries exhausted after 0s"
