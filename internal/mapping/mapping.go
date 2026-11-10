@@ -759,13 +759,14 @@ func (l *Loader) reuseCachedRecords(prev *Cache) Cache {
 
 // retried runs one mapread request under httpclient.Do's retry policy. mapread
 // returns a come-back-later status as a plain *mapread.StatusError, which
-// httpclient cannot classify, so one whose code httpclient retries is marked
-// transient; a transport failure is httpclient's own call.
+// httpclient cannot classify, so one httpclient's StatusError would call
+// transient (its retry rule less 429) is marked transient; a 429 is left to the
+// next refresh, and a transport failure is httpclient's own call.
 func retried[T any](ctx context.Context, l *Loader, fn func(context.Context) (T, error)) (T, error) {
 	return httpclient.Do(ctx,
 		func(ctx context.Context) (T, error) {
 			v, err := fn(ctx)
-			if se, ok := errors.AsType[*mapread.StatusError](err); ok && refusal(err) == "" && httpclient.IsRetryableStatus(se.Code) {
+			if se, ok := errors.AsType[*mapread.StatusError](err); ok && refusal(err) == "" && se.Code != http.StatusTooManyRequests && httpclient.IsRetryableStatus(se.Code) {
 				err = httpclient.MarkTransient(err)
 			}
 			return v, err

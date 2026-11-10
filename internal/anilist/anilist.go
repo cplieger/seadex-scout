@@ -80,16 +80,12 @@ var errBatchRecord = errors.New("anilist: batch response")
 
 // --- upstream failure classification ---
 
-// retryableUpstreamStatus reports whether an upstream status is a self-healing
-// server-side failure worth another attempt: httpclient.IsRetryableStatus, narrowed twice.
-// 429 is excluded because this client gives a rate limit its own dedicated path (which
-// penalizes the shared throttle), and a status of 600 or more is excluded because this
-// predicate also reads e.Status out of the untrusted GraphQL errors[] envelope.
+// retryableUpstreamStatus reports whether a status the untrusted GraphQL errors[]
+// envelope reports is a self-healing server-side failure worth another attempt:
+// httpclient.IsRetryableStatus less 429, which this client sends down its own rate-limit
+// path (which penalizes the shared throttle).
 func retryableUpstreamStatus(code int) bool {
-	if code == http.StatusTooManyRequests || code >= 600 {
-		return false
-	}
-	return httpclient.IsRetryableStatus(code)
+	return code != http.StatusTooManyRequests && httpclient.IsRetryableStatus(code)
 }
 
 // envelopeErrors decodes the untrusted GraphQL errors[] list, the one shape both
@@ -450,12 +446,11 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		c.observeRateHeaders(resp)
 		httpclient.DrainClose(resp.Body)
+		// httpclient's *StatusError is transient for exactly the statuses its retry
+		// rule accepts, so the retry loop repeats a 408 or a self-healing 5xx as it is.
 		statusErr := httpclient.CheckStatus(resp)
 		if statusErr == nil {
 			statusErr = fmt.Errorf("anilist: unexpected status %d", resp.StatusCode)
-		}
-		if retryableUpstreamStatus(resp.StatusCode) {
-			return nil, httpclient.MarkTransient(statusErr)
 		}
 		return nil, statusErr
 	}
