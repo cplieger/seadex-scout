@@ -658,10 +658,9 @@ func TestFetchNotFound404ReturnsErrNotFound(t *testing.T) {
 // TestFetchErrorStatusClassification pins the non-429 error-status path: a
 // 4xx or 5xx (other than the AniList 404 not-found form) surfaces as the
 // typed httpclient error and is never ErrNotFound. It also pins the retry split:
-// a self-healing server-side status (5xx, and 408) is retried inside the
-// bounded budget, while a client-side fault is attempted exactly once. httpclient's
-// own StatusError policy is transient for 502/503/504 only, so a plain 500
-// is retryable here because THIS client classifies it, not httpclient.
+// a self-healing server-side status (408, and a 5xx other than 501, 505, 506, 508,
+// 510 and 511) is retried inside the bounded budget, by httpclient's own StatusError
+// classification, while a client-side fault or a repeating 5xx is attempted exactly once.
 func TestFetchErrorStatusClassification(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -672,6 +671,8 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 	}{
 		{name: "500 internal error", status: http.StatusInternalServerError, wantCalls: maxAttempts},
 		{name: "408 request timeout", status: http.StatusRequestTimeout, wantCalls: maxAttempts},
+		{name: "501 not implemented", status: http.StatusNotImplemented, wantCalls: 1},
+		{name: "511 network authentication required", status: http.StatusNetworkAuthenticationRequired, wantCalls: 1},
 		{name: "400 bad request", status: http.StatusBadRequest, wantCalls: 1},
 		{name: "401 unauthorized", status: http.StatusUnauthorized, wantAuth: true, wantCalls: 1},
 		{name: "204 unexpected status", status: http.StatusNoContent, wantGeneric: true, wantCalls: 1},
