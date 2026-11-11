@@ -26,7 +26,7 @@ import (
 	"syscall"
 
 	"github.com/cplieger/go/filesafe"
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/seadex-scout/internal/pathredact"
