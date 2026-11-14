@@ -483,9 +483,9 @@ func TestParseOverrides(t *testing.T) {
 	if len(set.records) != 1 || set.records[0].Type != "MOVIE" {
 		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", set.records)
 	}
-	// IMDb ids must be normalized like animap's (trimmed, blanks dropped) so
-	// HasArrIdentifier, findMovie, and the report catalogue agree on the
-	// exact lookup key.
+	// An override's IMDb ids take canonicalize's form (trimmed, blanks
+	// dropped) so HasArrIdentifier, findMovie, and the report catalogue agree
+	// on the exact lookup key.
 	if got := set.records[0].IMDbIDs; !slices.Equal(got, []string{"tt2222222"}) {
 		t.Errorf("IMDbIDs = %v, want [tt2222222] (trimmed, blank dropped)", got)
 	}
