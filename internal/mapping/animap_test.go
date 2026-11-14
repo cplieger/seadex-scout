@@ -166,7 +166,7 @@ func TestProject_derivesTheRecordFromWhereTheEpisodesLand(t *testing.T) {
 func TestProject_routesAndKeys(t *testing.T) {
 	anime := []mapread.Anime{
 		{
-			AniDBID: 1, Type: "MOVIE", TVDBID: 500, IMDbIDs: []string{"tt0000042"}, Last: mapread.Last{Regular: 1, Special: 2},
+			AniDBID: 1, Type: "MOVIE", TVDBID: 500, Last: mapread.Last{Regular: 1, Special: 2},
 			Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 1, TVDB: targets(at(0, 3)), TMDBMovies: []int{42}},
 				{Kind: mapread.Special, Start: 1, End: 2, TVDB: targets(at(0, 8))},
@@ -186,7 +186,7 @@ func TestProject_routesAndKeys(t *testing.T) {
 	p, got := projected(t, encode(t, document(anime, entries)))
 	t.Run("a whole film", func(t *testing.T) {
 		r := got[10].rec
-		if r.AniDBID != 1 || r.TvdbID != 500 || !slices.Equal(r.TmdbMovies, []int{42}) || !slices.Equal(r.IMDbIDs, []string{"tt0000042"}) ||
+		if r.AniDBID != 1 || r.TvdbID != 500 || !slices.Equal(r.TmdbMovies, []int{42}) ||
 			r.SeasonKind != SeasonPresent || r.SeasonTvdb != 0 {
 			t.Errorf("record = %+v, want AniDB 1, TVDB 500 season 0, its film ids", r)
 		}
@@ -232,6 +232,28 @@ func TestProject_routesAndKeys(t *testing.T) {
 			t.Errorf("records = %d, want one per entry, 5", len(p.records))
 		}
 	})
+}
+
+// TestProject_anEarlierReleaseWithIMDbIDs pins that a release from before
+// animap dropped IMDb ids (v2026.10.21 and earlier) still reads: the film
+// routes by its TMDB movie, and the anime row's imdb_ids reach no Record.
+func TestProject_anEarlierReleaseWithIMDbIDs(t *testing.T) {
+	anime := []mapread.Anime{{
+		AniDBID: 1, Type: "MOVIE", TVDBID: 500, Last: mapread.Last{Regular: 1},
+		Episodes: []mapread.Run{{Kind: mapread.Regular, Start: 1, End: 1, TVDB: targets(at(0, 3)), TMDBMovies: []int{42}}},
+	}}
+	entries := []mapread.Entry{{AniListID: 10, Type: "MOVIE", Parts: []mapread.Part{{AniDBID: 1, Kind: mapread.Regular}}}}
+	body := encode(t, document(anime, entries))
+	const series = `"tvdb_id":500,`
+	if !bytes.Contains(body, []byte(series)) {
+		t.Fatalf("body has no %s to extend", series)
+	}
+	body = bytes.Replace(body, []byte(series), []byte(series+`"imdb_ids":["tt0000042"],`), 1)
+	_, got := projected(t, body)
+	r := got[10].rec
+	if r.IMDbIDs != nil || !slices.Equal(r.TmdbMovies, []int{42}) || !r.HasArrIdentifier() {
+		t.Errorf("record = %+v, want the TMDB movie and no IMDb ids", r)
+	}
 }
 
 func TestProject_anEpisodeFiledOnAnotherSeries(t *testing.T) {

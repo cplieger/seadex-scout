@@ -156,7 +156,7 @@ func entryFacts(x *mapread.Index, e mapread.Entry) (rec Record, m Mapping, state
 	routes := x.Routes(e)
 	rec = Record{
 		Type: e.Type, SeasonKind: SeasonAbsent, AniListID: e.AniListID, AniDBID: wholeAnime(e),
-		TmdbMovies: routes.TMDBMovies, IMDbIDs: routes.IMDb,
+		TmdbMovies: routes.TMDBMovies,
 	}
 	if len(routes.TVDB) == 1 {
 		rec.TvdbID = routes.TVDB[0]

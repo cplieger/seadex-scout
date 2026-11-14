@@ -21,7 +21,7 @@ const fuzzEpisodes = 1 << 12
 
 func FuzzProject(f *testing.F) {
 	f.Add(entriesBody(f, seriesEntries(2)...))
-	f.Add(entriesBody(f, entry{AniList: 3, Type: "MOVIE", TVDB: 9, Lands: targets(at(0, 4), at(0, 5)), Movies: []int{7}, IMDb: []string{"tt0000007"}}))
+	f.Add(entriesBody(f, entry{AniList: 3, Type: "MOVIE", TVDB: 9, Lands: targets(at(0, 4), at(0, 5)), Movies: []int{7}}))
 	f.Add(entriesBody(f, entry{AniList: 4, Type: "TV", TVDB: 9}, entry{AniList: 5, Type: "OVA", TVDB: 9, Lands: targets(dflt(2, 1))}))
 	f.Add(entriesBody(f, entry{AniList: 6, Type: "MOVIE", Movies: []int{8}}, entry{AniList: 7, Type: "TV", TVDB: 9}))
 	f.Add(encode(f, document([]mapread.Anime{

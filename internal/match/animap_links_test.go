@@ -37,7 +37,7 @@ func linksDocument() *mapread.Document {
 				{Kind: mapread.Regular, Start: 1, End: 20, TVDB: &[]mapread.Target{{Season: 1, Episode: 1, Default: true}}},
 				{Kind: mapread.Regular, Start: 21, End: 49, TVDB: stated(2, 1)},
 			}},
-			{AniDBID: 1466, Type: "OVA", IMDbIDs: []string{"tt0167846"}, Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
+			{AniDBID: 1466, Type: "OVA", Last: mapread.Last{Regular: 1}, Episodes: []mapread.Run{
 				{Kind: mapread.Regular, Start: 1, End: 1, TMDBMovies: []int{66033}},
 			}},
 			{AniDBID: 4932, Type: "TV", TVDBID: 82099, Last: mapread.Last{Regular: 7}, Episodes: []mapread.Run{
