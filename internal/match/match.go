@@ -374,8 +374,7 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 		// Typing can make identifiers the record ALREADY carried usable, so
 		// the record may no longer be id-less: RoutedIDs only routes the
 		// TMDB-movie/IMDb fields once the type says MOVIE, and an untyped
-		// record can carry them: tmdb_movies from animap or an override,
-		// imdb_ids only from an override.
+		// record can still carry them.
 		if rec.HasArrIdentifier() {
 			return r.matchMappedEntry(ctx, e, rec, r.lib.FindByID(rec), false)
 		}
