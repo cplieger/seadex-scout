@@ -1420,9 +1420,9 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 // TestStoreSaveOverCapErrorReportsSizes pins the over-cap error's numbers:
 // the app wrap names the limit Load actually enforces (maxStateBytes, NOT
 // the internal +1 the encoder's newline rides on), and the wrapped
-// filesafe rejection quotes the staged size the encoder attempted - the
-// JSON size plus that trailing newline - so an operator can read both the
-// contract and the overshoot from one line.
+// filesafe rejection carries the staged size the encoder attempted (the
+// JSON size plus that trailing newline) against the writer's cap, so an
+// operator can read both the contract and the overshoot from one line.
 func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
@@ -1444,9 +1444,18 @@ func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	if !strings.Contains(saveErr.Error(), wantLimit) {
 		t.Errorf("error = %q, want the load limit named (%q)", saveErr.Error(), wantLimit)
 	}
-	wantAttempted := fmt.Sprintf("to %d bytes", len(encoded)+1)
-	if !strings.Contains(saveErr.Error(), wantAttempted) {
-		t.Errorf("error = %q, want the attempted staged size named (%q: the JSON size plus the encoder's trailing newline)", saveErr.Error(), wantAttempted)
+	var tooLarge *filesafe.FileTooLargeError
+	if !errors.As(saveErr, &tooLarge) {
+		t.Fatalf("error = %v, want a *filesafe.FileTooLargeError carrying the sizes", saveErr)
+	}
+	if want := int64(len(encoded) + 1); tooLarge.Size != want {
+		t.Errorf("FileTooLargeError.Size = %d, want %d (the JSON size plus the encoder's trailing newline)", tooLarge.Size, want)
+	}
+	if want := int64(maxStateBytes + 1); tooLarge.Limit != want {
+		t.Errorf("FileTooLargeError.Limit = %d, want %d (the load limit plus the newline's byte)", tooLarge.Limit, want)
+	}
+	if want := fmt.Sprint(tooLarge.Size); !strings.Contains(saveErr.Error(), want) {
+		t.Errorf("error = %q, want the attempted staged size %s in the line", saveErr.Error(), want)
 	}
 }
 
