@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync/atomic"
 
-	"github.com/cplieger/go/httpserver"
+	"github.com/cplieger/go/httpserver/v2"
 )
 
 const (
