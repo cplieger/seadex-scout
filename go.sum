@@ -2,8 +2,8 @@ github.com/cplieger/animap/mapread v0.3.3 h1:XnS20I/ixfByqGAIOkIutobnSCEviKlafOE
 github.com/cplieger/animap/mapread v0.3.3/go.mod h1:5MCQ30ymux0zORYhhfbNOgfKEZiqv8VX7f8sfWPppaI=
 github.com/cplieger/arrapi/v3 v3.2.0-dev.18 h1:e1UY46Ywgv6ZG7VpCCMTL7UMYJW8XY0WvXyr1DZt7cc=
 github.com/cplieger/arrapi/v3 v3.2.0-dev.18/go.mod h1:48eoSNuIblVN7HHvUQSfoJrkNk1xaHzsk0lN63+Tlwk=
-github.com/cplieger/go/filesafe v1.2.0-dev.3 h1:lMbQouVJd4/q++z2ZCxmUZRtbgv77mPaDlCyhbKGPaw=
-github.com/cplieger/go/filesafe v1.2.0-dev.3/go.mod h1:ji4TnJD8S8kgKelJlCQxlHyX0UXQGTW1ylSBqH5xqhI=
+github.com/cplieger/go/filesafe v1.2.0-dev.4 h1:YSiO42ooQsYpR26PM2XoHRJsP+t31lO+9WctnvbFAnI=
+github.com/cplieger/go/filesafe v1.2.0-dev.4/go.mod h1:ji4TnJD8S8kgKelJlCQxlHyX0UXQGTW1ylSBqH5xqhI=
 github.com/cplieger/go/health v1.1.0 h1:vG4wM0JVBXvDXxGm9fnhyn8yA0BuiyB99LE3CPulA4s=
 github.com/cplieger/go/health v1.1.0/go.mod h1:7eOprE7L510iSRZBJabPD4V06TftKymjdtLnLTZPTiY=
 github.com/cplieger/go/httpclient v1.2.0 h1:E+lbIpiNkUkcq3fxdMDYn116cwx6tU1XWmn4mDdBGU0=
