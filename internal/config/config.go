@@ -24,7 +24,7 @@ import (
 	"unicode"
 
 	"github.com/cplieger/go/filesafe"
-	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/v2"
 	"github.com/cplieger/go/slogx"
 	"github.com/cplieger/go/urlform"
 	"github.com/cplieger/go/yamlenv"

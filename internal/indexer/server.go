@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/httpclient"
-	"github.com/cplieger/go/httpserver"
+	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/seadex-scout/internal/secretref"
 )
 
